@@ -1,0 +1,19 @@
+[package]
+name = "mm-core"
+description = "Manic Microbes simulation core. No Bevy, no floats, no wall-clock, no global RNG."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Deliberately empty. Invariant I2 and hard rule 1 are much easier to keep when nothing
+# is pulled in that could violate them. M1 adds serde and rayon; nothing before that.
+[dependencies]
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false }
+
+[[bench]]
+name = "vm"
+harness = false

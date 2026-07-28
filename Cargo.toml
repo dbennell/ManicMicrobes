@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = ["crates/mm-core", "crates/mm-asm"]
+
+# mm-cli lands with M2 (headless runner), mm-app with M2/M4 (viewer, microscope).
+# They are deliberately absent until then.
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+# overflow-checks stays off in release: the M0 performance gate is 50M instructions/second
+# and the VM is written with explicit wrapping_*/saturating_* everywhere (hard rule 3).
+# The debug-profile fuzz run exercises the same code with overflow checks on.
+
+[profile.bench]
+lto = "thin"
+codegen-units = 1

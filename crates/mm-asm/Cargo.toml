@@ -1,0 +1,11 @@
+[package]
+name = "mm-asm"
+description = "Assembler, disassembler and source maps for Manic Microbes .mm assembly."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+mm-core = { path = "../mm-core" }
