@@ -51,6 +51,7 @@ pub mod mutation;
 pub mod organelle;
 pub mod rng;
 pub mod scenario;
+pub mod sensing;
 pub mod snapshot;
 pub mod state_hash;
 pub mod substrate;
@@ -75,6 +76,7 @@ pub use organelle::{
 };
 pub use rng::{mix64, Purpose, RandCtx};
 pub use scenario::{Barrier, Scenario, ScenarioError, Seeding};
+pub use sensing::{ChemReading, PhysicsReport, TouchReading};
 pub use snapshot::{Snapshot, SnapshotError};
 pub use state_hash::{StateHash, StateHasher};
 pub use substrate::{Substrate, SubstrateError};

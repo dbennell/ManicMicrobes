@@ -85,6 +85,8 @@ pub struct CellHost<'a> {
     /// How much of each chemical the cell has already promised itself this tick, so that a
     /// genome calling `EAT` twice is not told the same food twice.
     claimed: [i32; CHEM_COUNT],
+    /// The tick, for the one sensor that reads a clock rather than the world.
+    tick: u64,
 }
 
 impl<'a> CellHost<'a> {
@@ -94,6 +96,7 @@ impl<'a> CellHost<'a> {
         cells: &'a CellArena,
         substrate: &'a Substrate,
         intents: &'a mut IntentBuffer,
+        tick: u64,
     ) -> CellHost<'a> {
         let square = substrate.index(pos_to_square(cells.x[slot]), pos_to_square(cells.y[slot]));
         CellHost {
@@ -103,6 +106,7 @@ impl<'a> CellHost<'a> {
             intents,
             square,
             claimed: [0; CHEM_COUNT],
+            tick,
         }
     }
 
@@ -246,9 +250,27 @@ impl Host for CellHost<'_> {
                 0 => q10_to_visible(interior_capacity(self.cells, self.slot)),
                 _ => q10_to_visible(self.cells.interior(self.slot).iter().copied().sum::<i32>()),
             },
-            // Built, paid for, and not yet implemented. A `RESERVED` organelle reads as
-            // nothing rather than as an error, because there is no error state.
-            _ => 0,
+            _ => {
+                // Sensors and cilia (M3). Read from the world around the cell, which nobody
+                // is writing during execute.
+                let sx = pos_to_square(self.cells.x[self.slot]);
+                let sy = pos_to_square(self.cells.y[self.slot]);
+                crate::sensing::read_sensor(
+                    &o,
+                    idx,
+                    crate::sensing::SensorContext {
+                        substrate: self.substrate,
+                        x: sx,
+                        y: sy,
+                        tick: self.tick,
+                        cell_key: self.cells.id_at(self.slot).ordering_key(),
+                        touch: crate::sensing::TouchReading::default(),
+                    },
+                )
+                // Built, paid for, and not yet implemented. A `RESERVED` organelle reads as
+                // nothing rather than as an error, because there is no error state.
+                .unwrap_or(0)
+            }
         }
     }
 
@@ -345,7 +367,7 @@ pub struct BiologyConfig {
     pub division_matter: i32,
     /// Energy a division costs outright, `Q10`.
     pub division_energy: i32,
-    /// Which chemical structural mass is made of.
+    /// Which chemical structural mass is made of. Must match the metabolism's.
     pub structural_chemical: usize,
     /// Energy per genome byte copied at full fidelity, `Q10`. Accuracy is not free.
     pub copy_energy_per_byte: i32,
@@ -803,7 +825,7 @@ pub fn execute(
         let genome: Arc<Genome> = Arc::clone(&cells.genome[i]);
         let mut vm = std::mem::take(&mut cells.vm[i]);
         {
-            let mut host = CellHost::new(i, cells, substrate, intents);
+            let mut host = CellHost::new(i, cells, substrate, intents, tick);
             let ctx = RandCtx::new(seed, tick, id.ordering_key());
             vm.tick(&genome, cfg, &ctx, &mut host);
         }
@@ -1313,7 +1335,7 @@ mod tests {
         f.cells.energy[i] = q10(1234);
         let mut intents = IntentBuffer::new();
         intents.begin_tick(f.cells.capacity());
-        let mut host = CellHost::new(i, &f.cells, &f.substrate, &mut intents);
+        let mut host = CellHost::new(i, &f.cells, &f.substrate, &mut intents, 0);
         assert_eq!(host.oget(1, 0), 1234, "energy");
         assert_eq!(host.oget(0, 0), 20, "mass");
         assert_eq!(host.otype(0), OrganelleType::Membrane.number());
@@ -1327,7 +1349,7 @@ mod tests {
         f.substrate.set_chem(5, 8, 8, q10(10));
         let mut intents = IntentBuffer::new();
         intents.begin_tick(f.cells.capacity());
-        let mut host = CellHost::new(i, &f.cells, &f.substrate, &mut intents);
+        let mut host = CellHost::new(i, &f.cells, &f.substrate, &mut intents, 0);
         assert_eq!(host.eat(10, 5), 10);
         assert_eq!(host.eat(10, 5), 0, "the square was already spoken for");
     }

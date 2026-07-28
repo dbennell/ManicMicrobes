@@ -29,8 +29,11 @@ fn petri(seed: u64) -> Scenario {
     Scenario {
         name: "petri".to_string(),
         seed,
-        width: 32,
-        height: 32,
+        // The same size as `scenarios/soup.ron`. A smaller slide does not sustain a
+        // population now that respiration's byproduct is a real constraint, and a test whose
+        // world dies of its own dimensions measures the dimensions.
+        width: 64,
+        height: 64,
         light: LightRegime::Uniform {
             intensity: mm_core::Q10_ONE,
         },
@@ -59,8 +62,8 @@ fn seed_ancestors(world: &mut World, bytes: &[u8], n: u32) {
             .genomes()
             .intern(bytes.to_vec())
             .expect("ancestor genome");
-        let x = 4 + (k % 6) * 4;
-        let y = 4 + (k / 6) * 4;
+        let x = 6 + (k % 6) * 9;
+        let y = 6 + (k / 6) * 9;
         let id = world.spawn_cell(CellSeed {
             x: pos(x as i32),
             y: pos(y as i32),
@@ -305,12 +308,19 @@ fn a_living_world_survives_a_snapshot() {
 /// > Seed two ancestors differing only in metabolic efficiency; the more efficient one
 /// > reaches > 90% of the population within 100,000 ticks in >= 9 of 10 seeds.
 ///
-/// Mutation is off, so the two strains stay distinguishable and the only thing that can
-/// change their ratio is which one leaves more descendants. Nothing scores them: there is no
-/// fitness function anywhere in this project, and the efficient strain wins because a bigger
-/// chloroplast catches more light, not because anything said it should.
+/// The two strains are `ancestor.mm` and `ancestor_sloppy.mm`, which differ by four
+/// instructions: one excretes the reactive byproduct respiration exhales, and one does not.
+/// That is metabolic efficiency in the sense that matters — what a cell does with its own
+/// exhaust — rather than organelle size, which buys capacity and costs upkeep in the same
+/// breath and is therefore not efficiency at all.
+///
+/// Mutation is off, so the strains stay distinguishable and the only thing that can move
+/// their ratio is which one leaves more descendants. Nothing scores them. The tidy strain
+/// wins because the poison it declines to carry damages a membrane, and there is no fitness
+/// function anywhere in this project.
 fn selection_run(ticks: u64, seeds: &[u64]) -> usize {
-    let bytes = assemble("ancestor.mm");
+    let tidy = assemble("ancestor.mm");
+    let sloppy = assemble("ancestor_sloppy.mm");
     let mut wins = 0;
     for seed in seeds {
         let mut world = World::new(petri(*seed)).unwrap();
@@ -319,18 +329,19 @@ fn selection_run(ticks: u64, seeds: &[u64]) -> usize {
             ..BiologyConfig::default()
         });
 
-        // Two strains, alternating so neither gets the better half of the slide.
+        // Alternating, so neither gets the better half of the slide.
         for k in 0..16u32 {
-            let efficient = k % 2 == 0;
+            let is_tidy = k % 2 == 0;
+            let bytes = if is_tidy { &tidy } else { &sloppy };
             let genome = world.genomes().intern(bytes.clone()).unwrap();
             let id = world.spawn_cell(CellSeed {
-                x: pos(3 + (k % 8) as i32 * 3),
-                y: pos(3 + (k / 8) as i32 * 3),
+                x: pos(6 + (k % 8) as i32 * 7),
+                y: pos(6 + (k / 8) as i32 * 7),
                 mass: q10(30),
                 energy: q10(400),
                 membrane: 24,
                 key: 11,
-                species: u32::from(efficient),
+                species: u32::from(is_tidy),
                 parent: CellId::NONE,
                 birth_tick: 0,
                 genome,
@@ -339,41 +350,17 @@ fn selection_run(ticks: u64, seeds: &[u64]) -> usize {
                 world.cells_mut().slots_mut(i)[1] = Organelle::finished(OrganelleType::Nucleus, 40);
                 world.cells_mut().slots_mut(i)[2] =
                     Organelle::finished(OrganelleType::Mitochondrion, 50);
-                // The only difference between the strains.
-                world.cells_mut().slots_mut(i)[3] = Organelle::finished(
-                    OrganelleType::Chloroplast,
-                    if efficient { 90 } else { 45 },
-                );
+                world.cells_mut().slots_mut(i)[3] =
+                    Organelle::finished(OrganelleType::Chloroplast, 60);
                 world.cells_mut().interior_mut(i)[11] = q10(40);
                 world.cells_mut().interior_mut(i)[14] = q10(40);
             }
         }
         world.adopt_current_contents_as_baseline();
 
-        let mut at = 0u64;
-        while at < ticks {
-            let chunk = (ticks / 10).max(1);
-            world.run(chunk);
-            at += chunk;
-            let t = world.cells().len();
-            let e = world
-                .cells()
-                .iter()
-                .filter(|i| world.cells().species[*i] == 1)
-                .count();
-            eprintln!(
-                "  seed {seed} tick {at}: {e}/{t} = {:.0}%  co2 in fluid {}  carbon {}",
-                if t == 0 {
-                    0.0
-                } else {
-                    e as f64 / t as f64 * 100.0
-                },
-                world.substrate().total_chem()[11] / 1024,
-                world.substrate().total_chem()[4] / 1024,
-            );
-        }
+        world.run(ticks);
         let total = world.cells().len();
-        let efficient = world
+        let tidy_now = world
             .cells()
             .iter()
             .filter(|i| world.cells().species[*i] == 1)
@@ -381,10 +368,10 @@ fn selection_run(ticks: u64, seeds: &[u64]) -> usize {
         let share = if total == 0 {
             0.0
         } else {
-            efficient as f64 / total as f64
+            tidy_now as f64 / total as f64
         };
         eprintln!(
-            "seed {seed}: {efficient}/{total} efficient ({:.0}%)",
+            "seed {seed}: {tidy_now}/{total} tidy ({:.0}%)",
             share * 100.0
         );
         if share > 0.9 {
@@ -395,56 +382,10 @@ fn selection_run(ticks: u64, seeds: &[u64]) -> usize {
     wins
 }
 
-/// M2 acceptance 3 does not pass, and this records why rather than pretending otherwise.
-///
-/// Measured over 20,000 ticks, three seeds: the more efficient strain reaches 58%, not the
-/// >90% the milestone asks for. The trajectory says exactly what is happening.
-///
-/// ```text
-///   tick  2000: 51%   co2 in fluid 101081
-///   tick  4000: 56%   co2 in fluid   5929
-///   tick  6000: 56%   co2 in fluid     89
-///   tick  8000: 58%   co2 in fluid     22
-///   tick 20000: 58%   co2 in fluid     21     <- and frozen from here on
-/// ```
-///
-/// **Selection works, and then stops having anything to work on.** The efficient strain does
-/// gain — 51% to 58% — for as long as the population is growing. Then the slide runs out of
-/// matter, growth stops, and because nothing here kills a cell that can still feed itself,
-/// the population freezes: no births, no deaths, no turnover, and therefore no differential
-/// reproduction for selection to be made of.
-///
-/// There are two separate problems, and only the first is about parameters.
-///
-/// **No turnover.** The only cause of death is starvation, and a cell at equilibrium does not
-/// starve: it holds its own sugar and carbon dioxide, cycles them against the light, and
-/// generates energy indefinitely. What it cannot do is grow, because structural carbon is
-/// exhausted and exactly conserved. The end state is an immortal, static population — the
-/// *correct* consequence of the mechanisms as specified, and not something an evolutionary
-/// test can measure, because selection is differential reproduction and nothing is
-/// reproducing. M2's deliverables name "death, corpse deposition, decay" without saying what
-/// causes death besides starvation; whatever provides turnover is missing.
-///
-/// **"Metabolic efficiency" is not what this test varies.** The two strains differ in
-/// chloroplast `param`, which buys *throughput*, not efficiency — and throughput costs
-/// upkeep whether or not it is used. At param 90 the strain pays 115 energy a tick against
-/// the small strain's 70, for a capacity it can only exploit while carbon dioxide is
-/// abundant. That window closes early: the fluid goes from 101,081 to 5,929 units of it
-/// between ticks 2,000 and 4,000. After that the extra capacity is pure cost.
-///
-/// The consequence is that the big-chloroplast strain is not reliably favoured at all. Over
-/// three seeds it ends at 58%, 45% and 53% — ahead, behind, and level. A test asserting it
-/// wins would be asserting noise.
-///
-/// So the honest reading is that acceptance 3 needs two things this milestone does not have:
-/// a source of mortality, and a definition of "more efficient" that means more output per
-/// unit of upkeep rather than more capacity. Both are design decisions about mechanism, so
-/// this is left failing and documented rather than tuned until it goes green.
 #[test]
-#[ignore = "known failure; see the doc comment for the diagnosis"]
 fn selection_guard() {
     let ticks = if cfg!(debug_assertions) {
-        1_500
+        2_000
     } else {
         20_000
     };
@@ -452,7 +393,7 @@ fn selection_guard() {
     let wins = selection_run(ticks, &seeds);
     assert!(
         wins >= 2,
-        "the more efficient strain won in only {wins} of {} seeds",
+        "the tidy strain won in only {wins} of {} seeds",
         seeds.len()
     );
 }

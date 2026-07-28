@@ -44,6 +44,22 @@ pub struct ChemicalDef {
     pub structural: bool,
     /// Colour for the false-colour overlay (M4).
     pub colour: [u8; 3],
+
+    /// What this species turns into on its own, if anything.
+    ///
+    /// SPEC §12 lists decay as part of the fluid step without saying what governs it; this is
+    /// that, and it is data rather than a special case so that any chemistry can have an
+    /// unstable species. It is what closes the loop around a byproduct: peroxide is a real
+    /// dead end unless something turns it back into something usable, and hydrogen peroxide
+    /// decomposing on its own is what real hydrogen peroxide does.
+    ///
+    /// Decay is a *balanced reaction* — the units leaving this species arrive in `decay_to` —
+    /// so it goes through the ledger like any other and I4 stays exact.
+    #[serde(default)]
+    pub decay_to: Option<usize>,
+    /// Fraction of this species that decays per fluid step, `Q10`.
+    #[serde(default)]
+    pub decay_rate: i32,
 }
 
 impl ChemicalDef {
@@ -57,6 +73,8 @@ impl ChemicalDef {
             energy_yield: 0,
             structural: false,
             colour: [128, 128, 128],
+            decay_to: None,
+            decay_rate: 0,
         }
     }
 }
@@ -109,6 +127,8 @@ impl ChemTable {
             energy_yield: 0,
             structural: false,
             colour,
+            decay_to: None,
+            decay_rate: 0,
         };
         let monomer = |name: &str, colour: [u8; 3]| ChemicalDef {
             name: name.to_string(),
@@ -117,6 +137,8 @@ impl ChemTable {
             energy_yield: 0,
             structural: true,
             colour,
+            decay_to: None,
+            decay_rate: 0,
         };
         let substrate = |name: &str, yield_: i32, colour: [u8; 3]| ChemicalDef {
             name: name.to_string(),
@@ -125,6 +147,8 @@ impl ChemTable {
             energy_yield: yield_,
             structural: false,
             colour,
+            decay_to: None,
+            decay_rate: 0,
         };
         let waste = |name: &str, colour: [u8; 3]| ChemicalDef {
             name: name.to_string(),
@@ -133,6 +157,8 @@ impl ChemTable {
             energy_yield: 0,
             structural: false,
             colour,
+            decay_to: None,
+            decay_rate: 0,
         };
 
         ChemTable::new(vec![
@@ -157,6 +183,11 @@ impl ChemTable {
             substrate("sulphide", 768, [200, 210, 120]),
             waste("carbon_dioxide", [140, 120, 130]),
             waste("ammonia", [160, 140, 190]),
+            // Respiration's byproduct. Toxic, so a cell has to get rid of it or take
+            // damage; unstable, so what it gets rid of finds its way back into the loop
+            // instead of being a permanent matter sink. Both halves matter — without the
+            // toxicity nothing ages, and without the decay the world slowly turns into
+            // peroxide and dies of it.
             ChemicalDef {
                 name: "peroxide".to_string(),
                 diffusion: Q10_ONE / 5,
@@ -164,6 +195,8 @@ impl ChemTable {
                 energy_yield: 0,
                 structural: false,
                 colour: [255, 120, 120],
+                decay_to: Some(11),
+                decay_rate: Q10_ONE / 64,
             },
             ChemicalDef::inert("brine"),
             ChemicalDef::inert("silt"),

@@ -56,6 +56,14 @@ pub struct MetabolicRates {
     pub photosynthesis_efficiency: i32,
     /// Fraction of a substrate's latent energy a mitochondrion recovers.
     pub respiration_efficiency: i32,
+    /// Fraction of respiration's exhaust that comes out reactive rather than inert, `Q10`.
+    ///
+    /// This is the cost of breathing. Matter still balances exactly — the same two units come
+    /// out either way — but some of them come out as a poison, so a cell that respires is
+    /// slowly damaging itself and has to excrete or repair to keep up. It is why a well-fed
+    /// cell is not immortal, and therefore why a population at carrying capacity still turns
+    /// over and selection still has something to act on.
+    pub reactive_fraction: i32,
     /// Matter one unit of `param` can convert per tick, `Q10`.
     pub throughput_per_param: i32,
     /// Latent energy per unit of substrate chemical, `Q10` energy per `Q10` matter.
@@ -70,12 +78,26 @@ pub struct MetabolicRates {
     /// is what makes a toxin something to avoid or excrete rather than a flat tax on being
     /// alive.
     pub toxicity_threshold: i32,
-    /// Fraction of accumulated damage a cell repairs per tick, `Q10`.
+    /// Structural matter a cell moves from its cytoplasm into its body per tick, `Q10`.
     ///
-    /// Damage is not permanent, or the first whiff of a toxin would be a death sentence
-    /// eventually. Repair is free at M2; making it cost energy is the obvious next turn of
-    /// the screw and belongs with the M8 balancing pass.
-    pub repair_rate: i32,
+    /// This is growth, and without it a cell is stuck at whatever mass it was born with.
+    /// Division halves mass, so a lineage that could not put matter back would shrink by half
+    /// every generation and stop dividing after five or six — which is exactly what happened
+    /// before this existed, and it looked like a carrying capacity rather than like a bug.
+    pub growth_rate: i32,
+    /// Damage a cell repairs per tick, `Q10`. A rate, not a fraction.
+    ///
+    /// Fixed capacity rather than a proportion, and the difference decides whether anything
+    /// ever ages. Repairing a *fraction* of accumulated damage means damage asymptotes at
+    /// `inflicted / fraction`: a cell either sits below its tolerance forever or crosses it
+    /// immediately, with nothing in between and no lifespan to speak of. A fixed capacity
+    /// means damage grows at `inflicted - repair`, so a cell that is poisoning itself faster
+    /// than it can mend has a definite and finite life — and one that respires harder has a
+    /// shorter one. That is senescence with a cause.
+    ///
+    /// Repair is free at M2. Making it cost energy is the obvious next turn of the screw and
+    /// belongs with the M8 balancing pass.
+    pub repair_per_tick: i32,
 }
 
 impl Default for MetabolicRates {
@@ -83,10 +105,12 @@ impl Default for MetabolicRates {
         MetabolicRates {
             photosynthesis_efficiency: Q10_ONE / 2,
             respiration_efficiency: Q10_ONE * 3 / 4,
+            reactive_fraction: Q10_ONE / 24,
             throughput_per_param: Q10_ONE / 16,
             latent_per_substrate: 64,
+            growth_rate: q10(1) / 4,
             toxicity_threshold: q10(8),
-            repair_rate: Q10_ONE / 64,
+            repair_per_tick: 100,
         }
     }
 }
@@ -109,6 +133,12 @@ pub struct MetabolicReport {
     pub fixed: i64,
     /// Matter respired, `Q10`.
     pub burned: i64,
+    /// Reactive byproduct made by respiration, `Q10`.
+    pub reactive: i64,
+    /// Matter that decayed from one species into another, `Q10`.
+    pub decayed: i64,
+    /// Structural matter moved from cytoplasm into body, `Q10`.
+    pub grown: i64,
     /// Cells whose energy ran out this tick.
     pub starved: u32,
     /// Cells whose membrane failed under toxic damage this tick.
@@ -227,12 +257,35 @@ impl Metabolism {
                     let released = (burn as i64 * latent_per_unit as i64) / Q10_ONE as i64;
                     let recovered =
                         (released * self.rates.respiration_efficiency as i64) / Q10_ONE as i64;
+                    // Two units come out for the two that went in, but not all of it is
+                    // inert: a share is reactive, and that share is what ages the cell.
+                    let exhaust = burn.saturating_mul(2);
+                    let reactive = q10_scale(exhaust, self.rates.reactive_fraction).min(exhaust);
+                    let inert = exhaust.saturating_sub(reactive);
+
                     let interior = cells.interior_mut(i);
                     interior[m.substrate] = interior[m.substrate].saturating_sub(burn);
                     interior[m.oxidant] = interior[m.oxidant].saturating_sub(burn);
-                    interior[m.waste] = interior[m.waste].saturating_add(burn * 2);
-                    ledger.convert(m.substrate, m.waste, burn as i64);
-                    ledger.convert(m.oxidant, m.waste, burn as i64);
+                    interior[m.waste] = interior[m.waste].saturating_add(inert);
+                    interior[m.reactive] = interior[m.reactive].saturating_add(reactive);
+
+                    // Reported as two balanced reactions, so the per-species claim stays
+                    // exact and an unaccounted transmutation still shows up as drift.
+                    let from_substrate = burn.min(inert);
+                    ledger.convert(m.substrate, m.waste, from_substrate as i64);
+                    ledger.convert(
+                        m.substrate,
+                        m.reactive,
+                        burn.saturating_sub(from_substrate) as i64,
+                    );
+                    let oxidant_inert = inert.saturating_sub(from_substrate);
+                    ledger.convert(m.oxidant, m.waste, oxidant_inert as i64);
+                    ledger.convert(
+                        m.oxidant,
+                        m.reactive,
+                        burn.saturating_sub(oxidant_inert) as i64,
+                    );
+                    report.reactive += reactive as i64;
 
                     cells.energy[i] =
                         cells.energy[i].saturating_add(crate::fixed::sat_i32(recovered));
@@ -243,6 +296,47 @@ impl Metabolism {
                     report.burned += burn as i64;
                 }
             }
+
+            // --- growth: cytoplasm becoming body ---
+            //
+            // A cell puts structural matter into itself up to what its membrane can hold, and
+            // its membrane's size is what says how big it means to be. This is the other half
+            // of division: a daughter is born at half its parent's mass and has to earn the
+            // rest back before it can divide in turn, which is what makes structural matter
+            // the thing a population is ultimately limited by.
+            //
+            // Not a species change — the same chemical, moved from the cytoplasm to the body —
+            // so it needs no ledger entry, only for both compartments to be counted.
+            {
+                let membrane = cells.slots(i)[0];
+                let target =
+                    q10(membrane.param as i32).saturating_add((membrane.control[1] as i32).max(0));
+                let room = target.saturating_sub(cells.mass[i]);
+                if room > 0 {
+                    let sc = m.structural % CHEM_COUNT;
+                    let available = cells.interior(i)[sc];
+                    let grown = self.rates.growth_rate.min(room).min(available);
+                    if grown > 0 {
+                        cells.interior_mut(i)[sc] = cells.interior(i)[sc].saturating_sub(grown);
+                        cells.mass[i] = cells.mass[i].saturating_add(grown);
+                        report.grown += grown as i64;
+                    }
+                }
+            }
+
+            // Note what does *not* happen here: a cell does not decompose its own peroxide.
+            //
+            // It decomposes in the water, and only there. Real hydrogen peroxide needs
+            // catalase to break down at any speed, and catalase is a lysosome — an M8
+            // organelle this cell does not have. So the only way out of a cytoplasm is to
+            // excrete it, and a cell that will not is stuck with it.
+            //
+            // This was the other way round to begin with, and the consequence was worth
+            // recording: with interior decay, retaining peroxide was an *advantage*, because
+            // it decayed into carbon dioxide right where photosynthesis needed it. The strain
+            // that dutifully excreted its waste lost, every time, for having given away its
+            // own food supply. A believable mechanism, an emergent result, and the exact
+            // opposite of the physics it was meant to model.
 
             // --- toxicity: membrane damage from what the cell is carrying (SPEC §7.1) ---
             //
@@ -261,7 +355,7 @@ impl Metabolism {
                         inflicted = inflicted.saturating_add(q10_scale(excess, toxicity));
                     }
                 }
-                let repaired = q10_scale(cells.damage[i], self.rates.repair_rate);
+                let repaired = self.rates.repair_per_tick.min(cells.damage[i]).max(0);
                 cells.damage[i] = cells.damage[i]
                     .saturating_sub(repaired)
                     .saturating_add(inflicted)

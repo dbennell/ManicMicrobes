@@ -71,6 +71,7 @@ pub struct TickReport {
     pub population: u32,
     pub biology: BiologyReport,
     pub metabolism: MetabolicReport,
+    pub physics: crate::sensing::PhysicsReport,
 }
 
 // `scratch` is a scratchpad, so two worlds that differ only in what happens to be left in it
@@ -362,7 +363,30 @@ impl World {
                 seed,
             );
 
-            // 4. Physics. Brownian jitter, cilia and collisions arrive at M3.
+            // 4. Physics: thrust, Brownian jitter, drag and integration. Cells push on the
+            //    water here, so it is sequential and in slot order like resolve.
+            report.physics = crate::sensing::step_physics(
+                &mut self.cells,
+                &self.substrate,
+                &mut self.impulse_x,
+                &mut self.impulse_y,
+                self.scenario.jitter,
+                tick,
+                seed,
+            );
+            if report.physics.moved != 0 || report.physics.energy_spent != 0 {
+                // A cilium that pushed on the water changed the velocity field.
+                self.velocity_written = false;
+                self.active_impulses = self
+                    .impulse_x
+                    .iter()
+                    .zip(self.impulse_y.iter())
+                    .filter(|(x, y)| **x != 0 || **y != 0)
+                    .count() as u32;
+            }
+            if report.physics.energy_spent > 0 {
+                self.ledger.dissipate(report.physics.energy_spent);
+            }
         }
 
         // 5. Fluid, at fluid_hz.
@@ -375,6 +399,7 @@ impl World {
                 &self.diffusion_rates,
                 &mut self.scratch,
             );
+            self.decay_fluid();
             if self.active_impulses > 0 {
                 decay_impulses(
                     &mut self.impulse_x,
@@ -426,6 +451,28 @@ impl World {
             "energy accounting broke at tick {}",
             self.tick
         );
+    }
+
+    /// Turn unstable species in the water into what they decay to (SPEC §12, step 5).
+    ///
+    /// A balanced reaction like any other, so it goes through the ledger and the per-species
+    /// claim stays exact. Without it a byproduct excreted into the water would be a permanent
+    /// matter sink, and a world that respires would slowly turn into its own exhaust.
+    fn decay_fluid(&mut self) {
+        for c in 0..CHEM_COUNT {
+            let def = self.scenario.chemicals.get(c);
+            let (Some(into), rate) = (def.decay_to, def.decay_rate) else {
+                continue;
+            };
+            let into = into % CHEM_COUNT;
+            if rate <= 0 || into == c || !self.substrate.present()[c] {
+                continue;
+            }
+            let moved = self.substrate.decay_plane(c, into, rate);
+            if moved > 0 {
+                self.ledger.convert(c, into, moved);
+            }
+        }
     }
 
     /// Total of each chemical over every compartment: fluid, cell interiors and cell mass.
@@ -583,13 +630,20 @@ impl World {
         energy_in: i64,
         energy_out: i64,
         energy_stored: i64,
+        converted: i64,
     ) {
         self.tick = tick;
         self.substrate.restore(planes, light, vx, vy, blocked);
         self.impulse_x = impulse_x;
         self.impulse_y = impulse_y;
-        self.ledger
-            .restore(chem_totals, evicted, energy_in, energy_out, energy_stored);
+        self.ledger.restore(
+            chem_totals,
+            evicted,
+            energy_in,
+            energy_out,
+            energy_stored,
+            converted,
+        );
         // The light and velocity fields came from the snapshot, so neither may be overwritten
         // by a fresh evaluation on the next step.
         self.light_written = true;
@@ -707,13 +761,21 @@ mod tests {
 
     #[test]
     fn stepping_conserves_matter_exactly() {
+        // Per-species totals may move, but only through a balanced reaction that reported
+        // itself — peroxide decomposing in the water is one. What may never move is the total
+        // across every species, and what must always agree is the ledger's claim.
         let mut w = World::new(Scenario::stress(24, 20)).unwrap();
-        let before = w.substrate().total_chem();
-        for _ in 0..2000 {
+        let before: i64 = w.total_matter().iter().sum();
+        for tick in 0..2000 {
             w.step();
-            w.check_invariants().unwrap();
+            w.check_invariants()
+                .unwrap_or_else(|e| panic!("at tick {tick}: {e}"));
+            assert_eq!(
+                w.total_matter().iter().sum::<i64>(),
+                before,
+                "total matter moved at tick {tick}"
+            );
         }
-        assert_eq!(w.substrate().total_chem(), before);
     }
 
     #[test]

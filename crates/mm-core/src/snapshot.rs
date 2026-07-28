@@ -419,6 +419,7 @@ impl Snapshot {
         w.i64(l.energy_in());
         w.i64(l.energy_out());
         w.i64(l.energy_stored());
+        w.i64(l.converted());
 
         Ok(w.bytes)
     }
@@ -613,6 +614,7 @@ impl Snapshot {
         let energy_in = r.i64()?;
         let energy_out = r.i64()?;
         let energy_stored = r.i64()?;
+        let converted = r.i64()?;
 
         world.restore_cells(cells, free);
         world.restore(
@@ -629,6 +631,7 @@ impl Snapshot {
             energy_in,
             energy_out,
             energy_stored,
+            converted,
         );
         Ok(world)
     }

@@ -312,6 +312,16 @@ pub struct MetabolicChemistry {
     pub waste: usize,
     /// Produced alongside the substrate by photosynthesis.
     pub byproduct: usize,
+    /// What a body is built out of.
+    pub structural: usize,
+    /// Respiration's toxic byproduct — reactive oxygen, in the real thing.
+    ///
+    /// A fraction of what a mitochondrion exhales comes out as this rather than as ordinary
+    /// waste. It is what gives ageing a *cause*: a cell that respires accumulates a poison it
+    /// must excrete or repair away, and one that cannot keep up eventually fails. Without it
+    /// a well-fed cell is immortal, and a population with no turnover has no differential
+    /// reproduction for selection to be made of.
+    pub reactive: usize,
 }
 
 impl Default for MetabolicChemistry {
@@ -323,6 +333,8 @@ impl Default for MetabolicChemistry {
             oxidant: 14,
             waste: 11,
             byproduct: 14,
+            structural: 4,
+            reactive: 13,
         }
     }
 }
@@ -339,6 +351,8 @@ impl MetabolicChemistry {
             && self.oxidant < CHEM_COUNT
             && self.waste < CHEM_COUNT
             && self.byproduct < CHEM_COUNT
+            && self.reactive < CHEM_COUNT
+            && self.structural < CHEM_COUNT
             && self.substrate != self.waste
             && self.oxidant == self.byproduct
     }
@@ -597,7 +611,9 @@ mod tests {
             substrate: 8,
             oxidant: 14,
             waste: 8,
-            byproduct: 14
+            byproduct: 14,
+            structural: 4,
+            reactive: 13,
         }
         .closes());
     }

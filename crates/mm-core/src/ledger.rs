@@ -212,6 +212,7 @@ impl Ledger {
     }
 
     /// Overwrite every field, for snapshot restoration.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn restore(
         &mut self,
         chem: [i64; CHEM_COUNT],
@@ -219,12 +220,14 @@ impl Ledger {
         energy_in: i64,
         energy_out: i64,
         energy_stored: i64,
+        converted: i64,
     ) {
         self.chem = chem;
         self.evicted = evicted;
         self.energy_in = energy_in;
         self.energy_out = energy_out;
         self.energy_stored = energy_stored;
+        self.converted = converted;
     }
 
     /// Adopt the world's current stored energy as the baseline.
@@ -285,6 +288,7 @@ impl StateHash for Ledger {
         h.u64(self.energy_in as u64);
         h.u64(self.energy_out as u64);
         h.u64(self.energy_stored as u64);
+        h.u64(self.converted as u64);
     }
 }
 

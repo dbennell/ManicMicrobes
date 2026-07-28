@@ -1,4 +1,4 @@
-; ancestor.mm — the first thing that is alive.
+; ancestor_sloppy.mm — the same cell, one bit worse at housekeeping.
 ;
 ; A photo-autotroph. It eats waste and its oxidant from the water, photosynthesises them into
 ; substrate, burns the substrate for energy, excretes the waste back, and divides when it has
@@ -73,17 +73,25 @@
 
 ; ---------------------------------------------------------------- keep house
 ;
-; Respiration exhales a reactive byproduct — chemical 13, peroxide — and above a threshold it
-; damages the membrane. A cell that lets it build up ages and dies; one that dumps it into the
-; water lives, because peroxide is unstable and decomposes back into carbon dioxide out there,
-; which is food again. This gene is the whole difference between this ancestor and
-; `ancestor_sloppy.mm`, and it is what M2's selection test measures.
+; This is the strain that does NOT excrete its peroxide, and it exists to be beaten.
 ;
-; It also dumps surplus sugar, which would otherwise fill the cytoplasm and stop it eating.
+; It differs from `ancestor.mm` by one template bit: where the tidy strain excretes chemical
+; 13, this one excretes chemical 15, an inert filler it is not carrying, so the instruction
+; runs and achieves nothing. Same length in bytes, same number of instructions, same time
+; round the cycle, same cost to copy at division.
+;
+; That control matters more than it looks. Padding with different instructions left the tidy
+; strain a few bytes longer, and a few bytes longer means a few more COPYB in every division —
+; enough, measured, to lose it the whole contest on genome length alone while looking like a
+; result about metabolism.
+;
+; Respiration exhales a reactive byproduct, and above a threshold it damages the membrane. A
+; cell that declines to clear it ages faster and leaves fewer descendants, with nothing
+; scoring it and no fitness function anywhere.
 
         GENE    #grow
         IMM     255
-        IMM     13              ; peroxide, out
+        IMM     15              ; ...into chemical 15, which it does not have
         EMIT
         DROP
         IMM     8

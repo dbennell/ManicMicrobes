@@ -57,7 +57,7 @@ impl std::fmt::Display for SubstrateError {
 impl std::error::Error for SubstrateError {}
 
 /// The world's fluid, chemistry and barriers.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, Debug)]
 pub struct Substrate {
     width: u32,
     height: u32,
@@ -102,6 +102,29 @@ pub struct Substrate {
     /// Set when `vx`/`vy` change; cleared by `sync_edge_velocity`.
     edge_velocity_stale: bool,
 }
+
+/// Two substrates are equal when they hold the same things, not when their caches agree.
+///
+/// `present`, `has_flow`, `has_barriers`, the edge masks and the edge velocities are all
+/// derived, and two of them are deliberately *conservative*: `present` may stay true for a
+/// plane that has since drained to zero, because clearing it would mean scanning a megabyte to
+/// learn something that only costs a wasted sweep to get wrong. A derived `PartialEq` would
+/// therefore report two identical worlds as different — which is exactly what it did, and it
+/// took a snapshot round-trip failing on "some field is missing from the format" to notice,
+/// when nothing was missing at all.
+impl PartialEq for Substrate {
+    fn eq(&self, other: &Self) -> bool {
+        self.width == other.width
+            && self.height == other.height
+            && self.chem == other.chem
+            && self.light == other.light
+            && self.vx == other.vx
+            && self.vy == other.vy
+            && self.blocked == other.blocked
+    }
+}
+
+impl Eq for Substrate {}
 
 impl Substrate {
     /// An empty substrate: no chemicals, no light, no flow, no barriers.
@@ -477,6 +500,50 @@ impl Substrate {
             &self.edge_vx,
             &self.edge_vy,
         )
+    }
+
+    /// Move a fraction of one species into another, everywhere at once.
+    ///
+    /// Exactly conservative by the same argument as the fluid solver: the figure subtracted
+    /// from one plane is the figure added to the other, square by square, so nothing rounds
+    /// away. Returns the total moved, which is what the ledger has to be told.
+    pub fn decay_plane(&mut self, from: usize, to: usize, rate: i32) -> i64 {
+        let from = from % CHEM_COUNT;
+        let to = to % CHEM_COUNT;
+        if from == to || rate <= 0 {
+            return 0;
+        }
+        let rate = rate.min(crate::fixed::Q10_ONE);
+        let n = self.light.len();
+        let mut total = 0i64;
+        // Split the borrow: `from` and `to` are different planes, so both can be touched.
+        let (lo, hi) = if from < to { (from, to) } else { (to, from) };
+        let (head, tail) = self.chem.split_at_mut(hi);
+        let (src, dst) = if from < to {
+            (&mut head[lo], &mut tail[0])
+        } else {
+            (&mut tail[0], &mut head[lo])
+        };
+        for i in 0..n {
+            let held = src[i];
+            if held <= 0 {
+                continue;
+            }
+            // Bounded by what is there and by what the destination has room for, so a full
+            // square cannot make the two sides disagree.
+            let headroom = MAX_QUANTITY.saturating_sub(dst[i]).max(0);
+            let moved = crate::fixed::q10_scale(held, rate).min(held).min(headroom);
+            if moved <= 0 {
+                continue;
+            }
+            src[i] = held - moved;
+            dst[i] += moved;
+            total += moved as i64;
+        }
+        if total > 0 {
+            self.present[to] = true;
+        }
+        total
     }
 
     /// The exact total of each chemical over the whole grid.

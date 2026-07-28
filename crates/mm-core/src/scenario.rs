@@ -93,6 +93,13 @@ pub struct Scenario {
     pub fluid_interval: u32,
     /// Fraction of a cilium impulse that survives each fluid step, `Q10`.
     pub impulse_retain: i32,
+    /// Brownian jitter, `Q10` of a square per tick.
+    ///
+    /// The reason a cell that does nothing still ends up somewhere. Small enough that it is
+    /// noise rather than transport, large enough that a population spreads without needing to
+    /// swim — which matters, because a chemotaxis experiment has to be able to tell swimming
+    /// apart from drifting.
+    pub jitter: i32,
 
     pub seeding: Vec<Seeding>,
     pub barriers: Vec<Barrier>,
@@ -113,6 +120,7 @@ impl Default for Scenario {
             current: CurrentField::default(),
             fluid_interval: 1,
             impulse_retain: Q10_ONE * 15 / 16,
+            jitter: 24,
             seeding: Vec::new(),
             barriers: Vec::new(),
             vm: VmConfig::DEFAULT,
@@ -263,6 +271,7 @@ impl StateHash for Scenario {
         self.current.hash_state(h);
         h.u32(self.fluid_interval);
         h.i32(self.impulse_retain);
+        h.i32(self.jitter);
         h.u16(self.vm.instr_per_tick);
         h.u16(self.vm.template_search_range);
         h.u16(self.vm.promoter_bind_threshold);
