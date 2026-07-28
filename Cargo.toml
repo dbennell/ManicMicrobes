@@ -1,8 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["crates/mm-core", "crates/mm-asm", "crates/mm-cli"]
+members = ["crates/mm-core", "crates/mm-asm", "crates/mm-cli", "crates/mm-app"]
 
-# mm-app lands with M2/M4 (viewer, microscope) and is deliberately absent until then.
 
 [workspace.package]
 version = "0.0.1"

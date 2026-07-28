@@ -79,6 +79,7 @@ pub struct CellHost<'a> {
     slot: usize,
     cells: &'a CellArena,
     substrate: &'a Substrate,
+    neighbours: &'a crate::neighbours::NeighbourIndex,
     intents: &'a mut IntentBuffer,
     /// The square the cell is standing on.
     square: usize,
@@ -95,6 +96,7 @@ impl<'a> CellHost<'a> {
         slot: usize,
         cells: &'a CellArena,
         substrate: &'a Substrate,
+        neighbours: &'a crate::neighbours::NeighbourIndex,
         intents: &'a mut IntentBuffer,
         tick: u64,
     ) -> CellHost<'a> {
@@ -103,6 +105,7 @@ impl<'a> CellHost<'a> {
             slot,
             cells,
             substrate,
+            neighbours,
             intents,
             square,
             claimed: [0; CHEM_COUNT],
@@ -264,7 +267,11 @@ impl Host for CellHost<'_> {
                         y: sy,
                         tick: self.tick,
                         cell_key: self.cells.id_at(self.slot).ordering_key(),
-                        touch: crate::sensing::TouchReading::default(),
+                        touch: crate::neighbours::touch_reading(
+                            self.cells,
+                            self.neighbours,
+                            self.slot,
+                        ),
                     },
                 )
                 // Built, paid for, and not yet implemented. A `RESERVED` organelle reads as
@@ -809,9 +816,11 @@ fn deposit(substrate: &mut Substrate, c: usize, x: i32, y: i32, amount: i32) -> 
 /// Sequential over cells at M2. The VM is taken out of the arena for the duration so that the
 /// host can hold a shared reference to everything else; parallelising this is M9's scale work
 /// and needs the arena split differently, not the semantics changed.
+#[allow(clippy::too_many_arguments)]
 pub fn execute(
     cells: &mut CellArena,
     substrate: &Substrate,
+    neighbours: &crate::neighbours::NeighbourIndex,
     intents: &mut IntentBuffer,
     cfg: &VmConfig,
     tick: u64,
@@ -825,7 +834,7 @@ pub fn execute(
         let genome: Arc<Genome> = Arc::clone(&cells.genome[i]);
         let mut vm = std::mem::take(&mut cells.vm[i]);
         {
-            let mut host = CellHost::new(i, cells, substrate, intents, tick);
+            let mut host = CellHost::new(i, cells, substrate, neighbours, intents, tick);
             let ctx = RandCtx::new(seed, tick, id.ordering_key());
             vm.tick(&genome, cfg, &ctx, &mut host);
         }
@@ -1305,9 +1314,11 @@ mod tests {
         let before = f.substrate.chem_at(5, 8, 8);
 
         f.intents.begin_tick(f.cells.capacity());
+        let index = crate::neighbours::NeighbourIndex::default();
         execute(
             &mut f.cells,
             &f.substrate,
+            &index,
             &mut f.intents,
             &VmConfig::DEFAULT,
             0,
@@ -1335,7 +1346,8 @@ mod tests {
         f.cells.energy[i] = q10(1234);
         let mut intents = IntentBuffer::new();
         intents.begin_tick(f.cells.capacity());
-        let mut host = CellHost::new(i, &f.cells, &f.substrate, &mut intents, 0);
+        let index = crate::neighbours::NeighbourIndex::default();
+        let mut host = CellHost::new(i, &f.cells, &f.substrate, &index, &mut intents, 0);
         assert_eq!(host.oget(1, 0), 1234, "energy");
         assert_eq!(host.oget(0, 0), 20, "mass");
         assert_eq!(host.otype(0), OrganelleType::Membrane.number());
@@ -1349,7 +1361,8 @@ mod tests {
         f.substrate.set_chem(5, 8, 8, q10(10));
         let mut intents = IntentBuffer::new();
         intents.begin_tick(f.cells.capacity());
-        let mut host = CellHost::new(i, &f.cells, &f.substrate, &mut intents, 0);
+        let index = crate::neighbours::NeighbourIndex::default();
+        let mut host = CellHost::new(i, &f.cells, &f.substrate, &index, &mut intents, 0);
         assert_eq!(host.eat(10, 5), 10);
         assert_eq!(host.eat(10, 5), 0, "the square was already spoken for");
     }

@@ -48,6 +48,7 @@ pub mod ledger;
 pub mod light;
 pub mod metabolism;
 pub mod mutation;
+pub mod neighbours;
 pub mod organelle;
 pub mod rng;
 pub mod scenario;
@@ -71,6 +72,7 @@ pub use ledger::{Ledger, LedgerBreach, TrophicSource};
 pub use light::{CurrentField, Edge, LightRegime};
 pub use metabolism::{MetabolicRates, Metabolism};
 pub use mutation::{MutationRates, Operator};
+pub use neighbours::NeighbourIndex;
 pub use organelle::{
     MembraneReading, Organelle, OrganelleCatalogue, OrganelleType, MEMBRANE_SLOT, SLOT_COUNT,
 };

@@ -61,6 +61,9 @@ pub struct World {
     pending: Pending,
     /// Reused between ticks to avoid an allocation per tick.
     starving: Vec<CellId>,
+    /// Who is next to whom. Rebuilt each tick before sensing, so touch readings and collision
+    /// resolution see the same neighbourhood.
+    neighbours: crate::neighbours::NeighbourIndex,
     /// What the last tick did, for metrics.
     last_report: TickReport,
 }
@@ -127,6 +130,7 @@ impl World {
             intents: IntentBuffer::new(),
             pending: Pending::default(),
             starving: Vec::new(),
+            neighbours: crate::neighbours::NeighbourIndex::default(),
             last_report: TickReport::default(),
         };
 
@@ -333,9 +337,12 @@ impl World {
         let mut report = TickReport::default();
 
         if !self.cells.is_empty() {
-            // 1. Sense. The light and chemistry a cell reads are already in the substrate,
-            //    and nothing has moved since the last tick ended, so there is nothing to
-            //    gather: the execute phase reads the world directly and read-only.
+            // 1. Sense. Light and chemistry are already in the substrate and nothing has moved
+            //    since the last tick ended, so the execute phase reads those directly and
+            //    read-only. What does have to be gathered is who is next to whom, because
+            //    answering that by walking the population would be quadratic.
+            self.neighbours
+                .rebuild(&self.cells, self.substrate.width(), self.substrate.height());
 
             // 2. Execute. Each cell runs its instruction budget and emits intents. No cell
             //    writes shared state, so no cell can observe another's turn.
@@ -343,6 +350,7 @@ impl World {
             biology::execute(
                 &mut self.cells,
                 &self.substrate,
+                &self.neighbours,
                 &mut self.intents,
                 &self.scenario.vm,
                 tick,
@@ -387,6 +395,12 @@ impl World {
             if report.physics.energy_spent > 0 {
                 self.ledger.dissipate(report.physics.energy_spent);
             }
+            // Cells occupy space, so a crowded patch is crowded and there is a reason to
+            // leave it. Rebuilt first because everything just moved.
+            self.neighbours
+                .rebuild(&self.cells, self.substrate.width(), self.substrate.height());
+            report.physics.separated =
+                crate::neighbours::resolve_collisions(&mut self.cells, &self.neighbours);
         }
 
         // 5. Fluid, at fluid_hz.

@@ -366,6 +366,8 @@ pub struct PhysicsReport {
     pub moved: i64,
     /// Energy spent on thrust.
     pub energy_spent: i64,
+    /// Overlapping pairs pushed apart.
+    pub separated: u32,
 }
 
 #[cfg(test)]

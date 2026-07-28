@@ -1,0 +1,42 @@
+[package]
+name = "mm-app"
+description = "Manic Microbes front-end: the microscope, the editor, the wiki."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+mm-core = { path = "../mm-core" }
+mm-asm = { path = "../mm-asm" }
+
+# The only crate in the workspace that may depend on Bevy, and the reason mm-core may not: the
+# simulation has to run headless at a thousand times realtime, and a renderer that could hold
+# it to a frame budget would make that impossible (SPEC §1).
+#
+# Optional, so that `slide.rs` — which is where the wall between simulation and rendering
+# actually lives — compiles and is tested without a graphics stack. The guarantee M4 has to
+# make is that rendering cannot reach the simulation, and that is checkable on a machine with
+# no display at all.
+bevy = { version = "0.14", optional = true, default-features = false, features = [
+    "bevy_winit",
+    "bevy_render",
+    "bevy_core_pipeline",
+    "bevy_sprite",
+    "x11",
+    "multi_threaded",
+] }
+
+[features]
+default = []
+render = ["dep:bevy"]
+
+[lib]
+name = "mm_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mm-app"
+path = "src/main.rs"
+required-features = ["render"]

@@ -305,3 +305,137 @@ fn acceptance_chemotaxis_evolves() {
         "the sighted line ended up closer to its food in only {wins} of 10 seeds"
     );
 }
+
+/// M3 acceptance 2: arena determinism.
+///
+/// > Two hand-written cells in a fixed scenario with mutation off produce identical outcomes
+/// > across 100 runs.
+///
+/// Arena mode (SPEC §0) is the half of the product where people write cells and find out
+/// whose code wins, and a match that did not replay identically would not be a match. This is
+/// the same claim as I1, stated at the scale a user cares about: two named cells, one slide,
+/// a hundred runs, one answer.
+#[test]
+fn arena_determinism() {
+    let a = assemble("drifter.mm");
+    let b = assemble("drifter_blind.mm");
+    let ticks = if cfg!(debug_assertions) { 300 } else { 2_000 };
+
+    let play = || {
+        let mut world = World::new(patchy(99)).expect("world");
+        world.set_biology(BiologyConfig {
+            mutation: MutationRates::none(),
+            ..BiologyConfig::default()
+        });
+        for (k, bytes) in [&a, &b].iter().enumerate() {
+            let genome = world.genomes().intern((*bytes).clone()).unwrap();
+            let id = world.spawn_cell(CellSeed {
+                x: pos(20 + k as i32 * 24),
+                y: pos(32),
+                mass: q10(30),
+                energy: q10(600),
+                membrane: 24,
+                key: 11,
+                species: k as u32,
+                parent: CellId::NONE,
+                birth_tick: 0,
+                genome,
+            });
+            if let Some(i) = world.cells_mut().index(id) {
+                world.cells_mut().slots_mut(i)[1] = Organelle::finished(OrganelleType::Nucleus, 64);
+                world.cells_mut().slots_mut(i)[2] =
+                    Organelle::finished(OrganelleType::Mitochondrion, 40);
+                world.cells_mut().slots_mut(i)[3] =
+                    Organelle::finished(OrganelleType::Chloroplast, 50);
+            }
+        }
+        world.adopt_current_contents_as_baseline();
+        world.run(ticks);
+        (world.state_hash(), world.cells().len())
+    };
+
+    let expected = play();
+    // A hundred replays of the same match. If any one of them differs, the match is not a
+    // match and nothing built on top of it — a leaderboard, a saved replay, a shared
+    // scenario — means anything.
+    for run in 1..100 {
+        assert_eq!(play(), expected, "run {run} differed from the first");
+    }
+}
+
+/// M3 acceptance 3: momentum sanity.
+///
+/// > Cilia impulses into the fluid do not create net momentum from nothing beyond the
+/// > configured drag budget.
+///
+/// Momentum here is not conserved and is not claimed to be — impulses decay, which is the
+/// whole reason one flick of one cilium does not stir the slide forever. What must hold is
+/// that a cilium cannot push on nothing: every unit of thrust a cell gives itself is a unit
+/// it puts into the water the other way, and the water then loses it to drag rather than to
+/// arithmetic.
+#[test]
+fn cilia_push_on_the_water_rather_than_on_nothing() {
+    let sighted = assemble("drifter.mm");
+    let mut world = World::new(patchy(7)).unwrap();
+    world.set_biology(BiologyConfig {
+        mutation: MutationRates::none(),
+        ..BiologyConfig::default()
+    });
+    let genome = world.genomes().intern(sighted).unwrap();
+    let id = world.spawn_cell(CellSeed {
+        x: pos(32),
+        y: pos(32),
+        mass: q10(30),
+        energy: q10(20_000),
+        membrane: 24,
+        key: 11,
+        species: 0,
+        parent: CellId::NONE,
+        birth_tick: 0,
+        genome,
+    });
+    let i = world.cells_mut().index(id).unwrap();
+    world.cells_mut().slots_mut(i)[1] = Organelle::finished(OrganelleType::Nucleus, 64);
+    world.cells_mut().slots_mut(i)[3] = Organelle::finished(OrganelleType::Chloroplast, 50);
+    world.adopt_current_contents_as_baseline();
+
+    // A still slide with one cell on it: any momentum in the water came from that cell.
+    let impulse_total = |w: &World| -> i64 {
+        let (ix, iy) = w.impulses();
+        ix.iter().map(|v| *v as i64).sum::<i64>() + iy.iter().map(|v| *v as i64).sum::<i64>()
+    };
+    assert_eq!(impulse_total(&world), 0, "the water starts still");
+
+    let mut peak = 0i64;
+    let ticks = if cfg!(debug_assertions) { 200 } else { 1_500 };
+    for _ in 0..ticks {
+        world.step();
+        peak = peak.max(impulse_total(&world).abs());
+    }
+    assert!(peak > 0, "nothing ever pushed on the water");
+    // Bounded: the impulse layer is clamped per square and decays every fluid step, so a cell
+    // beating for fifteen hundred ticks cannot accumulate momentum without limit.
+    let squares = (WIDTH as i64) * (HEIGHT as i64);
+    assert!(
+        peak < squares * mm_core::Q10_ONE as i64,
+        "momentum in the water grew without bound: {peak}"
+    );
+
+    // Now take everything out of the water. Zeroing the cilia would not do it — the genome
+    // rewrites its own control inputs every tick, which is the point of them — so the only
+    // way to have nothing pushing is to have nothing there.
+    let ids: Vec<_> = world.cells().ids().collect();
+    for id in ids {
+        world.cells_mut().despawn(id);
+    }
+    assert!(world.cells().is_empty());
+
+    for _ in 0..2_000 {
+        world.step();
+    }
+    assert_eq!(
+        impulse_total(&world),
+        0,
+        "the water was still moving long after everything stopped pushing it"
+    );
+}
