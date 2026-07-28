@@ -527,7 +527,15 @@ Full Navier–Stokes with projection is a later upgrade behind the same interfac
 explicitly not required for interesting behaviour, and it costs determinism and speed.
 
 The fluid runs at `fluid_hz`, decoupled from and typically lower than the cell tick rate,
-parallelised with rayon over row bands (checkerboard-phased so fluxes never race).
+parallelised with rayon over row bands.
+
+This paragraph used to specify checkerboard phasing as the way fluxes avoid racing. M1
+measured it: checkerboard is about twice as slow as the scheme that shipped, and phasing an
+isotropic kernel makes it anisotropic. What ships instead computes every flux into its own
+plane and then applies all of them, which needs no phasing at all — a flux is a pure function
+of the two squares either side of it, so nothing races when nothing is being written yet.
+Row bands are still how the work is divided. See the module docs in `fluid.rs` for the two
+alternatives that were tried and dropped.
 
 ---
 

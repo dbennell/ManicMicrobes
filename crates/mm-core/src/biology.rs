@@ -29,13 +29,15 @@
 
 use std::sync::Arc;
 
+use rayon::prelude::*;
+
 use crate::cell::{CellArena, CellSeed};
 use crate::chem::{ChemTable, CHEM_COUNT};
 use crate::config::VmConfig;
 use crate::fixed::{cell_to_q10, pos_to_square, q10, q10_scale, sat_i16, Q10_ONE};
 use crate::genome::{Genome, GenomePool};
 use crate::host::Host;
-use crate::intent::{Intent, IntentBuffer, Pending, PendingBirth};
+use crate::intent::{Intent, IntentBuffer, Pending, PendingBirth, SlotIntents};
 use crate::ledger::Ledger;
 use crate::metabolism::Metabolism;
 use crate::mutation::{copy_error, copy_error_rate, mutate_structural, MutationRates};
@@ -44,6 +46,7 @@ use crate::organelle::{
 };
 use crate::rng::{Purpose, RandCtx};
 use crate::substrate::Substrate;
+use crate::vm::Vm;
 
 /// How much of one chemical a cell can hold before it stops being able to eat, `Q10`.
 ///
@@ -80,7 +83,7 @@ pub struct CellHost<'a> {
     cells: &'a CellArena,
     substrate: &'a Substrate,
     neighbours: &'a crate::neighbours::NeighbourIndex,
-    intents: &'a mut IntentBuffer,
+    intents: SlotIntents<'a>,
     /// The square the cell is standing on.
     square: usize,
     /// How much of each chemical the cell has already promised itself this tick, so that a
@@ -97,7 +100,7 @@ impl<'a> CellHost<'a> {
         cells: &'a CellArena,
         substrate: &'a Substrate,
         neighbours: &'a crate::neighbours::NeighbourIndex,
-        intents: &'a mut IntentBuffer,
+        intents: SlotIntents<'a>,
         tick: u64,
     ) -> CellHost<'a> {
         let square = substrate.index(pos_to_square(cells.x[slot]), pos_to_square(cells.y[slot]));
@@ -182,34 +185,25 @@ pub fn nucleus_capacity(cells: &CellArena, i: usize) -> usize {
 
 impl Host for CellHost<'_> {
     fn build(&mut self, param: i16, ty: i16, slot: i16) {
-        self.intents.push(
-            self.slot,
-            Intent::Build {
-                slot: slot_index(slot) as u8,
-                kind: (ty as u16 % SLOT_COUNT as u16) as u8,
-                param: (param as u16 & 0xFF) as u8,
-            },
-        );
+        self.intents.push(Intent::Build {
+            slot: slot_index(slot) as u8,
+            kind: (ty as u16 % SLOT_COUNT as u16) as u8,
+            param: (param as u16 & 0xFF) as u8,
+        });
     }
 
     fn tear(&mut self, slot: i16) {
-        self.intents.push(
-            self.slot,
-            Intent::Tear {
-                slot: slot_index(slot) as u8,
-            },
-        );
+        self.intents.push(Intent::Tear {
+            slot: slot_index(slot) as u8,
+        });
     }
 
     fn oset(&mut self, v: i16, idx: i16, slot: i16) {
-        self.intents.push(
-            self.slot,
-            Intent::Control {
-                slot: slot_index(slot) as u8,
-                index: (idx as u16 % 2) as u8,
-                value: v,
-            },
-        );
+        self.intents.push(Intent::Control {
+            slot: slot_index(slot) as u8,
+            index: (idx as u16 % 2) as u8,
+            value: v,
+        });
     }
 
     fn oget(&mut self, idx: i16, slot: i16) -> i16 {
@@ -306,13 +300,10 @@ impl Host for CellHost<'_> {
             return 0;
         }
         self.claimed[c] = self.claimed[c].saturating_add(promised);
-        self.intents.push(
-            self.slot,
-            Intent::Eat {
-                chem: c as u8,
-                promised,
-            },
-        );
+        self.intents.push(Intent::Eat {
+            chem: c as u8,
+            promised,
+        });
         q10_to_visible(promised)
     }
 
@@ -326,13 +317,10 @@ impl Host for CellHost<'_> {
         if sending <= 0 {
             return 0;
         }
-        self.intents.push(
-            self.slot,
-            Intent::Emit {
-                chem: c as u8,
-                amount: sending,
-            },
-        );
+        self.intents.push(Intent::Emit {
+            chem: c as u8,
+            amount: sending,
+        });
         q10_to_visible(sending)
     }
 
@@ -347,21 +335,20 @@ impl Host for CellHost<'_> {
             // is truncated at division (SPEC §4.1) rather than being allowed to carry it.
             return 0;
         }
-        self.intents
-            .push(self.slot, Intent::Bud { size: want as u16 });
+        self.intents.push(Intent::Bud { size: want as u16 });
         1
     }
 
     fn copy_byte(&mut self, dst: u16, src: u8) {
-        self.intents.push(self.slot, Intent::CopyByte { dst, src });
+        self.intents.push(Intent::CopyByte { dst, src });
     }
 
     fn split(&mut self) {
-        self.intents.push(self.slot, Intent::Split);
+        self.intents.push(Intent::Split);
     }
 
     fn set_key(&mut self, key: u8) {
-        self.intents.push(self.slot, Intent::SetKey { key });
+        self.intents.push(Intent::SetKey { key });
     }
 }
 
@@ -811,11 +798,30 @@ fn deposit(substrate: &mut Substrate, c: usize, x: i32, y: i32, amount: i32) -> 
     amount - remaining
 }
 
-/// Give one cell its instruction budget.
+/// Below this many slots the fan-out costs more than the work.
+const PARALLEL_THRESHOLD: usize = 512;
+
+/// Give every cell its instruction budget.
 ///
-/// Sequential over cells at M2. The VM is taken out of the arena for the duration so that the
-/// host can hold a shared reference to everything else; parallelising this is M9's scale work
-/// and needs the arena split differently, not the semantics changed.
+/// # Why this can be parallel at all
+///
+/// A cell's tick reads the world and writes nothing to it. Everything it wants to happen goes
+/// into its own slice of the intent buffer, to be applied later in slot order by `resolve`;
+/// the only thing it mutates is its own VM. So the three things that would normally make
+/// this order-dependent are all absent:
+///
+/// * **No cell can see another cell's changes**, because there are none to see until the
+///   resolve phase. `cells` is a shared reference for the whole phase.
+/// * **No cell can write where another writes.** The VMs are handed out one per slot and the
+///   intent lists are disjoint slices, both enforced by the borrow checker rather than by
+///   convention.
+/// * **No draw depends on when the cell ran.** Randomness is `hash(seed, tick, cell, purpose)`
+///   (SPEC §11), so a cell gets the same numbers whichever thread picks it up and whenever it
+///   does.
+///
+/// The result is that the state hash after a tick is the same on one thread as on sixteen,
+/// which M2's determinism acceptance test checks at 500,000 ticks. The VMs come out of the
+/// arena for the duration because the host needs a shared borrow of everything else.
 #[allow(clippy::too_many_arguments)]
 pub fn execute(
     cells: &mut CellArena,
@@ -826,20 +832,38 @@ pub fn execute(
     tick: u64,
     seed: u64,
 ) {
-    for i in 0..cells.capacity() {
-        if !cells.occupied(i) {
-            continue;
+    let mut vms = std::mem::take(&mut cells.vm);
+    let arena: &CellArena = cells;
+    let run = |i: usize, vm: &mut Vm, slot: SlotIntents<'_>| -> u64 {
+        if !arena.occupied(i) {
+            return 0;
         }
-        let id = cells.id_at(i);
-        let genome: Arc<Genome> = Arc::clone(&cells.genome[i]);
-        let mut vm = std::mem::take(&mut cells.vm[i]);
-        {
-            let mut host = CellHost::new(i, cells, substrate, neighbours, intents, tick);
-            let ctx = RandCtx::new(seed, tick, id.ordering_key());
-            vm.tick(&genome, cfg, &ctx, &mut host);
-        }
-        cells.vm[i] = vm;
-    }
+        let genome: Arc<Genome> = Arc::clone(&arena.genome[i]);
+        let ctx = RandCtx::new(seed, tick, arena.id_at(i).ordering_key());
+        let mut host = CellHost::new(i, arena, substrate, neighbours, slot, tick);
+        vm.tick(&genome, cfg, &ctx, &mut host);
+        host.intents.dropped()
+    };
+
+    let dropped: u64 = if vms.len() < PARALLEL_THRESHOLD {
+        vms.iter_mut()
+            .zip(intents.slots_mut())
+            .enumerate()
+            .map(|(i, (vm, slot))| run(i, vm, slot))
+            .sum()
+    } else {
+        // Collected first because `slots_mut` is a sequential iterator over disjoint chunks;
+        // the collection is what makes it indexable, not what makes it safe.
+        let slots: Vec<SlotIntents<'_>> = intents.slots_mut().collect();
+        vms.par_iter_mut()
+            .zip(slots.into_par_iter())
+            .enumerate()
+            .map(|(i, (vm, slot))| run(i, vm, slot))
+            .sum()
+    };
+
+    cells.vm = vms;
+    intents.add_dropped(dropped);
 }
 
 #[cfg(test)]
@@ -1347,7 +1371,8 @@ mod tests {
         let mut intents = IntentBuffer::new();
         intents.begin_tick(f.cells.capacity());
         let index = crate::neighbours::NeighbourIndex::default();
-        let mut host = CellHost::new(i, &f.cells, &f.substrate, &index, &mut intents, 0);
+        let slot = intents.slots_mut().nth(i).expect("slot in range");
+        let mut host = CellHost::new(i, &f.cells, &f.substrate, &index, slot, 0);
         assert_eq!(host.oget(1, 0), 1234, "energy");
         assert_eq!(host.oget(0, 0), 20, "mass");
         assert_eq!(host.otype(0), OrganelleType::Membrane.number());
@@ -1362,7 +1387,8 @@ mod tests {
         let mut intents = IntentBuffer::new();
         intents.begin_tick(f.cells.capacity());
         let index = crate::neighbours::NeighbourIndex::default();
-        let mut host = CellHost::new(i, &f.cells, &f.substrate, &index, &mut intents, 0);
+        let slot = intents.slots_mut().nth(i).expect("slot in range");
+        let mut host = CellHost::new(i, &f.cells, &f.substrate, &index, slot, 0);
         assert_eq!(host.eat(10, 5), 10);
         assert_eq!(host.eat(10, 5), 0, "the square was already spoken for");
     }

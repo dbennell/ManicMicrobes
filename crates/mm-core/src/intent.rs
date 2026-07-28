@@ -74,6 +74,39 @@ pub struct IntentBuffer {
     dropped: u64,
 }
 
+/// One cell's slice of the intent buffer, handed out for the duration of its tick.
+///
+/// This exists so that the borrow checker, rather than a comment, is what stops one cell
+/// writing into another's list during the parallel execute phase.
+#[derive(Debug)]
+pub struct SlotIntents<'a> {
+    intents: &'a mut [Intent],
+    count: &'a mut u8,
+    dropped: u64,
+}
+
+impl SlotIntents<'_> {
+    /// Record an intent, or count it as dropped if the cell has already filled its list.
+    #[inline]
+    pub fn push(&mut self, intent: Intent) {
+        let at = *self.count as usize;
+        if at >= MAX_INTENTS_PER_TICK {
+            self.dropped = self.dropped.saturating_add(1);
+            return;
+        }
+        if let Some(cell) = self.intents.get_mut(at) {
+            *cell = intent;
+            *self.count = self.count.saturating_add(1);
+        }
+    }
+
+    /// Intents this cell tried to emit past its allowance.
+    #[must_use]
+    pub fn dropped(&self) -> u64 {
+        self.dropped
+    }
+}
+
 impl IntentBuffer {
     #[must_use]
     pub fn new() -> IntentBuffer {
@@ -107,6 +140,30 @@ impl IntentBuffer {
             *cell = intent;
             *count = count.saturating_add(1);
         }
+    }
+
+    /// One mutable view per slot, in slot order.
+    ///
+    /// The regions are disjoint by construction, which is what lets the execute phase run
+    /// cells on however many threads are available without the result depending on how many
+    /// there were: a cell can only reach its own list, so there is no interleaving for the
+    /// thread count to change.
+    pub fn slots_mut(&mut self) -> impl Iterator<Item = SlotIntents<'_>> {
+        self.intents
+            .chunks_mut(MAX_INTENTS_PER_TICK)
+            .zip(self.counts.iter_mut())
+            .map(|(intents, count)| SlotIntents {
+                intents,
+                count,
+                dropped: 0,
+            })
+    }
+
+    /// Fold the per-slot overflow counts back in after a parallel execute phase.
+    ///
+    /// Addition commutes, so the total does not depend on the order the slots finished in.
+    pub fn add_dropped(&mut self, dropped: u64) {
+        self.dropped = self.dropped.saturating_add(dropped);
     }
 
     /// What the cell in `slot` asked for, in the order it asked.

@@ -408,3 +408,188 @@ fn acceptance_selection_works() {
         "the more efficient strain reached >90% in only {wins} of 10 seeds"
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// Acceptance 4 — mutation-rate evolution.
+//
+// > Under a stable environment, mean nucleus copy fidelity rises measurably over 1,000,000
+// > ticks. Under a fluctuating environment, it does not rise as fast.
+//
+// This needs an ancestor that *expresses* fidelity: `ancestor.mm` never touches the nucleus
+// control, so its fidelity is whatever the organelle was built with and no mutation can move
+// it. `mutator.mm` sets it every tick from a genome immediate, which is what turns a constant
+// into a trait. See the comment at the top of that file.
+
+/// Mean nucleus copy fidelity across the living population, `Q10`, or `None` if all dead.
+fn mean_fidelity(world: &World) -> Option<i64> {
+    let cells = world.cells();
+    let mut total = 0i64;
+    let mut n = 0i64;
+    for i in cells.iter() {
+        total += i64::from(mm_core::biology::nucleus_fidelity(cells, i));
+        n += 1;
+    }
+    (n > 0).then(|| total / n)
+}
+
+/// Run the mutator ancestor and report (starting fidelity, ending fidelity).
+fn fidelity_run(ticks: u64, seed: u64, fluctuating: bool) -> Option<(i64, i64)> {
+    let bytes = assemble("mutator.mm");
+    let mut scenario = petri(seed);
+    if fluctuating {
+        // The same total light over a cycle as the stable world receives, delivered in
+        // alternating gluts and famines. Matching the mean matters: a fluctuating world that
+        // is also a darker world would be measuring the darkness.
+        scenario.light = LightRegime::DayNight {
+            period_ticks: 2_000,
+            day: mm_core::Q10_ONE * 2,
+            night: 0,
+        };
+    }
+    let mut world = World::new(scenario).unwrap();
+    world.set_biology(BiologyConfig {
+        mutation: MutationRates::default(),
+        ..BiologyConfig::default()
+    });
+    seed_ancestors(&mut world, &bytes, 12);
+
+    // Measured after a settling period rather than at tick zero: every seeded cell starts on
+    // the same immediate, so tick-zero fidelity is a property of the genome file and not of
+    // anything the population has done.
+    let settle = (ticks / 20).max(1);
+    let mut start = None;
+    for tick in 0..ticks {
+        world.step();
+        if tick == settle {
+            start = mean_fidelity(&world);
+        }
+        if world.cells().is_empty() {
+            return None;
+        }
+    }
+    Some((start?, mean_fidelity(&world)?))
+}
+
+fn fidelity_report(ticks: u64, seeds: &[u64]) -> (i64, i64) {
+    let mut stable_drift = 0i64;
+    let mut fluctuating_drift = 0i64;
+    let mut counted = 0i64;
+    for seed in seeds {
+        let (Some(stable), Some(fluctuating)) = (
+            fidelity_run(ticks, *seed, false),
+            fidelity_run(ticks, *seed, true),
+        ) else {
+            eprintln!("seed {seed}: extinct, not counted");
+            continue;
+        };
+        let s = stable.1 - stable.0;
+        let f = fluctuating.1 - fluctuating.0;
+        eprintln!(
+            "seed {seed}: stable {} -> {} ({s:+}), fluctuating {} -> {} ({f:+})",
+            stable.0, stable.1, fluctuating.0, fluctuating.1
+        );
+        stable_drift += s;
+        fluctuating_drift += f;
+        counted += 1;
+    }
+    assert!(counted > 0, "every seed went extinct; nothing was measured");
+    (stable_drift / counted, fluctuating_drift / counted)
+}
+
+#[test]
+fn fidelity_is_a_trait_the_genome_controls() {
+    // The premise of acceptance 4, checked directly rather than inferred from a long run: the
+    // mutator ancestor's fidelity is what its genome says, and the plain ancestor's is not.
+    let mut world = World::new(petri(1)).unwrap();
+    seed_ancestors(&mut world, &assemble("mutator.mm"), 1);
+    for _ in 0..8 {
+        world.step();
+    }
+    assert_eq!(
+        mean_fidelity(&world),
+        Some(512),
+        "the mutator ancestor did not set its nucleus fidelity to the 512 its genome asks for"
+    );
+}
+
+#[test]
+#[ignore = "1,000,000 ticks, stable and fluctuating, across 10 seeds; --release --ignored"]
+fn acceptance_mutation_rate_evolves() {
+    let seeds = [1u64, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    let ticks = common::env_usize("MM_M2_TICKS", 1_000_000) as u64;
+    let (stable, fluctuating) = fidelity_report(ticks, &seeds);
+    eprintln!("mean drift: stable {stable:+}, fluctuating {fluctuating:+}");
+    assert!(
+        stable > 0,
+        "fidelity fell by {} in a stable world, where preserving a working genome should pay",
+        -stable
+    );
+    assert!(
+        stable > fluctuating,
+        "fidelity rose at least as fast in a fluctuating world ({fluctuating:+}) as in a \
+         stable one ({stable:+}); the environment is not reaching selection"
+    );
+}
+
+// ---------------------------------------------------------------------------------------
+// Acceptance 5 — determinism with life.
+//
+// > Identical state hash at 500,000 ticks across thread counts.
+//
+// The execute phase runs cells on however many threads rayon offers (see
+// `biology::execute`). This is the test that says the number of threads is not an input to
+// the simulation.
+
+fn hash_after(ticks: u64, threads: usize) -> u64 {
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .expect("thread pool");
+    pool.install(|| {
+        let bytes = assemble("ancestor.mm");
+        let mut world = World::new(petri(7)).unwrap();
+        world.set_biology(BiologyConfig {
+            mutation: MutationRates::default(),
+            ..BiologyConfig::default()
+        });
+        seed_ancestors(&mut world, &bytes, 12);
+        for _ in 0..ticks {
+            world.step();
+        }
+        assert!(
+            !world.cells().is_empty(),
+            "the population died, so the hash compares two empty worlds"
+        );
+        world.state_hash()
+    })
+}
+
+fn thread_count_run(ticks: u64) {
+    // 1 is below `biology::PARALLEL_THRESHOLD`'s effect and 16 is well above it, so this
+    // compares the serial path against the parallel one and not just two parallel runs.
+    let one = hash_after(ticks, 1);
+    let many: Vec<(usize, u64)> = [2usize, 3, 8, 16]
+        .into_iter()
+        .map(|t| (t, hash_after(ticks, t)))
+        .collect();
+    for (threads, hash) in &many {
+        assert_eq!(
+            *hash, one,
+            "{threads} threads gave {hash:#018x} where 1 thread gave {one:#018x}"
+        );
+    }
+    eprintln!("{ticks} ticks: {one:#018x} on 1, 2, 3, 8 and 16 threads");
+}
+
+#[test]
+fn thread_count_is_not_an_input() {
+    // Long enough for the arena to grow past the parallel threshold and for births, deaths
+    // and mutations to have happened many times over.
+    thread_count_run(if cfg!(debug_assertions) { 400 } else { 4_000 });
+}
+
+#[test]
+#[ignore = "500,000 ticks at five thread counts; run with --release --ignored"]
+fn acceptance_determinism_with_life() {
+    thread_count_run(common::env_usize("MM_M2_TICKS", 500_000) as u64);
+}
