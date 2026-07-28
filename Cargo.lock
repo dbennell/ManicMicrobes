@@ -240,6 +240,7 @@ name = "mm-core"
 version = "0.0.1"
 dependencies = [
  "criterion",
+ "mm-asm",
  "rayon",
  "ron",
  "serde",

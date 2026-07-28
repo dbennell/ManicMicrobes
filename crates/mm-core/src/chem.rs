@@ -144,9 +144,17 @@ impl ChemTable {
             monomer("nitrogen", [110, 150, 110]),
             monomer("phosphorus", [220, 180, 90]),
             monomer("silicon", [180, 180, 200]),
-            substrate("sugar", 64, [240, 220, 140]),
-            substrate("lipid", 96, [230, 190, 120]),
-            substrate("sulphide", 48, [200, 210, 120]),
+            // Energy yields are `Q10` energy per `Q10` of matter oxidised, so 1024 is "one
+            // unit of sugar is worth one unit of energy". They are set against the organelle
+            // upkeep in `OrganelleCatalogue::balanced`: a cell carrying a membrane, a
+            // nucleus, a mitochondrion and a chloroplast pays roughly 0.4 energy a tick and
+            // can process a few units of matter in that time, so a yield much below 1024
+            // means no loadout can pay for itself and every lineage starves regardless of
+            // what it evolves. Balancing is M8's milestone; these are the numbers that make
+            // the first thing alive.
+            substrate("sugar", 1024, [240, 220, 140]),
+            substrate("lipid", 1536, [230, 190, 120]),
+            substrate("sulphide", 768, [200, 210, 120]),
             waste("carbon_dioxide", [140, 120, 130]),
             waste("ammonia", [160, 140, 190]),
             ChemicalDef {

@@ -23,9 +23,12 @@
 //! commit.* [`Snapshot::write`] and [`Snapshot::read`] must stay mirror images, and
 //! `world_survives_a_round_trip` is the test that catches it when they do not.
 
+use crate::cell::{CellId, RestoredCell};
 use crate::chem::CHEM_COUNT;
 use crate::isa::ISA_VERSION;
+use crate::organelle::{Organelle, OrganelleType, SLOT_COUNT};
 use crate::scenario::Scenario;
+use crate::vm::{Vm, CALL_STACK_LEN, DATA_STACK_LEN, RAM_WORDS, REGISTER_COUNT};
 use crate::world::World;
 
 /// Magic bytes at the head of every snapshot: "MMSNAP\0\x01".
@@ -130,6 +133,11 @@ impl Writer {
     fn string(&mut self, v: &str) {
         self.u64(v.len() as u64);
         self.bytes.extend_from_slice(v.as_bytes());
+    }
+    /// A length-prefixed byte string.
+    fn blob(&mut self, v: &[u8]) {
+        self.u64(v.len() as u64);
+        self.bytes.extend_from_slice(v);
     }
 }
 
@@ -237,12 +245,75 @@ impl<'a> Reader<'a> {
         Ok(out)
     }
 
+    fn byte_vec(&mut self) -> Result<Vec<u8>, SnapshotError> {
+        let n = self.u64()? as usize;
+        if self.bytes.len().saturating_sub(self.at) < n {
+            return Err(SnapshotError::Corrupt(format!(
+                "claims {n} bytes but only {} remain",
+                self.bytes.len().saturating_sub(self.at)
+            )));
+        }
+        Ok(self.take(n)?.to_vec())
+    }
+
     fn string(&mut self) -> Result<String, SnapshotError> {
         let n = self.u64()? as usize;
         let b = self.take(n)?;
         String::from_utf8(b.to_vec())
             .map_err(|e| SnapshotError::Corrupt(format!("invalid utf-8: {e}")))
     }
+}
+
+fn write_vm(w: &mut Writer, vm: &Vm) {
+    for v in vm.data {
+        w.u16(v as u16);
+    }
+    for v in vm.call {
+        w.u16(v);
+    }
+    for v in vm.regs {
+        w.u16(v as u16);
+    }
+    for v in vm.ram {
+        w.u16(v as u16);
+    }
+    w.u16(vm.ip);
+    w.u16(vm.pa);
+    w.u16(vm.pb);
+    w.u16(vm.ln);
+    w.u32(vm.rand_ctr);
+    w.u8(vm.dsp);
+    w.u8(vm.dlen);
+    w.u8(vm.csp);
+    w.u8(vm.clen);
+    w.bool(vm.halted);
+}
+
+fn read_vm(r: &mut Reader<'_>) -> Result<Vm, SnapshotError> {
+    let mut vm = Vm::new();
+    for i in 0..DATA_STACK_LEN {
+        vm.data[i] = r.u16()? as i16;
+    }
+    for i in 0..CALL_STACK_LEN {
+        vm.call[i] = r.u16()?;
+    }
+    for i in 0..REGISTER_COUNT {
+        vm.regs[i] = r.u16()? as i16;
+    }
+    for i in 0..RAM_WORDS {
+        vm.ram[i] = r.u16()? as i16;
+    }
+    vm.ip = r.u16()?;
+    vm.pa = r.u16()?;
+    vm.pb = r.u16()?;
+    vm.ln = r.u16()?;
+    vm.rand_ctr = r.u32()?;
+    vm.dsp = r.u8()?;
+    vm.dlen = r.u8()?;
+    vm.csp = r.u8()?;
+    vm.clen = r.u8()?;
+    vm.halted = r.bool()?;
+    Ok(vm)
 }
 
 /// Save and restore of complete world state.
@@ -284,6 +355,59 @@ impl Snapshot {
         let (ix, iy) = world.impulses();
         w.i32_slice(ix);
         w.i32_slice(iy);
+
+        // The population, slot for slot including the empty ones: a free slot still has to
+        // exist or every id after it would shift, and ids are held across saves.
+        let cells = world.cells();
+        w.u64(cells.capacity() as u64);
+        for i in 0..cells.capacity() {
+            // The generation goes out for every slot, occupied or not: a free slot's
+            // generation decides the id of whoever moves in next.
+            w.u32(cells.generation_at(i));
+            match cells.snapshot_slot(i) {
+                None => w.bool(false),
+                Some(c) => {
+                    w.bool(true);
+                    w.i32(c.x);
+                    w.i32(c.y);
+                    w.i32(c.vx);
+                    w.i32(c.vy);
+                    w.i32(c.mass);
+                    w.i32(c.energy);
+                    w.u32(c.age);
+                    w.i32(c.damage);
+                    w.i32_slice(c.interior);
+                    w.u64(c.slots.len() as u64);
+                    for o in c.slots {
+                        w.u8(o.kind as u8);
+                        w.u8(o.param);
+                        w.u16(o.remaining_build);
+                        w.u16(o.control[0] as u16);
+                        w.u16(o.control[1] as u16);
+                    }
+                    write_vm(&mut w, c.vm);
+                    w.blob(c.genome.bytes());
+                    match c.daughter {
+                        Some(d) => {
+                            w.bool(true);
+                            w.blob(d);
+                        }
+                        None => w.bool(false),
+                    }
+                    w.u8(c.key);
+                    w.u32(c.species);
+                    w.u32(c.parent.slot());
+                    w.u32(c.parent.generation());
+                    w.u64(c.birth_tick);
+                }
+            }
+        }
+
+        // ...and the free list, in order.
+        w.u64(cells.free_list().len() as u64);
+        for slot in cells.free_list() {
+            w.u32(*slot);
+        }
 
         let l = world.ledger();
         for v in l.chem_totals() {
@@ -344,6 +468,7 @@ impl Snapshot {
         // overwrite every field with the saved values. The scenario's own seeding is
         // discarded by the overwrite, which is correct: the snapshot is the truth.
         let mut world = World::new(scenario).map_err(|e| SnapshotError::Scenario(e.to_string()))?;
+        let pool = world.genomes().clone_handle();
         let expected = (width as usize).saturating_mul(height as usize);
 
         let mut planes = Vec::with_capacity(CHEM_COUNT);
@@ -378,6 +503,105 @@ impl Snapshot {
             }
         }
 
+        // The population.
+        let slot_count = r.u64()? as usize;
+        if slot_count > 1 << 26 {
+            return Err(SnapshotError::Corrupt(format!(
+                "{slot_count} cell slots is not a plausible population"
+            )));
+        }
+        let mut cells = Vec::with_capacity(slot_count.min(1 << 16));
+        for _ in 0..slot_count {
+            let generation = r.u32()?;
+            if !r.bool()? {
+                cells.push((generation, None));
+                continue;
+            }
+            let x = r.i32()?;
+            let y = r.i32()?;
+            let vx = r.i32()?;
+            let vy = r.i32()?;
+            let mass = r.i32()?;
+            let energy = r.i32()?;
+            let age = r.u32()?;
+            let damage = r.i32()?;
+            let interior = r.i32_vec()?;
+            if interior.len() != CHEM_COUNT {
+                return Err(SnapshotError::Corrupt(format!(
+                    "a cell has {} chemicals, expected {CHEM_COUNT}",
+                    interior.len()
+                )));
+            }
+            let n_slots = r.u64()? as usize;
+            if n_slots != SLOT_COUNT {
+                return Err(SnapshotError::Corrupt(format!(
+                    "a cell has {n_slots} organelle slots, expected {SLOT_COUNT}"
+                )));
+            }
+            let mut slots = Vec::with_capacity(SLOT_COUNT);
+            for _ in 0..SLOT_COUNT {
+                let kind_byte = r.u8()?;
+                let kind = if kind_byte == 255 {
+                    OrganelleType::Empty
+                } else {
+                    OrganelleType::from_operand(kind_byte as i16)
+                };
+                let param = r.u8()?;
+                let remaining_build = r.u16()?;
+                let c0 = r.u16()? as i16;
+                let c1 = r.u16()? as i16;
+                slots.push(Organelle {
+                    kind,
+                    param,
+                    remaining_build,
+                    control: [c0, c1],
+                });
+            }
+            let vm = read_vm(&mut r)?;
+            let genome_bytes = r.byte_vec()?;
+            let genome = pool
+                .intern(genome_bytes)
+                .map_err(|e| SnapshotError::Corrupt(e.to_string()))?;
+            let daughter = if r.bool()? { Some(r.byte_vec()?) } else { None };
+            let key = r.u8()?;
+            let species = r.u32()?;
+            let parent = CellId::from_parts(r.u32()?, r.u32()?);
+            let birth_tick = r.u64()?;
+            cells.push((
+                generation,
+                Some(RestoredCell {
+                    x,
+                    y,
+                    vx,
+                    vy,
+                    mass,
+                    energy,
+                    age,
+                    damage,
+                    interior,
+                    slots,
+                    vm,
+                    genome,
+                    daughter,
+                    key,
+                    species,
+                    parent,
+                    birth_tick,
+                }),
+            ));
+        }
+
+        let free_len = r.u64()? as usize;
+        if free_len > slot_count {
+            return Err(SnapshotError::Corrupt(format!(
+                "free list of {free_len} for {slot_count} slots"
+            )));
+        }
+        let mut free = Vec::with_capacity(free_len);
+        for _ in 0..free_len {
+            free.push(r.u32()?);
+        }
+
         let mut chem_totals = [0i64; CHEM_COUNT];
         for slot in chem_totals.iter_mut() {
             *slot = r.i64()?;
@@ -390,6 +614,7 @@ impl Snapshot {
         let energy_out = r.i64()?;
         let energy_stored = r.i64()?;
 
+        world.restore_cells(cells, free);
         world.restore(
             tick,
             planes,
@@ -456,9 +681,14 @@ mod tests {
         let (ix, iy) = restored.impulses();
         let i = restored.substrate().index(3, 3);
         assert_eq!((ix[i], iy[i]), (700, -400));
-        assert_eq!(restored.ledger().energy_in(), 12_345);
+        // The world starts with a stored-energy baseline of its own, so what matters is that
+        // the transactions survived, not that the totals are the numbers just passed in.
+        assert_eq!(restored.ledger().energy_in(), w.ledger().energy_in());
         assert_eq!(restored.ledger().energy_out(), 2_345);
-        assert_eq!(restored.ledger().energy_stored(), 10_000);
+        assert_eq!(
+            restored.ledger().energy_stored(),
+            w.ledger().energy_stored()
+        );
         restored.check_invariants().unwrap();
     }
 

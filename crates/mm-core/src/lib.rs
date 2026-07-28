@@ -34,6 +34,7 @@
 )]
 #![warn(missing_debug_implementations)]
 
+pub mod biology;
 pub mod cell;
 pub mod chem;
 pub mod config;
@@ -56,6 +57,7 @@ pub mod substrate;
 pub mod vm;
 pub mod world;
 
+pub use biology::{BiologyConfig, BiologyReport, CellHost};
 pub use cell::{CellArena, CellId, CellSeed};
 pub use chem::{ChemTable, ChemicalDef, CHEM_COUNT};
 pub use config::VmConfig;

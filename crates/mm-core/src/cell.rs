@@ -370,6 +370,112 @@ impl CellArena {
         self.iter().map(|i| self.energy[i] as i64).sum()
     }
 
+    /// Every field of one slot, for the snapshot writer. `None` for a free slot.
+    ///
+    /// Deliberately one function rather than sixteen accessors: hard rule 7 says new state
+    /// must be serialised in the same commit that adds it, and a single place that names
+    /// every field is the one that makes forgetting hard.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn snapshot_slot(&self, i: usize) -> Option<SlotSnapshot<'_>> {
+        if !self.occupied(i) {
+            return None;
+        }
+        Some(SlotSnapshot {
+            x: self.x[i],
+            y: self.y[i],
+            vx: self.vx[i],
+            vy: self.vy[i],
+            mass: self.mass[i],
+            energy: self.energy[i],
+            age: self.age[i],
+            damage: self.damage[i],
+            interior: self.interior(i),
+            slots: self.slots(i),
+            vm: &self.vm[i],
+            genome: &self.genome[i],
+            daughter: self.daughter[i].as_deref(),
+            key: self.key[i],
+            species: self.species[i],
+            parent: self.parent[i],
+            birth_tick: self.birth_tick[i],
+        })
+    }
+
+    /// The free list, in the order slots will be reused.
+    ///
+    /// Load-bearing state, not bookkeeping: which slot the next birth takes decides its id,
+    /// and a world restored with a differently-ordered free list diverges on its very next
+    /// division.
+    pub(crate) fn free_list(&self) -> &[u32] {
+        &self.free
+    }
+
+    /// A slot's generation, occupied or not.
+    ///
+    /// A *free* slot's generation is load-bearing state, not bookkeeping: the next cell to
+    /// move in gets `generation + 1`, so a snapshot that reset it would hand out different
+    /// ids than an uninterrupted run and diverge on the very next birth.
+    pub(crate) fn generation_at(&self, i: usize) -> u32 {
+        self.generation.get(i).copied().unwrap_or(0)
+    }
+
+    /// Rebuild the arena from a snapshot, slot for slot.
+    ///
+    /// Generations are restored rather than reset, so a `CellId` held across a save and a
+    /// load still means what it meant.
+    pub(crate) fn restore(&mut self, slots: Vec<(u32, Option<RestoredCell>)>, free: Vec<u32>) {
+        *self = CellArena::new();
+        for (i, (generation, entry)) in slots.into_iter().enumerate() {
+            let Some(c) = entry else {
+                // A free slot still has to exist, or every id after it would shift, and its
+                // generation still matters for whoever moves in next.
+                self.alive.push(false);
+                self.generation.push(generation);
+                self.x.push(0);
+                self.y.push(0);
+                self.vx.push(0);
+                self.vy.push(0);
+                self.mass.push(0);
+                self.energy.push(0);
+                self.age.push(0);
+                self.damage.push(0);
+                self.interior.extend(std::iter::repeat_n(0, CHEM_COUNT));
+                self.slots
+                    .extend(std::iter::repeat_n(Organelle::empty(), SLOT_COUNT));
+                self.vm.push(Vm::new());
+                self.genome.push(Arc::new(crate::genome::Genome::empty()));
+                self.daughter.push(None);
+                self.key.push(0);
+                self.species.push(0);
+                self.parent.push(CellId::NONE);
+                self.birth_tick.push(0);
+                let _ = i;
+                continue;
+            };
+            self.alive.push(true);
+            self.generation.push(generation);
+            self.x.push(c.x);
+            self.y.push(c.y);
+            self.vx.push(c.vx);
+            self.vy.push(c.vy);
+            self.mass.push(c.mass);
+            self.energy.push(c.energy);
+            self.age.push(c.age);
+            self.damage.push(c.damage);
+            self.interior.extend_from_slice(&c.interior);
+            self.slots.extend_from_slice(&c.slots);
+            self.vm.push(c.vm);
+            self.genome.push(c.genome);
+            self.daughter.push(c.daughter);
+            self.key.push(c.key);
+            self.species.push(c.species);
+            self.parent.push(c.parent);
+            self.birth_tick.push(c.birth_tick);
+            self.count = self.count.saturating_add(1);
+        }
+        self.free = free;
+    }
+
     /// Distinct genomes currently referenced. Instrumentation for M9's interning statistics.
     #[must_use]
     pub fn distinct_genomes(&self) -> usize {
@@ -377,6 +483,58 @@ impl CellArena {
         hashes.sort_unstable();
         hashes.dedup();
         hashes.len()
+    }
+}
+
+/// One occupied slot, borrowed for writing to a snapshot.
+#[derive(Debug)]
+pub(crate) struct SlotSnapshot<'a> {
+    pub x: i32,
+    pub y: i32,
+    pub vx: i32,
+    pub vy: i32,
+    pub mass: i32,
+    pub energy: i32,
+    pub age: u32,
+    pub damage: i32,
+    pub interior: &'a [i32],
+    pub slots: &'a [Organelle],
+    pub vm: &'a Vm,
+    pub genome: &'a Arc<Genome>,
+    pub daughter: Option<&'a [u8]>,
+    pub key: u8,
+    pub species: u32,
+    pub parent: CellId,
+    pub birth_tick: u64,
+}
+
+/// One occupied slot, read back from a snapshot.
+#[derive(Debug)]
+pub(crate) struct RestoredCell {
+    pub x: i32,
+    pub y: i32,
+    pub vx: i32,
+    pub vy: i32,
+    pub mass: i32,
+    pub energy: i32,
+    pub age: u32,
+    pub damage: i32,
+    pub interior: Vec<i32>,
+    pub slots: Vec<Organelle>,
+    pub vm: Vm,
+    pub genome: Arc<Genome>,
+    pub daughter: Option<Vec<u8>>,
+    pub key: u8,
+    pub species: u32,
+    pub parent: CellId,
+    pub birth_tick: u64,
+}
+
+/// A `CellId` from its parts, for snapshot restoration.
+impl CellId {
+    #[must_use]
+    pub const fn from_parts(slot: u32, generation: u32) -> CellId {
+        CellId { slot, generation }
     }
 }
 

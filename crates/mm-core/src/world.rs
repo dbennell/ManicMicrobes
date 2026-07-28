@@ -8,10 +8,15 @@
 //! move at all are the fluid solver, which exchanges across edges and therefore conserves by
 //! construction, and the explicit seed/evict paths, which go through the ledger.
 
+use crate::biology::{self, BiologyConfig, BiologyReport};
+use crate::cell::{CellArena, CellId, CellSeed};
 use crate::chem::CHEM_COUNT;
 use crate::fluid;
+use crate::genome::GenomePool;
+use crate::intent::{IntentBuffer, Pending};
 use crate::ledger::{Ledger, LedgerBreach};
 use crate::light::{decay_impulses, CurrentField, LightRegime};
+use crate::metabolism::MetabolicReport;
 use crate::scenario::{Barrier, Scenario, ScenarioError, Seeding};
 use crate::state_hash::{StateHash, StateHasher};
 use crate::substrate::Substrate;
@@ -43,6 +48,29 @@ pub struct World {
     /// Working buffer for the fluid solver. Not state: it holds nothing between steps, and
     /// is excluded from equality, hashing and snapshots for that reason.
     scratch: crate::fluid::FluidScratch,
+
+    /// The population.
+    cells: CellArena,
+    /// Interned genomes, shared across the whole population.
+    genomes: GenomePool,
+    /// Costs, rates and mutation for the living half of the world.
+    biology: BiologyConfig,
+    /// This tick's intents. Cleared at the start of every execute phase.
+    intents: IntentBuffer,
+    /// Deaths and births decided during resolve, applied during bookkeeping.
+    pending: Pending,
+    /// Reused between ticks to avoid an allocation per tick.
+    starving: Vec<CellId>,
+    /// What the last tick did, for metrics.
+    last_report: TickReport,
+}
+
+/// What one tick did, for the instrumentation of SPEC §13.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct TickReport {
+    pub population: u32,
+    pub biology: BiologyReport,
+    pub metabolism: MetabolicReport,
 }
 
 // `scratch` is a scratchpad, so two worlds that differ only in what happens to be left in it
@@ -56,6 +84,7 @@ impl PartialEq for World {
             && self.tick == other.tick
             && self.impulse_x == other.impulse_x
             && self.impulse_y == other.impulse_y
+            && self.cells == other.cells
     }
 }
 
@@ -91,13 +120,21 @@ impl World {
             active_impulses: 0,
             diffusion_rates,
             scratch: crate::fluid::FluidScratch::new(n),
+            cells: CellArena::new(),
+            genomes: GenomePool::new(),
+            biology: BiologyConfig::default(),
+            intents: IntentBuffer::new(),
+            pending: Pending::default(),
+            starving: Vec::new(),
+            last_report: TickReport::default(),
         };
 
         world.raise_barriers();
         world.seed_chemistry();
-        world.ledger.set_baseline(world.substrate.total_chem());
+        world.ledger.set_baseline(world.total_matter());
         world.refresh_light();
         world.refresh_velocity();
+        world.rebaseline_energy();
         Ok(world)
     }
 
@@ -290,7 +327,43 @@ impl World {
 
     /// Advance one tick, in the fixed order of SPEC §12.
     pub fn step(&mut self) {
-        // 1-4. Sense, execute, resolve, physics. Nothing is alive yet; M2 fills these in.
+        let seed = self.scenario.seed;
+        let tick = self.tick;
+        let mut report = TickReport::default();
+
+        if !self.cells.is_empty() {
+            // 1. Sense. The light and chemistry a cell reads are already in the substrate,
+            //    and nothing has moved since the last tick ended, so there is nothing to
+            //    gather: the execute phase reads the world directly and read-only.
+
+            // 2. Execute. Each cell runs its instruction budget and emits intents. No cell
+            //    writes shared state, so no cell can observe another's turn.
+            self.intents.begin_tick(self.cells.capacity());
+            biology::execute(
+                &mut self.cells,
+                &self.substrate,
+                &mut self.intents,
+                &self.scenario.vm,
+                tick,
+                seed,
+            );
+
+            // 3. Resolve. Intents applied in slot order, which is cell-id order, so a
+            //    contested square is allocated the same way on every machine.
+            report.biology = biology::resolve(
+                &mut self.cells,
+                &mut self.substrate,
+                &self.intents,
+                &self.biology,
+                &self.scenario.chemicals,
+                &mut self.ledger,
+                &mut self.pending,
+                tick,
+                seed,
+            );
+
+            // 4. Physics. Brownian jitter, cilia and collisions arrive at M3.
+        }
 
         // 5. Fluid, at fluid_hz.
         let interval = self.scenario.fluid_interval.max(1) as u64;
@@ -318,13 +391,129 @@ impl World {
             }
         }
 
-        // 6. Bookkeeping.
+        // 6. Bookkeeping: metabolism, deaths, births, metrics.
+        if !self.cells.is_empty() {
+            self.starving.clear();
+            report.metabolism = self.biology.metabolism.step(
+                &mut self.cells,
+                &self.substrate,
+                &self.scenario.chemicals,
+                &mut self.ledger,
+                &mut self.starving,
+            );
+            self.pending.deaths.append(&mut self.starving);
+            report.biology.deaths = biology::apply_deaths(
+                &mut self.cells,
+                &mut self.substrate,
+                &self.biology,
+                &mut self.ledger,
+                &mut self.pending,
+            );
+            biology::apply_births(
+                &mut self.cells,
+                &self.genomes,
+                &mut self.pending,
+                tick,
+                seed,
+            );
+        }
+        report.population = self.cells.len() as u32;
+        self.last_report = report;
+
         self.tick = self.tick.saturating_add(1);
         debug_assert!(
             self.ledger.check_energy().is_ok(),
             "energy accounting broke at tick {}",
             self.tick
         );
+    }
+
+    /// Total of each chemical over every compartment: fluid, cell interiors and cell mass.
+    ///
+    /// This is what I4 is about. Structural mass counts — matter built into a body has not
+    /// left the world, it has left the pool the fluid can reach.
+    #[must_use]
+    pub fn total_matter(&self) -> [i64; CHEM_COUNT] {
+        let fluid = self.substrate.total_chem();
+        let interiors = self.cells.total_interior();
+        let sc = self.biology.structural_chemical % CHEM_COUNT;
+        let mut out: [i64; CHEM_COUNT] = std::array::from_fn(|c| fluid[c] + interiors[c]);
+        for i in self.cells.iter() {
+            out[sc] = out[sc].saturating_add(self.cells.mass[i] as i64);
+        }
+        out
+    }
+
+    /// Adopt the world's current stored energy as the ledger's baseline.
+    ///
+    /// What is in the world at tick zero was not absorbed from anywhere, so it counts as both
+    /// `energy_in` and `energy_stored` and the identity starts balanced.
+    fn rebaseline_energy(&mut self) {
+        let stored = crate::metabolism::recompute_stored(
+            &self.cells,
+            &self.substrate,
+            &self.scenario.chemicals,
+            &self.biology.metabolism,
+        );
+        self.ledger.set_energy_baseline(stored);
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn cells(&self) -> &CellArena {
+        &self.cells
+    }
+
+    #[inline]
+    pub fn cells_mut(&mut self) -> &mut CellArena {
+        &mut self.cells
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn genomes(&self) -> &GenomePool {
+        &self.genomes
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn biology(&self) -> &BiologyConfig {
+        &self.biology
+    }
+
+    #[inline]
+    pub fn set_biology(&mut self, config: BiologyConfig) {
+        self.biology = config;
+    }
+
+    /// What the last tick did.
+    #[inline]
+    #[must_use]
+    pub fn report(&self) -> TickReport {
+        self.last_report
+    }
+
+    /// Adopt whatever the world currently holds as the ledger's baseline.
+    ///
+    /// **Scenario setup only.** Placing a cell and then filling its cytoplasm by hand creates
+    /// matter, which is correct at setup — the world is being given its contents — and a bug
+    /// at any other time. Calling this mid-run would paper over exactly what I4 exists to
+    /// catch, so it is a deliberate, named act rather than something that happens quietly.
+    pub fn adopt_current_contents_as_baseline(&mut self) {
+        self.ledger.set_baseline(self.total_matter());
+        self.rebaseline_energy();
+    }
+
+    /// Place a cell on the slide and rebalance the energy baseline around it.
+    ///
+    /// # Errors
+    ///
+    /// A genome longer than the addressing limit.
+    pub fn spawn_cell(&mut self, seed: CellSeed) -> CellId {
+        let id = self.cells.spawn(seed);
+        self.ledger.set_baseline(self.total_matter());
+        self.rebaseline_energy();
+        id
     }
 
     /// Advance many ticks.
@@ -360,6 +549,15 @@ impl World {
         current.apply(&mut self.substrate, &ix, &iy);
         self.impulse_x = ix;
         self.impulse_y = iy;
+    }
+
+    /// Replace the population, for [`crate::snapshot::Snapshot`].
+    pub(crate) fn restore_cells(
+        &mut self,
+        cells: Vec<(u32, Option<crate::cell::RestoredCell>)>,
+        free: Vec<u32>,
+    ) {
+        self.cells.restore(cells, free);
     }
 
     /// Overwrite every piece of world state at once, for [`crate::snapshot::Snapshot`].
@@ -422,7 +620,7 @@ impl World {
     ///
     /// The first chemical whose ledger total and actual total differ.
     pub fn check_matter(&self) -> Result<(), LedgerBreach> {
-        self.ledger.check_matter(&self.substrate.total_chem())
+        self.ledger.check_matter(&self.total_matter())
     }
 
     /// Check I5.
@@ -463,6 +661,7 @@ impl StateHash for World {
         self.scenario.hash_state(h);
         self.substrate.hash_state(h);
         self.ledger.hash_state(h);
+        self.cells.hash_state(h);
         for v in &self.impulse_x {
             h.i32(*v);
         }

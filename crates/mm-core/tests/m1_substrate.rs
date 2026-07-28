@@ -126,6 +126,10 @@ fn conservation_holds_with_every_current_field() {
 /// heat, with the identity asserted after every single transaction.
 fn energy_run(n: u64) {
     let mut world = World::new(stress(24, 24)).expect("world");
+    // A world starts holding energy — the latent energy of the substrate chemical dissolved
+    // in it — so what this measures is the change the transactions make, not the absolutes.
+    let baseline_in = world.ledger().energy_in();
+    let baseline_out = world.ledger().energy_out();
     let mut absorbed_total = 0i64;
     let mut dissipated_total = 0i64;
 
@@ -147,17 +151,20 @@ fn energy_run(n: u64) {
 
     let l = world.ledger();
     assert_eq!(
-        l.energy_in(),
+        l.energy_in() - baseline_in,
         absorbed_total,
         "absorbed energy went missing"
     );
-    assert_eq!(l.energy_out(), dissipated_total);
+    assert_eq!(l.energy_out() - baseline_out, dissipated_total);
     assert_eq!(
         l.energy_in(),
         l.energy_out() + l.energy_stored(),
         "the identity is what the whole entropy story rests on"
     );
-    assert!(l.energy_in() > 0, "no energy moved, so this proved nothing");
+    assert!(
+        absorbed_total > 0,
+        "no energy moved, so this proved nothing"
+    );
 }
 
 #[test]
@@ -175,7 +182,15 @@ fn acceptance_energy_accounting() {
 fn energy_cannot_be_dissipated_that_was_never_absorbed() {
     // Otherwise energy_out would run ahead of energy_in and the world would be exporting
     // heat it never took in.
-    let mut world = World::new(stress(8, 8)).unwrap();
+    // An empty slide, so the only energy in the world is what this test puts there.
+    let mut world = World::new(Scenario {
+        width: 4,
+        height: 4,
+        seeding: Vec::new(),
+        ..Scenario::default()
+    })
+    .unwrap();
+    assert_eq!(world.ledger().energy_stored(), 0, "nothing to start with");
     world.ledger_mut().absorb(100);
     assert_eq!(world.ledger_mut().dissipate(10_000), 100);
     world.check_energy().unwrap();

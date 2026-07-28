@@ -139,6 +139,18 @@ impl Metabolism {
                 continue;
             }
 
+            // --- construction: an organelle takes time before it works ---
+            //
+            // SPEC §6.2: organelles take time to construct and a partially built one is
+            // inert. This is where that time passes. Without it every organelle a cell ever
+            // built would stay inert forever, which looks exactly like a metabolism that
+            // does not work.
+            for o in cells.slots_mut(i) {
+                if o.remaining_build > 0 {
+                    o.remaining_build = o.remaining_build.saturating_sub(1);
+                }
+            }
+
             // --- photosynthesis: waste + light -> substrate + oxidant ---
             let light = {
                 let sq = substrate.index(

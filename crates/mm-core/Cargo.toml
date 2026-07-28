@@ -17,6 +17,9 @@ ron = "0.12"
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false }
+# A dev-only cycle, which cargo permits: the acceptance tests need to assemble the genomes in
+# `genomes/`, and mm-core must not depend on the toolchain in its own right.
+mm-asm = { path = "../mm-asm" }
 
 [[bench]]
 name = "vm"

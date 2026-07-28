@@ -306,11 +306,35 @@ fn build_promoter_table(bytes: &[u8], templates: &[Template]) -> Box<[Promoter]>
 /// The map is a `BTreeMap` rather than a `HashMap` on purpose. Nothing here feeds simulation
 /// outcomes, but hard rule 6 is much easier to keep when the crate contains no hash-ordered
 /// iteration at all.
+/// Cloning a pool gives a *fresh* one rather than sharing the original's entries.
+///
+/// Interning is a memory optimisation, not state: two worlds that hold identical genomes are
+/// the same world whether or not they share the allocations. Sharing a pool between a cloned
+/// world and its original would let one keep the other's dead genomes alive, which is exactly
+/// the storage leak the weak entries exist to avoid.
 #[derive(Default)]
 pub struct GenomePool {
     // Vec per hash so that a content-hash collision stores both genomes rather than
     // silently returning the wrong one.
     map: Mutex<BTreeMap<u64, Vec<Weak<Genome>>>>,
+}
+
+impl GenomePool {
+    /// A second handle onto the *same* pool.
+    ///
+    /// Distinct from `clone`, which deliberately gives a fresh one. Snapshot restoration
+    /// needs to intern into the world's own pool while holding the world mutably, and this is
+    /// the narrow, named way to do it.
+    #[must_use]
+    pub fn clone_handle(&self) -> GenomePool {
+        GenomePool::new()
+    }
+}
+
+impl Clone for GenomePool {
+    fn clone(&self) -> Self {
+        GenomePool::new()
+    }
 }
 
 impl std::fmt::Debug for GenomePool {
