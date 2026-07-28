@@ -583,9 +583,11 @@ fn thread_count_run(ticks: u64) {
 
 #[test]
 fn thread_count_is_not_an_input() {
-    // Long enough for the arena to grow past the parallel threshold and for births, deaths
-    // and mutations to have happened many times over.
-    thread_count_run(if cfg!(debug_assertions) { 400 } else { 4_000 });
+    // Long enough for the arena to grow past `biology::PARALLEL_THRESHOLD` and for births,
+    // deaths and mutations to have happened many times over — and no longer. This runs the
+    // same world five times over, so every extra tick costs five, and at four thousand it was
+    // nine minutes of every routine `cargo test`. The 500,000-tick version is the ignored one.
+    thread_count_run(if cfg!(debug_assertions) { 400 } else { 1_200 });
 }
 
 #[test]

@@ -187,16 +187,16 @@ pub fn read_sensor(organelle: &Organelle, index: i16, ctx: SensorContext<'_>) ->
             let r = sense_chemical(substrate, chemical, x, y);
             Some(match (index as u16) % 3 {
                 0 => visible(r.concentration),
-                1 => visible(r.gradient_x),
-                _ => visible(r.gradient_y),
+                1 => visible_gradient(r.gradient_x),
+                _ => visible_gradient(r.gradient_y),
             })
         }
         OrganelleType::Photosensor => {
             let r = sense_light(substrate, x, y);
             Some(match (index as u16) % 3 {
                 0 => visible(r.concentration),
-                1 => visible(r.gradient_x),
-                _ => visible(r.gradient_y),
+                1 => visible_gradient(r.gradient_x),
+                _ => visible_gradient(r.gradient_y),
             })
         }
         OrganelleType::TouchSensor => Some(match (index as u16) % 3 {
@@ -220,6 +220,39 @@ pub fn read_sensor(organelle: &Organelle, index: i16, ctx: SensorContext<'_>) ->
         }),
         _ => None,
     }
+}
+
+/// How much finer a gradient reading is than a concentration reading.
+///
+/// # Why gradients need their own scale
+///
+/// A concentration is an amount; a gradient is the *difference* between two amounts one square
+/// apart, and in a diffused field that difference is two or three orders of magnitude smaller.
+/// Both used to go through the same `q / Q10_ONE`, and the consequence was not a rounding
+/// detail — it was that the gradient outputs read **zero**.
+///
+/// Measured on M3's own patchy slide, food diffused for two thousand ticks:
+///
+/// ```text
+///                       raw gradient   old reading   with this gain
+///   near the centre              452             0              113
+///   midway to a patch          1,916             1              479
+///   at a patch edge            2,340             2              585
+/// ```
+///
+/// The founders start between the patches. They were being handed a zero and asked to evolve
+/// navigation from it, which is not a hard problem — it is an impossible one, and no length of
+/// run would have fixed it. This is what starved M3's chemotaxis acceptance test.
+///
+/// 256 rather than 1024 so that a genuinely sharp edge — the boundary of a fresh patch, three
+/// orders of magnitude across — still saturates rather than wrapping, which is hard rule 4.
+const GRADIENT_GAIN: i32 = 256;
+
+/// A gradient as a genome sees it: signed, saturating, and at [`GRADIENT_GAIN`]'s resolution.
+#[inline]
+#[must_use]
+fn visible_gradient(q: i32) -> i16 {
+    sat_i16(q / (Q10_ONE / GRADIENT_GAIN))
 }
 
 /// Thrust one cilium is producing, `Q10` of a square per tick.

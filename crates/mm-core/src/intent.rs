@@ -126,6 +126,11 @@ impl IntentBuffer {
     }
 
     /// Record an intent for the cell in `slot`.
+    ///
+    /// Not the path the execute phase takes any more — a running cell writes through
+    /// [`SlotIntents`], which can only reach its own list. This remains for tests and for
+    /// anything outside the tick that wants to hand a cell an intent, and it is bounds-checked
+    /// rather than assuming the slot exists.
     #[inline]
     pub fn push(&mut self, slot: usize, intent: Intent) {
         let Some(count) = self.counts.get_mut(slot) else {

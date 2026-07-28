@@ -125,6 +125,31 @@ fn mean_distance_to_food(world: &World) -> f64 {
     total / n as f64
 }
 
+/// Mean distance to food for cells scattered at random over the whole slide.
+///
+/// The null. Added after the first full run came back with numbers that looked like a result
+/// and were not: the sighted line averaged 13.49 against this baseline's 13.13, which is to
+/// say it was sitting exactly where cells with no sensor at all would sit. Without the null
+/// printed next to them, "sighted 13.49, blind 14.32" reads as chemotaxis, and it is not.
+///
+/// Computed rather than hard-coded, so it stays true if the patches or the slide move.
+fn scattered_baseline() -> f64 {
+    let mut total = 0f64;
+    for x in 0..WIDTH as i32 {
+        for y in 0..HEIGHT as i32 {
+            total += PATCHES
+                .iter()
+                .map(|(px, py)| {
+                    let dx = (x - *px as i32) as f64;
+                    let dy = (y - *py as i32) as f64;
+                    (dx * dx + dy * dy).sqrt()
+                })
+                .fold(f64::INFINITY, f64::min);
+        }
+    }
+    total / (WIDTH as f64 * HEIGHT as f64)
+}
+
 /// Seed a population of one ancestor and run it.
 ///
 /// Founders start *between* the patches, so a lineage that never learns to steer stays spread
@@ -182,7 +207,17 @@ fn chemotaxis_run(ticks: u64, seeds: &[u64]) -> usize {
         "the two lines must be the same length, or this measures genome length"
     );
 
+    let null = scattered_baseline();
+    eprintln!(
+        "cells scattered at random would score {null:.2}; sitting in the patches would score \
+         about {:.0}. A line that has not learnt to steer scores the first.",
+        PATCH_RADIUS as f64
+    );
+
     let mut wins = 0;
+    let mut sighted_total = 0f64;
+    let mut blind_total = 0f64;
+    let mut counted = 0f64;
     for seed in seeds {
         let a = run_line(&sighted, patchy(*seed), ticks);
         let b = run_line(&blind, patchy(*seed), ticks);
@@ -196,6 +231,9 @@ fn chemotaxis_run(ticks: u64, seeds: &[u64]) -> usize {
                 if better {
                     wins += 1;
                 }
+                sighted_total += sd;
+                blind_total += bd;
+                counted += 1.0;
             }
             (a, b) => eprintln!(
                 "seed {seed}: extinct — sighted {}, blind {}",
@@ -203,6 +241,14 @@ fn chemotaxis_run(ticks: u64, seeds: &[u64]) -> usize {
                 b.map_or("dead".to_string(), |x| format!("{:.2}", x.0)),
             ),
         }
+    }
+    if counted > 0.0 {
+        let (sm, bm) = (sighted_total / counted, blind_total / counted);
+        eprintln!(
+            "means: sighted {sm:.2}, blind {bm:.2}, random scatter {null:.2} — sighted is {:.0}% \
+             of the way from random to the patches",
+            (null - sm) / (null - PATCH_RADIUS as f64) * 100.0
+        );
     }
     wins
 }
@@ -293,7 +339,170 @@ fn chemotaxis_guard() {
     let _ = chemotaxis_run(ticks, &[1, 2, 3]);
 }
 
+#[test]
+fn there_is_a_gradient_to_climb_where_the_cells_actually_are() {
+    // Written to answer the third question in the failure note below, and it is the one that
+    // decides whether the whole experiment is measuring anything: a chemosensor that reads
+    // zero in both directions cannot be selected for, however long the run is.
+    //
+    // Checks the food field itself, after letting diffusion do whatever it is going to do, at
+    // the place the founders start — between the patches, which is the whole point of starting
+    // them there.
+    let mut world = World::new(patchy(1)).unwrap();
+    // Long enough for diffusion to have smeared the patch edges as far as it is going to
+    // matter within a founder's lifetime.
+    world.run(2_000);
+
+    let food = world.substrate().chem_plane(FOOD);
+    let at = |x: i32, y: i32| -> i64 {
+        let i = (y.clamp(0, HEIGHT as i32 - 1) as usize) * WIDTH as usize
+            + x.clamp(0, WIDTH as i32 - 1) as usize;
+        food.get(i).copied().unwrap_or(0) as i64
+    };
+
+    // Walk the line from the centre of the slide towards one patch and report what a cell
+    // standing at each point would have to work with. A gradient is readable if the difference
+    // across a cell's own sensing span is bigger than the noise it is reading through.
+    let (px, py) = (PATCHES[0].0 as i32, PATCHES[0].1 as i32);
+    let (cx, cy) = (WIDTH as i32 / 2, HEIGHT as i32 / 2);
+    let mut readable = 0;
+    let mut steps = 0;
+    eprintln!("food along the line from the centre ({cx},{cy}) to patch 0 ({px},{py}):");
+    for k in 0..=10 {
+        let x = cx + (px - cx) * k / 10;
+        let y = cy + (py - cy) * k / 10;
+        // What a chemosensor compares: this square against its neighbour one step nearer.
+        let here = at(x, y);
+        let nearer = at(x + (px - cx).signum(), y + (py - cy).signum());
+        let delta = nearer - here;
+        steps += 1;
+        if delta.abs() > 0 {
+            readable += 1;
+        }
+        eprintln!(
+            "  ({x:>2},{y:>2})  food {:>8}  step towards patch {delta:>+8}{}",
+            here,
+            if delta > 0 {
+                "  uphill"
+            } else if delta < 0 {
+                "  downhill"
+            } else {
+                "  FLAT"
+            }
+        );
+    }
+    assert!(
+        readable * 2 >= steps,
+        "only {readable} of {steps} points on the way to a patch have any gradient at all; a \
+         chemosensor is reading zero across most of the slide, so chemotaxis has nothing to be \
+         selected on and the acceptance experiment cannot succeed however long it runs"
+    );
+}
+
+#[test]
+fn a_chemosensor_can_actually_read_the_gradient_it_is_standing_in() {
+    // The companion to `there_is_a_gradient_to_climb_where_the_cells_actually_are`: that one
+    // checks the gradient exists in the water, this one checks it survives the trip through
+    // the sensor and into a genome's stack.
+    //
+    // It did not, and that is what starved the acceptance test below. A gradient of a few
+    // hundred `Q10` units per square was being divided by 1024 along with the concentration
+    // and arriving as a literal zero — at the centre of the slide, which is where the founders
+    // start. See `sensing::GRADIENT_GAIN`.
+    let mut world = World::new(patchy(1)).unwrap();
+    world.run(2_000);
+
+    // Standing between the patches, looking towards patch 0 at (12,12): both components
+    // should be negative, since the patch is up and to the left of the centre.
+    let reading = mm_core::sensing::sense_chemical(world.substrate(), FOOD, 24, 24);
+    let mut sensor = Organelle::finished(OrganelleType::Chemosensor, 60);
+    sensor.control[0] = FOOD as i16;
+
+    let ctx = mm_core::sensing::SensorContext {
+        substrate: world.substrate(),
+        x: 24,
+        y: 24,
+        tick: 0,
+        cell_key: 0,
+        touch: mm_core::sensing::TouchReading::default(),
+    };
+    let gx = mm_core::sensing::read_sensor(&sensor, 1, ctx).expect("a chemosensor reads");
+    let gy = mm_core::sensing::read_sensor(&sensor, 2, ctx).expect("a chemosensor reads");
+
+    eprintln!(
+        "at (24,24): raw gradient ({}, {}) -> genome sees ({gx}, {gy})",
+        reading.gradient_x, reading.gradient_y
+    );
+    assert!(
+        reading.gradient_x < 0 && reading.gradient_y < 0,
+        "the raw field does not slope towards the patch at all: {reading:?}"
+    );
+    assert!(
+        gx.abs() >= 8 && gy.abs() >= 8,
+        "a genome standing in a real gradient sees ({gx}, {gy}); anything this close to zero \
+         cannot be steered on, and chemotaxis cannot evolve from a signal that is not there"
+    );
+    assert!(
+        gx < 0 && gy < 0,
+        "the sensor points ({gx}, {gy}) — away from the food it is supposed to find"
+    );
+}
+
 /// The milestone's headline result.
+///
+/// # It has not passed. Here is exactly how it failed.
+///
+/// Run at **200,000 ticks** — a tenth of the budget the milestone allows — over all ten seeds,
+/// on 2026-07-28:
+///
+/// ```text
+/// seed  1: sighted 16.04 (1857 cells), blind 13.60 (6441 cells)
+/// seed  2: sighted 11.58 (15533),      blind 13.67 (4641)     <-- closer
+/// seed  3: sighted 13.33 (6368),       blind 14.31 (1169)
+/// seed  4: sighted 13.77 (3216),       blind 14.50 (12008)
+/// seed  5: sighted 13.86 (5648),       blind 14.63 (169)
+/// seed  6: sighted 14.39 (2150),       blind 15.32 (1520)
+/// seed  7: sighted 13.54 (1445),       blind 16.11 (1011)     <-- closer
+/// seed  8: sighted 11.87 (4897),       blind 13.30 (6556)     <-- closer
+/// seed  9: sighted 13.35 (7998),       blind 13.68 (7357)
+/// seed 10: sighted 13.21 (6420),       blind 14.12 (2175)
+///
+/// sighted mean 13.49    blind mean 14.32    random scatter 13.13
+/// ```
+///
+/// The sighted line is closer in nine seeds of ten, which looks like a result and is not one.
+/// **13.49 against a random-scatter baseline of 13.13 means the sighted population is sitting
+/// where cells with no sensor at all would sit.** Chemotaxis would put it near the patches, at
+/// four to six. Nothing has learnt to steer. What the nine-of-ten actually measures is the
+/// blind line being pushed *further out than random* by swimming it cannot aim, while the
+/// sighted line stays at the null — a difference in how badly each line is failing.
+///
+/// That is why [`scattered_baseline`] now prints alongside the result. Without it these
+/// numbers read as evolution.
+///
+/// The `< 0.9` margin in [`chemotaxis_run`] is the milestone's "significantly below", and it
+/// is **not to be relaxed**. Three of ten seeds clear it; six are needed. Lowering it to 0.95
+/// would report success for a population that has not moved towards its food at all.
+///
+/// # What to try, in the order the evidence supports
+///
+/// 1. **The tick budget.** This ran at a tenth of the 2,000,000 the milestone allows. Linking
+///    a sensor to a cilium is several mutations deep: the genome must read the gradient, turn
+///    it into a signed power, and write it to the right slot, with no partial credit until all
+///    three are in place. 200,000 ticks may simply be before the beginning.
+/// 2. **The population sizes.** They swing from 169 to 15,533 between arms of the same seed.
+///    A mean distance over 169 cells is noise, and the two arms are not comparable when one
+///    is eighty times the other. Whatever is causing that instability is upstream of the
+///    measurement and should be found first — a controlled experiment cannot be built on it.
+/// 3. **Whether the gradient is readable at all.** `PATCH_RADIUS` is 6 and the patches are 40
+///    squares apart, so a cell between them senses nothing in either direction. There may be
+///    no gradient to climb for most of the slide, in which case chemotaxis is not being
+///    selected against — it is being given nothing to act on. `the_chemosensor_reads_a_real_
+///    gradient` checks the sensor works; it does not check that the *slide* has a gradient
+///    where the cells actually are.
+///
+/// Option 3 is the one that would invalidate the experiment rather than merely lengthen it,
+/// so it is the one to check first, and it is cheap to check.
 #[test]
 #[ignore = "2,000,000 ticks x 10 seeds x 2 lines; run with --release --ignored"]
 fn acceptance_chemotaxis_evolves() {
