@@ -28,8 +28,8 @@
 ; ---------------------------------------------------------------- build the body
 
         GENE    #build
-        IMM     40
-        IMM     1               ; nucleus
+        IMM     64              ; nucleus: 8 bytes of genome per unit, and this genome is 329,
+        IMM     1               ; so anything under 42 cannot copy itself at all
         IMM     1
         BUILD
         IMM     50
@@ -110,13 +110,15 @@
 ; ---------------------------------------------------------------- divide
 
         GENE    #divide
-        ZERO
         ONE
-        OGET                    ; membrane reading 1: energy
+        ZERO
+        OGET                    ; membrane slot 0, reading 1: energy
         IMM     200
-        CMP
-        JMPZ    enough
-        HALT
+        CMP                     ; -1 if poor, 0 or 1 if it can afford to divide
+        ONE
+        ADD                     ; 0 if poor, non-zero if not
+        JMPNZ   enough
+        HALT                    ; not yet; sleeping is cheap
         HALT
 enough:
         GLEN

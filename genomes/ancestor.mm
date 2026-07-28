@@ -98,15 +98,14 @@
 ; cannot afford to wastes the copy and gets nothing, so the guard is worth its instructions.
 
         GENE    #divide
-        ZERO
-        ZERO
-        OGET                    ; membrane reading 1 is energy
         ONE
-        SWAP
-        DROP
+        ZERO
+        OGET                    ; membrane slot 0, reading 1: energy
         IMM     200
-        CMP                     ; energy - 200
-        JMPZ    enough
+        CMP                     ; -1 if poor, 0 or 1 if it can afford to divide
+        ONE
+        ADD                     ; 0 if poor, non-zero if not
+        JMPNZ   enough
         HALT                    ; not yet; sleeping is cheap
         HALT
 enough:
