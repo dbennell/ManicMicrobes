@@ -273,8 +273,6 @@ pub enum CurrentField {
     Shear { strength: i32 },
 }
 
-
-
 impl CurrentField {
     /// Velocity at one square, `Q10` squares per step, clamped to the CFL limit of one
     /// square per step in each axis.
