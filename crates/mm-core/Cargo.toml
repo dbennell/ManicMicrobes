@@ -28,3 +28,7 @@ harness = false
 [[bench]]
 name = "fluid"
 harness = false
+
+[[bench]]
+name = "population"
+harness = false

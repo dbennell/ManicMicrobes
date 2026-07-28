@@ -15,16 +15,14 @@
 //! rather than about arguments, and a tool whose whole purpose is reproducibility is a poor
 //! place to take on a dependency that does not earn itself.
 
-mod metrics;
-
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use metrics::Sample;
 use mm_core::biology::BiologyConfig;
 use mm_core::cell::{CellId, CellSeed};
 use mm_core::fixed::{pos, q10};
+use mm_core::metrics::Sample;
 use mm_core::mutation::RATE_SCALE;
 use mm_core::organelle::{Organelle, OrganelleType};
 use mm_core::{MutationRates, Scenario, Snapshot, World};

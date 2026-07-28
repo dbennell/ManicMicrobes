@@ -47,6 +47,7 @@ pub mod isa;
 pub mod ledger;
 pub mod light;
 pub mod metabolism;
+pub mod metrics;
 pub mod mutation;
 pub mod neighbours;
 pub mod organelle;

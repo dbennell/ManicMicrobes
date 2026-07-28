@@ -11,6 +11,19 @@
 //!
 //! The Bevy application is behind the `render` feature for the same reason.
 
+//! # What is where
+//!
+//! - [`slide`] — the world, the frame, level of detail, overlays and the metric history.
+//! - [`optics`] — the microscope's look, as parameters rather than as a shader.
+//! - [`inspector`] — a read-only transcript of one cell.
+//!
+//! All three are testable without a graphics stack, which is the point. `main.rs` is the only
+//! file that knows Bevy exists, and it is behind the `render` feature.
+
+pub mod inspector;
+pub mod optics;
 pub mod slide;
 
-pub use slide::{CellDot, Frame, Slide};
+pub use inspector::Inspection;
+pub use optics::{Mote, Optics};
+pub use slide::{CellDot, Frame, Lod, MetricHistory, OverlayLayer, Slide};

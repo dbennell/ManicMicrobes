@@ -12,9 +12,9 @@
 //! that offline analysis depends on, and writing it out longhand means the field names are
 //! visible in one place instead of being implied by a struct definition somewhere else.
 
-use mm_core::chem::CHEM_COUNT;
-use mm_core::organelle::OrganelleType;
-use mm_core::World;
+use crate::chem::CHEM_COUNT;
+use crate::organelle::OrganelleType;
+use crate::World;
 
 /// One sample of everything worth plotting.
 #[derive(Clone, Debug, Default)]
@@ -75,7 +75,7 @@ impl Sample {
             energy += cells.energy[i] as i64;
             mass += cells.mass[i] as i64;
             genome_len += cells.genome[i].len() as i64;
-            fidelity += mm_core::biology::nucleus_fidelity(cells, i) as i64;
+            fidelity += crate::biology::nucleus_fidelity(cells, i) as i64;
 
             // A loadout is which types are in which slots, ignoring size: two cells with the
             // same organelles in the same places are the same kind of thing.
@@ -116,7 +116,7 @@ impl Sample {
             distinct_genomes: cells.distinct_genomes() as u64,
             distinct_loadouts: loadouts.len() as u64,
             mean_fidelity: fidelity / n,
-            trophic_light: ledger.trophic_share(mm_core::TrophicSource::Light),
+            trophic_light: ledger.trophic_share(crate::TrophicSource::Light),
             chemicals,
             total_matter: chemicals.iter().sum(),
         }
@@ -185,7 +185,7 @@ impl Sample {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mm_core::Scenario;
+    use crate::Scenario;
 
     #[test]
     fn a_sample_of_an_empty_world_is_well_formed() {
