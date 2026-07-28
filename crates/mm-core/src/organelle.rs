@@ -198,14 +198,31 @@ impl Organelle {
         }
     }
 
-    /// A finished organelle of a given type and size.
+    /// A finished organelle of a given type and size, at full throttle.
+    ///
+    /// Full, not idle. A cell that has paid for a mitochondrion should get a mitochondrion;
+    /// requiring a separate `OSET` before the machinery does anything would mean a genome had
+    /// to find two mutations to gain one capability, and the second is invisible until the
+    /// first exists. Throttling down is the refinement, and it is the one a genome has a
+    /// reason to discover.
     #[must_use]
     pub const fn finished(kind: OrganelleType, param: u8) -> Organelle {
         Organelle {
             kind,
             param,
             remaining_build: 0,
-            control: [0, 0],
+            control: [Q10_ONE as i16, 0],
+        }
+    }
+
+    /// An organelle under construction, at full throttle for when it finishes.
+    #[must_use]
+    pub const fn building(kind: OrganelleType, param: u8, ticks: u16) -> Organelle {
+        Organelle {
+            kind,
+            param,
+            remaining_build: ticks,
+            control: [Q10_ONE as i16, 0],
         }
     }
 
@@ -546,6 +563,20 @@ mod tests {
                 "pump"
             ]
         );
+    }
+
+    #[test]
+    fn a_new_organelle_runs_without_having_to_be_switched_on() {
+        // Otherwise a genome would need two mutations to gain one capability, and the second
+        // would be invisible until the first existed.
+        let o = Organelle::finished(OrganelleType::Mitochondrion, 100);
+        assert_eq!(o.throttle(), Q10_ONE);
+        assert_eq!(
+            Organelle::building(OrganelleType::Chloroplast, 50, 9).throttle(),
+            Q10_ONE
+        );
+        // and an empty slot has nothing to throttle
+        assert_eq!(Organelle::empty().throttle(), 0);
     }
 
     #[test]

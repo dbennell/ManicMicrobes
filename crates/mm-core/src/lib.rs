@@ -45,6 +45,7 @@ pub mod intent;
 pub mod isa;
 pub mod ledger;
 pub mod light;
+pub mod metabolism;
 pub mod mutation;
 pub mod organelle;
 pub mod rng;
@@ -65,6 +66,7 @@ pub use intent::{Intent, IntentBuffer, Pending, PendingBirth, SenseView};
 pub use isa::{Op, Template, ISA_VERSION, MAX_TEMPLATE_LEN, OPCODE_COUNT};
 pub use ledger::{Ledger, LedgerBreach};
 pub use light::{CurrentField, Edge, LightRegime};
+pub use metabolism::{MetabolicRates, Metabolism};
 pub use mutation::{MutationRates, Operator};
 pub use organelle::{
     MembraneReading, Organelle, OrganelleCatalogue, OrganelleType, MEMBRANE_SLOT, SLOT_COUNT,

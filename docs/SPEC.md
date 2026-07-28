@@ -79,8 +79,38 @@ waste energy. Covered by a fuzz/property test over random byte arrays.
 interiors + all cell structural mass + all corpses) is invariant to the exact integer.
 Asserted every N ticks in debug; a test runs 1,000,000 ticks and requires zero drift.
 
+*Except through a balanced reaction.* §7.2's metabolism turns substrate into waste and back
+again, so a per-species total that never moved would make the matter loop impossible — the two
+statements as originally written contradicted each other. The resolution keeps the invariant
+in its exact per-species form rather than weakening it to a sum:
+
+- **Total matter, summed over all sixteen species, is invariant. No mechanism may move it.**
+- A per-species total may change **only** through a reaction that reports itself to the
+  ledger, and every reaction is stoichiometrically balanced: the units leaving one species
+  equal the units arriving in another.
+
+The ledger's per-species claim therefore stays exact, and an unreported transmutation shows up
+as drift in exactly the same way a leak would. That is the point of routing conversions through
+the ledger rather than letting metabolism adjust two arrays and hope: a reaction that forgets to
+account for itself is indistinguishable from a conservation bug, and both should fail the same
+test.
+
 **I5 — Energy accounting.** `energy_in (light) == energy_out (heat) + delta(stored energy)`,
 exactly, in integer units. Energy is *not* conserved — it degrades. It is *accounted*.
+
+"Stored" has to be defined precisely enough to recompute from the world, or the identity is a
+ledger agreeing with itself. It is the sum of two things:
+
+- the energy each living cell holds, and
+- the **latent energy of the substrate chemical**, wherever it is — inside a cell or dissolved
+  in the fluid. A unit of sugar is energy that has not been spent yet. Counting only cell
+  energy would make photosynthesis look like it created energy from nothing and respiration
+  look like it destroyed it.
+
+Both conversions are lossy on purpose. Photosynthesis banks less than the light it catches and
+respiration recovers less than the substrate holds; the difference is dissipated as heat, and
+that difference is the free-energy dissipation rate §13 exists to plot. Without it a cell would
+be a battery rather than a dissipative structure.
 
 **I6 — Schedule independence.** Simulation results do not depend on thread count,
 work-stealing order, or iteration order of any hash map. Randomness is derived by hashing

@@ -1,0 +1,545 @@
+//! The matter loop and the energy ledger it runs through (SPEC §7.2, §7.3).
+//!
+//! # Why the loop has to close
+//!
+//! Matter is exactly conserved, which means a world with only consumers in it runs down into
+//! an all-waste equilibrium and dies — not as a balancing failure but as an arithmetic
+//! certainty. Closing it needs a primary producer:
+//!
+//! ```text
+//! mitochondrion:  substrate + oxidant  ->  waste + waste   + energy
+//! chloroplast:    waste + waste + light ->  substrate + oxidant
+//! ```
+//!
+//! Two units of matter in, two units out, in both directions. Light is the only thing
+//! entering from outside, and it is the only reason the biosphere does not equilibrate. That
+//! is the entropy story the whole simulation exists to display: a cell is a dissipative
+//! structure, maintaining local order by consuming a gradient and exporting disorder.
+//!
+//! # Energy is accounted, not conserved
+//!
+//! I5 says `energy_in == energy_out + Δenergy_stored`, exactly, in integer units. Energy is
+//! *not* conserved — it degrades — so the claim is bookkeeping rather than physics, and it
+//! only means anything if "stored" is defined precisely enough to recompute independently.
+//!
+//! Stored energy lives in two places:
+//!
+//! * the energy each living cell holds, and
+//! * the **latent energy** of the substrate chemical, wherever it is — inside a cell or
+//!   dissolved in the fluid. A unit of sugar is energy that has not been spent yet, and
+//!   pretending otherwise would make photosynthesis look like it created energy from nothing
+//!   and respiration look like it destroyed it.
+//!
+//! So every transaction here moves energy between those two pots and the ledger, and
+//! [`recompute_stored`] adds them up from the world so the claim can be checked against
+//! something that is not itself.
+//!
+//! Both conversions are lossy, and deliberately: photosynthesis banks less than the light it
+//! catches, respiration recovers less than the substrate holds, and the difference is
+//! dissipated as heat. Without that there would be no dissipation rate to plot and no reason
+//! for a cell to be anything other than a battery.
+
+use crate::cell::CellArena;
+use crate::chem::{ChemTable, CHEM_COUNT};
+use crate::fixed::{q10_scale, Q10_ONE};
+use crate::ledger::Ledger;
+use crate::organelle::{MetabolicChemistry, OrganelleCatalogue, OrganelleType};
+use crate::substrate::Substrate;
+
+/// How much of what it catches each conversion keeps, `Q10`.
+///
+/// Scenario data at M8; named constants here so the numbers are visible rather than buried in
+/// the arithmetic that uses them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct MetabolicRates {
+    /// Fraction of absorbed light that ends up banked as substrate rather than heat.
+    pub photosynthesis_efficiency: i32,
+    /// Fraction of a substrate's latent energy a mitochondrion recovers.
+    pub respiration_efficiency: i32,
+    /// Matter one unit of `param` can convert per tick, `Q10`.
+    pub throughput_per_param: i32,
+    /// Latent energy per unit of substrate chemical, `Q10` energy per `Q10` matter.
+    ///
+    /// Read from the chemical table's `energy_yield` in a scenario; kept here as the fallback
+    /// so the loop is well-defined even for a table that says nothing.
+    pub latent_per_substrate: i32,
+}
+
+impl Default for MetabolicRates {
+    fn default() -> Self {
+        MetabolicRates {
+            photosynthesis_efficiency: Q10_ONE / 2,
+            respiration_efficiency: Q10_ONE * 3 / 4,
+            throughput_per_param: Q10_ONE / 16,
+            latent_per_substrate: 64,
+        }
+    }
+}
+
+/// Everything the metabolic step needs that is not the world itself.
+#[derive(Clone, Debug, Default)]
+pub struct Metabolism {
+    pub rates: MetabolicRates,
+    pub catalogue: OrganelleCatalogue,
+}
+
+/// What one tick of metabolism did, for the metrics of SPEC §13.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct MetabolicReport {
+    /// Light energy absorbed by chloroplasts.
+    pub absorbed: i64,
+    /// Energy dissipated as heat: conversion losses plus upkeep.
+    pub dissipated: i64,
+    /// Matter photosynthesised, `Q10`.
+    pub fixed: i64,
+    /// Matter respired, `Q10`.
+    pub burned: i64,
+    /// Cells whose energy ran out this tick.
+    pub starved: u32,
+}
+
+impl Metabolism {
+    /// The latent energy of a quantity of substrate chemical.
+    #[inline]
+    #[must_use]
+    pub fn latent(&self, chem: &ChemTable, m: &MetabolicChemistry, quantity: i64) -> i64 {
+        let per = self.per_unit_latent(chem, m) as i64;
+        (quantity * per) / Q10_ONE as i64
+    }
+
+    #[inline]
+    fn per_unit_latent(&self, chem: &ChemTable, m: &MetabolicChemistry) -> i32 {
+        let from_table = chem.get(m.substrate).energy_yield;
+        if from_table > 0 {
+            from_table
+        } else {
+            self.rates.latent_per_substrate
+        }
+    }
+
+    /// Run one tick of metabolism over the whole population.
+    ///
+    /// Cells are visited in slot order, which is id order (I6). Nothing here depends on how
+    /// the work is scheduled because nothing here is scheduled — metabolism is part of
+    /// resolve, and resolve is sequential by design.
+    pub fn step(
+        &self,
+        cells: &mut CellArena,
+        substrate: &Substrate,
+        chem: &ChemTable,
+        ledger: &mut Ledger,
+        starving: &mut Vec<crate::cell::CellId>,
+    ) -> MetabolicReport {
+        let m = self.catalogue.metabolism;
+        let latent_per_unit = self.per_unit_latent(chem, &m);
+        let mut report = MetabolicReport::default();
+
+        for i in 0..cells.capacity() {
+            if !cells.occupied(i) {
+                continue;
+            }
+
+            // --- photosynthesis: waste + light -> substrate + oxidant ---
+            let light = {
+                let sq = substrate.index(
+                    cells.x[i] >> crate::fixed::POS_BITS,
+                    cells.y[i] >> crate::fixed::POS_BITS,
+                );
+                substrate.light().get(sq).copied().unwrap_or(0)
+            };
+            if light > 0 {
+                let capacity = self.conversion_capacity(cells, i, OrganelleType::Chloroplast);
+                if capacity > 0 {
+                    // Bounded by machinery, by the waste on hand, and by the light falling on
+                    // it. Two units of waste make one of substrate and one of oxidant.
+                    let waste_available = cells.interior(i)[m.waste];
+                    let by_light = q10_scale(capacity, light);
+                    let pairs = by_light.min(waste_available / 2).max(0);
+                    if pairs > 0 {
+                        let gained_latent =
+                            (pairs as i64 * latent_per_unit as i64) / Q10_ONE as i64;
+                        // The light it took to bank that much, plus what was lost as heat.
+                        let absorbed = if self.rates.photosynthesis_efficiency > 0 {
+                            (gained_latent * Q10_ONE as i64)
+                                / self.rates.photosynthesis_efficiency as i64
+                        } else {
+                            gained_latent
+                        };
+                        let interior = cells.interior_mut(i);
+                        interior[m.waste] = interior[m.waste].saturating_sub(pairs * 2);
+                        interior[m.substrate] = interior[m.substrate].saturating_add(pairs);
+                        interior[m.oxidant] = interior[m.oxidant].saturating_add(pairs);
+                        // Two units of waste became one of substrate and one of oxidant.
+                        // Reported rather than done silently: an unaccounted transmutation is
+                        // indistinguishable from a conservation bug (I4).
+                        ledger.convert(m.waste, m.substrate, pairs as i64);
+                        ledger.convert(m.waste, m.oxidant, pairs as i64);
+
+                        ledger.absorb(absorbed);
+                        let waste_heat = absorbed.saturating_sub(gained_latent);
+                        report.dissipated += ledger.dissipate(waste_heat);
+                        report.absorbed += absorbed;
+                        report.fixed += pairs as i64;
+                    }
+                }
+            }
+
+            // --- respiration: substrate + oxidant -> waste + energy ---
+            let capacity = self.conversion_capacity(cells, i, OrganelleType::Mitochondrion);
+            if capacity > 0 {
+                let (sub, ox) = {
+                    let interior = cells.interior(i);
+                    (interior[m.substrate], interior[m.oxidant])
+                };
+                let burn = capacity.min(sub).min(ox).max(0);
+                if burn > 0 {
+                    let released = (burn as i64 * latent_per_unit as i64) / Q10_ONE as i64;
+                    let recovered =
+                        (released * self.rates.respiration_efficiency as i64) / Q10_ONE as i64;
+                    let interior = cells.interior_mut(i);
+                    interior[m.substrate] = interior[m.substrate].saturating_sub(burn);
+                    interior[m.oxidant] = interior[m.oxidant].saturating_sub(burn);
+                    interior[m.waste] = interior[m.waste].saturating_add(burn * 2);
+                    ledger.convert(m.substrate, m.waste, burn as i64);
+                    ledger.convert(m.oxidant, m.waste, burn as i64);
+
+                    cells.energy[i] =
+                        cells.energy[i].saturating_add(crate::fixed::sat_i32(recovered));
+                    // The latent energy left the substrate; part became cell energy and the
+                    // rest became heat. Stored is unchanged by the first and reduced by the
+                    // second, which is exactly what dissipating the difference says.
+                    report.dissipated += ledger.dissipate(released - recovered);
+                    report.burned += burn as i64;
+                }
+            }
+
+            // --- upkeep: the cost of being alive ---
+            let upkeep = self.catalogue.upkeep(&cells.loadout(i));
+            if upkeep > 0 {
+                let paid = cells.energy[i].min(upkeep);
+                cells.energy[i] = cells.energy[i].saturating_sub(paid);
+                report.dissipated += ledger.dissipate(paid as i64);
+                if paid < upkeep {
+                    // It could not pay. A cell that cannot meet its own upkeep is dying, and
+                    // the bookkeeping phase is where that is acted on.
+                    starving.push(cells.id_at(i));
+                    report.starved = report.starved.saturating_add(1);
+                }
+            }
+
+            cells.age[i] = cells.age[i].saturating_add(1);
+        }
+
+        report
+    }
+
+    /// How much matter one cell's organelles of a given type can convert this tick.
+    ///
+    /// Only finished organelles count: a half-built chloroplast is matter the cell is
+    /// carrying, not machinery it can use (SPEC §6.2).
+    fn conversion_capacity(&self, cells: &CellArena, i: usize, kind: OrganelleType) -> i32 {
+        let mut total = 0i32;
+        for o in cells.slots(i) {
+            if o.kind != kind || !o.is_active() {
+                continue;
+            }
+            let size = self
+                .rates
+                .throughput_per_param
+                .saturating_mul(o.param as i32);
+            total = total.saturating_add(q10_scale(size, o.throttle()));
+        }
+        total
+    }
+}
+
+/// Recompute the world's stored energy from what is actually there.
+///
+/// The independent check that makes I5 mean something: the ledger claims a figure, and this
+/// derives one from the cells and the fluid. Two different calculations agreeing is evidence;
+/// a ledger agreeing with itself is not.
+#[must_use]
+pub fn recompute_stored(
+    cells: &CellArena,
+    substrate: &Substrate,
+    chem: &ChemTable,
+    metabolism: &Metabolism,
+) -> i64 {
+    let m = metabolism.catalogue.metabolism;
+    let per_unit = metabolism.per_unit_latent(chem, &m) as i64;
+
+    let cell_energy = cells.total_energy();
+    let substrate_in_cells = cells.total_interior()[m.substrate % CHEM_COUNT];
+    let substrate_in_fluid = substrate.total_chem()[m.substrate % CHEM_COUNT];
+    let latent = ((substrate_in_cells + substrate_in_fluid) * per_unit) / Q10_ONE as i64;
+
+    cell_energy + latent
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cell::{CellId, CellSeed};
+    use crate::fixed::q10;
+    use crate::genome::GenomePool;
+    use crate::organelle::Organelle;
+
+    fn world() -> (
+        CellArena,
+        Substrate,
+        ChemTable,
+        Ledger,
+        Metabolism,
+        GenomePool,
+    ) {
+        (
+            CellArena::new(),
+            Substrate::new(8, 8).unwrap(),
+            ChemTable::spec_default(),
+            Ledger::new(),
+            Metabolism::default(),
+            GenomePool::new(),
+        )
+    }
+
+    fn spawn(cells: &mut CellArena, pool: &GenomePool) -> usize {
+        let id = cells.spawn(CellSeed {
+            x: crate::fixed::pos(4),
+            y: crate::fixed::pos(4),
+            mass: q10(10),
+            energy: q10(100),
+            membrane: 16,
+            key: 0,
+            species: 0,
+            parent: CellId::NONE,
+            birth_tick: 0,
+            genome: pool.intern(vec![0x2E]).unwrap(),
+        });
+        cells.index(id).unwrap()
+    }
+
+    /// Per-species totals across cells and fluid — what the ledger claims to know.
+    fn total_matter(cells: &CellArena, substrate: &Substrate) -> [i64; CHEM_COUNT] {
+        let a = cells.total_interior();
+        let b = substrate.total_chem();
+        std::array::from_fn(|c| a[c] + b[c])
+    }
+
+    /// Total matter across every species — the quantity no reaction may move.
+    fn grand_total(cells: &CellArena, substrate: &Substrate) -> i64 {
+        total_matter(cells, substrate).iter().sum()
+    }
+
+    #[test]
+    fn respiration_conserves_matter_and_yields_energy() {
+        let (mut cells, sub, chem, mut ledger, met, pool) = world();
+        let i = spawn(&mut cells, &pool);
+        cells.slots_mut(i)[2] = Organelle::finished(OrganelleType::Mitochondrion, 200);
+        let m = met.catalogue.metabolism;
+        cells.interior_mut(i)[m.substrate] = q10(50);
+        cells.interior_mut(i)[m.oxidant] = q10(50);
+
+        ledger.set_baseline(total_matter(&cells, &sub));
+        let before_total = grand_total(&cells, &sub);
+        let before_energy = cells.energy[i];
+        let mut starving = Vec::new();
+        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+
+        assert!(report.burned > 0, "nothing was respired");
+        assert!(
+            cells.energy[i] > before_energy,
+            "respiration yielded no energy"
+        );
+        assert_eq!(
+            grand_total(&cells, &sub),
+            before_total,
+            "respiration created or destroyed matter"
+        );
+        // A reaction moves matter between species, so the per-species claim only holds if
+        // the reaction reported itself.
+        ledger
+            .check_matter(&total_matter(&cells, &sub))
+            .expect("respiration did not account for what it transmuted");
+        assert!(ledger.converted() > 0);
+    }
+
+    #[test]
+    fn photosynthesis_conserves_matter_and_costs_light() {
+        let (mut cells, mut sub, chem, mut ledger, met, pool) = world();
+        for y in 0..8 {
+            for x in 0..8 {
+                let idx = sub.index(x, y);
+                sub.light_mut()[idx] = Q10_ONE;
+            }
+        }
+        let i = spawn(&mut cells, &pool);
+        cells.slots_mut(i)[3] = Organelle::finished(OrganelleType::Chloroplast, 200);
+        let m = met.catalogue.metabolism;
+        cells.interior_mut(i)[m.waste] = q10(100);
+
+        ledger.set_baseline(total_matter(&cells, &sub));
+        let before = grand_total(&cells, &sub);
+        let mut starving = Vec::new();
+        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+
+        assert!(report.fixed > 0, "nothing was photosynthesised");
+        assert!(report.absorbed > 0, "light was free");
+        assert!(cells.interior(i)[m.substrate] > 0);
+        assert_eq!(
+            grand_total(&cells, &sub),
+            before,
+            "photosynthesis created or destroyed matter"
+        );
+        ledger
+            .check_matter(&total_matter(&cells, &sub))
+            .expect("photosynthesis did not account for what it transmuted");
+    }
+
+    #[test]
+    fn the_loop_closes_over_many_ticks() {
+        // The property the whole design rests on: a cell with both organelles cycles matter
+        // between substrate and waste indefinitely, and the totals never move.
+        let (mut cells, mut sub, chem, mut ledger, met, pool) = world();
+        for y in 0..8 {
+            for x in 0..8 {
+                let idx = sub.index(x, y);
+                sub.light_mut()[idx] = Q10_ONE;
+            }
+        }
+        let i = spawn(&mut cells, &pool);
+        cells.slots_mut(i)[2] = Organelle::finished(OrganelleType::Mitochondrion, 120);
+        cells.slots_mut(i)[3] = Organelle::finished(OrganelleType::Chloroplast, 120);
+        let m = met.catalogue.metabolism;
+        cells.interior_mut(i)[m.substrate] = q10(200);
+        cells.interior_mut(i)[m.oxidant] = q10(200);
+        cells.interior_mut(i)[m.waste] = q10(200);
+        cells.energy[i] = q10(10_000);
+
+        ledger.set_baseline(total_matter(&cells, &sub));
+        let before = grand_total(&cells, &sub);
+        let mut starving = Vec::new();
+        for tick in 0..2_000 {
+            met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+            assert_eq!(
+                grand_total(&cells, &sub),
+                before,
+                "total matter moved at tick {tick}"
+            );
+            ledger
+                .check_matter(&total_matter(&cells, &sub))
+                .unwrap_or_else(|e| panic!("unaccounted transmutation at tick {tick}: {e}"));
+        }
+        assert!(ledger.energy_in() > 0, "no light was ever absorbed");
+        assert!(ledger.energy_out() > 0, "no heat was ever exported");
+    }
+
+    #[test]
+    fn energy_accounting_holds_against_an_independent_recomputation() {
+        // I5 checked the way it has to be checked: the ledger's claim against a figure
+        // derived from the world rather than from the ledger.
+        let (mut cells, mut sub, chem, mut ledger, met, pool) = world();
+        for y in 0..8 {
+            for x in 0..8 {
+                let idx = sub.index(x, y);
+                sub.light_mut()[idx] = Q10_ONE;
+            }
+        }
+        let i = spawn(&mut cells, &pool);
+        cells.slots_mut(i)[2] = Organelle::finished(OrganelleType::Mitochondrion, 90);
+        cells.slots_mut(i)[3] = Organelle::finished(OrganelleType::Chloroplast, 90);
+        let m = met.catalogue.metabolism;
+        cells.interior_mut(i)[m.substrate] = q10(100);
+        cells.interior_mut(i)[m.oxidant] = q10(100);
+        cells.interior_mut(i)[m.waste] = q10(100);
+
+        // Adopt the world's starting energy as the baseline, the way World::new does for
+        // matter: what was there at the start was not "absorbed".
+        let baseline = recompute_stored(&cells, &sub, &chem, &met);
+        ledger.set_energy_baseline(baseline);
+
+        let mut starving = Vec::new();
+        for tick in 0..1_000 {
+            met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+            ledger
+                .check_energy()
+                .unwrap_or_else(|e| panic!("identity broke at tick {tick}: {e}"));
+            let actual = recompute_stored(&cells, &sub, &chem, &met);
+            assert_eq!(
+                ledger.energy_stored(),
+                actual,
+                "at tick {tick}: the ledger claims {} but the world holds {actual}",
+                ledger.energy_stored()
+            );
+        }
+    }
+
+    #[test]
+    fn upkeep_starves_a_cell_that_cannot_pay() {
+        let (mut cells, sub, chem, mut ledger, met, pool) = world();
+        let i = spawn(&mut cells, &pool);
+        cells.slots_mut(i)[1] = Organelle::finished(OrganelleType::Nucleus, 255);
+        cells.energy[i] = 1;
+
+        let mut starving = Vec::new();
+        ledger.absorb(1_000_000);
+        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+        assert_eq!(report.starved, 1);
+        assert_eq!(starving, vec![cells.id_at(i)]);
+        assert_eq!(cells.energy[i], 0, "it spent everything it had trying");
+    }
+
+    #[test]
+    fn a_cell_with_no_machinery_still_ages_and_pays() {
+        let (mut cells, sub, chem, mut ledger, met, pool) = world();
+        let i = spawn(&mut cells, &pool);
+        ledger.absorb(q10(1000) as i64);
+        let mut starving = Vec::new();
+        met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+        assert_eq!(cells.age[i], 1);
+        assert!(
+            cells.energy[i] < q10(100),
+            "the membrane's upkeep is the floor on the cost of being alive"
+        );
+    }
+
+    #[test]
+    fn an_unfinished_organelle_does_nothing_but_still_costs() {
+        let (mut cells, sub, chem, mut ledger, met, pool) = world();
+        let i = spawn(&mut cells, &pool);
+        cells.slots_mut(i)[2] = Organelle {
+            remaining_build: 5,
+            ..Organelle::finished(OrganelleType::Mitochondrion, 200)
+        };
+        let m = met.catalogue.metabolism;
+        cells.interior_mut(i)[m.substrate] = q10(50);
+        cells.interior_mut(i)[m.oxidant] = q10(50);
+
+        let mut starving = Vec::new();
+        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+        assert_eq!(report.burned, 0, "a half-built mitochondrion must be inert");
+        assert!(cells.energy[i] < q10(100), "but it is still being carried");
+    }
+
+    #[test]
+    fn the_throttle_controls_the_rate() {
+        // The genome's only handle on its own metabolism. Without this a cell could not
+        // choose to idle, and dormancy would not be an evolvable strategy.
+        let (mut cells, sub, chem, mut ledger, met, pool) = world();
+        let m = met.catalogue.metabolism;
+        let mut burned = Vec::new();
+        for throttle in [0, Q10_ONE / 4, Q10_ONE] {
+            let i = spawn(&mut cells, &pool);
+            let mut organelle = Organelle::finished(OrganelleType::Mitochondrion, 200);
+            organelle.control[0] = throttle as i16;
+            cells.slots_mut(i)[2] = organelle;
+            cells.interior_mut(i)[m.substrate] = q10(50);
+            cells.interior_mut(i)[m.oxidant] = q10(50);
+            let mut starving = Vec::new();
+            let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+            burned.push(report.burned);
+            cells.despawn(cells.id_at(i));
+        }
+        assert_eq!(burned[0], 0, "a closed throttle should burn nothing");
+        assert!(burned[1] > 0 && burned[1] < burned[2], "{burned:?}");
+    }
+}

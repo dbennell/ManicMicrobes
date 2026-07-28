@@ -48,6 +48,8 @@ pub struct Ledger {
     energy_out: i64,
     /// Energy currently held by living things.
     energy_stored: i64,
+    /// Matter converted between species by metabolism, cumulative.
+    converted: i64,
 }
 
 /// What a mismatch looked like, for a test failure that says something useful.
@@ -144,6 +146,38 @@ impl Ledger {
         }
     }
 
+    /// One species becoming another, in a balanced reaction.
+    ///
+    /// The only way a per-species total may move. Total matter is unchanged by construction —
+    /// the same figure leaves one species and arrives in another — so I4 survives in its exact
+    /// per-species form rather than being weakened to a sum. An unreported transmutation shows
+    /// up in `check_matter` as drift, which is the point: metabolism has to say what it did.
+    pub fn convert(&mut self, from: usize, to: usize, amount: i64) {
+        if amount <= 0 {
+            return;
+        }
+        let from = from % CHEM_COUNT;
+        let to = to % CHEM_COUNT;
+        if from == to {
+            return;
+        }
+        self.chem[from] = self.chem[from].saturating_sub(amount);
+        self.chem[to] = self.chem[to].saturating_add(amount);
+        self.converted = self.converted.saturating_add(amount);
+    }
+
+    /// Total matter converted between species, cumulative. Instrumentation only.
+    #[must_use]
+    pub fn converted(&self) -> i64 {
+        self.converted
+    }
+
+    /// Total matter across every species — the quantity no mechanism may move.
+    #[must_use]
+    pub fn total_matter(&self) -> i64 {
+        self.chem.iter().sum()
+    }
+
     /// Matter added to the world from outside — seeding a scenario, a tool dropping food in.
     ///
     /// Not something the simulation does to itself. If a mechanism ever needs this, that
@@ -191,6 +225,16 @@ impl Ledger {
         self.energy_in = energy_in;
         self.energy_out = energy_out;
         self.energy_stored = energy_stored;
+    }
+
+    /// Adopt the world's current stored energy as the baseline.
+    ///
+    /// What was in the world at tick zero was not absorbed from anywhere, so it counts as
+    /// both `energy_in` and `energy_stored` and the identity starts balanced.
+    pub fn set_energy_baseline(&mut self, stored: i64) {
+        self.energy_in = stored;
+        self.energy_out = 0;
+        self.energy_stored = stored;
     }
 
     /// Check I5. Called every tick in debug builds and by the acceptance tests.
