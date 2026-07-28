@@ -448,6 +448,85 @@ fn a_chemosensor_can_actually_read_the_gradient_it_is_standing_in() {
     );
 }
 
+#[test]
+#[ignore = "runs a live population for 25,000 ticks; --release --ignored"]
+fn the_patches_still_exist_once_a_population_has_been_eating_them() {
+    // The third question, and the one that decides whether the acceptance test below can be
+    // won at all.
+    //
+    // `mean_distance_to_food` measures distance to where the food was *seeded*, deliberately,
+    // so that a lineage cannot score well by eating its patch flat and destroying the
+    // gradient. That is the right choice only while the patches are still there. If a
+    // population strips them early, the test spends the rest of the run asking cells to
+    // congregate on bare water — and a cell that did so would be selected against, not for.
+    //
+    // Reports rather than asserts a threshold: what the right contrast is depends on a
+    // judgement about the scenario, and the number is what that judgement needs.
+    let bytes = assemble("drifter.mm");
+    let mut world = World::new(patchy(1)).unwrap();
+    world.set_biology(BiologyConfig {
+        mutation: MutationRates::default(),
+        ..BiologyConfig::default()
+    });
+    for k in 0..16u32 {
+        let genome = world.genomes().intern(bytes.clone()).expect("genome");
+        let id = world.spawn_cell(CellSeed {
+            x: pos((8 + (k % 4) * 16) as i32),
+            y: pos((8 + (k / 4) * 16) as i32),
+            mass: q10(30),
+            energy: q10(500),
+            membrane: 24,
+            key: 11,
+            species: 0,
+            parent: CellId::NONE,
+            birth_tick: 0,
+            genome,
+        });
+        if let Some(i) = world.cells_mut().index(id) {
+            let cells = world.cells_mut();
+            cells.slots_mut(i)[1] = Organelle::finished(OrganelleType::Nucleus, 64);
+            cells.slots_mut(i)[2] = Organelle::finished(OrganelleType::Mitochondrion, 40);
+            cells.slots_mut(i)[3] = Organelle::finished(OrganelleType::Chloroplast, 50);
+            cells.interior_mut(i)[FOOD] = q10(40);
+            cells.interior_mut(i)[14] = q10(40);
+        }
+    }
+    world.adopt_current_contents_as_baseline();
+
+    let sample = |world: &World| -> (i64, i64) {
+        let food = world.substrate().chem_plane(FOOD);
+        let at = |x: u32, y: u32| food[(y as usize) * WIDTH as usize + x as usize] as i64;
+        let in_patches: i64 = PATCHES.iter().map(|(x, y)| at(*x, *y)).sum::<i64>() / 4;
+        // The middle of the slide: as far from every patch as it is possible to be.
+        let between = at(WIDTH / 2, HEIGHT / 2);
+        (in_patches, between)
+    };
+
+    eprintln!("   tick    cells   food in patches   food between   contrast");
+    for step in 0..=10 {
+        if step > 0 {
+            world.run(2_500);
+        }
+        let (patch, between) = sample(&world);
+        eprintln!(
+            "{:>7}  {:>7}  {:>16}  {:>13}  {:>7.2}x",
+            world.tick_count(),
+            world.cells().len(),
+            patch,
+            between,
+            patch as f64 / between.max(1) as f64
+        );
+        if world.cells().is_empty() {
+            break;
+        }
+    }
+    eprintln!(
+        "\nA contrast near 1.00 means the patches are gone and the slide is uniform: there is \
+         no longer anywhere better to be, and `mean_distance_to_food` is measuring loyalty to \
+         a memory."
+    );
+}
+
 /// The milestone's headline result.
 ///
 /// # It has not passed. Here is exactly how it failed.
@@ -484,25 +563,57 @@ fn a_chemosensor_can_actually_read_the_gradient_it_is_standing_in() {
 /// is **not to be relaxed**. Three of ten seeds clear it; six are needed. Lowering it to 0.95
 /// would report success for a population that has not moved towards its food at all.
 ///
-/// # What to try, in the order the evidence supports
+/// # Two causes were found. The first is fixed. The second makes this scenario unwinnable.
 ///
-/// 1. **The tick budget.** This ran at a tenth of the 2,000,000 the milestone allows. Linking
-///    a sensor to a cilium is several mutations deep: the genome must read the gradient, turn
-///    it into a signed power, and write it to the right slot, with no partial credit until all
-///    three are in place. 200,000 ticks may simply be before the beginning.
-/// 2. **The population sizes.** They swing from 169 to 15,533 between arms of the same seed.
-///    A mean distance over 169 cells is noise, and the two arms are not comparable when one
-///    is eighty times the other. Whatever is causing that instability is upstream of the
-///    measurement and should be found first — a controlled experiment cannot be built on it.
-/// 3. **Whether the gradient is readable at all.** `PATCH_RADIUS` is 6 and the patches are 40
-///    squares apart, so a cell between them senses nothing in either direction. There may be
-///    no gradient to climb for most of the slide, in which case chemotaxis is not being
-///    selected against — it is being given nothing to act on. `the_chemosensor_reads_a_real_
-///    gradient` checks the sensor works; it does not check that the *slide* has a gradient
-///    where the cells actually are.
+/// **One — the sensor could not read the gradient.** Fixed; see `sensing::GRADIENT_GAIN` and
+/// `a_chemosensor_can_actually_read_the_gradient_it_is_standing_in`. Both the concentration
+/// and the gradient went through the same divide-by-1024, and a gradient is two or three
+/// orders of magnitude smaller than an amount, so it arrived as a literal zero at the centre
+/// of the slide. Gradients now have their own scale and read about -192 where they read 0.
 ///
-/// Option 3 is the one that would invalidate the experiment rather than merely lengthen it,
-/// so it is the one to check first, and it is cheap to check.
+/// **Two — the patches do not survive contact with a population, and this is fatal to the
+/// scenario as written.** `the_patches_still_exist_once_a_population_has_been_eating_them`
+/// measures the food at the patch centres against the middle of the slide, with the drifter
+/// line living on it:
+///
+/// ```text
+///    tick    cells   food in patches   food between   contrast
+///       0       16           1454080          20480     71.00x
+///    2500    15368              3483           5520      0.63x
+///    5000    14887              2302           1418      1.62x
+///   10000    13037               571            532      1.07x
+///   25000    22638               391            277      1.41x
+/// ```
+///
+/// The patches are gone inside 2,500 ticks — a hundredth of this run and an eight-hundredth
+/// of the 2,000,000 the milestone allows. After that the slide is uniform, and the contrast
+/// spends as much time *below* one as above it: the patch sites are repeatedly **poorer** than
+/// open water, because that is where the cells are and they are eating.
+///
+/// So for better than 98% of the run there is nowhere better to be. `mean_distance_to_food`
+/// measures distance to where food was *seeded* — chosen deliberately, so that a lineage
+/// cannot score well by eating its patch flat — and the consequence is that the test spends
+/// almost all of its length asking cells to congregate on bare water. A cell that did so
+/// would be selected *against*. Chemotaxis is not being starved of time here; it is being
+/// asked for and then punished.
+///
+/// That also explains the numbers above. Founders start at mean distance 11.98, closer than
+/// random scatter's 13.13. Both lines end near 14.2 — worse than random — because the
+/// survivors are the ones that left the stripped patch sites. The nine-of-ten was never a
+/// signal.
+///
+/// # What this needs, and why it is not done here
+///
+/// The patches have to be a *source*, not a stock: food replenished at the patch centres so
+/// the gradient persists for the length of the run. That is a change to what the scenario
+/// means — a standing gradient is a different world from a depleting one, with different
+/// carrying capacity and different selection — and `Seeding` has no notion of a source, so it
+/// is a mechanism to add rather than a constant to tweak. CLAUDE.md says to flag a design
+/// decision like that rather than pick whichever reading is easier, so it is flagged.
+///
+/// The `< 0.9` margin in [`chemotaxis_run`] is the milestone's "significantly below" and is
+/// **not to be relaxed**. Nothing above is a reason to lower it; all of it is a reason the
+/// scenario cannot currently reach it.
 #[test]
 #[ignore = "2,000,000 ticks x 10 seeds x 2 lines; run with --release --ignored"]
 fn acceptance_chemotaxis_evolves() {
