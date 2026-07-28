@@ -1,0 +1,18 @@
+// A slide big enough to carry the fifty thousand cells M2's performance gate asks for.
+//
+//   mm-cli run scenarios/scale.ron --genome genomes/ancestor.mm --population 256 --ticks 5000
+(
+    name: "scale",
+    seed: 4242,
+    width: 128,
+    height: 128,
+    light: Uniform(intensity: 1024),
+    current: Still,
+    fluid_interval: 4,
+    seeding: [
+        Uniform(chemical: 11, per_square: 819200),
+        Uniform(chemical: 14, per_square: 819200),
+        Uniform(chemical: 4, per_square: 819200),
+    ],
+    barriers: [],
+)

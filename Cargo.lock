@@ -236,6 +236,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mm-cli"
+version = "0.0.1"
+dependencies = [
+ "mm-asm",
+ "mm-core",
+]
+
+[[package]]
 name = "mm-core"
 version = "0.0.1"
 dependencies = [

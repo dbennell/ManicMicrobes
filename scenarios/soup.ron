@@ -1,0 +1,29 @@
+// Primordial soup — the default slide.
+//
+// A lit, still, well-fed 64x64 world with no barriers: the simplest place an autotroph can
+// live, and the control condition everything else is a variation on. Seed it with an ancestor
+// and it grows to a carrying capacity set by how much structural carbon there is, because
+// matter is exactly conserved and there is nowhere else for a body to come from.
+//
+//   mm-cli run scenarios/soup.ron --genome genomes/ancestor.mm --ticks 50000 --check
+(
+    name: "primordial soup",
+    seed: 20250728,
+    width: 64,
+    height: 64,
+
+    // Uniform daylight: no gradient to climb, so nothing here rewards moving. The directional
+    // and day/night regimes are where that changes.
+    light: Uniform(intensity: 1024),
+    current: Still,
+    fluid_interval: 1,
+
+    // Carbon dioxide to photosynthesise, an oxidant to do it with, and carbon to build a body
+    // out of. Indices match the default chemical table of SPEC §7.1.
+    seeding: [
+        Uniform(chemical: 11, per_square: 409600),
+        Uniform(chemical: 14, per_square: 409600),
+        Uniform(chemical: 4, per_square: 409600),
+    ],
+    barriers: [],
+)

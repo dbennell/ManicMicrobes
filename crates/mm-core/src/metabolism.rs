@@ -41,7 +41,7 @@
 
 use crate::cell::CellArena;
 use crate::chem::{ChemTable, CHEM_COUNT};
-use crate::fixed::{q10_scale, Q10_ONE};
+use crate::fixed::{q10, q10_scale, Q10_ONE};
 use crate::ledger::Ledger;
 use crate::organelle::{MetabolicChemistry, OrganelleCatalogue, OrganelleType};
 use crate::substrate::Substrate;
@@ -63,6 +63,19 @@ pub struct MetabolicRates {
     /// Read from the chemical table's `energy_yield` in a scenario; kept here as the fallback
     /// so the loop is well-defined even for a table that says nothing.
     pub latent_per_substrate: i32,
+    /// How much of a toxin a cell tolerates before it starts taking damage, `Q10`.
+    ///
+    /// SPEC §7.1 defines `toxicity` as "membrane damage per unit **above threshold**"; this
+    /// is that threshold. Below it a cell is coping, above it the toxin is doing harm — which
+    /// is what makes a toxin something to avoid or excrete rather than a flat tax on being
+    /// alive.
+    pub toxicity_threshold: i32,
+    /// Fraction of accumulated damage a cell repairs per tick, `Q10`.
+    ///
+    /// Damage is not permanent, or the first whiff of a toxin would be a death sentence
+    /// eventually. Repair is free at M2; making it cost energy is the obvious next turn of
+    /// the screw and belongs with the M8 balancing pass.
+    pub repair_rate: i32,
 }
 
 impl Default for MetabolicRates {
@@ -72,6 +85,8 @@ impl Default for MetabolicRates {
             respiration_efficiency: Q10_ONE * 3 / 4,
             throughput_per_param: Q10_ONE / 16,
             latent_per_substrate: 64,
+            toxicity_threshold: q10(8),
+            repair_rate: Q10_ONE / 64,
         }
     }
 }
@@ -96,6 +111,10 @@ pub struct MetabolicReport {
     pub burned: i64,
     /// Cells whose energy ran out this tick.
     pub starved: u32,
+    /// Cells whose membrane failed under toxic damage this tick.
+    pub poisoned: u32,
+    /// Damage inflicted by toxins this tick, `Q10`.
+    pub damage: i64,
 }
 
 impl Metabolism {
@@ -222,6 +241,40 @@ impl Metabolism {
                     // second, which is exactly what dissipating the difference says.
                     report.dissipated += ledger.dissipate(released - recovered);
                     report.burned += burn as i64;
+                }
+            }
+
+            // --- toxicity: membrane damage from what the cell is carrying (SPEC §7.1) ---
+            //
+            // A toxin does harm only above a threshold, so carrying a little is survivable
+            // and carrying a lot is not. That is what makes excreting it a strategy rather
+            // than a formality, and what gives a `PUMP` something to be for.
+            {
+                let mut inflicted = 0i32;
+                for (c, held) in cells.interior(i).iter().enumerate() {
+                    let toxicity = chem.get(c).toxicity;
+                    if toxicity <= 0 {
+                        continue;
+                    }
+                    let excess = held.saturating_sub(self.rates.toxicity_threshold);
+                    if excess > 0 {
+                        inflicted = inflicted.saturating_add(q10_scale(excess, toxicity));
+                    }
+                }
+                let repaired = q10_scale(cells.damage[i], self.rates.repair_rate);
+                cells.damage[i] = cells.damage[i]
+                    .saturating_sub(repaired)
+                    .saturating_add(inflicted)
+                    .max(0);
+                report.damage += inflicted as i64;
+
+                // A membrane fails when the damage exceeds what was invested in it. That is
+                // why membrane investment is a real trade-off and not just a number: it is
+                // the cell's tolerance for its own chemistry.
+                let tolerance = q10(cells.slots(i)[0].param as i32).max(q10(1));
+                if cells.damage[i] > tolerance {
+                    starving.push(cells.id_at(i));
+                    report.poisoned = report.poisoned.saturating_add(1);
                 }
             }
 
@@ -483,6 +536,90 @@ mod tests {
                 ledger.energy_stored()
             );
         }
+    }
+
+    #[test]
+    fn a_toxin_damages_a_membrane_only_above_its_threshold() {
+        // SPEC §7.1: "membrane damage per unit above threshold". Below it a cell is coping,
+        // which is what makes excreting a toxin a strategy rather than a formality.
+        let (mut cells, sub, chem, mut ledger, met, pool) = world();
+        let toxin = chem
+            .all()
+            .iter()
+            .position(|d| d.toxicity > 0)
+            .expect("the default table has a toxin");
+
+        let tolerable = spawn(&mut cells, &pool);
+        cells.interior_mut(tolerable)[toxin] = met.rates.toxicity_threshold / 2;
+        let poisoned = spawn(&mut cells, &pool);
+        cells.interior_mut(poisoned)[toxin] = met.rates.toxicity_threshold * 20;
+
+        ledger.absorb(q10(100_000) as i64);
+        let mut starving = Vec::new();
+        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+
+        assert_eq!(cells.damage[tolerable], 0, "a survivable dose did harm");
+        assert!(cells.damage[poisoned] > 0, "an overdose did none");
+        assert!(report.damage > 0);
+    }
+
+    #[test]
+    fn a_membrane_fails_when_damage_exceeds_what_was_invested_in_it() {
+        // Membrane investment is the cell's tolerance for its own chemistry, which is what
+        // makes it a real trade-off rather than a number.
+        let (mut cells, sub, chem, mut ledger, met, pool) = world();
+        let toxin = chem.all().iter().position(|d| d.toxicity > 0).unwrap();
+        let i = spawn(&mut cells, &pool);
+        cells.interior_mut(i)[toxin] = met.rates.toxicity_threshold * 200;
+        ledger.absorb(q10(100_000) as i64);
+
+        let mut starving = Vec::new();
+        let mut ticks = 0;
+        while starving.is_empty() && ticks < 10_000 {
+            met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+            ticks += 1;
+        }
+        assert!(!starving.is_empty(), "a poisoned cell never died");
+        assert_eq!(starving[0], cells.id_at(i));
+    }
+
+    #[test]
+    fn damage_heals_when_the_toxin_is_gone() {
+        // Otherwise the first whiff of a toxin would eventually be a death sentence, and
+        // there would be no point in a cell ever clearing itself out.
+        let (mut cells, sub, chem, mut ledger, met, pool) = world();
+        let i = spawn(&mut cells, &pool);
+        cells.damage[i] = q10(10);
+        ledger.absorb(q10(100_000) as i64);
+        let before = cells.damage[i];
+        let mut starving = Vec::new();
+        for _ in 0..200 {
+            met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+        }
+        assert!(cells.damage[i] < before, "damage never healed");
+    }
+
+    #[test]
+    fn a_world_with_no_toxin_takes_no_damage() {
+        let (mut cells, sub, mut chem, mut ledger, met, pool) = world();
+        let defs: Vec<_> = chem
+            .all()
+            .iter()
+            .map(|d| crate::chem::ChemicalDef {
+                toxicity: 0,
+                ..d.clone()
+            })
+            .collect();
+        chem = ChemTable::new(defs);
+        let i = spawn(&mut cells, &pool);
+        for c in 0..CHEM_COUNT {
+            cells.interior_mut(i)[c] = q10(10_000);
+        }
+        ledger.absorb(q10(100_000) as i64);
+        let mut starving = Vec::new();
+        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+        assert_eq!(report.damage, 0);
+        assert_eq!(cells.damage[i], 0);
     }
 
     #[test]

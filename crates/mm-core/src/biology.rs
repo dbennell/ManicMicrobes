@@ -483,7 +483,15 @@ pub fn resolve(
                         continue;
                     }
                     let spec = *config.metabolism.catalogue.spec(o.kind);
-                    let matter = spec.matter_cost(o.param);
+                    // What it nominally cost, bounded by what the body actually has.
+                    //
+                    // Division halves a cell's mass but leaves its organelles where they are,
+                    // so a cell that has divided since it built something has less body than
+                    // that thing nominally cost. Giving back the nominal figure would create
+                    // matter — a slow leak that only shows up once a population is large
+                    // enough for teardowns to be common, which is exactly the kind of I4
+                    // violation that is invisible in a small test.
+                    let matter = spec.matter_cost(o.param).min(cells.mass[i]).max(0);
                     let recovered = q10_scale(matter, spec.teardown_recovery).min(matter);
                     let sc = config.structural_chemical % CHEM_COUNT;
                     // Everything comes off the mass; what is not recovered into the interior
@@ -1077,6 +1085,33 @@ mod tests {
         assert_eq!(report.torn, 1);
         assert!(!f.cells.slots(i)[2].is_present());
         assert_eq!(f.total(), before, "dismantling lost matter");
+    }
+
+    #[test]
+    fn tearing_after_a_division_cannot_give_back_more_body_than_there_is() {
+        // Division halves a cell's mass but leaves its organelles in place, so a cell that
+        // has divided since it built something has less body than that thing nominally cost.
+        // Recovering the nominal figure creates matter — a leak invisible until a population
+        // is large enough for teardowns to be common.
+        let mut f = Fixture::new();
+        let i = f.spawn(vec![0x2E]);
+        f.cells.slots_mut(i)[2] = Organelle::finished(OrganelleType::Mitochondrion, 200);
+        // Deliberately less body than the organelle nominally cost.
+        let spec = *f
+            .config
+            .metabolism
+            .catalogue
+            .spec(OrganelleType::Mitochondrion);
+        assert!(spec.matter_cost(200) > q10(1));
+        f.cells.mass[i] = q10(1);
+        let before = f.total();
+
+        f.intents.begin_tick(f.cells.capacity());
+        f.intents.push(i, Intent::Tear { slot: 2 });
+        f.resolve();
+
+        assert_eq!(f.total(), before, "tearing invented matter out of nothing");
+        assert!(f.cells.mass[i] >= 0);
     }
 
     #[test]
