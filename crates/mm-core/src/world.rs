@@ -1,0 +1,685 @@
+//! The world: substrate, ledger and the tick loop (SPEC §12).
+//!
+//! At M1 the world has no cells in it. The tick order of SPEC §12 is already the real one —
+//! sense, execute, resolve, physics, fluid, bookkeeping — with the first four steps empty,
+//! so that M2 fills them in rather than restructuring the loop around them.
+//!
+//! Everything the world does to itself conserves matter exactly. The only ways matter can
+//! move at all are the fluid solver, which exchanges across edges and therefore conserves by
+//! construction, and the explicit seed/evict paths, which go through the ledger.
+
+use crate::chem::CHEM_COUNT;
+use crate::fluid;
+use crate::ledger::{Ledger, LedgerBreach};
+use crate::light::{decay_impulses, CurrentField, LightRegime};
+use crate::scenario::{Barrier, Scenario, ScenarioError, Seeding};
+use crate::state_hash::{StateHash, StateHasher};
+use crate::substrate::Substrate;
+
+/// A running simulation.
+#[derive(Clone, Debug)]
+pub struct World {
+    scenario: Scenario,
+    substrate: Substrate,
+    ledger: Ledger,
+    tick: u64,
+    /// Momentum injected locally by cilia (M3), decaying each fluid step. Separate from the
+    /// prescribed current because it is state, not configuration.
+    impulse_x: Vec<i32>,
+    impulse_y: Vec<i32>,
+    /// Cached so a static light regime is not rewritten over the whole grid every step.
+    light_written: bool,
+    /// Whether the velocity field is already correct for the current impulse layer.
+    ///
+    /// The prescribed current is time-invariant, so with no cilia pushing on the water the
+    /// velocity field is written once and never again. Rewriting it every step — a quarter of
+    /// a million squares, each a couple of divisions — cost more than the fluid solver it was
+    /// feeding.
+    velocity_written: bool,
+    /// How many squares carry a non-zero impulse. Zero means the velocity field cannot have
+    /// moved since it was last written.
+    active_impulses: u32,
+    diffusion_rates: [i32; CHEM_COUNT],
+    /// Working buffer for the fluid solver. Not state: it holds nothing between steps, and
+    /// is excluded from equality, hashing and snapshots for that reason.
+    scratch: crate::fluid::FluidScratch,
+}
+
+// `scratch` is a scratchpad, so two worlds that differ only in what happens to be left in it
+// are the same world. Deriving `PartialEq` would make the snapshot round-trip test fail for
+// a reason that means nothing.
+impl PartialEq for World {
+    fn eq(&self, other: &Self) -> bool {
+        self.scenario == other.scenario
+            && self.substrate == other.substrate
+            && self.ledger == other.ledger
+            && self.tick == other.tick
+            && self.impulse_x == other.impulse_x
+            && self.impulse_y == other.impulse_y
+    }
+}
+
+impl Eq for World {}
+
+impl World {
+    /// Build a world from a scenario: allocate the grid, raise the barriers, seed the
+    /// chemistry, and take the ledger's baseline.
+    ///
+    /// Order matters. Barriers go up *before* seeding, so that a scenario cannot place
+    /// matter inside a wall and have it evicted a moment later; and the baseline is taken
+    /// last, so it describes what the world actually holds.
+    ///
+    /// # Errors
+    ///
+    /// Bad grid dimensions, or an ISA version this engine cannot honour.
+    pub fn new(scenario: Scenario) -> Result<World, ScenarioError> {
+        scenario.check_isa()?;
+        let substrate =
+            Substrate::new(scenario.width, scenario.height).map_err(ScenarioError::Substrate)?;
+        let n = substrate.len();
+        let diffusion_rates = scenario.chemicals.diffusion_rates();
+
+        let mut world = World {
+            scenario,
+            substrate,
+            ledger: Ledger::new(),
+            tick: 0,
+            impulse_x: vec![0; n],
+            impulse_y: vec![0; n],
+            light_written: false,
+            velocity_written: false,
+            active_impulses: 0,
+            diffusion_rates,
+            scratch: crate::fluid::FluidScratch::new(n),
+        };
+
+        world.raise_barriers();
+        world.seed_chemistry();
+        world.ledger.set_baseline(world.substrate.total_chem());
+        world.refresh_light();
+        world.refresh_velocity();
+        Ok(world)
+    }
+
+    fn raise_barriers(&mut self) {
+        let barriers = self.scenario.barriers.clone();
+        for b in &barriers {
+            match b {
+                Barrier::Square { x, y } => {
+                    self.block(*x, *y);
+                }
+                Barrier::Rect {
+                    x,
+                    y,
+                    width,
+                    height,
+                } => {
+                    for dy in 0..*height {
+                        for dx in 0..*width {
+                            self.block(x.saturating_add(dx), y.saturating_add(dy));
+                        }
+                    }
+                }
+                Barrier::WallWithGap {
+                    at,
+                    vertical,
+                    gap_start,
+                    gap_len,
+                } => {
+                    let span = if *vertical {
+                        self.substrate.height()
+                    } else {
+                        self.substrate.width()
+                    };
+                    for i in 0..span {
+                        let in_gap = i >= *gap_start && i < gap_start.saturating_add(*gap_len);
+                        if in_gap {
+                            continue;
+                        }
+                        if *vertical {
+                            self.block(*at, i);
+                        } else {
+                            self.block(i, *at);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Raise a barrier and tell the ledger about anything it destroyed.
+    fn block(&mut self, x: u32, y: u32) {
+        if x >= self.substrate.width() || y >= self.substrate.height() {
+            return;
+        }
+        let evicted = self.substrate.set_blocked(x as i32, y as i32, true);
+        self.ledger.record_evicted(&evicted);
+    }
+
+    fn seed_chemistry(&mut self) {
+        let seeding = self.scenario.seeding.clone();
+        let w = self.substrate.width();
+        let h = self.substrate.height();
+        for s in &seeding {
+            match s {
+                Seeding::Uniform {
+                    chemical,
+                    per_square,
+                } => {
+                    for y in 0..h as i32 {
+                        for x in 0..w as i32 {
+                            self.substrate.add_chem(*chemical, x, y, *per_square);
+                        }
+                    }
+                }
+                Seeding::Gradient {
+                    chemical,
+                    low,
+                    high,
+                    horizontal,
+                } => {
+                    for y in 0..h as i32 {
+                        for x in 0..w as i32 {
+                            let (num, den) = if *horizontal {
+                                (x as i64, (w.saturating_sub(1)).max(1) as i64)
+                            } else {
+                                (y as i64, (h.saturating_sub(1)).max(1) as i64)
+                            };
+                            let v = *low as i64 + (*high as i64 - *low as i64) * num / den;
+                            self.substrate
+                                .add_chem(*chemical, x, y, crate::fixed::sat_i32(v));
+                        }
+                    }
+                }
+                Seeding::Spike {
+                    chemical,
+                    x,
+                    y,
+                    amount,
+                } => {
+                    self.substrate
+                        .add_chem(*chemical, *x as i32, *y as i32, *amount);
+                }
+                Seeding::Patch {
+                    chemical,
+                    x,
+                    y,
+                    width,
+                    height,
+                    per_square,
+                } => {
+                    for dy in 0..*height {
+                        for dx in 0..*width {
+                            self.substrate.add_chem(
+                                *chemical,
+                                x.saturating_add(dx) as i32,
+                                y.saturating_add(dy) as i32,
+                                *per_square,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // Seeding is the world being given its contents, not the world creating matter, so
+        // the baseline is taken afterwards rather than each placement being "injected".
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn tick_count(&self) -> u64 {
+        self.tick
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn substrate(&self) -> &Substrate {
+        &self.substrate
+    }
+
+    #[inline]
+    pub fn substrate_mut(&mut self) -> &mut Substrate {
+        &mut self.substrate
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn ledger(&self) -> &Ledger {
+        &self.ledger
+    }
+
+    #[inline]
+    pub fn ledger_mut(&mut self) -> &mut Ledger {
+        &mut self.ledger
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn scenario(&self) -> &Scenario {
+        &self.scenario
+    }
+
+    #[must_use]
+    pub fn impulses(&self) -> (&[i32], &[i32]) {
+        (&self.impulse_x, &self.impulse_y)
+    }
+
+    /// Inject momentum at a square. This is the API cilia will use at M3.
+    ///
+    /// Momentum is not matter and is not conserved — it decays, which is what stops one flick
+    /// of one cilium from stirring the slide forever.
+    pub fn inject_impulse(&mut self, x: i32, y: i32, dx: i32, dy: i32) {
+        let i = self.substrate.index(x, y);
+        if self.substrate.blocked()[i] {
+            return;
+        }
+        let limit = crate::fixed::Q10_ONE;
+        let was = self.impulse_x[i] != 0 || self.impulse_y[i] != 0;
+        self.impulse_x[i] =
+            (self.impulse_x[i] as i64 + dx as i64).clamp(-(limit as i64), limit as i64) as i32;
+        self.impulse_y[i] =
+            (self.impulse_y[i] as i64 + dy as i64).clamp(-(limit as i64), limit as i64) as i32;
+        let now = self.impulse_x[i] != 0 || self.impulse_y[i] != 0;
+        if now && !was {
+            self.active_impulses = self.active_impulses.saturating_add(1);
+        } else if was && !now {
+            self.active_impulses = self.active_impulses.saturating_sub(1);
+        }
+        self.velocity_written = false;
+    }
+
+    /// Advance one tick, in the fixed order of SPEC §12.
+    pub fn step(&mut self) {
+        // 1-4. Sense, execute, resolve, physics. Nothing is alive yet; M2 fills these in.
+
+        // 5. Fluid, at fluid_hz.
+        let interval = self.scenario.fluid_interval.max(1) as u64;
+        if self.tick % interval == 0 {
+            self.refresh_light();
+            self.refresh_velocity();
+            fluid::step(
+                &mut self.substrate,
+                &self.diffusion_rates,
+                &mut self.scratch,
+            );
+            if self.active_impulses > 0 {
+                decay_impulses(
+                    &mut self.impulse_x,
+                    &mut self.impulse_y,
+                    self.scenario.impulse_retain,
+                );
+                self.active_impulses = self
+                    .impulse_x
+                    .iter()
+                    .zip(self.impulse_y.iter())
+                    .filter(|(x, y)| **x != 0 || **y != 0)
+                    .count() as u32;
+                self.velocity_written = false;
+            }
+        }
+
+        // 6. Bookkeeping.
+        self.tick = self.tick.saturating_add(1);
+        debug_assert!(
+            self.ledger.check_energy().is_ok(),
+            "energy accounting broke at tick {}",
+            self.tick
+        );
+    }
+
+    /// Advance many ticks.
+    pub fn run(&mut self, ticks: u64) {
+        for _ in 0..ticks {
+            self.step();
+        }
+    }
+
+    /// Rewrite the light field if the regime needs it.
+    fn refresh_light(&mut self) {
+        if self.light_written && !self.scenario.light.is_time_varying() {
+            return;
+        }
+        let regime = self.scenario.light.clone();
+        regime.apply(&mut self.substrate, self.tick);
+        self.light_written = true;
+    }
+
+    /// Rewrite the velocity field from the prescribed current plus the impulse layer.
+    ///
+    /// Skipped entirely once written, unless a cilium has pushed on the water since. A
+    /// prescribed current does not depend on the tick.
+    fn refresh_velocity(&mut self) {
+        if self.velocity_written {
+            return;
+        }
+        self.velocity_written = true;
+        let current: CurrentField = self.scenario.current.clone();
+        // Take the impulse buffers out so the substrate can be borrowed mutably.
+        let ix = std::mem::take(&mut self.impulse_x);
+        let iy = std::mem::take(&mut self.impulse_y);
+        current.apply(&mut self.substrate, &ix, &iy);
+        self.impulse_x = ix;
+        self.impulse_y = iy;
+    }
+
+    /// Overwrite every piece of world state at once, for [`crate::snapshot::Snapshot`].
+    ///
+    /// Deliberately blunt and deliberately crate-private: I7 says a restored world must be
+    /// bit-identical, and the way to be sure of that is for restoration to set *everything*
+    /// rather than to patch selected fields and hope the rest was already right. Hard rule 7
+    /// — if you add state, extend the serialisation in the same commit — means adding a
+    /// parameter here, which is a compile error at both call sites until it is handled.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn restore(
+        &mut self,
+        tick: u64,
+        planes: Vec<Vec<i32>>,
+        light: Vec<i32>,
+        vx: Vec<i32>,
+        vy: Vec<i32>,
+        blocked: Vec<bool>,
+        impulse_x: Vec<i32>,
+        impulse_y: Vec<i32>,
+        chem_totals: [i64; CHEM_COUNT],
+        evicted: [i64; CHEM_COUNT],
+        energy_in: i64,
+        energy_out: i64,
+        energy_stored: i64,
+    ) {
+        self.tick = tick;
+        self.substrate.restore(planes, light, vx, vy, blocked);
+        self.impulse_x = impulse_x;
+        self.impulse_y = impulse_y;
+        self.ledger
+            .restore(chem_totals, evicted, energy_in, energy_out, energy_stored);
+        // The light and velocity fields came from the snapshot, so neither may be overwritten
+        // by a fresh evaluation on the next step.
+        self.light_written = true;
+        self.velocity_written = true;
+        self.active_impulses = self
+            .impulse_x
+            .iter()
+            .zip(self.impulse_y.iter())
+            .filter(|(x, y)| **x != 0 || **y != 0)
+            .count() as u32;
+    }
+
+    /// Change the light regime mid-run — an authored scenario event (M8).
+    pub fn set_light(&mut self, regime: LightRegime) {
+        self.scenario.light = regime;
+        self.light_written = false;
+    }
+
+    /// Change the prescribed current mid-run.
+    pub fn set_current(&mut self, current: CurrentField) {
+        self.scenario.current = current;
+        self.velocity_written = false;
+    }
+
+    /// Check I4 against an independent recomputation.
+    ///
+    /// # Errors
+    ///
+    /// The first chemical whose ledger total and actual total differ.
+    pub fn check_matter(&self) -> Result<(), LedgerBreach> {
+        self.ledger.check_matter(&self.substrate.total_chem())
+    }
+
+    /// Check I5.
+    ///
+    /// # Errors
+    ///
+    /// The energy identity, if it does not hold exactly.
+    pub fn check_energy(&self) -> Result<(), LedgerBreach> {
+        self.ledger.check_energy()
+    }
+
+    /// Everything the invariants promise, checked at once. Used by the acceptance tests and
+    /// available to any caller that wants to be sure.
+    ///
+    /// # Errors
+    ///
+    /// The first invariant that does not hold.
+    pub fn check_invariants(&self) -> Result<(), LedgerBreach> {
+        self.check_matter()?;
+        self.check_energy()?;
+        Ok(())
+    }
+
+    /// The rolling world-state hash (I1). Computed on demand rather than every tick: it
+    /// touches every square of every chemical, which is four million values on a 512×512
+    /// grid and far too much to do inside a 2ms step budget.
+    #[must_use]
+    pub fn state_hash(&self) -> u64 {
+        let mut h = StateHasher::new();
+        self.hash_state(&mut h);
+        h.finish()
+    }
+}
+
+impl StateHash for World {
+    fn hash_state(&self, h: &mut StateHasher) {
+        h.u64(self.tick);
+        self.scenario.hash_state(h);
+        self.substrate.hash_state(h);
+        self.ledger.hash_state(h);
+        for v in &self.impulse_x {
+            h.i32(*v);
+        }
+        for v in &self.impulse_y {
+            h.i32(*v);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixed::q10;
+
+    #[test]
+    fn a_world_starts_balanced() {
+        let w = World::new(Scenario::stress(32, 24)).unwrap();
+        w.check_invariants().unwrap();
+        assert!(w.substrate().total_chem().iter().any(|t| *t > 0));
+    }
+
+    #[test]
+    fn barriers_go_up_before_seeding() {
+        // Otherwise a scenario would place matter into a square that is about to be walled
+        // off, and the eviction would look exactly like a conservation bug.
+        let s = Scenario {
+            width: 8,
+            height: 8,
+            barriers: vec![Barrier::Square { x: 4, y: 4 }],
+            seeding: vec![Seeding::Uniform {
+                chemical: 0,
+                per_square: q10(100),
+            }],
+            ..Scenario::default()
+        };
+        let w = World::new(s).unwrap();
+        assert_eq!(w.substrate().chem_at(0, 4, 4), 0);
+        assert_eq!(w.ledger().evicted()[0], 0, "nothing had to be destroyed");
+        // 63 open squares, not 64
+        assert_eq!(w.ledger().chem_totals()[0], 63 * q10(100) as i64);
+        w.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn stepping_conserves_matter_exactly() {
+        let mut w = World::new(Scenario::stress(24, 20)).unwrap();
+        let before = w.substrate().total_chem();
+        for _ in 0..2000 {
+            w.step();
+            w.check_invariants().unwrap();
+        }
+        assert_eq!(w.substrate().total_chem(), before);
+    }
+
+    #[test]
+    fn the_fluid_interval_is_honoured() {
+        let s = Scenario {
+            width: 32,
+            height: 32,
+            fluid_interval: 10,
+            seeding: vec![Seeding::Spike {
+                chemical: 0,
+                x: 16,
+                y: 16,
+                amount: q10(1_000_000),
+            }],
+            ..Scenario::default()
+        };
+        let mut w = World::new(s).unwrap();
+        // Tick 0 runs the fluid: the interval counts from the start of the run, so the first
+        // tick is a fluid tick.
+        let before = w.state_hash();
+        w.step();
+        let after_first = w.state_hash();
+        assert_ne!(after_first, before, "tick 0 should have run the fluid");
+
+        // Ticks 1..=9 are not fluid ticks, so nothing about the world moves except the clock.
+        for _ in 0..9 {
+            w.step();
+            assert_eq!(
+                w.substrate().chem_plane(0),
+                {
+                    let mut reference = World::new(w.scenario().clone()).unwrap();
+                    reference.step();
+                    reference.substrate().chem_plane(0).to_vec()
+                },
+                "the substrate moved on a non-fluid tick"
+            );
+        }
+        assert_eq!(w.tick_count(), 10);
+
+        // Tick 10 is.
+        let before_tenth = w.substrate().chem_plane(0).to_vec();
+        w.step();
+        assert_ne!(w.substrate().chem_plane(0), before_tenth.as_slice());
+    }
+
+    #[test]
+    fn a_time_varying_light_regime_is_rewritten_and_a_static_one_is_not() {
+        let mut day = World::new(Scenario {
+            width: 8,
+            height: 8,
+            light: LightRegime::DayNight {
+                period_ticks: 64,
+                day: 1024,
+                night: 0,
+            },
+            ..Scenario::default()
+        })
+        .unwrap();
+        let dark = day.substrate().light_at(0, 0);
+        day.run(32);
+        assert!(day.substrate().light_at(0, 0) > dark, "day never came");
+
+        let mut still = World::new(Scenario {
+            width: 8,
+            height: 8,
+            light: LightRegime::Uniform { intensity: 500 },
+            ..Scenario::default()
+        })
+        .unwrap();
+        still.run(100);
+        assert_eq!(still.substrate().light_at(0, 0), 500);
+    }
+
+    #[test]
+    fn impulses_move_matter_and_then_fade() {
+        let s = Scenario {
+            width: 16,
+            height: 4,
+            seeding: vec![Seeding::Spike {
+                chemical: 0,
+                x: 2,
+                y: 2,
+                amount: q10(10_000),
+            }],
+            impulse_retain: crate::fixed::Q10_ONE / 2,
+            ..Scenario::default()
+        };
+        let mut w = World::new(s).unwrap();
+        let before = w.substrate().total_chem();
+        for _ in 0..8 {
+            for y in 0..4 {
+                for x in 0..16 {
+                    w.inject_impulse(x, y, crate::fixed::Q10_ONE, 0);
+                }
+            }
+            w.step();
+        }
+        assert!(
+            w.substrate().chem_at(0, 2, 2) < q10(10_000),
+            "nothing moved"
+        );
+        assert_eq!(w.substrate().total_chem(), before, "and nothing was lost");
+
+        w.run(64);
+        let (ix, _) = w.impulses();
+        assert!(ix.iter().all(|v| *v == 0), "impulses stirred forever");
+    }
+
+    #[test]
+    fn an_impulse_into_a_barrier_is_ignored() {
+        let mut w = World::new(Scenario {
+            width: 8,
+            height: 8,
+            barriers: vec![Barrier::Square { x: 3, y: 3 }],
+            ..Scenario::default()
+        })
+        .unwrap();
+        w.inject_impulse(3, 3, 500, 500);
+        let (ix, iy) = w.impulses();
+        let i = w.substrate().index(3, 3);
+        assert_eq!((ix[i], iy[i]), (0, 0));
+    }
+
+    #[test]
+    fn a_wall_with_a_gap_leaves_exactly_the_gap() {
+        let w = World::new(Scenario {
+            width: 16,
+            height: 16,
+            barriers: vec![Barrier::WallWithGap {
+                at: 8,
+                vertical: true,
+                gap_start: 6,
+                gap_len: 2,
+            }],
+            ..Scenario::default()
+        })
+        .unwrap();
+        for y in 0..16 {
+            let open = (6..8).contains(&y);
+            assert_eq!(!w.substrate().is_blocked(8, y), open, "row {y}");
+        }
+    }
+
+    #[test]
+    fn the_state_hash_moves_with_the_world_and_not_otherwise() {
+        let mut a = World::new(Scenario::stress(16, 16)).unwrap();
+        let b = World::new(Scenario::stress(16, 16)).unwrap();
+        assert_eq!(a.state_hash(), b.state_hash(), "same scenario, same state");
+        a.step();
+        assert_ne!(a.state_hash(), b.state_hash());
+    }
+
+    #[test]
+    fn two_worlds_from_one_scenario_stay_identical() {
+        let mut a = World::new(Scenario::stress(20, 17)).unwrap();
+        let mut b = World::new(Scenario::stress(20, 17)).unwrap();
+        for _ in 0..500 {
+            a.step();
+            b.step();
+            assert_eq!(
+                a.state_hash(),
+                b.state_hash(),
+                "diverged at tick {}",
+                a.tick
+            );
+        }
+    }
+}

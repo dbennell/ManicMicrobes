@@ -7,13 +7,21 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# Deliberately empty. Invariant I2 and hard rule 1 are much easier to keep when nothing
-# is pulled in that could violate them. M1 adds serde and rayon; nothing before that.
+# Kept to the minimum that the milestones actually require, and reviewed by
+# `tests/hard_rules.rs`: rayon for the fluid solver, serde + ron for scenario files.
+# Nothing here can pull in Bevy, floats-as-simulation-state, or a clock.
 [dependencies]
+rayon = "1.12"
+serde = { version = "1.0", features = ["derive"] }
+ron = "0.12"
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false }
 
 [[bench]]
 name = "vm"
+harness = false
+
+[[bench]]
+name = "fluid"
 harness = false

@@ -34,18 +34,35 @@
 )]
 #![warn(missing_debug_implementations)]
 
+pub mod chem;
 pub mod config;
+pub mod fixed;
+pub mod fluid;
 pub mod genome;
 pub mod host;
 pub mod isa;
+pub mod ledger;
+pub mod light;
 pub mod rng;
+pub mod scenario;
+pub mod snapshot;
 pub mod state_hash;
+pub mod substrate;
 pub mod vm;
+pub mod world;
 
+pub use chem::{ChemTable, ChemicalDef, CHEM_COUNT};
 pub use config::VmConfig;
+pub use fixed::{POS_ONE, Q10_ONE};
 pub use genome::{Genome, GenomeError, GenomePool, Promoter, MAX_GENOME_LEN};
 pub use host::{Host, NullHost, RecordingHost, INJECT_SELF};
 pub use isa::{Op, Template, ISA_VERSION, MAX_TEMPLATE_LEN, OPCODE_COUNT};
+pub use ledger::{Ledger, LedgerBreach};
+pub use light::{CurrentField, Edge, LightRegime};
 pub use rng::{mix64, Purpose, RandCtx};
+pub use scenario::{Barrier, Scenario, ScenarioError, Seeding};
+pub use snapshot::{Snapshot, SnapshotError};
 pub use state_hash::{StateHash, StateHasher};
+pub use substrate::{Substrate, SubstrateError};
 pub use vm::{Vm, CALL_STACK_LEN, DATA_STACK_LEN, RAM_WORDS, REGISTER_COUNT};
+pub use world::World;

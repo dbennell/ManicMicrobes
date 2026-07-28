@@ -288,10 +288,57 @@ fn no_bevy_in_the_dependency_graph() {
          that a headless run is never hostage to a frame budget"
     );
 
-    // And nothing at all, in fact: M0's dependency list is empty by design, because I2 and
-    // I3 are far easier to keep when there is nothing to violate them.
-    let count = tree.lines().filter(|l| !l.trim().is_empty()).count();
-    assert_eq!(count, 1, "mm-core has grown dependencies:\n{tree}");
+    // And nothing else has crept in either. `mm-core` carries the invariants that are
+    // hardest to keep and easiest to lose to somebody else's code — no floats in simulation
+    // state, no clock, no global RNG, no hash-ordered iteration — so its dependency list is
+    // reviewed rather than merely bounded. Anything not on this list is a decision, not an
+    // accident, and should be added here deliberately.
+    //
+    // What is here and why:
+    //   rayon  — the fluid solver's parallelism (M1). Its scheduling is unobservable by
+    //            construction; see `fluid`'s module docs.
+    //   serde  — scenario files (SPEC §16). Derive only; no runtime behaviour.
+    //   ron    — the scenario file format itself.
+    // Everything below those is their own transitive closure.
+    const REVIEWED_ROOTS: &[&str] = &["mm-core", "rayon", "serde", "ron"];
+    const REVIEWED_TRANSITIVE: &[&str] = &[
+        "rayon-core",
+        "crossbeam-deque",
+        "crossbeam-epoch",
+        "crossbeam-utils",
+        "either",
+        "serde_derive",
+        "serde_core",
+        "proc-macro2",
+        "quote",
+        "syn",
+        "unicode-ident",
+        "base64",
+        "bitflags",
+        "once_cell",
+        "typeid",
+        "unicode-ident",
+    ];
+
+    let mut unexpected: Vec<String> = Vec::new();
+    for line in tree.lines() {
+        let name = line.split_whitespace().next().unwrap_or("");
+        if name.is_empty() {
+            continue;
+        }
+        if REVIEWED_ROOTS.contains(&name) || REVIEWED_TRANSITIVE.contains(&name) {
+            continue;
+        }
+        unexpected.push(name.to_string());
+    }
+    unexpected.sort();
+    unexpected.dedup();
+    assert!(
+        unexpected.is_empty(),
+        "mm-core has picked up unreviewed dependencies: {unexpected:?}\n\
+         Add them to REVIEWED_TRANSITIVE only after checking they cannot introduce floats \
+         into simulation state, a clock, a global RNG, or hash-ordered iteration.\n{tree}"
+    );
 }
 
 /// The lints above pass. These check they would not pass on a violation — a guard that

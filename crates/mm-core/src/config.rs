@@ -6,7 +6,8 @@
 /// Parameters that change how a genome executes. Part of the reproducibility contract: two
 /// runs with different `VmConfig` are not comparable, so the values belong in the scenario
 /// file and in any saved state.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct VmConfig {
     /// Instructions a cell may execute per tick (SPEC §5). `HALT` yields the remainder.
     pub instr_per_tick: u16,

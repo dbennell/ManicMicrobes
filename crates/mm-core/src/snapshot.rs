@@ -1,0 +1,539 @@
+//! Complete world state, serialised (invariant I7).
+//!
+//! > Complete world state round-trips through serialisation with bit-identical resumption.
+//! > This is a hard requirement now even though networking is deferred, because retrofitting
+//! > it is infeasible.
+//!
+//! # Why a hand-rolled binary format
+//!
+//! The scenario is `.ron` because a human edits it. A snapshot is not: it is four million
+//! integers on a 512×512 grid, and as text it would be tens of megabytes of digits that
+//! nobody reads. So this is a compact binary format, written by hand.
+//!
+//! Hand-rolled rather than reached for from a crate, for two reasons. The first is that
+//! "bit-identical resumption" is the whole requirement, and a format whose exact byte
+//! layout is under our control is one where that is checkable by reading it. The second is
+//! versioning: every save carries the ISA version, and a genome archived under a different
+//! opcode table means something different now than it did when it evolved (SPEC §16). That
+//! refusal has to be explicit, not a deserialisation error about an unexpected field.
+//!
+//! # Adding state
+//!
+//! Hard rule 7: *if you add state, extend the serialisation and its test in the same
+//! commit.* [`Snapshot::write`] and [`Snapshot::read`] must stay mirror images, and
+//! `world_survives_a_round_trip` is the test that catches it when they do not.
+
+use crate::chem::CHEM_COUNT;
+use crate::isa::ISA_VERSION;
+use crate::scenario::Scenario;
+use crate::world::World;
+
+/// Magic bytes at the head of every snapshot: "MMSNAP\0\x01".
+pub const MAGIC: [u8; 8] = *b"MMSNAP\0\x01";
+/// Snapshot format version, distinct from the ISA version. The format may change without
+/// the meaning of a genome changing, and vice versa.
+pub const FORMAT_VERSION: u16 = 1;
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum SnapshotError {
+    NotASnapshot,
+    /// A format this build does not know how to read.
+    FormatVersion {
+        found: u16,
+        expected: u16,
+    },
+    /// Genomes in this save mean something different under this engine's opcode table.
+    IsaMismatch {
+        found: u16,
+        expected: u16,
+    },
+    /// The file ended in the middle of a field.
+    Truncated {
+        at: usize,
+    },
+    /// The embedded scenario did not parse.
+    Scenario(String),
+    /// A length field described more data than the file contains, or than is legal.
+    Corrupt(String),
+}
+
+impl std::fmt::Display for SnapshotError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SnapshotError::NotASnapshot => write!(f, "not a Manic Microbes snapshot"),
+            SnapshotError::FormatVersion { found, expected } => write!(
+                f,
+                "snapshot format version {found}, this build reads {expected}"
+            ),
+            SnapshotError::IsaMismatch { found, expected } => write!(
+                f,
+                "snapshot was made under ISA version {found}, this engine is version \
+                 {expected}; every stored genome means something different under a \
+                 different opcode table, so it will not be resumed"
+            ),
+            SnapshotError::Truncated { at } => {
+                write!(f, "snapshot ends unexpectedly at byte {at}")
+            }
+            SnapshotError::Scenario(e) => write!(f, "embedded scenario: {e}"),
+            SnapshotError::Corrupt(e) => write!(f, "corrupt snapshot: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for SnapshotError {}
+
+/// Append-only cursor over a byte buffer.
+struct Writer {
+    bytes: Vec<u8>,
+}
+
+impl Writer {
+    fn new() -> Writer {
+        Writer { bytes: Vec::new() }
+    }
+    fn u8(&mut self, v: u8) {
+        self.bytes.push(v);
+    }
+    fn u16(&mut self, v: u16) {
+        self.bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    fn u32(&mut self, v: u32) {
+        self.bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    fn u64(&mut self, v: u64) {
+        self.bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    fn i32(&mut self, v: i32) {
+        self.u32(v as u32);
+    }
+    fn i64(&mut self, v: i64) {
+        self.u64(v as u64);
+    }
+    fn bool(&mut self, v: bool) {
+        self.u8(u8::from(v));
+    }
+    fn i32_slice(&mut self, v: &[i32]) {
+        self.u64(v.len() as u64);
+        for x in v {
+            self.i32(*x);
+        }
+    }
+    fn bool_slice(&mut self, v: &[bool]) {
+        // One byte per flag. A bitset would be eight times smaller, but barriers are sparse
+        // and a snapshot is not the memory budget; clarity wins over a factor of eight on
+        // the one field that is easiest to get subtly wrong.
+        self.u64(v.len() as u64);
+        for x in v {
+            self.bool(*x);
+        }
+    }
+    fn string(&mut self, v: &str) {
+        self.u64(v.len() as u64);
+        self.bytes.extend_from_slice(v.as_bytes());
+    }
+}
+
+/// Reading cursor. Every read is bounds-checked and returns an error rather than panicking:
+/// a snapshot may be truncated, corrupt or hostile, and none of those may take the process
+/// down.
+struct Reader<'a> {
+    bytes: &'a [u8],
+    at: usize,
+}
+
+impl<'a> Reader<'a> {
+    fn new(bytes: &'a [u8]) -> Reader<'a> {
+        Reader { bytes, at: 0 }
+    }
+
+    fn take(&mut self, n: usize) -> Result<&'a [u8], SnapshotError> {
+        let end = self
+            .at
+            .checked_add(n)
+            .ok_or(SnapshotError::Truncated { at: self.at })?;
+        let slice = self
+            .bytes
+            .get(self.at..end)
+            .ok_or(SnapshotError::Truncated { at: self.at })?;
+        self.at = end;
+        Ok(slice)
+    }
+
+    fn u8(&mut self) -> Result<u8, SnapshotError> {
+        Ok(self.take(1)?.first().copied().unwrap_or(0))
+    }
+
+    fn u16(&mut self) -> Result<u16, SnapshotError> {
+        let b = self.take(2)?;
+        Ok(u16::from_le_bytes([
+            b.first().copied().unwrap_or(0),
+            b.get(1).copied().unwrap_or(0),
+        ]))
+    }
+
+    fn u32(&mut self) -> Result<u32, SnapshotError> {
+        let b = self.take(4)?;
+        let mut a = [0u8; 4];
+        for (slot, byte) in a.iter_mut().zip(b) {
+            *slot = *byte;
+        }
+        Ok(u32::from_le_bytes(a))
+    }
+
+    fn u64(&mut self) -> Result<u64, SnapshotError> {
+        let b = self.take(8)?;
+        let mut a = [0u8; 8];
+        for (slot, byte) in a.iter_mut().zip(b) {
+            *slot = *byte;
+        }
+        Ok(u64::from_le_bytes(a))
+    }
+
+    fn i32(&mut self) -> Result<i32, SnapshotError> {
+        Ok(self.u32()? as i32)
+    }
+
+    fn i64(&mut self) -> Result<i64, SnapshotError> {
+        Ok(self.u64()? as i64)
+    }
+
+    fn bool(&mut self) -> Result<bool, SnapshotError> {
+        Ok(self.u8()? != 0)
+    }
+
+    /// A length-prefixed slice. The length is checked against what remains *before*
+    /// allocating, so a corrupt header claiming four billion elements fails immediately
+    /// rather than trying to reserve sixteen gigabytes.
+    fn i32_vec(&mut self) -> Result<Vec<i32>, SnapshotError> {
+        let n = self.u64()? as usize;
+        let bytes = n.checked_mul(4).ok_or_else(|| {
+            SnapshotError::Corrupt(format!("{n} elements is not a plausible length"))
+        })?;
+        if self.bytes.len().saturating_sub(self.at) < bytes {
+            return Err(SnapshotError::Corrupt(format!(
+                "claims {n} values but only {} bytes remain",
+                self.bytes.len().saturating_sub(self.at)
+            )));
+        }
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            out.push(self.i32()?);
+        }
+        Ok(out)
+    }
+
+    fn bool_vec(&mut self) -> Result<Vec<bool>, SnapshotError> {
+        let n = self.u64()? as usize;
+        if self.bytes.len().saturating_sub(self.at) < n {
+            return Err(SnapshotError::Corrupt(format!(
+                "claims {n} flags but only {} bytes remain",
+                self.bytes.len().saturating_sub(self.at)
+            )));
+        }
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            out.push(self.bool()?);
+        }
+        Ok(out)
+    }
+
+    fn string(&mut self) -> Result<String, SnapshotError> {
+        let n = self.u64()? as usize;
+        let b = self.take(n)?;
+        String::from_utf8(b.to_vec())
+            .map_err(|e| SnapshotError::Corrupt(format!("invalid utf-8: {e}")))
+    }
+}
+
+/// Save and restore of complete world state.
+#[derive(Clone, Copy, Debug)]
+pub struct Snapshot;
+
+impl Snapshot {
+    /// Serialise a world.
+    ///
+    /// # Errors
+    ///
+    /// Only if the embedded scenario cannot be rendered to `.ron`.
+    pub fn write(world: &World) -> Result<Vec<u8>, SnapshotError> {
+        let mut w = Writer::new();
+        w.bytes.extend_from_slice(&MAGIC);
+        w.u16(FORMAT_VERSION);
+        w.u16(ISA_VERSION);
+
+        let scenario_ron = world
+            .scenario()
+            .to_ron()
+            .map_err(|e| SnapshotError::Scenario(e.to_string()))?;
+        w.string(&scenario_ron);
+
+        w.u64(world.tick_count());
+
+        let s = world.substrate();
+        w.u32(s.width());
+        w.u32(s.height());
+        for c in 0..CHEM_COUNT {
+            w.i32_slice(s.chem_plane(c));
+        }
+        w.i32_slice(s.light());
+        let (vx, vy) = s.velocity();
+        w.i32_slice(vx);
+        w.i32_slice(vy);
+        w.bool_slice(s.blocked());
+
+        let (ix, iy) = world.impulses();
+        w.i32_slice(ix);
+        w.i32_slice(iy);
+
+        let l = world.ledger();
+        for v in l.chem_totals() {
+            w.i64(v);
+        }
+        for v in l.evicted() {
+            w.i64(v);
+        }
+        w.i64(l.energy_in());
+        w.i64(l.energy_out());
+        w.i64(l.energy_stored());
+
+        Ok(w.bytes)
+    }
+
+    /// Restore a world.
+    ///
+    /// # Errors
+    ///
+    /// A file that is not a snapshot, is a format or ISA version this build will not honour,
+    /// is truncated, or is internally inconsistent.
+    pub fn read(bytes: &[u8]) -> Result<World, SnapshotError> {
+        let mut r = Reader::new(bytes);
+        let magic = r.take(MAGIC.len())?;
+        if magic != MAGIC {
+            return Err(SnapshotError::NotASnapshot);
+        }
+        let format = r.u16()?;
+        if format != FORMAT_VERSION {
+            return Err(SnapshotError::FormatVersion {
+                found: format,
+                expected: FORMAT_VERSION,
+            });
+        }
+        let isa = r.u16()?;
+        if isa != ISA_VERSION {
+            return Err(SnapshotError::IsaMismatch {
+                found: isa,
+                expected: ISA_VERSION,
+            });
+        }
+
+        let scenario_ron = r.string()?;
+        let scenario = Scenario::from_ron(&scenario_ron)
+            .map_err(|e| SnapshotError::Scenario(e.to_string()))?;
+        let tick = r.u64()?;
+
+        let width = r.u32()?;
+        let height = r.u32()?;
+        if width != scenario.width || height != scenario.height {
+            return Err(SnapshotError::Corrupt(format!(
+                "grid is {width}x{height} but the scenario says {}x{}",
+                scenario.width, scenario.height
+            )));
+        }
+
+        // Build from the scenario so barriers and derived tables come out consistent, then
+        // overwrite every field with the saved values. The scenario's own seeding is
+        // discarded by the overwrite, which is correct: the snapshot is the truth.
+        let mut world = World::new(scenario).map_err(|e| SnapshotError::Scenario(e.to_string()))?;
+        let expected = (width as usize).saturating_mul(height as usize);
+
+        let mut planes = Vec::with_capacity(CHEM_COUNT);
+        for c in 0..CHEM_COUNT {
+            let plane = r.i32_vec()?;
+            if plane.len() != expected {
+                return Err(SnapshotError::Corrupt(format!(
+                    "chemical {c} has {} values, expected {expected}",
+                    plane.len()
+                )));
+            }
+            planes.push(plane);
+        }
+        let light = r.i32_vec()?;
+        let vx = r.i32_vec()?;
+        let vy = r.i32_vec()?;
+        let blocked = r.bool_vec()?;
+        let ix = r.i32_vec()?;
+        let iy = r.i32_vec()?;
+        for (name, len) in [
+            ("light", light.len()),
+            ("vx", vx.len()),
+            ("vy", vy.len()),
+            ("blocked", blocked.len()),
+            ("impulse_x", ix.len()),
+            ("impulse_y", iy.len()),
+        ] {
+            if len != expected {
+                return Err(SnapshotError::Corrupt(format!(
+                    "{name} has {len} values, expected {expected}"
+                )));
+            }
+        }
+
+        let mut chem_totals = [0i64; CHEM_COUNT];
+        for slot in chem_totals.iter_mut() {
+            *slot = r.i64()?;
+        }
+        let mut evicted = [0i64; CHEM_COUNT];
+        for slot in evicted.iter_mut() {
+            *slot = r.i64()?;
+        }
+        let energy_in = r.i64()?;
+        let energy_out = r.i64()?;
+        let energy_stored = r.i64()?;
+
+        world.restore(
+            tick,
+            planes,
+            light,
+            vx,
+            vy,
+            blocked,
+            ix,
+            iy,
+            chem_totals,
+            evicted,
+            energy_in,
+            energy_out,
+            energy_stored,
+        );
+        Ok(world)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scenario::Scenario;
+
+    fn stirred(ticks: u64) -> World {
+        let mut w = World::new(Scenario::stress(24, 20)).unwrap();
+        w.run(ticks);
+        w
+    }
+
+    #[test]
+    fn a_world_survives_a_round_trip() {
+        let original = stirred(500);
+        let bytes = Snapshot::write(&original).unwrap();
+        let restored = Snapshot::read(&bytes).unwrap();
+        assert_eq!(restored.state_hash(), original.state_hash());
+        assert_eq!(restored, original, "some field is missing from the format");
+    }
+
+    #[test]
+    fn a_restored_world_runs_on_identically() {
+        // The property that matters: not just that the bytes match, but that the future
+        // does. This is what makes networking and long-run checkpointing possible later.
+        let mut uninterrupted = stirred(200);
+        let mut resumed = Snapshot::read(&Snapshot::write(&uninterrupted).unwrap()).unwrap();
+        for tick in 0..500 {
+            uninterrupted.step();
+            resumed.step();
+            assert_eq!(
+                resumed.state_hash(),
+                uninterrupted.state_hash(),
+                "diverged {tick} ticks after resuming"
+            );
+        }
+    }
+
+    #[test]
+    fn impulses_and_the_ledger_survive_too() {
+        let mut w = World::new(Scenario::stress(16, 16)).unwrap();
+        w.inject_impulse(3, 3, 700, -400);
+        w.ledger_mut().absorb(12_345);
+        w.ledger_mut().dissipate(2_345);
+        let restored = Snapshot::read(&Snapshot::write(&w).unwrap()).unwrap();
+        let (ix, iy) = restored.impulses();
+        let i = restored.substrate().index(3, 3);
+        assert_eq!((ix[i], iy[i]), (700, -400));
+        assert_eq!(restored.ledger().energy_in(), 12_345);
+        assert_eq!(restored.ledger().energy_out(), 2_345);
+        assert_eq!(restored.ledger().energy_stored(), 10_000);
+        restored.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn a_foreign_file_is_refused_rather_than_misread() {
+        assert_eq!(
+            Snapshot::read(b"not a snapshot at all").unwrap_err(),
+            SnapshotError::NotASnapshot
+        );
+        assert!(matches!(
+            Snapshot::read(b"").unwrap_err(),
+            SnapshotError::Truncated { .. }
+        ));
+    }
+
+    #[test]
+    fn a_foreign_isa_version_is_refused() {
+        let mut bytes = Snapshot::write(&stirred(1)).unwrap();
+        // The ISA stamp sits right after the magic and the format version.
+        let at = MAGIC.len() + 2;
+        bytes[at] = 99;
+        bytes[at + 1] = 0;
+        assert_eq!(
+            Snapshot::read(&bytes).unwrap_err(),
+            SnapshotError::IsaMismatch {
+                found: 99,
+                expected: ISA_VERSION
+            }
+        );
+    }
+
+    #[test]
+    fn a_foreign_format_version_is_refused() {
+        let mut bytes = Snapshot::write(&stirred(1)).unwrap();
+        bytes[MAGIC.len()] = 7;
+        assert!(matches!(
+            Snapshot::read(&bytes).unwrap_err(),
+            SnapshotError::FormatVersion { found: 7, .. }
+        ));
+    }
+
+    #[test]
+    fn truncation_at_any_point_is_an_error_and_never_a_panic() {
+        let bytes = Snapshot::write(&stirred(3)).unwrap();
+        for cut in 0..bytes.len() {
+            // Every prefix must be rejected cleanly. A save interrupted by a full disk is a
+            // thing that happens, and it must not take the process down when it is opened.
+            let _ = Snapshot::read(&bytes[..cut]);
+        }
+        assert!(Snapshot::read(&bytes).is_ok());
+    }
+
+    #[test]
+    fn corruption_is_an_error_and_never_a_panic() {
+        let good = Snapshot::write(&stirred(2)).unwrap();
+        for byte in 0..good.len().min(4096) {
+            let mut bytes = good.clone();
+            bytes[byte] ^= 0xFF;
+            let _ = Snapshot::read(&bytes);
+        }
+    }
+
+    #[test]
+    fn a_length_field_cannot_make_it_allocate_the_universe() {
+        let mut bytes = Snapshot::write(&stirred(1)).unwrap();
+        // Find the first chemical plane's length prefix and claim it is enormous.
+        let header = MAGIC.len() + 4;
+        let mut r = Reader::new(&bytes);
+        r.take(header).unwrap();
+        let scenario_len = r.u64().unwrap() as usize;
+        let at = header + 8 + scenario_len + 8 + 4 + 4;
+        bytes[at..at + 8].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(matches!(
+            Snapshot::read(&bytes).unwrap_err(),
+            SnapshotError::Corrupt(_)
+        ));
+    }
+}
