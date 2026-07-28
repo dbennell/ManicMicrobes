@@ -636,6 +636,7 @@ fn try_split(
         y: cells.y[i],
         membrane,
         key: cells.key[i],
+        species: cells.species[i],
     });
     true
 }
@@ -669,7 +670,10 @@ pub fn apply_births(
             energy: birth.energy,
             membrane: birth.membrane,
             key: birth.key,
-            species: 0,
+            // Lineage marker, inherited from the parent. Real speciation — forking on
+            // fingerprint distance from a founder — is M5's; until then this is what lets a
+            // run tell two seeded strains apart.
+            species: birth.species,
             parent: birth.parent,
             birth_tick: tick,
             genome,

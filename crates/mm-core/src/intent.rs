@@ -174,6 +174,8 @@ pub struct PendingBirth {
     pub y: i32,
     pub membrane: u8,
     pub key: u8,
+    /// Inherited from the parent. M5 replaces this with real speciation.
+    pub species: u32,
 }
 
 impl Pending {
