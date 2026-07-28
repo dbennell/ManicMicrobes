@@ -114,7 +114,10 @@ impl NeighbourIndex {
 pub fn touch_reading(cells: &CellArena, index: &NeighbourIndex, i: usize) -> TouchReading {
     let sx = pos_to_square(cells.x[i]);
     let sy = pos_to_square(cells.y[i]);
-    let reach = crate::biology::radius(cells, i).saturating_mul(2);
+    // Hoisted: `radius` is an integer square root, and the sensing cell's own radius does not
+    // change while it is looking around.
+    let ri = crate::biology::radius(cells, i);
+    let reach = ri.saturating_mul(2);
 
     let mut contacts = 0i32;
     let mut nearest = i32::MAX;
@@ -126,7 +129,7 @@ pub fn touch_reading(cells: &CellArena, index: &NeighbourIndex, i: usize) -> Tou
         }
         let d = separation(cells, i, j);
         let touching = crate::biology::radius(cells, j)
-            .saturating_add(crate::biology::radius(cells, i))
+            .saturating_add(ri)
             .saturating_add(reach);
         if d <= touching {
             contacts = contacts.saturating_add(1);
@@ -148,8 +151,8 @@ pub fn touch_reading(cells: &CellArena, index: &NeighbourIndex, i: usize) -> Tou
 /// Distance between two cells, `POS` units.
 ///
 /// Octagonal rather than Euclidean: exact in integers, monotonic in the true distance, and
-/// nothing here needs the difference. A square root would need a float or a loop, and this is
-/// on a path walked once per neighbour per cell per tick.
+/// nothing here needs the difference. A Euclidean distance would need a square root, and this
+/// is on a path walked once per neighbour per cell per tick.
 #[inline]
 fn separation(cells: &CellArena, i: usize, j: usize) -> i32 {
     let dx = (cells.x[i] - cells.x[j]).abs();
@@ -162,10 +165,28 @@ fn separation(cells: &CellArena, i: usize, j: usize) -> i32 {
 ///
 /// Returns how many pairs were separated, which is a cheap measure of how crowded the slide
 /// is and the thing to watch if a population stops growing for reasons that are not food.
-pub fn resolve_collisions(cells: &mut CellArena, index: &NeighbourIndex) -> u32 {
+pub fn resolve_collisions(
+    cells: &mut CellArena,
+    index: &NeighbourIndex,
+    radii: &mut Vec<i32>,
+) -> u32 {
     let mut separated = 0u32;
     let width = index.width;
     let height = index.height;
+
+    // Radius is an integer square root, so it is not free, and the inner loop below would
+    // otherwise recompute the same neighbour's radius once per pair it takes part in. Computed
+    // once per cell here instead. Exactly equivalent: radius depends only on mass, and this
+    // function moves cells without changing what they weigh.
+    radii.clear();
+    radii.reserve(cells.capacity());
+    for i in 0..cells.capacity() {
+        radii.push(if cells.occupied(i) {
+            crate::biology::radius(cells, i)
+        } else {
+            0
+        });
+    }
 
     for i in 0..cells.capacity() {
         if !cells.occupied(i) {
@@ -173,19 +194,19 @@ pub fn resolve_collisions(cells: &mut CellArena, index: &NeighbourIndex) -> u32 
         }
         let sx = pos_to_square(cells.x[i]);
         let sy = pos_to_square(cells.y[i]);
-        let ri = crate::biology::radius(cells, i);
+        let ri = radii[i];
 
         // `around` borrows the index and the push writes to cells, which are different
-        // objects, so the neighbours can be walked directly.
-        let neighbours: Vec<usize> = index.around(sx, sy).collect();
-        for j in neighbours {
+        // objects, so the neighbours are walked directly. Collecting them first would be one
+        // heap allocation per cell per tick, which at fifty thousand cells was a third of the
+        // tick on its own.
+        for j in index.around(sx, sy) {
             // Each pair is handled once, by its lower slot, so the push is applied to both
             // sides of one decision rather than to two sides of two.
             if j <= i || !cells.occupied(j) {
                 continue;
             }
-            let rj = crate::biology::radius(cells, j);
-            let want = ri.saturating_add(rj);
+            let want = ri.saturating_add(radii[j]);
             let d = separation(cells, i, j);
             if d >= want {
                 continue;
@@ -302,7 +323,7 @@ mod tests {
         let mut index = NeighbourIndex::default();
         index.rebuild(&cells, 16, 16);
         let before = separation(&cells, 0, 1);
-        let n = resolve_collisions(&mut cells, &index);
+        let n = resolve_collisions(&mut cells, &index, &mut Vec::new());
         assert_eq!(n, 1);
         assert!(
             separation(&cells, 0, 1) > before,
@@ -313,7 +334,7 @@ mod tests {
         let mut index2 = NeighbourIndex::default();
         index2.rebuild(&far, 16, 16);
         let positions: Vec<(i32, i32)> = far.iter().map(|i| (far.x[i], far.y[i])).collect();
-        assert_eq!(resolve_collisions(&mut far, &index2), 0);
+        assert_eq!(resolve_collisions(&mut far, &index2, &mut Vec::new()), 0);
         let after: Vec<(i32, i32)> = far.iter().map(|i| (far.x[i], far.y[i])).collect();
         assert_eq!(positions, after, "distant cells were moved");
     }
@@ -326,7 +347,7 @@ mod tests {
         let mut index = NeighbourIndex::default();
         index.rebuild(&cells, 16, 16);
         for _ in 0..20 {
-            resolve_collisions(&mut cells, &index);
+            resolve_collisions(&mut cells, &index, &mut Vec::new());
             index.rebuild(&cells, 16, 16);
         }
         assert!(
@@ -341,7 +362,7 @@ mod tests {
         let mut index = NeighbourIndex::default();
         index.rebuild(&cells, 16, 16);
         for _ in 0..50 {
-            resolve_collisions(&mut cells, &index);
+            resolve_collisions(&mut cells, &index, &mut Vec::new());
             index.rebuild(&cells, 16, 16);
             for i in cells.iter() {
                 assert!(cells.x[i] >= 0 && cells.x[i] < 16 * POS_ONE);
@@ -362,7 +383,7 @@ mod tests {
             let mut index = NeighbourIndex::default();
             for _ in 0..10 {
                 index.rebuild(&cells, 16, 16);
-                resolve_collisions(&mut cells, &index);
+                resolve_collisions(&mut cells, &index, &mut Vec::new());
             }
             cells
                 .iter()

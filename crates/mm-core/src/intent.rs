@@ -226,7 +226,7 @@ pub struct PendingBirth {
     pub energy: i32,
     /// Half the parent's interior chemistry, moved rather than copied — division splits what
     /// a cell has, it does not duplicate it (I4).
-    pub interior: Vec<i32>,
+    pub interior: [i32; crate::chem::CHEM_COUNT],
     pub x: i32,
     pub y: i32,
     pub membrane: u8,

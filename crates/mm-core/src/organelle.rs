@@ -385,6 +385,21 @@ impl OrganelleCatalogue {
 
         // The membrane is the one thing every cell has, so its upkeep is the floor on the
         // cost of being alive.
+        //
+        // NOT YET IMPLEMENTED: control input 0, `permeability`. SPEC §8 gives the membrane
+        // two controls and only the second, `investment`, is read (by the growth step in
+        // `metabolism`). So passive transport — chemistry crossing the membrane on its own,
+        // down its gradient, without an `EAT` — does not happen, and M2's deliverable list
+        // asks for it. Today a membrane is a perfect barrier, which is the one thing a
+        // membrane is not.
+        //
+        // It is left undone rather than done quickly because of where the default sits.
+        // `Organelle::finished` starts every control at full throttle, which for a
+        // permeability control means *wide open*: switching this on would make every existing
+        // ancestor leak its sugar into the water and absorb the peroxide it just excreted.
+        // That is a change to whether the hand-written ancestors are viable at all, so it
+        // needs its own pass at M2's persistence and selection runs — not a late addition on
+        // top of results already gathered.
         specs[OrganelleType::Membrane as usize] = OrganelleSpec {
             build_matter: q10(8),
             build_matter_per_param: q10(1) / 4,

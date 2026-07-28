@@ -27,6 +27,7 @@ use mm_core::biology::BiologyConfig;
 use mm_core::cell::{CellId, CellSeed};
 use mm_core::fixed::{pos, q10};
 use mm_core::light::CurrentField;
+use mm_core::neighbours::{self, NeighbourIndex};
 use mm_core::{LightRegime, MutationRates, Organelle, OrganelleType, Scenario, Seeding, World};
 
 const TARGET_CELLS: usize = 50_000;
@@ -171,6 +172,80 @@ fn gate(_c: &mut Criterion) {
     }
 }
 
+/// Which phase the tick is actually spent in.
+///
+/// Added when both gates were missed by a wide margin and the fluid turned out to account for
+/// none of it. A number that says "too slow" is not actionable; a number that says which of
+/// the six phases is too slow is. Every phase here is a public function taking public types,
+/// so this measures them exactly as `World::step` calls them, without instrumenting `World`
+/// itself — which could not carry an `Instant` anyway (hard rule 5).
+fn phase_breakdown(_c: &mut Criterion) {
+    if cfg!(debug_assertions) {
+        return;
+    }
+    let Some(mut world) = grown("ancestor.mm", 1) else {
+        return;
+    };
+    let population = world.cells().len();
+    let (w, h) = (world.substrate().width(), world.substrate().height());
+    let n = 60u32;
+
+    eprintln!("\nPhase breakdown at {population} cells ({w}x{h}):");
+
+    let mut index = NeighbourIndex::default();
+    let t = Instant::now();
+    for _ in 0..n {
+        index.rebuild(world.cells(), w, h);
+    }
+    let rebuild = t.elapsed() / n;
+
+    let mut radii = Vec::new();
+    let t = Instant::now();
+    for _ in 0..n {
+        std::hint::black_box(neighbours::resolve_collisions(
+            world.cells_mut(),
+            &index,
+            &mut radii,
+        ));
+    }
+    let collisions = t.elapsed() / n;
+
+    // `execute` and `resolve` need pieces `World` keeps private, so they are measured as the
+    // remainder: whole tick minus everything above and minus the fluid.
+    let t = Instant::now();
+    world.run(n as u64);
+    let whole = t.elapsed() / n;
+
+    let mut empty = World::new(slide(1)).expect("world");
+    empty.run(10);
+    let t = Instant::now();
+    empty.run(n as u64);
+    let fluid = t.elapsed() / n;
+
+    let accounted = rebuild * 2 + collisions + fluid;
+    let rest = whole.saturating_sub(accounted);
+    let pct = |d: std::time::Duration| d.as_secs_f64() / whole.as_secs_f64() * 100.0;
+    eprintln!("  whole tick            {whole:>10.2?}");
+    eprintln!(
+        "  neighbour rebuild x2  {:>10.2?}  {:5.1}%",
+        rebuild * 2,
+        pct(rebuild * 2)
+    );
+    eprintln!(
+        "  collision separation  {collisions:>10.2?}  {:5.1}%",
+        pct(collisions)
+    );
+    eprintln!(
+        "  fluid + bookkeeping   {fluid:>10.2?}  {:5.1}%",
+        pct(fluid)
+    );
+    eprintln!(
+        "  execute + resolve +   {rest:>10.2?}  {:5.1}%  (the remainder)",
+        pct(rest)
+    );
+    eprintln!("    metabolism + physics");
+}
+
 /// Per-phase throughput, for finding out *where* a regression went rather than only that one
 /// happened.
 fn phases(c: &mut Criterion) {
@@ -187,5 +262,5 @@ fn phases(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, gate, phases);
+criterion_group!(benches, gate, phase_breakdown, phases);
 criterion_main!(benches);

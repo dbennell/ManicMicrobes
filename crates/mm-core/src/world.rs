@@ -48,6 +48,9 @@ pub struct World {
     /// Working buffer for the fluid solver. Not state: it holds nothing between steps, and
     /// is excluded from equality, hashing and snapshots for that reason.
     scratch: crate::fluid::FluidScratch,
+    /// Per-cell radii, reused by collision separation so it does not allocate per tick.
+    /// Scratch like `scratch`: excluded from equality and from the hash.
+    radii: Vec<i32>,
 
     /// The population.
     cells: CellArena,
@@ -77,9 +80,9 @@ pub struct TickReport {
     pub physics: crate::sensing::PhysicsReport,
 }
 
-// `scratch` is a scratchpad, so two worlds that differ only in what happens to be left in it
-// are the same world. Deriving `PartialEq` would make the snapshot round-trip test fail for
-// a reason that means nothing.
+// `scratch` and `radii` are scratchpads, so two worlds that differ only in what happens to be
+// left in them are the same world. Deriving `PartialEq` would make the snapshot round-trip
+// test fail for a reason that means nothing.
 impl PartialEq for World {
     fn eq(&self, other: &Self) -> bool {
         self.scenario == other.scenario
@@ -124,6 +127,7 @@ impl World {
             active_impulses: 0,
             diffusion_rates,
             scratch: crate::fluid::FluidScratch::new(n),
+            radii: Vec::new(),
             cells: CellArena::new(),
             genomes: GenomePool::new(),
             biology: BiologyConfig::default(),
@@ -399,8 +403,11 @@ impl World {
             // leave it. Rebuilt first because everything just moved.
             self.neighbours
                 .rebuild(&self.cells, self.substrate.width(), self.substrate.height());
-            report.physics.separated =
-                crate::neighbours::resolve_collisions(&mut self.cells, &self.neighbours);
+            report.physics.separated = crate::neighbours::resolve_collisions(
+                &mut self.cells,
+                &self.neighbours,
+                &mut self.radii,
+            );
         }
 
         // 5. Fluid, at fluid_hz.

@@ -148,12 +148,22 @@ fn q10_to_visible(v: i32) -> i16 {
 /// A cell's radius, `Q10` in substrate squares. Grows with mass, slowly.
 #[must_use]
 pub fn radius(cells: &CellArena, i: usize) -> i32 {
-    // Integer square-root-ish: radius rises with mass but not linearly, so a cell twice as
-    // heavy is not twice as wide. Cheap and monotonic, which is all anything needs of it.
+    // Integer square-root: radius rises with mass but not linearly, so a cell twice as heavy
+    // is not twice as wide. Monotonic, which is all anything needs of it.
+    //
+    // Found by bit rather than by counting up. The counting version was correct and read
+    // better, but this is called once per cell per neighbour on the collision and touch-sensor
+    // paths, and its cost there was proportional to how heavy the cell was — so the simulation
+    // got slower as its cells grew, which is not a thing anyone would think to look for.
     let m = (cells.mass[i] / Q10_ONE).max(0) as u32;
     let mut r = 0u32;
-    while (r + 1) * (r + 1) <= m {
-        r += 1;
+    let mut bit = 1u32 << 15;
+    while bit != 0 {
+        let try_r = r | bit;
+        if try_r.saturating_mul(try_r) <= m {
+            r = try_r;
+        }
+        bit >>= 1;
     }
     (Q10_ONE / 4).saturating_add((r as i32).saturating_mul(Q10_ONE / 8))
 }
@@ -629,7 +639,10 @@ fn try_split(
     let energy = cells.energy[i] / 2;
     cells.energy[i] = cells.energy[i].saturating_sub(energy);
 
-    let mut interior = vec![0i32; CHEM_COUNT];
+    // A fixed array rather than a `Vec`: this runs once per division, and at fifty thousand
+    // cells divisions are frequent enough that a heap allocation for sixteen integers is
+    // worth not doing.
+    let mut interior = [0i32; CHEM_COUNT];
     for (c, share) in interior.iter_mut().enumerate() {
         let half = cells.interior(i)[c] / 2;
         *share = half;
@@ -868,6 +881,43 @@ pub fn execute(
 
 #[cfg(test)]
 mod tests {
+    /// The bit-by-bit square root in `radius` must agree with counting up, for every mass a
+    /// cell can have. Written because the fast version is the kind of change that is right
+    /// for every value anyone tries by hand and wrong at one boundary.
+    #[test]
+    fn the_fast_square_root_agrees_with_the_obvious_one() {
+        fn counting(m: u32) -> u32 {
+            let mut r = 0u32;
+            while (r + 1).saturating_mul(r + 1) <= m {
+                r += 1;
+            }
+            r
+        }
+        fn by_bit(m: u32) -> u32 {
+            let mut r = 0u32;
+            let mut bit = 1u32 << 15;
+            while bit != 0 {
+                let try_r = r | bit;
+                if try_r.saturating_mul(try_r) <= m {
+                    r = try_r;
+                }
+                bit >>= 1;
+            }
+            r
+        }
+        for m in 0..70_000u32 {
+            assert_eq!(by_bit(m), counting(m), "disagreed at mass {m}");
+        }
+        // And around every perfect square up to the representable maximum, where an
+        // off-by-one would hide.
+        for k in 0..=0xFFFFu32 {
+            let sq = k.saturating_mul(k);
+            for m in [sq.saturating_sub(1), sq, sq.saturating_add(1)] {
+                assert_eq!(by_bit(m), counting(m), "disagreed at mass {m} near {k}^2");
+            }
+        }
+    }
+
     use super::*;
     use crate::cell::CellId;
     use crate::fixed::pos;
