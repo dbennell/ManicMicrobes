@@ -67,7 +67,7 @@ pub use genome::{Genome, GenomeError, GenomePool, Promoter, MAX_GENOME_LEN};
 pub use host::{Host, NullHost, RecordingHost, INJECT_SELF};
 pub use intent::{Intent, IntentBuffer, Pending, PendingBirth, SenseView};
 pub use isa::{Op, Template, ISA_VERSION, MAX_TEMPLATE_LEN, OPCODE_COUNT};
-pub use ledger::{Ledger, LedgerBreach};
+pub use ledger::{Ledger, LedgerBreach, TrophicSource};
 pub use light::{CurrentField, Edge, LightRegime};
 pub use metabolism::{MetabolicRates, Metabolism};
 pub use mutation::{MutationRates, Operator};

@@ -36,9 +36,9 @@ fn stress(w: u32, h: u32) -> Scenario {
 /// > Per-species totals drift by exactly zero. Not "within epsilon" — zero.
 fn conservation_run(scenario: Scenario, n: u64) {
     let mut world = World::new(scenario).expect("world");
-    let baseline = world.substrate().total_chem();
+    let baseline: i64 = world.total_matter().iter().sum();
     assert!(
-        baseline.iter().any(|t| *t > 0),
+        baseline > 0,
         "the scenario seeded nothing, so this would pass vacuously"
     );
 
@@ -48,15 +48,14 @@ fn conservation_run(scenario: Scenario, n: u64) {
     for tick in 0..n {
         world.step();
         if tick % check_every == 0 || tick + 1 == n {
-            let actual = world.substrate().total_chem();
-            for c in 0..CHEM_COUNT {
-                assert_eq!(
-                    actual[c],
-                    baseline[c],
-                    "chemical {c} drifted by {} at tick {tick}",
-                    actual[c] - baseline[c]
-                );
-            }
+            // Per-species totals may move, but only through a balanced reaction that reported
+            // itself — peroxide decomposing in the water is one, and `check_matter` is what
+            // catches an unreported one. What may never move is the total across all species.
+            assert_eq!(
+                world.total_matter().iter().sum::<i64>(),
+                baseline,
+                "total matter drifted at tick {tick}"
+            );
             world
                 .check_invariants()
                 .unwrap_or_else(|e| panic!("at tick {tick}: {e}"));

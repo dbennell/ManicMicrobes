@@ -44,6 +44,9 @@ pub struct Sample {
     /// evolvable rather than a constant somebody chose (SPEC §9).
     pub mean_fidelity: i64,
 
+    /// Trophic composition: what fraction of the world's energy income came from light, in
+    /// parts per thousand (SPEC §13). Predation and scavenging arrive at M8.
+    pub trophic_light: i64,
     /// Per-chemical totals over fluid, cell interiors and cell mass.
     pub chemicals: [i64; CHEM_COUNT],
     /// Total matter across every species — the number that must never move.
@@ -113,6 +116,7 @@ impl Sample {
             distinct_genomes: cells.distinct_genomes() as u64,
             distinct_loadouts: loadouts.len() as u64,
             mean_fidelity: fidelity / n,
+            trophic_light: ledger.trophic_share(mm_core::TrophicSource::Light),
             chemicals,
             total_matter: chemicals.iter().sum(),
         }
@@ -128,6 +132,7 @@ impl Sample {
                 r#""dissipation":{},"energy_in":{},"energy_out":{},"energy_stored":{},"#,
                 r#""mean_age":{},"mean_energy":{},"mean_mass":{},"mean_genome_len":{},"#,
                 r#""distinct_genomes":{},"distinct_loadouts":{},"mean_fidelity":{},"#,
+                r#""trophic_light":{},"#,
                 r#""total_matter":{},"chemicals":[{}]}}"#
             ),
             self.tick,
@@ -145,6 +150,7 @@ impl Sample {
             self.distinct_genomes,
             self.distinct_loadouts,
             self.mean_fidelity,
+            self.trophic_light,
             self.total_matter,
             chems.join(",")
         )

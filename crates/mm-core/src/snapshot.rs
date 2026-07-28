@@ -316,6 +316,10 @@ fn read_vm(r: &mut Reader<'_>) -> Result<Vm, SnapshotError> {
     Ok(vm)
 }
 
+const fn mm_income_len() -> usize {
+    crate::ledger::TrophicSource::COUNT
+}
+
 /// Save and restore of complete world state.
 #[derive(Clone, Copy, Debug)]
 pub struct Snapshot;
@@ -420,6 +424,9 @@ impl Snapshot {
         w.i64(l.energy_out());
         w.i64(l.energy_stored());
         w.i64(l.converted());
+        for v in l.income() {
+            w.i64(v);
+        }
 
         Ok(w.bytes)
     }
@@ -615,6 +622,10 @@ impl Snapshot {
         let energy_out = r.i64()?;
         let energy_stored = r.i64()?;
         let converted = r.i64()?;
+        let mut income = [0i64; mm_income_len()];
+        for slot in income.iter_mut() {
+            *slot = r.i64()?;
+        }
 
         world.restore_cells(cells, free);
         world.restore(
@@ -632,6 +643,7 @@ impl Snapshot {
             energy_out,
             energy_stored,
             converted,
+            income,
         );
         Ok(world)
     }

@@ -631,6 +631,7 @@ impl World {
         energy_out: i64,
         energy_stored: i64,
         converted: i64,
+        income: [i64; crate::ledger::TrophicSource::COUNT],
     ) {
         self.tick = tick;
         self.substrate.restore(planes, light, vx, vy, blocked);
@@ -643,6 +644,7 @@ impl World {
             energy_out,
             energy_stored,
             converted,
+            income,
         );
         // The light and velocity fields came from the snapshot, so neither may be overwritten
         // by a fresh evaluation on the next step.

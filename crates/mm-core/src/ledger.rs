@@ -50,6 +50,38 @@ pub struct Ledger {
     energy_stored: i64,
     /// Matter converted between species by metabolism, cumulative.
     converted: i64,
+    /// Where the world's energy income came from, cumulative (SPEC §13).
+    ///
+    /// Every unit of `energy_in` is attributed to exactly one of these, so they sum to it.
+    /// Trophic composition — what fraction of a population lives on light versus on eating
+    /// other things — is the measure that says whether a food web exists, and it is only
+    /// answerable if income is attributed as it arrives rather than guessed at afterwards.
+    income: [i64; TrophicSource::COUNT],
+}
+
+/// Where a unit of energy came into the world.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(usize)]
+pub enum TrophicSource {
+    /// Photosynthesis. The only route by which energy enters from outside (SPEC §7.3).
+    Light = 0,
+    /// Eating another cell's remains (M8). Matter and its latent energy together.
+    Scavenging = 1,
+    /// Eating something that was alive (M8).
+    Predation = 2,
+}
+
+impl TrophicSource {
+    pub const COUNT: usize = 3;
+
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            TrophicSource::Light => "light",
+            TrophicSource::Scavenging => "scavenging",
+            TrophicSource::Predation => "predation",
+        }
+    }
 }
 
 /// What a mismatch looked like, for a test failure that says something useful.
@@ -187,13 +219,39 @@ impl Ledger {
         self.chem[c] = self.chem[c].saturating_add(amount as i64);
     }
 
-    /// Energy absorbed from light by a chloroplast (M2). Enters the accounts and is stored.
+    /// Energy absorbed from light by a chloroplast. Enters the accounts and is stored.
     pub fn absorb(&mut self, amount: i64) {
+        self.absorb_from(amount, TrophicSource::Light);
+    }
+
+    /// The same, attributed to where it came from (SPEC §13).
+    pub fn absorb_from(&mut self, amount: i64, source: TrophicSource) {
         if amount <= 0 {
             return;
         }
         self.energy_in = self.energy_in.saturating_add(amount);
         self.energy_stored = self.energy_stored.saturating_add(amount);
+        let i = source as usize % TrophicSource::COUNT;
+        self.income[i] = self.income[i].saturating_add(amount);
+    }
+
+    /// Cumulative energy income by source. Sums to [`Ledger::energy_in`].
+    #[must_use]
+    pub fn income(&self) -> [i64; TrophicSource::COUNT] {
+        self.income
+    }
+
+    /// What fraction of income came from one source, in parts per thousand.
+    ///
+    /// Integer permille rather than a float, because this is `mm-core` and a metric that
+    /// differed between machines would be a metric nobody could compare (I2).
+    #[must_use]
+    pub fn trophic_share(&self, source: TrophicSource) -> i64 {
+        let total: i64 = self.income.iter().sum();
+        if total <= 0 {
+            return 0;
+        }
+        self.income[source as usize % TrophicSource::COUNT].saturating_mul(1000) / total
     }
 
     /// Energy leaving as heat: metabolic inefficiency, movement drag, maintenance.
@@ -221,6 +279,7 @@ impl Ledger {
         energy_out: i64,
         energy_stored: i64,
         converted: i64,
+        income: [i64; TrophicSource::COUNT],
     ) {
         self.chem = chem;
         self.evicted = evicted;
@@ -228,9 +287,13 @@ impl Ledger {
         self.energy_out = energy_out;
         self.energy_stored = energy_stored;
         self.converted = converted;
+        self.income = income;
     }
 
-    /// Adopt the world's current stored energy as the baseline.
+    /// Attribute a baseline to light, so the shares start somewhere defensible.
+    ///
+    /// What was in the world at tick zero was not absorbed from anywhere, so it counts as
+    /// both `energy_in` and `energy_stored` and the identity starts balanced.
     ///
     /// What was in the world at tick zero was not absorbed from anywhere, so it counts as
     /// both `energy_in` and `energy_stored` and the identity starts balanced.
@@ -238,6 +301,8 @@ impl Ledger {
         self.energy_in = stored;
         self.energy_out = 0;
         self.energy_stored = stored;
+        self.income = [0; TrophicSource::COUNT];
+        self.income[TrophicSource::Light as usize] = stored;
     }
 
     /// Check I5. Called every tick in debug builds and by the acceptance tests.
@@ -289,6 +354,9 @@ impl StateHash for Ledger {
         h.u64(self.energy_out as u64);
         h.u64(self.energy_stored as u64);
         h.u64(self.converted as u64);
+        for v in self.income {
+            h.u64(v as u64);
+        }
     }
 }
 
@@ -355,6 +423,37 @@ mod tests {
         let mut actual = [1000i64; CHEM_COUNT];
         actual[3] = 750;
         l.check_matter(&actual).unwrap();
+    }
+
+    #[test]
+    fn income_is_attributed_and_sums_to_what_came_in() {
+        // SPEC §13's trophic composition. Every unit of income belongs to exactly one source,
+        // so the shares are a partition rather than an estimate.
+        let mut l = Ledger::new();
+        l.absorb_from(700, TrophicSource::Light);
+        l.absorb_from(200, TrophicSource::Scavenging);
+        l.absorb_from(100, TrophicSource::Predation);
+        assert_eq!(l.income().iter().sum::<i64>(), l.energy_in());
+        assert_eq!(l.trophic_share(TrophicSource::Light), 700);
+        assert_eq!(l.trophic_share(TrophicSource::Scavenging), 200);
+        assert_eq!(l.trophic_share(TrophicSource::Predation), 100);
+        l.check_energy().unwrap();
+    }
+
+    #[test]
+    fn an_untouched_ledger_has_no_trophic_composition_rather_than_a_wrong_one() {
+        let l = Ledger::new();
+        assert_eq!(l.trophic_share(TrophicSource::Light), 0);
+        assert_eq!(l.income().iter().sum::<i64>(), 0);
+    }
+
+    #[test]
+    fn plain_absorb_counts_as_light() {
+        // Photosynthesis is the only route by which energy enters from outside (SPEC §7.3),
+        // so the unattributed call has to mean that one rather than nothing.
+        let mut l = Ledger::new();
+        l.absorb(500);
+        assert_eq!(l.trophic_share(TrophicSource::Light), 1000);
     }
 
     #[test]
