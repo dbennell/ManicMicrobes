@@ -445,6 +445,17 @@ impl OrganelleCatalogue {
         }
     }
 
+    /// Every spec, in catalogue order. For serialisation (hard rule 7).
+    #[must_use]
+    pub fn specs(&self) -> &[OrganelleSpec; SLOT_COUNT] {
+        &self.specs
+    }
+
+    /// Replace every spec, in catalogue order. For restoring a snapshot.
+    pub fn set_specs(&mut self, specs: [OrganelleSpec; SLOT_COUNT]) {
+        self.specs = specs;
+    }
+
     #[inline(always)]
     #[must_use]
     pub fn spec(&self, kind: OrganelleType) -> &OrganelleSpec {

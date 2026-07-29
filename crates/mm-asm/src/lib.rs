@@ -16,6 +16,7 @@
 
 pub mod asm;
 pub mod disasm;
+pub mod highlight;
 pub mod source_map;
 
 pub use asm::{

@@ -302,3 +302,69 @@ fn two_rands_in_one_tick_differ() {
         vm.data
     );
 }
+
+/// One instruction at a time is the same as all of them at once.
+///
+/// The property a debugger rests on (M6). If stepping instruction by instruction produced a
+/// different VM from running the budget in one go, then a single-stepped cell would diverge
+/// from the same cell run normally, and every value the debugger showed would be a value the
+/// real run never had.
+#[test]
+fn stepping_one_instruction_at_a_time_is_the_same_as_running_the_budget() {
+    let genome = Genome::new(
+        (0..96u16)
+            .map(|i| (i.wrapping_mul(37) % 256) as u8)
+            .collect::<Vec<u8>>(),
+    )
+    .expect("genome");
+    let cfg = VmConfig::DEFAULT;
+    let ctx = RandCtx::new(0x51EE, 9, 3);
+    let budget = 64u32;
+
+    let mut whole = Vm::new();
+    let mut host_a = NullHost;
+    let ran = whole.run(&genome, &cfg, &ctx, &mut host_a, budget);
+
+    let mut stepped = Vm::new();
+    let mut host_b = NullHost;
+    let mut count = 0;
+    for _ in 0..budget {
+        if stepped.halted {
+            break;
+        }
+        count += stepped.run(&genome, &cfg, &ctx, &mut host_b, 1);
+    }
+
+    assert_eq!(
+        stepped, whole,
+        "a single-stepped VM diverged from a run one"
+    );
+    assert_eq!(count, ran, "the two disagree about how much they executed");
+}
+
+/// And the same for a genome that halts partway, which is the case a debugger meets most.
+#[test]
+fn stepping_past_a_halt_stops_where_running_would_have() {
+    // `HALT` early, then instructions that must never execute.
+    let mut bytes = vec![Op::One.canonical_byte(), Op::Dup.canonical_byte()];
+    bytes.push(Op::Halt.canonical_byte());
+    bytes.extend([Op::Rand.canonical_byte(); 8]);
+    let genome = Genome::new(bytes).expect("genome");
+    let cfg = VmConfig::DEFAULT;
+    let ctx = RandCtx::new(7, 7, 7);
+
+    let mut whole = Vm::new();
+    let mut host_a = NullHost;
+    whole.run(&genome, &cfg, &ctx, &mut host_a, 32);
+
+    let mut stepped = Vm::new();
+    let mut host_b = NullHost;
+    for _ in 0..32 {
+        if stepped.halted {
+            break;
+        }
+        stepped.run(&genome, &cfg, &ctx, &mut host_b, 1);
+    }
+    assert!(whole.halted && stepped.halted);
+    assert_eq!(stepped, whole);
+}

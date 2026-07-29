@@ -352,6 +352,17 @@ impl Phylogeny {
         }
     }
 
+    /// Found a root species unconditionally, even if an identical genome already has one.
+    ///
+    /// For arena mode (M6), where two competitors may enter the *same* genome and must still
+    /// be two teams. [`Phylogeny::found`] merges them, which is right for a slide being seeded
+    /// with twelve copies of one ancestor and wrong for a match — the first version of the
+    /// arena used `found` and every match between identical genomes ended 12–0 at tick one,
+    /// because both sides resolved to the same root and one of them was always checked first.
+    pub fn found_distinct(&mut self, genome: &Arc<Genome>, traits: Traits, tick: u64) -> SpeciesId {
+        self.insert(None, genome, traits, tick, 0)
+    }
+
     /// Register the species a seeded cell belongs to, creating it on first sight.
     ///
     /// Seeded cells have no parent species, so this is the only way a root enters the tree.

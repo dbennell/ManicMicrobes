@@ -604,6 +604,24 @@ impl World {
     /// # Errors
     ///
     /// A genome longer than the addressing limit.
+    /// Spawn a cell that founds its own species even if an identical genome already has one.
+    ///
+    /// For arena mode, where the two sides may enter the same genome and must stay two teams.
+    /// Everything else should use [`World::spawn_cell`], which merges — twelve seedings of one
+    /// ancestor are one species, not twelve rivals.
+    pub fn spawn_cell_as_new_species(&mut self, seed: CellSeed) -> CellId {
+        let genome = Arc::clone(&seed.genome);
+        let id = self.cells.spawn(seed);
+        if let Some(i) = self.cells.index(id) {
+            let traits = crate::names::Traits::of(self.cells.slots(i), genome.len());
+            let species = self.archive.found_distinct(&genome, traits, self.tick);
+            self.cells.species[i] = species;
+        }
+        self.ledger.set_baseline(self.total_matter());
+        self.rebaseline_energy();
+        id
+    }
+
     pub fn spawn_cell(&mut self, seed: CellSeed) -> CellId {
         let genome = Arc::clone(&seed.genome);
         let id = self.cells.spawn(seed);
@@ -714,6 +732,67 @@ impl World {
     /// as good a claim as a viewer that wants a legible tree. `mm-cli` prunes on a schedule.
     pub fn prune_archive(&mut self, keep_above: u32) -> usize {
         self.archive.prune(keep_above)
+    }
+
+    /// Kill a cell, returning everything it held to the water (M6's tweezers).
+    ///
+    /// The simulation's own death path, not a second one. A tool that removed a cell by
+    /// clearing its slot would destroy the matter inside it, and the conservation check would
+    /// start failing in a way that pointed at the physics rather than at the tool.
+    pub fn kill_cell(&mut self, cell: CellId) {
+        if self.cells.index(cell).is_none() {
+            return;
+        }
+        self.pending.deaths.push(cell);
+        biology::apply_deaths(
+            &mut self.cells,
+            &mut self.substrate,
+            &self.biology,
+            &mut self.ledger,
+            &mut self.pending,
+        );
+    }
+
+    /// Draw or erase a barrier, putting whatever was in the square somewhere it can go.
+    ///
+    /// `Substrate::set_blocked` evicts the square's contents and hands them back; dropping
+    /// them on the floor would be a matter leak in a tool, which is the hardest kind to find
+    /// because the ledger would blame the fluid. They go to the neighbours, and whatever will
+    /// not fit is written off through the ledger so the books still balance exactly.
+    pub fn set_barrier(&mut self, x: u32, y: u32, blocked: bool) {
+        let evicted = self.substrate.set_blocked(x as i32, y as i32, blocked);
+        let mut unplaced = [0i32; CHEM_COUNT];
+        for (c, amount) in evicted.iter().enumerate() {
+            if *amount <= 0 {
+                continue;
+            }
+            let mut left = *amount;
+            // Outward in rings, the same way a corpse finds somewhere to go.
+            'placed: for ring in 1..4i32 {
+                for dy in -ring..=ring {
+                    for dx in -ring..=ring {
+                        if dx.abs() != ring && dy.abs() != ring {
+                            continue;
+                        }
+                        left -= self
+                            .substrate
+                            .add_chem(c, x as i32 + dx, y as i32 + dy, left);
+                        if left <= 0 {
+                            break 'placed;
+                        }
+                    }
+                }
+            }
+            if left > 0 {
+                // Nowhere to put it: walled in on every side. Recorded as evicted rather than
+                // silently dropped, which is what the ledger's eviction column is for.
+                unplaced[c] = left;
+            }
+        }
+        if unplaced.iter().any(|v| *v > 0) {
+            self.ledger.record_evicted(&unplaced);
+        }
+        self.velocity_written = false;
     }
 
     /// Advance many ticks.

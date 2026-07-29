@@ -34,6 +34,7 @@ USAGE:
     mm-cli run   <scenario.ron> [options]     run a simulation
     mm-cli sweep <scenario.ron> [options]     run it once per parameter value
     mm-cli hash  <scenario.ron> [options]     print the state hash, for determinism checks
+    mm-cli match <left.mm> <right.mm> [opts]  play an arena match and report it
 
 OPTIONS:
     --ticks <n>            how long to run                     [default: 100000]
@@ -49,6 +50,11 @@ OPTIONS:
     --save <file>          write a snapshot when the run ends
     --load <file>          resume from a snapshot instead of a scenario
     --check                verify the invariants at every sample, and fail if one breaks
+
+MATCH OPTIONS:
+    --ticks <n>            tick limit for the match             [default: 20000]
+    --seed <n>             the match seed
+    --population <n>       cells per side                       [default: 8]
 
 SWEEP OPTIONS:
     --param <name>         one of: mutation, duplication, fluid, light
@@ -125,6 +131,12 @@ fn run(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
+    // `match` takes two genome paths rather than a scenario, so it is dispatched before the
+    // scenario is demanded.
+    if command == "match" {
+        return cmd_match(&args[1..]);
+    }
+
     let mut opts = parse(&args[1..])?;
     if opts.scenario.as_os_str().is_empty() && opts.load.is_none() {
         return Err("no scenario given; try `mm-cli --help`".to_string());
@@ -136,6 +148,91 @@ fn run(args: &[String]) -> Result<(), String> {
         "sweep" => cmd_sweep(&mut opts),
         other => Err(format!("unknown command `{other}`; try `mm-cli --help`")),
     }
+}
+
+/// Play an arena match between two genomes and print the report (M6).
+///
+/// Takes `.mm` assembly or a shareable `.mmg` genome file, deciding by content rather than by
+/// extension — a file that says what it is should be believed over a name anybody can change.
+fn cmd_match(args: &[String]) -> Result<(), String> {
+    let mut paths: Vec<&String> = Vec::new();
+    let mut rules = mm_core::arena::MatchRules::default();
+    let mut i = 0usize;
+    while i < args.len() {
+        let arg = &args[i];
+        if let Some(flag) = arg.strip_prefix("--") {
+            let value = args
+                .get(i + 1)
+                .ok_or_else(|| format!("--{flag} needs a value"))?;
+            match flag {
+                "ticks" => {
+                    rules.tick_limit = value
+                        .parse()
+                        .map_err(|_| "--ticks wants a number".to_string())?
+                }
+                "seed" => {
+                    rules.seed = value
+                        .parse()
+                        .map_err(|_| "--seed wants a number".to_string())?
+                }
+                "population" => {
+                    rules.cells_per_side = value
+                        .parse()
+                        .map_err(|_| "--population wants a number".to_string())?
+                }
+                other => return Err(format!("unknown option `--{other}`")),
+            }
+            i += 2;
+        } else {
+            paths.push(arg);
+            i += 1;
+        }
+    }
+    if paths.len() != 2 {
+        return Err("match takes exactly two genomes".to_string());
+    }
+
+    let load = |path: &str| -> Result<mm_core::arena::Entry, String> {
+        let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+        let name = std::path::Path::new(path)
+            .file_stem()
+            .map_or_else(|| path.to_string(), |s| s.to_string_lossy().to_string());
+        // A shareable genome file first, because it carries an ISA stamp that must be
+        // honoured. Falling back to assembly when it is not one.
+        match mm_core::genome_file::GenomeFile::from_text(&text) {
+            Ok(file) => Ok(mm_core::arena::Entry::new(
+                if file.name.is_empty() { name } else { file.name },
+                file.bytes,
+            )),
+            Err(mm_core::genome_file::GenomeFileError::NotAGenomeFile) => {
+                let bytes = mm_asm::assemble(&text)
+                    .map_err(|e| format!("{path} does not assemble:\n{e}"))?
+                    .bytes;
+                Ok(mm_core::arena::Entry::new(name, bytes))
+            }
+            // Anything else — a wrong ISA above all — is refused rather than worked around.
+            Err(e) => Err(format!("{path}: {e}")),
+        }
+    };
+
+    let left = load(paths[0])?;
+    let right = load(paths[1])?;
+    let report = mm_core::arena::play(&rules, &left, &right).map_err(|e| e.to_string())?;
+    println!("{}", report.summary());
+    if report.copy_damaged > 0 {
+        // Real information about the match: with mutation off a cell can still produce a
+        // damaged daughter by running short of energy mid-copy, and a match where most of a
+        // side is damaged was not really won by the genome its author wrote.
+        println!(
+            "  {} cells finished on a copy-damaged genome",
+            report.copy_damaged
+        );
+    }
+    println!("\n  tick      {:>8} {:>8}", left.name, right.name);
+    for s in &report.standings {
+        println!("  {:>8}  {:>8} {:>8}", s.tick, s.left, s.right);
+    }
+    Ok(())
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {

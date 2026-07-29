@@ -16,14 +16,20 @@
 //! - [`slide`] — the world, the frame, level of detail, overlays and the metric history.
 //! - [`optics`] — the microscope's look, as parameters rather than as a shader.
 //! - [`inspector`] — a read-only transcript of one cell.
+//! - [`editor`] — a `.mm` source buffer, its diagnostics and its exports.
+//! - [`debugger`] — breakpoints over the live world, instruction stepping in a sandbox.
 //! - [`wiki`] — the species wiki, the phylogenetic tree and the world timeline.
+//! - [`tools`] — tweezers and barriers: the one place that is *meant* to touch the world.
 //!
 //! All three are testable without a graphics stack, which is the point. `main.rs` is the only
 //! file that knows Bevy exists, and it is behind the `render` feature.
 
+pub mod debugger;
+pub mod editor;
 pub mod inspector;
 pub mod optics;
 pub mod slide;
+pub mod tools;
 pub mod wiki;
 
 pub use inspector::Inspection;

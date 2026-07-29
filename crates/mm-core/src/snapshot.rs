@@ -35,7 +35,7 @@ use crate::world::World;
 pub const MAGIC: [u8; 8] = *b"MMSNAP\0\x01";
 /// Snapshot format version, distinct from the ISA version. The format may change without
 /// the meaning of a genome changing, and vice versa.
-pub const FORMAT_VERSION: u16 = 2;
+pub const FORMAT_VERSION: u16 = 3;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum SnapshotError {
@@ -521,6 +521,55 @@ impl Snapshot {
             w.i64(v);
         }
 
+        // --- the biology configuration ---
+        //
+        // Mutation rates, division costs, metabolic constants and the organelle catalogue.
+        // Not stored until M6, which is a hard-rule-7 bug that was latent from M2: a world
+        // restored into `BiologyConfig::default()` is a *different world*, and the first thing
+        // to notice was an arena match — mutation off when it was saved, back on when it was
+        // resumed, diverging twenty ticks later while the state hash at the moment of restore
+        // matched perfectly.
+        let b = world.biology();
+        w.u32(b.mutation.point);
+        w.u32(b.mutation.insertion);
+        w.u32(b.mutation.deletion);
+        w.u32(b.mutation.duplication);
+        w.u32(b.mutation.inversion);
+        w.u32(b.mutation.translocation);
+        w.u16(b.mutation.max_segment);
+        w.u32(b.mutation.copy_error_max);
+        w.i32(b.division_matter);
+        w.i32(b.division_energy);
+        w.u64(b.structural_chemical as u64);
+        w.i32(b.copy_energy_per_byte);
+
+        let r = &b.metabolism.rates;
+        w.i32(r.photosynthesis_efficiency);
+        w.i32(r.respiration_efficiency);
+        w.i32(r.reactive_fraction);
+        w.i32(r.throughput_per_param);
+        w.i32(r.latent_per_substrate);
+        w.i32(r.toxicity_threshold);
+        w.i32(r.growth_rate);
+        w.i32(r.repair_per_tick);
+
+        let m = b.metabolism.catalogue.metabolism;
+        w.u64(m.substrate as u64);
+        w.u64(m.oxidant as u64);
+        w.u64(m.waste as u64);
+        w.u64(m.byproduct as u64);
+        w.u64(m.structural as u64);
+        w.u64(m.reactive as u64);
+        for spec in b.metabolism.catalogue.specs() {
+            w.i32(spec.build_matter);
+            w.i32(spec.build_matter_per_param);
+            w.i32(spec.build_energy);
+            w.u16(spec.build_ticks);
+            w.i32(spec.upkeep);
+            w.i32(spec.upkeep_per_param);
+            w.i32(spec.teardown_recovery);
+        }
+
         // --- the species archive and the world's newspaper (SPEC §10) ---
         //
         // Founder genomes are written out in full, which is the one place this format stores
@@ -782,6 +831,63 @@ impl Snapshot {
         for slot in income.iter_mut() {
             *slot = r.i64()?;
         }
+
+        // --- the biology configuration ---
+        let mutation = crate::mutation::MutationRates {
+            point: r.u32()?,
+            insertion: r.u32()?,
+            deletion: r.u32()?,
+            duplication: r.u32()?,
+            inversion: r.u32()?,
+            translocation: r.u32()?,
+            max_segment: r.u16()?,
+            copy_error_max: r.u32()?,
+        };
+        let division_matter = r.i32()?;
+        let division_energy = r.i32()?;
+        let structural_chemical = r.u64()? as usize;
+        let copy_energy_per_byte = r.i32()?;
+        let rates = crate::metabolism::MetabolicRates {
+            photosynthesis_efficiency: r.i32()?,
+            respiration_efficiency: r.i32()?,
+            reactive_fraction: r.i32()?,
+            throughput_per_param: r.i32()?,
+            latent_per_substrate: r.i32()?,
+            toxicity_threshold: r.i32()?,
+            growth_rate: r.i32()?,
+            repair_per_tick: r.i32()?,
+        };
+        let chemistry = crate::organelle::MetabolicChemistry {
+            substrate: r.u64()? as usize,
+            oxidant: r.u64()? as usize,
+            waste: r.u64()? as usize,
+            byproduct: r.u64()? as usize,
+            structural: r.u64()? as usize,
+            reactive: r.u64()? as usize,
+        };
+        let mut specs = *crate::organelle::OrganelleCatalogue::balanced().specs();
+        for spec in specs.iter_mut() {
+            *spec = crate::organelle::OrganelleSpec {
+                build_matter: r.i32()?,
+                build_matter_per_param: r.i32()?,
+                build_energy: r.i32()?,
+                build_ticks: r.u16()?,
+                upkeep: r.i32()?,
+                upkeep_per_param: r.i32()?,
+                teardown_recovery: r.i32()?,
+            };
+        }
+        let mut catalogue = crate::organelle::OrganelleCatalogue::balanced();
+        catalogue.metabolism = chemistry;
+        catalogue.set_specs(specs);
+        world.set_biology(crate::biology::BiologyConfig {
+            metabolism: crate::metabolism::Metabolism { rates, catalogue },
+            mutation,
+            division_matter,
+            division_energy,
+            structural_chemical,
+            copy_energy_per_byte,
+        });
 
         // --- the species archive and the world's newspaper ---
         let next_species = r.u32()?;

@@ -34,6 +34,7 @@
 )]
 #![warn(missing_debug_implementations)]
 
+pub mod arena;
 pub mod biology;
 pub mod cell;
 pub mod chem;
@@ -42,6 +43,7 @@ pub mod events;
 pub mod fixed;
 pub mod fluid;
 pub mod genome;
+pub mod genome_file;
 pub mod host;
 pub mod intent;
 pub mod isa;

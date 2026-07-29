@@ -23,6 +23,9 @@
 //! | `p` | plots |
 //! | `i` | inspector |
 //! | `w` | species wiki, tree and timeline |
+//! | `e` | genome editor |
+//! | `d` | debugger |
+//! | `F1`–`F5` | tool: select, move, remove, wall, erase |
 //! | `o` | optics on/off |
 //! | `r` | wipe and reseed the slide |
 //!
@@ -53,8 +56,11 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy_egui::{egui, EguiContexts, EguiPlugin};
 
+use mm_app::debugger::{Breakpoint, Breakpoints, Sandbox};
+use mm_app::editor::Editor;
 use mm_app::inspector::Inspection;
 use mm_app::slide::{Frame, Lod, Slide};
+use mm_app::tools::{self, ToolEvent};
 use mm_app::wiki;
 use mm_core::biology::BiologyConfig;
 use mm_core::cell::CellSeed;
@@ -106,6 +112,15 @@ struct SlideRes {
     /// The cell the inspector is pointed at, if any.
     selected: Option<CellId>,
     inspection: Option<Inspection>,
+    /// The genome editor (M6).
+    editor: Editor,
+    /// Breakpoints over the live world, and the sandbox for instruction stepping.
+    breakpoints: Breakpoints,
+    sandbox: Option<Sandbox>,
+    /// What the last tool did, for the status line.
+    last_tool: Option<ToolEvent>,
+    /// Where a genome exported from the editor was written.
+    last_export: Option<String>,
 }
 
 impl SlideRes {
@@ -126,6 +141,11 @@ impl SlideRes {
             frame: Frame::default(),
             selected: None,
             inspection: None,
+            editor: Editor::new(),
+            breakpoints: Breakpoints::new(),
+            sandbox: None,
+            last_tool: None,
+            last_export: None,
         };
         res.reseed();
         res.frame = res.slide.frame();
@@ -174,6 +194,8 @@ impl SlideRes {
         self.slide.world_mut().adopt_current_contents_as_baseline();
         self.selected = None;
         self.inspection = None;
+        self.sandbox = None;
+        self.breakpoints.rearm();
     }
 }
 
@@ -240,6 +262,11 @@ struct View {
     inspector: bool,
     /// The species wiki, the tree and the timeline (M5).
     wiki: bool,
+    /// The genome editor and the debugger (M6).
+    editor: bool,
+    debugger: bool,
+    /// Which laboratory tool the mouse is holding.
+    tool: Tool,
     /// Which species page is open.
     species: Option<mm_core::phylogeny::SpeciesId>,
 }
@@ -254,7 +281,35 @@ impl Default for View {
             plots: true,
             inspector: false,
             wiki: false,
+            editor: false,
+            debugger: false,
+            tool: Tool::Select,
             species: None,
+        }
+    }
+}
+
+/// What a click does (M6's laboratory tools).
+///
+/// `Select` is the default and is the only one that cannot change the world — everything else
+/// writes, which is why the tool is explicit rather than implied by a modifier key.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Tool {
+    Select,
+    Move,
+    Remove,
+    DrawBarrier,
+    EraseBarrier,
+}
+
+impl Tool {
+    fn name(self) -> &'static str {
+        match self {
+            Tool::Select => "select",
+            Tool::Move => "move",
+            Tool::Remove => "remove",
+            Tool::DrawBarrier => "wall",
+            Tool::EraseBarrier => "erase",
         }
     }
 }
@@ -344,6 +399,23 @@ fn handle_input(
     if keys.just_pressed(KeyCode::KeyW) {
         view.wiki = !view.wiki;
     }
+    if keys.just_pressed(KeyCode::KeyE) {
+        view.editor = !view.editor;
+    }
+    if keys.just_pressed(KeyCode::KeyD) {
+        view.debugger = !view.debugger;
+    }
+    for (key, tool) in [
+        (KeyCode::F1, Tool::Select),
+        (KeyCode::F2, Tool::Move),
+        (KeyCode::F3, Tool::Remove),
+        (KeyCode::F4, Tool::DrawBarrier),
+        (KeyCode::F5, Tool::EraseBarrier),
+    ] {
+        if keys.just_pressed(key) {
+            view.tool = tool;
+        }
+    }
     if keys.just_pressed(KeyCode::KeyR) {
         // Wipe and start the ancestor over. The nearest thing to a tool the microscope has
         // until M6 brings tweezers and slide loading.
@@ -370,16 +442,52 @@ fn handle_input(
         motion.clear();
     }
 
-    // Selection for the inspector. Picks the nearest cell within a couple of squares, so a
-    // click near a cell at far zoom still finds it.
+    // Right-click applies the current tool. `Select` is the default and is the only one that
+    // cannot change the world; the rest write, which is why the tool is chosen explicitly.
     if buttons.just_pressed(MouseButton::Right) {
         if let Some(cursor) = window.get_single().ok().and_then(|w| w.cursor_position()) {
             let size = window.get_single().map(|w| w.size()).unwrap_or(Vec2::ONE);
             let from_centre = cursor - size / 2.0;
             let slide_x = view.centre.x + from_centre.x / scale;
             let slide_y = view.centre.y + from_centre.y / scale;
-            sim.selected = sim.slide.cell_at(slide_x, slide_y, 3.0);
-            view.inspector = sim.selected.is_some();
+            let square = (slide_x.floor() as i32, slide_y.floor() as i32);
+            match view.tool {
+                Tool::Select => {
+                    sim.selected = sim.slide.cell_at(slide_x, slide_y, 3.0);
+                    view.inspector = sim.selected.is_some();
+                    // A new selection invalidates the sandbox: it was a copy of a different
+                    // cell and showing it under a new name would be a lie.
+                    sim.sandbox = None;
+                }
+                Tool::Move => {
+                    if let Some(cell) = sim.selected {
+                        let event =
+                            tools::relocate(sim.slide.world_mut(), cell, square.0, square.1);
+                        sim.last_tool = Some(event);
+                    }
+                }
+                Tool::Remove => {
+                    if let Some(cell) = sim.slide.cell_at(slide_x, slide_y, 3.0) {
+                        let event = tools::remove(sim.slide.world_mut(), cell);
+                        sim.last_tool = Some(event);
+                        if sim.selected == Some(cell) {
+                            sim.selected = None;
+                            sim.sandbox = None;
+                        }
+                    }
+                }
+                Tool::DrawBarrier | Tool::EraseBarrier => {
+                    if square.0 >= 0 && square.1 >= 0 {
+                        let event = tools::set_barrier(
+                            sim.slide.world_mut(),
+                            square.0 as u32,
+                            square.1 as u32,
+                            view.tool == Tool::DrawBarrier,
+                        );
+                        sim.last_tool = Some(event);
+                    }
+                }
+            }
         }
     }
 }
@@ -390,6 +498,21 @@ fn handle_input(
 /// different world on a fast machine than on a slow one, and every guarantee in the spec rests
 /// on it not doing that.
 fn advance_simulation(mut sim: ResMut<SlideRes>) {
+    // Breakpoints act on the viewer, not on the world: when one holds, the slide stops
+    // advancing. Pausing provably does not change a world (`slide.rs`), so a breakpoint
+    // cannot either — and there is no stop-in-the-middle-of-a-tick, because a tick is the
+    // simulation's atom.
+    if sim.breakpoints.tripped().is_none() {
+        // The breakpoint set is taken out for the duration so that checking it — which needs
+        // `&mut` for the tripped marker — can hold `&World` at the same time. Both live in the
+        // same resource; neither can reach the other.
+        let mut points = std::mem::take(&mut sim.breakpoints);
+        let hit = points.check(sim.slide.world());
+        sim.breakpoints = points;
+        if hit {
+            sim.slide.set_speed(0);
+        }
+    }
     sim.slide.advance_one_frame();
     sim.frame = sim.slide.frame();
     sim.inspection = sim.selected.and_then(|id| sim.slide.inspect(id));
@@ -668,6 +791,10 @@ fn panels(mut contexts: EguiContexts, mut sim: ResMut<SlideRes>, mut view: ResMu
                     });
                 }
                 ui.separator();
+                ui.label(format!("tool: {}  (F1-F5)", view.tool.name()));
+                if let Some(event) = &sim.last_tool {
+                    ui.small(format!("{event:?}"));
+                }
                 ui.horizontal(|ui| {
                     for (label, speed) in [("||", 0u32), ("1x", 1), ("8x", 8), ("fast", 256)] {
                         if ui.button(label).clicked() {
@@ -720,6 +847,13 @@ fn panels(mut contexts: EguiContexts, mut sim: ResMut<SlideRes>, mut view: ResMu
 
     if view.wiki {
         wiki_panel(ctx, &sim, &mut view);
+    }
+
+    if view.editor {
+        editor_panel(ctx, &mut sim);
+    }
+    if view.debugger {
+        debugger_panel(ctx, &mut sim);
     }
 
     if view.inspector {
@@ -912,6 +1046,222 @@ fn wiki_panel(ctx: &egui::Context, sim: &SlideRes, view: &mut View) {
                     ui.small(egui::RichText::new(hex).monospace());
                 });
         });
+}
+
+/// The genome editor (M6).
+///
+/// Syntax highlighting comes from `mm_asm::highlight`, which classifies against the real
+/// opcode table, and diagnostics come from actually assembling — so neither can drift from the
+/// language the way a second, approximate definition in the front-end would.
+fn editor_panel(ctx: &egui::Context, sim: &mut SlideRes) {
+    egui::Window::new("editor")
+        .anchor(egui::Align2::LEFT_TOP, [8.0, 220.0])
+        .default_width(520.0)
+        .default_height(420.0)
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("name:");
+                ui.text_edit_singleline(&mut sim.editor.name);
+                if ui.button("assemble").clicked() {
+                    sim.editor.assemble();
+                }
+                if ui.button("export").clicked() {
+                    sim.last_export = sim.editor.export().map(|f| f.to_text());
+                }
+                if ui.button("from selected cell").clicked() {
+                    if let Some(cell) = sim.selected {
+                        if let Some(file) = tools::copy_genome(sim.slide.world(), cell) {
+                            sim.editor.load_bytes(&file.bytes, file.name);
+                        }
+                    }
+                }
+            });
+            ui.label(sim.editor.status());
+            ui.separator();
+
+            // Diagnostics first: they are why anyone opened this panel.
+            let errors: Vec<String> = sim
+                .editor
+                .build()
+                .errors()
+                .iter()
+                .map(|e| format!("{}:{}: {}", e.line, e.col, e.message))
+                .collect();
+            if !errors.is_empty() {
+                egui::ScrollArea::vertical()
+                    .max_height(90.0)
+                    .id_source("diagnostics")
+                    .show(ui, |ui| {
+                        for e in &errors {
+                            ui.colored_label(egui::Color32::from_rgb(230, 120, 110), e);
+                        }
+                    });
+                ui.separator();
+            }
+
+            // The source, highlighted line by line. Drawn read-only alongside an editable
+            // buffer rather than as a rich text editor, because egui has no styled-input
+            // widget and a plain one that silently dropped the colours would be worse.
+            let mut source = sim.editor.source().to_string();
+            egui::ScrollArea::vertical()
+                .id_source("source")
+                .show(ui, |ui| {
+                    let response = ui.add(
+                        egui::TextEdit::multiline(&mut source)
+                            .code_editor()
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(18),
+                    );
+                    if response.changed() {
+                        sim.editor.set_source(source.clone());
+                    }
+                });
+
+            if let Some(text) = &sim.last_export {
+                ui.separator();
+                ui.label("exported — copy this:");
+                let mut shown = text.clone();
+                ui.add(
+                    egui::TextEdit::multiline(&mut shown)
+                        .code_editor()
+                        .desired_rows(4),
+                );
+            }
+        });
+}
+
+/// The debugger (M6).
+///
+/// Breakpoints act on the viewer; instruction stepping acts on a sandbox. Neither can reach
+/// the simulation — see `debugger.rs` for why that is structural rather than careful.
+fn debugger_panel(ctx: &egui::Context, sim: &mut SlideRes) {
+    egui::Window::new("debugger")
+        .anchor(egui::Align2::RIGHT_TOP, [-8.0, 300.0])
+        .default_width(360.0)
+        .show(ctx, |ui| {
+            // --- breakpoints, over the live world ---
+            ui.label("breakpoints");
+            if let Some(tripped) = sim.breakpoints.tripped() {
+                ui.colored_label(
+                    egui::Color32::from_rgb(240, 200, 120),
+                    format!("stopped: {}", tripped.describe()),
+                );
+                if ui.button("continue").clicked() {
+                    sim.breakpoints.rearm();
+                    sim.slide.set_speed(1);
+                }
+            }
+            let tick = sim.slide.world().tick_count();
+            ui.horizontal(|ui| {
+                if ui.button("+1,000 ticks").clicked() {
+                    sim.breakpoints.add(Breakpoint::AtTick(tick + 1_000));
+                }
+                if ui.button("on death").clicked() {
+                    if let Some(cell) = sim.selected {
+                        sim.breakpoints.add(Breakpoint::CellDies(cell));
+                    }
+                }
+                if ui.button("clear").clicked() {
+                    sim.breakpoints.clear();
+                }
+            });
+            let listed: Vec<String> = sim
+                .breakpoints
+                .iter()
+                .map(|(p, on)| format!("{} {}", if on { "●" } else { "○" }, p.describe()))
+                .collect();
+            for text in listed {
+                ui.small(text);
+            }
+            ui.separator();
+
+            // --- the sandbox, for instruction stepping ---
+            ui.label("sandbox");
+            let world_tick = sim.slide.world().tick_count();
+            if ui.button("take from selected cell").clicked() {
+                sim.sandbox = sim
+                    .selected
+                    .and_then(|cell| Sandbox::of(sim.slide.world(), cell));
+            }
+            let Some(sandbox) = sim.sandbox.as_mut() else {
+                ui.weak("select a cell and take a copy");
+                return;
+            };
+            let behind = world_tick.saturating_sub(sandbox.taken_at_tick);
+            if behind > 0 {
+                // Said plainly, so nobody reads a sandbox as the live cell.
+                ui.colored_label(
+                    egui::Color32::from_rgb(200, 180, 120),
+                    format!("a copy, taken {behind} ticks ago — the live cell has moved on"),
+                );
+            }
+            ui.horizontal(|ui| {
+                if ui.button("step").clicked() {
+                    sandbox.step();
+                }
+                if ui.button("step tick").clicked() {
+                    sandbox.step_tick();
+                }
+                if ui.button("×16").clicked() {
+                    for _ in 0..16 {
+                        sandbox.step();
+                    }
+                }
+            });
+            ui.label(format!(
+                "ip {}  next {}  ran {} ({}/{} this tick){}",
+                sandbox.vm.ip,
+                sandbox
+                    .next_op()
+                    .map_or("-".to_string(), |op| op.name().to_string()),
+                sandbox.executed,
+                sandbox.in_tick,
+                sandbox.budget(),
+                if sandbox.vm.halted { "  HALTED" } else { "" }
+            ));
+            ui.separator();
+            ui.label("stack (top last)");
+            ui.small(format!("{:?}", unwound(&sandbox.vm)));
+            ui.collapsing("registers", |ui| {
+                ui.small(format!("{:?}", sandbox.vm.regs));
+            });
+            ui.collapsing("ram", |ui| {
+                ui.small(format!("{:?}", sandbox.vm.ram));
+            });
+            ui.collapsing("disassembly", |ui| {
+                let listing = mm_asm::disassemble(sandbox.genome.bytes());
+                let here = sandbox.vm.ip as u32;
+                egui::ScrollArea::vertical()
+                    .max_height(180.0)
+                    .id_source("disasm")
+                    .show(ui, |ui| {
+                        for line in &listing.lines {
+                            let marker = if line.offset == here { "▶ " } else { "  " };
+                            ui.small(
+                                egui::RichText::new(format!(
+                                    "{marker}{:>5}  {}",
+                                    line.offset,
+                                    line.to_source()
+                                ))
+                                .monospace(),
+                            );
+                        }
+                    });
+            });
+            ui.small("world-facing reads return zero in a sandbox: there is nothing to eat.");
+        });
+}
+
+/// The data stack in push order, top last — the same unwinding the inspector does.
+fn unwound(vm: &mm_core::vm::Vm) -> Vec<i16> {
+    let live = (vm.dlen as usize).min(mm_core::vm::DATA_STACK_LEN);
+    (0..live)
+        .rev()
+        .filter_map(|back| {
+            let at = (vm.dsp as usize).wrapping_sub(back) % mm_core::vm::DATA_STACK_LEN;
+            vm.data.get(at).copied()
+        })
+        .collect()
 }
 
 /// A minimal line plot. Values are already `0..=1`.
