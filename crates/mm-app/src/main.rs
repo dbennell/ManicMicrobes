@@ -346,8 +346,13 @@ fn handle_input(
 
     if buttons.pressed(MouseButton::Left) {
         for ev in motion.read() {
-            // Screen y is up and slide y is down, so dragging follows the pointer.
-            view.centre -= ev.delta / scale * Vec2::new(1.0, -1.0);
+            // Both axes drag the slide with the pointer: push the mouse down and the slide
+            // comes down with it, as though you had a finger on the plate. The vertical used
+            // to be inverted — the double negative between "screen y is up, slide y is down"
+            // and "the camera moves opposite to the content" had been applied once too often,
+            // which is exactly the sort of thing that reads as correct on paper and wrong in
+            // the hand.
+            view.centre -= ev.delta / scale;
         }
     } else {
         motion.clear();
