@@ -1,0 +1,32 @@
+// The long dusk — light failing over a million ticks.
+//
+// `SlowDecline` takes the sun from full to nothing across the run. A population that has spent
+// the whole time optimising for abundant light meets a world that no longer has any, and the
+// question M8 asks is whether it crashes and recovers with a different way of making a living,
+// or simply ends.
+//
+// Either answer is a result. What matters is that the timeline says which — the archive
+// records the crash as a mass extinction and the trophic mix says what, if anything, replaced
+// the producers.
+//
+//   mm-cli run scenarios/the_long_dusk.ron --genome genomes/ancestor.mm --ticks 1000000 --archive dusk.ndjson
+(
+    name: "the long dusk",
+    seed: 20250802,
+    width: 96,
+    height: 96,
+
+    light: SlowDecline(start: 1536, end: 0, over_ticks: 1000000),
+    current: Still,
+    fluid_interval: 1,
+
+    // Well stocked at the start, because the story is about the light going out rather than
+    // about starting hungry. What is dissolved here is the only thing left once it has.
+    seeding: [
+        Uniform(chemical: 11, per_square: 409600),
+        Uniform(chemical: 14, per_square: 409600),
+        Uniform(chemical: 4, per_square: 409600),
+        Uniform(chemical: 8, per_square: 102400),
+    ],
+    barriers: [],
+)

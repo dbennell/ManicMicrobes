@@ -115,8 +115,8 @@ pub fn touch_reading(cells: &CellArena, index: &NeighbourIndex, i: usize) -> Tou
     let sx = pos_to_square(cells.x[i]);
     let sy = pos_to_square(cells.y[i]);
     // Hoisted: `radius` is an integer square root, and the sensing cell's own radius does not
-    // change while it is looking around.
-    let ri = crate::biology::radius(cells, i);
+    // change while it is looking around. Converted to `POS`, because `separation` is `POS`.
+    let ri = crate::fixed::q10_to_pos(crate::biology::radius(cells, i));
     let reach = ri.saturating_mul(2);
 
     let mut contacts = 0i32;
@@ -128,7 +128,7 @@ pub fn touch_reading(cells: &CellArena, index: &NeighbourIndex, i: usize) -> Tou
             continue;
         }
         let d = separation(cells, i, j);
-        let touching = crate::biology::radius(cells, j)
+        let touching = crate::fixed::q10_to_pos(crate::biology::radius(cells, j))
             .saturating_add(ri)
             .saturating_add(reach);
         if d <= touching {
@@ -178,11 +178,17 @@ pub fn resolve_collisions(
     // otherwise recompute the same neighbour's radius once per pair it takes part in. Computed
     // once per cell here instead. Exactly equivalent: radius depends only on mass, and this
     // function moves cells without changing what they weigh.
+    //
+    // Converted to `POS` on the way in. `radius` is `Q10` and `separation` is `POS` — both
+    // measure squares, at different scales — and comparing them directly meant a cell counted
+    // anything within *seven* squares as overlapping instead of about one and three quarters.
+    // A bug since M3, found at M7 because a junction could not pull two cells closer than the
+    // separation was shoving them apart.
     radii.clear();
     radii.reserve(cells.capacity());
     for i in 0..cells.capacity() {
         radii.push(if cells.occupied(i) {
-            crate::biology::radius(cells, i)
+            crate::fixed::q10_to_pos(crate::biology::radius(cells, i))
         } else {
             0
         });

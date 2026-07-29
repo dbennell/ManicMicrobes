@@ -1,0 +1,26 @@
+// Archipelago control — the same world with the walls taken out.
+//
+// Identical to `archipelago.ron` in every field but `barriers`, including the seed. It exists
+// so that M8's allopatric speciation test has something to compare against: a divergence rate
+// with no control is a number, not a result.
+//
+// If you change one of these files, change the other. A control that has drifted from its
+// experiment is worse than no control, because it still produces a number.
+(
+    name: "archipelago control",
+    seed: 20250804,
+    width: 96,
+    height: 96,
+
+    light: Uniform(intensity: 1024),
+    current: Still,
+    fluid_interval: 1,
+
+    seeding: [
+        Uniform(chemical: 11, per_square: 409600),
+        Uniform(chemical: 14, per_square: 409600),
+        Uniform(chemical: 4, per_square: 409600),
+    ],
+
+    barriers: [],
+)

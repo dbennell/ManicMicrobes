@@ -34,7 +34,7 @@ use rayon::prelude::*;
 use crate::cell::{CellArena, CellSeed};
 use crate::chem::{ChemTable, CHEM_COUNT};
 use crate::config::VmConfig;
-use crate::fixed::{cell_to_q10, pos_to_square, q10, q10_scale, sat_i16, Q10_ONE};
+use crate::fixed::{cell_to_q10, pos_to_square, q10, q10_scale, sat_i16, POS_ONE, Q10_ONE};
 use crate::genome::{Genome, GenomePool};
 use crate::host::Host;
 use crate::intent::{Intent, IntentBuffer, Pending, PendingBirth, SlotIntents};
@@ -71,6 +71,18 @@ pub struct BiologyReport {
     pub torn: u32,
     /// Divisions refused because the parent could not pay.
     pub failed_splits: u32,
+    /// Junctions formed this tick, split by whether the key matched (SPEC §8.2).
+    pub junctions_consensual: u32,
+    pub junctions_forced: u32,
+    /// `JOIN`s that failed: no free slot, out of reach, or could not pay the penalty.
+    pub junctions_refused: u32,
+    pub junctions_broken: u32,
+    /// Matter and energy moved across soft junctions, `Q10`.
+    pub transferred: i64,
+    /// Genome bytes written into another cell's nucleus. Parasitism, counted.
+    pub foreign_injections: u32,
+    /// Structural mass the tick's dead left as carrion, `Q10`.
+    pub to_carrion: i64,
 }
 
 /// The world as one cell sees it during its own execution.
@@ -91,6 +103,45 @@ pub struct CellHost<'a> {
     claimed: [i32; CHEM_COUNT],
     /// The tick, for the one sensor that reads a clock rather than the world.
     tick: u64,
+    /// What a unit of spike extension does, so the spike's reading can say what it is about to
+    /// deal rather than how many cells are in front of it. Copied in rather than reached for
+    /// through a config reference, because a host holds only what one cell may read.
+    spike_damage: i32,
+}
+
+/// Read an organelle's output the way `OGET` does, from outside the VM.
+///
+/// The readings of SPEC §6.2 are computed inside [`CellHost`], which only exists during the
+/// execute phase. This lets a test — or the inspector — ask what a genome would see without
+/// running one, so "the spike reports contact" is checkable rather than inferable from
+/// behaviour three phases later.
+#[must_use]
+pub fn read_organelle(
+    cells: &CellArena,
+    substrate: &Substrate,
+    neighbours: &crate::neighbours::NeighbourIndex,
+    cell: usize,
+    slot: usize,
+    idx: i16,
+    spike_damage: i32,
+) -> i16 {
+    // A throwaway intent buffer: reading an organelle pushes nothing, but the host holds a
+    // slot's worth either way.
+    let mut buffer = IntentBuffer::new();
+    buffer.begin_tick(cells.capacity());
+    let Some(intents) = buffer.slots_mut().nth(cell) else {
+        return 0;
+    };
+    let mut host = CellHost::new(
+        cell,
+        cells,
+        substrate,
+        neighbours,
+        intents,
+        0,
+        spike_damage,
+    );
+    Host::oget(&mut host, idx, slot as i16)
 }
 
 impl<'a> CellHost<'a> {
@@ -102,6 +153,7 @@ impl<'a> CellHost<'a> {
         neighbours: &'a crate::neighbours::NeighbourIndex,
         intents: SlotIntents<'a>,
         tick: u64,
+        spike_damage: i32,
     ) -> CellHost<'a> {
         let square = substrate.index(pos_to_square(cells.x[slot]), pos_to_square(cells.y[slot]));
         CellHost {
@@ -113,6 +165,7 @@ impl<'a> CellHost<'a> {
             square,
             claimed: [0; CHEM_COUNT],
             tick,
+            spike_damage,
         }
     }
 
@@ -257,6 +310,53 @@ impl Host for CellHost<'_> {
                 0 => q10_to_visible(interior_capacity(self.cells, self.slot)),
                 _ => q10_to_visible(self.cells.interior(self.slot).iter().copied().sum::<i32>()),
             },
+
+            // The two M8 organelles. SPEC §6.2 gives both a reading and without them they are
+            // write-only: a genome could extend a spike but not tell whether it was hitting
+            // anything, and could open a lysosome but not tell whether there was anything to
+            // digest. A predator with no feedback cannot retract when the prey run out, which
+            // is half of what a predator-prey oscillation is made of.
+            //
+            // Derived on the spot rather than stored from last tick. That keeps them out of
+            // world state — nothing to serialise, nothing to round-trip (hard rule 7) — and
+            // reads better anyway: "what my spike is about to do to what is in front of me
+            // now" is more use to a genome than a report on the tick before.
+            OrganelleType::Spike => match (idx as u16) % 2 {
+                0 => sat_i16(o.param as i32),
+                _ => {
+                    // What is within reach: damage per tick times the number of cells this
+                    // spike is touching. Zero means nothing is in front of it.
+                    let extension = crate::ecology::spike_extension(self.cells, self.slot);
+                    if extension <= 0 {
+                        return 0;
+                    }
+                    let reach = crate::junction::reach(self.cells, self.slot);
+                    let sx = pos_to_square(self.cells.x[self.slot]);
+                    let sy = pos_to_square(self.cells.y[self.slot]);
+                    let touching = self
+                        .neighbours
+                        .around(sx, sy)
+                        .filter(|j| *j != self.slot)
+                        .filter(|j| self.cells.occupied(*j))
+                        .filter(|j| crate::junction::distance(self.cells, self.slot, *j) <= reach)
+                        .count();
+                    let per = q10_scale(self.spike_damage, extension);
+                    q10_to_visible(per.saturating_mul(touching.min(i32::MAX as usize) as i32))
+                }
+            },
+
+            OrganelleType::Lysosome => match (idx as u16) % 2 {
+                0 => sat_i16(o.param as i32),
+                // Carrion under the cell, capped by what this cell could actually digest —
+                // which is the rate it is about to achieve, not the size of the pile.
+                _ => {
+                    let capacity = crate::ecology::digestive_capacity(self.cells, self.slot);
+                    let sx = pos_to_square(self.cells.x[self.slot]);
+                    let sy = pos_to_square(self.cells.y[self.slot]);
+                    let available = self.substrate.chem_at(crate::ecology::CARRION, sx, sy);
+                    q10_to_visible(capacity.min(available).max(0))
+                }
+            },
             _ => {
                 // Sensors and cilia (M3). Read from the world around the cell, which nobody
                 // is writing during execute.
@@ -360,6 +460,68 @@ impl Host for CellHost<'_> {
     fn set_key(&mut self, key: u8) {
         self.intents.push(Intent::SetKey { key });
     }
+
+    // --- junctions (SPEC §8) ---
+    //
+    // Every one of these records an intent and returns immediately. A genome learns whether a
+    // `JOIN` worked on the *next* tick, by reading its junction slots — not from the return
+    // value, which is a promise the execute phase is in no position to make. Execute reads a
+    // world nobody is writing (SPEC §12), and a `JOIN` that returned real success would have
+    // to have already taken the target's slot, which is exactly the shared write the phase
+    // separation exists to prevent.
+
+    fn join(&mut self, key: i16, kind: i16, handle: i16) -> i16 {
+        self.intents.push(Intent::Join {
+            key: (key as u16 & 0x7F) as u8,
+            kind: (kind as u16 & 1) as u8,
+            handle,
+        });
+        // Optimistic. The genome finds out by looking, which is also the only way it could
+        // find out about a junction somebody else formed with *it*.
+        1
+    }
+
+    fn leave(&mut self, jidx: i16) {
+        self.intents.push(Intent::Leave {
+            jidx: crate::junction::junction_index(jidx) as u8,
+        });
+    }
+
+    fn jxfer(&mut self, amount: i16, what: i16, jidx: i16) -> i16 {
+        if amount <= 0 {
+            return 0;
+        }
+        let promised = cell_to_q10(amount);
+        self.intents.push(Intent::Transfer {
+            jidx: crate::junction::junction_index(jidx) as u8,
+            what: (what as u16 & 0xFF) as u8,
+            amount: promised,
+        });
+        q10_to_visible(promised)
+    }
+
+    fn jlen(&mut self, v: i16, jidx: i16) {
+        self.intents.push(Intent::SetRest {
+            jidx: crate::junction::junction_index(jidx) as u8,
+            value: v,
+        });
+    }
+
+    fn inject(&mut self, jidx: i16, dst: u16, src: u8) -> i16 {
+        self.intents.push(Intent::Inject {
+            // `INJECT_SELF` is the reserved index for this cell's own nucleus, and it must
+            // survive the wrap that every other junction operand goes through — otherwise
+            // "write to myself" would alias onto a real junction slot.
+            jidx: if jidx == crate::host::INJECT_SELF {
+                u8::MAX
+            } else {
+                crate::junction::junction_index(jidx) as u8
+            },
+            dst,
+            src,
+        });
+        1
+    }
 }
 
 /// Everything resolve needs that is not the world.
@@ -375,6 +537,10 @@ pub struct BiologyConfig {
     pub structural_chemical: usize,
     /// Energy per genome byte copied at full fidelity, `Q10`. Accuracy is not free.
     pub copy_energy_per_byte: i32,
+    /// What junctions cost and how they behave (SPEC §8).
+    pub junctions: crate::junction::JunctionConfig,
+    /// What predation and digestion cost and yield (M8).
+    pub ecology: crate::ecology::EcologyConfig,
 }
 
 impl Default for BiologyConfig {
@@ -386,6 +552,8 @@ impl Default for BiologyConfig {
             division_energy: q10(20),
             structural_chemical: 4,
             copy_energy_per_byte: Q10_ONE / 64,
+            junctions: crate::junction::JunctionConfig::default(),
+            ecology: crate::ecology::EcologyConfig::default(),
         }
     }
 }
@@ -399,6 +567,7 @@ impl Default for BiologyConfig {
 pub fn resolve(
     cells: &mut CellArena,
     substrate: &mut Substrate,
+    pool: &GenomePool,
     intents: &IntentBuffer,
     config: &BiologyConfig,
     chem: &ChemTable,
@@ -574,6 +743,64 @@ pub fn resolve(
                 Intent::SetKey { key } => {
                     cells.key[i] = key & 0x7F;
                 }
+
+                // --- junctions (SPEC §8) ---
+                Intent::Join { key, kind, handle } => {
+                    let cost = resolve_join(cells, config, i, key, kind, handle, &mut report);
+                    if cost > 0 {
+                        report.dissipate_build(ledger, cost);
+                    }
+                }
+
+                Intent::Leave { jidx } => {
+                    if dissolve(cells, i, jidx as usize) {
+                        report.junctions_broken = report.junctions_broken.saturating_add(1);
+                    }
+                }
+
+                Intent::Transfer { jidx, what, amount } => {
+                    let moved = resolve_transfer(cells, config, i, jidx as usize, what, amount);
+                    if moved > 0 {
+                        report.transferred = report.transferred.saturating_add(moved as i64);
+                        // Moving something across a membrane is work, whichever direction it
+                        // goes. Charged to the sender, who asked for it.
+                        let cost = crate::fixed::q10_scale(config.junctions.transfer_cost, moved);
+                        let paid = cells.energy[i].min(cost);
+                        cells.energy[i] = cells.energy[i].saturating_sub(paid);
+                        report.dissipate_build(ledger, paid);
+                    }
+                }
+
+                Intent::SetRest { jidx, value } => {
+                    // Muscle. `JLEN` offsets the rest length within `±muscle_range` of the
+                    // natural length, so a genome can contract and extend but cannot simply
+                    // declare that two cells are forty squares apart.
+                    let slot = jidx as usize % crate::junction::JUNCTIONS_PER_CELL;
+                    let junction = cells.junctions(i)[slot];
+                    if junction.kind != crate::junction::JunctionKind::Hard {
+                        continue;
+                    }
+                    let Some(j) = cells.index(junction.other) else {
+                        continue;
+                    };
+                    let natural = natural_rest(cells, i, j);
+                    let range = config.junctions.muscle_range;
+                    let offset = (value as i32)
+                        .saturating_mul(range)
+                        .saturating_div(i16::MAX as i32 / 2 + 1)
+                        .clamp(-range, range);
+                    let rest = natural.saturating_add(offset).max(POS_ONE / 4);
+                    cells.junctions_mut(i)[slot].rest = rest;
+                    // Both ends carry the same rest length, or the solver would be trying to
+                    // satisfy two different constraints between the same pair.
+                    if let Some(other_slot) = crate::junction::existing(cells, j, id) {
+                        cells.junctions_mut(j)[other_slot].rest = rest;
+                    }
+                }
+
+                Intent::Inject { jidx, dst, src } => {
+                    resolve_inject(cells, pool, config, ledger, i, jidx, dst, src, &mut report);
+                }
             }
         }
     }
@@ -599,6 +826,221 @@ pub fn nucleus_fidelity(cells: &CellArena, i: usize) -> i32 {
         }
     }
     0
+}
+
+/// The rest length a junction naturally takes: the two cells just touching.
+fn natural_rest(cells: &CellArena, i: usize, j: usize) -> i32 {
+    // `radius` is `Q10` and a rest length is `POS`, so this has to be converted rather than
+    // added straight. See `fixed::q10_to_pos`.
+    crate::fixed::q10_to_pos(radius(cells, i).saturating_add(radius(cells, j))).max(POS_ONE / 2)
+}
+
+/// Form a junction, if it can be formed and paid for. Returns the energy spent.
+///
+/// The whole of SPEC §8.2's binding-key mechanic lives here: a matching key is nearly free, a
+/// mismatched one costs `join_forced_penalty` scaled by what the target invested in its
+/// membrane, and the junction forms anyway if the aggressor can pay. Consent is economic.
+fn resolve_join(
+    cells: &mut CellArena,
+    config: &BiologyConfig,
+    i: usize,
+    key: u8,
+    kind: u8,
+    handle: i16,
+    report: &mut BiologyReport,
+) -> i32 {
+    use crate::junction::{self, Junction, JunctionKind};
+
+    let reach = junction::reach(cells, i);
+    let Some(j) = junction::resolve_handle(cells, i, handle, reach) else {
+        report.junctions_refused = report.junctions_refused.saturating_add(1);
+        return 0;
+    };
+    let id_i = cells.id_at(i);
+    let id_j = cells.id_at(j);
+    // Already joined: nothing to do, and nothing to charge. A genome that calls `JOIN` every
+    // tick should not be paying for a junction it already has.
+    if junction::existing(cells, i, id_j).is_some() {
+        return 0;
+    }
+    // Both ends need a slot, because a junction is symmetric. A cell that is already holding
+    // four junctions cannot be joined, which is what stops one cell becoming a hub the whole
+    // slide hangs off.
+    let (Some(slot_i), Some(slot_j)) =
+        (junction::free_slot(cells, i), junction::free_slot(cells, j))
+    else {
+        report.junctions_refused = report.junctions_refused.saturating_add(1);
+        return 0;
+    };
+
+    let matched = key == cells.key[j];
+    let target_membrane = cells.slots(j)[MEMBRANE_SLOT].param;
+    let cost = junction::join_cost(&config.junctions, matched, target_membrane);
+    if cells.energy[i] < cost {
+        // Could not afford it. This is the deterrent working, not an error.
+        report.junctions_refused = report.junctions_refused.saturating_add(1);
+        return 0;
+    }
+    cells.energy[i] = cells.energy[i].saturating_sub(cost);
+
+    let junction_kind = if kind == 0 {
+        JunctionKind::Soft
+    } else {
+        JunctionKind::Hard
+    };
+    let rest = natural_rest(cells, i, j);
+    cells.junctions_mut(i)[slot_i] = Junction {
+        kind: junction_kind,
+        other: id_j,
+        rest,
+    };
+    cells.junctions_mut(j)[slot_j] = Junction {
+        kind: junction_kind,
+        other: id_i,
+        rest,
+    };
+    if matched {
+        report.junctions_consensual = report.junctions_consensual.saturating_add(1);
+    } else {
+        report.junctions_forced = report.junctions_forced.saturating_add(1);
+    }
+    cost
+}
+
+/// Dissolve a junction from both ends. Returns whether there was one.
+///
+/// From both ends because a junction is one relationship. Leaving from one side only would
+/// leave the other holding a slot pointing at a cell that no longer agrees, and the solver
+/// would keep pulling on a constraint nobody is party to.
+fn dissolve(cells: &mut CellArena, i: usize, slot: usize) -> bool {
+    let slot = slot % crate::junction::JUNCTIONS_PER_CELL;
+    let junction = cells.junctions(i)[slot];
+    if !junction.is_some() {
+        return false;
+    }
+    let id_i = cells.id_at(i);
+    cells.junctions_mut(i)[slot] = crate::junction::Junction::empty();
+    if let Some(j) = cells.index(junction.other) {
+        if let Some(other_slot) = crate::junction::existing(cells, j, id_i) {
+            cells.junctions_mut(j)[other_slot] = crate::junction::Junction::empty();
+        }
+    }
+    true
+}
+
+/// Move a chemical or energy across a soft junction.
+///
+/// What crosses is decided by `what`: `0` is energy, anything else selects a chemical. Both
+/// are conserved — this moves, it does not create — so neither needs a ledger entry, only for
+/// both compartments to be inside the total (I4, I5).
+fn resolve_transfer(
+    cells: &mut CellArena,
+    _config: &BiologyConfig,
+    i: usize,
+    slot: usize,
+    what: u8,
+    amount: i32,
+) -> i32 {
+    let slot = slot % crate::junction::JUNCTIONS_PER_CELL;
+    let junction = cells.junctions(i)[slot];
+    if !junction.is_some() {
+        return 0;
+    }
+    let Some(j) = cells.index(junction.other) else {
+        return 0;
+    };
+    if what == 0 {
+        // Energy. Bounded by what the sender has; energy has no capacity limit.
+        let moved = amount.min(cells.energy[i]).max(0);
+        if moved <= 0 {
+            return 0;
+        }
+        cells.energy[i] = cells.energy[i].saturating_sub(moved);
+        cells.energy[j] = cells.energy[j].saturating_add(moved);
+        moved
+    } else {
+        // A chemical. Bounded by what the sender holds *and* by what the receiver can take,
+        // or the difference would vanish.
+        let c = crate::chem::chem_index(what as i16);
+        let held = cells.interior(i)[c];
+        let room = interior_capacity(cells, j)
+            .saturating_sub(cells.interior(j)[c])
+            .max(0);
+        let moved = amount.min(held).min(room).max(0);
+        if moved <= 0 {
+            return 0;
+        }
+        cells.interior_mut(i)[c] = cells.interior(i)[c].saturating_sub(moved);
+        cells.interior_mut(j)[c] = cells.interior(j)[c].saturating_add(moved);
+        moved
+    }
+}
+
+/// Write one genome byte, into this cell's own nucleus or a neighbour's.
+///
+/// SPEC §8.3: reading and writing genome bytes is the same interface whether the target is
+/// self or a neighbour, which is why **viruses are emergent rather than implemented**. Nothing
+/// here knows the word. A cell that forms a soft junction and writes into what comes out of it
+/// is a parasite, and the only thing the engine notices is that a byte moved.
+///
+/// The target keeps executing. Its instruction pointer wraps modulo genome length, so there is
+/// no invalid state to reach — which is hard rule 3 doing the work that would otherwise need a
+/// validity check nobody could write.
+#[allow(clippy::too_many_arguments)]
+fn resolve_inject(
+    cells: &mut CellArena,
+    pool: &GenomePool,
+    config: &BiologyConfig,
+    ledger: &mut Ledger,
+    i: usize,
+    jidx: u8,
+    dst: u16,
+    src: u8,
+    report: &mut BiologyReport,
+) {
+    // Writing a genome costs the same per byte as copying one: accuracy is not free, and a
+    // parasite that could rewrite a host for nothing would be strictly better than one that
+    // reproduced.
+    let cost = config.copy_energy_per_byte;
+    if cells.energy[i] < cost {
+        return;
+    }
+
+    let target = if jidx == u8::MAX {
+        // The reserved index: this cell's own nucleus. Self-modifying code.
+        Some(i)
+    } else {
+        let junction = cells.junctions(i)[jidx as usize % crate::junction::JUNCTIONS_PER_CELL];
+        // A soft junction is required for a non-self target (SPEC §8.3). A hard one is
+        // structure, not a channel.
+        if junction.kind == crate::junction::JunctionKind::Soft {
+            cells.index(junction.other)
+        } else {
+            None
+        }
+    };
+    let Some(target) = target else {
+        return;
+    };
+
+    cells.energy[i] = cells.energy[i].saturating_sub(cost);
+    report.dissipate_build(ledger, cost);
+
+    // The genome is interned and shared, so writing to it means making a new one. That is the
+    // same thing `SPLIT` does with a daughter buffer, and it is why a cell under attack does
+    // not silently rewrite every clone that happens to share its genome.
+    let mut bytes = cells.genome[target].bytes().to_vec();
+    if bytes.is_empty() {
+        return;
+    }
+    let at = (dst as usize) % bytes.len();
+    bytes[at] = src;
+    if let Ok(genome) = pool.intern(bytes) {
+        cells.genome[target] = genome;
+    }
+    if target != i {
+        report.foreign_injections = report.foreign_injections.saturating_add(1);
+    }
 }
 
 /// Attempt a division. Returns whether one happened.
@@ -741,6 +1183,18 @@ pub fn apply_births(
     born
 }
 
+/// What the tick's dead left behind.
+///
+/// `to_carrion` is what makes the food web's bottom edge a measurement rather than a guess:
+/// it is the matter that actually reached a square as carrion, not what the dead were worth
+/// in principle, so a death in a walled-in corner contributes what it really contributed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct DeathReport {
+    pub deaths: u32,
+    /// Structural mass deposited as carrion, `Q10`.
+    pub to_carrion: i64,
+}
+
 /// Remove the tick's dead, returning everything they held to the fluid.
 ///
 /// A corpse is not a special object with a decay timer. The cell's interior chemistry and its
@@ -752,8 +1206,8 @@ pub fn apply_deaths(
     config: &BiologyConfig,
     ledger: &mut Ledger,
     pending: &mut Pending,
-) -> u32 {
-    let mut died = 0;
+) -> DeathReport {
+    let mut died = DeathReport::default();
     // Sorted so that two cells dying on the same square deposit in a fixed order, whatever
     // order they were detected in.
     pending.deaths.sort_unstable_by_key(|id| id.ordering_key());
@@ -766,12 +1220,30 @@ pub fn apply_deaths(
         let sx = pos_to_square(cells.x[i]);
         let sy = pos_to_square(cells.y[i]);
 
-        // Structural mass returns as the chemical it was built from.
+        // Structural mass becomes a corpse, mostly.
+        //
+        // SPEC §7.2: a dead cell leaves "a localised deposit that lysosomes can digest and
+        // that decays into the fluid over time". Carrion is a chemical rather than an object,
+        // so it diffuses slowly, decays on its own and is conserved exactly, all through
+        // machinery that already existed — see `ecology`.
+        //
+        // Not all of the body: a cell that starved has already spent itself, and a corpse that
+        // swallowed the whole body would leave nothing to tell starvation from predation.
+        // Turning body into carrion is a balanced reaction like any other, so it goes through
+        // the ledger (I4).
         let mut unplaced = [0i32; CHEM_COUNT];
         let sc = config.structural_chemical % CHEM_COUNT;
         let mass = cells.mass[i];
         cells.mass[i] = 0;
-        unplaced[sc] = mass.saturating_sub(deposit(substrate, sc, sx, sy, mass));
+        let as_carrion = q10_scale(mass, config.ecology.carrion_fraction);
+        let as_chemical = mass.saturating_sub(as_carrion);
+        if as_carrion > 0 {
+            let placed = deposit(substrate, crate::ecology::CARRION, sx, sy, as_carrion);
+            ledger.convert(sc, crate::ecology::CARRION, placed as i64);
+            unplaced[crate::ecology::CARRION] = as_carrion.saturating_sub(placed);
+            died.to_carrion = died.to_carrion.saturating_add(placed as i64);
+        }
+        unplaced[sc] = as_chemical.saturating_sub(deposit(substrate, sc, sx, sy, as_chemical));
 
         for (c, slot) in unplaced.iter_mut().enumerate() {
             let held = cells.interior(i)[c];
@@ -794,7 +1266,7 @@ pub fn apply_deaths(
         ledger.dissipate(energy as i64);
 
         cells.despawn(id);
-        died += 1;
+        died.deaths = died.deaths.saturating_add(1);
     }
     died
 }
@@ -862,6 +1334,10 @@ pub fn execute(
     cfg: &VmConfig,
     tick: u64,
     seed: u64,
+    // What a unit of spike extension deals, so a spike can report what it is about to do.
+    // Passed in rather than taking the whole `BiologyConfig`, because this is the only thing a
+    // cell reads from it during execution.
+    spike_damage: i32,
 ) {
     let mut vms = std::mem::take(&mut cells.vm);
     let arena: &CellArena = cells;
@@ -871,7 +1347,8 @@ pub fn execute(
         }
         let genome: Arc<Genome> = Arc::clone(&arena.genome[i]);
         let ctx = RandCtx::new(seed, tick, arena.id_at(i).ordering_key());
-        let mut host = CellHost::new(i, arena, substrate, neighbours, slot, tick);
+        let mut host =
+            CellHost::new(i, arena, substrate, neighbours, slot, tick, spike_damage);
         vm.tick(&genome, cfg, &ctx, &mut host);
         host.intents.dropped()
     };
@@ -997,6 +1474,7 @@ mod tests {
             resolve(
                 &mut self.cells,
                 &mut self.substrate,
+                &self.pool,
                 &self.intents,
                 &self.config,
                 &self.chem,
@@ -1340,11 +1818,25 @@ mod tests {
             &mut f.ledger,
             &mut f.pending,
         );
-        assert_eq!(died, 1);
+        assert_eq!(died.deaths, 1);
+        assert!(died.to_carrion > 0, "the corpse left no carrion");
         assert_eq!(f.cells.len(), 0);
-        assert_eq!(f.total(), before, "a corpse must not evaporate");
+        // Summed across chemicals rather than compared per species. Since M8 a corpse turns
+        // part of its body into carrion, which is a balanced reaction through the ledger — the
+        // per-chemical split legitimately moves and only the total is invariant.
+        let total = |v: &[i64; CHEM_COUNT]| -> i64 { v.iter().sum() };
+        assert_eq!(
+            total(&f.total()),
+            total(&before),
+            "a corpse must not evaporate"
+        );
+        // Interior chemistry goes back to the water untouched: only the *body* becomes carrion.
         assert_eq!(f.substrate.chem_at(6, 8, 8), q10(30));
         assert_eq!(f.substrate.chem_at(11, 8, 8), q10(20));
+        assert!(
+            f.substrate.chem_at(crate::ecology::CARRION, 8, 8) > 0,
+            "the body left no corpse behind"
+        );
     }
 
     #[test]
@@ -1368,13 +1860,14 @@ mod tests {
         // Anything the neighbourhood could not take is recorded as evicted rather than
         // quietly not adding up: I4 has no exception for a full square.
         let evicted: i64 = f.ledger.evicted().iter().sum();
+        // Summed rather than per-species, for the same reason as the test above: since M8 part
+        // of the body becomes carrion through the ledger, so the split moves and the total does
+        // not. What has to hold is that everything is accounted for — what reached the water
+        // plus what was evicted equals what the cell held.
+        let sum = |v: &[i64; CHEM_COUNT]| -> i64 { v.iter().sum() };
         assert_eq!(
-            f.total(),
-            {
-                let mut expected = before;
-                expected[6] -= f.ledger.evicted()[6];
-                expected
-            },
+            sum(&f.total()),
+            sum(&before) - evicted,
             "a corpse lost matter without saying so"
         );
         let spilled: i32 = (-1..=1)
@@ -1403,7 +1896,7 @@ mod tests {
             &mut f.ledger,
             &mut f.pending,
         );
-        assert_eq!(died, 2, "a duplicated death must be applied once");
+        assert_eq!(died.deaths, 2, "a duplicated death must be applied once");
         assert_eq!(f.cells.len(), 0);
     }
 
@@ -1429,6 +1922,7 @@ mod tests {
             &VmConfig::DEFAULT,
             0,
             1,
+            f.config.ecology.spike_damage,
         );
         assert_eq!(
             f.substrate.chem_at(5, 8, 8),
@@ -1454,7 +1948,15 @@ mod tests {
         intents.begin_tick(f.cells.capacity());
         let index = crate::neighbours::NeighbourIndex::default();
         let slot = intents.slots_mut().nth(i).expect("slot in range");
-        let mut host = CellHost::new(i, &f.cells, &f.substrate, &index, slot, 0);
+        let mut host = CellHost::new(
+            i,
+            &f.cells,
+            &f.substrate,
+            &index,
+            slot,
+            0,
+            f.config.ecology.spike_damage,
+        );
         assert_eq!(host.oget(1, 0), 1234, "energy");
         assert_eq!(host.oget(0, 0), 20, "mass");
         assert_eq!(host.otype(0), OrganelleType::Membrane.number());
@@ -1470,7 +1972,15 @@ mod tests {
         intents.begin_tick(f.cells.capacity());
         let index = crate::neighbours::NeighbourIndex::default();
         let slot = intents.slots_mut().nth(i).expect("slot in range");
-        let mut host = CellHost::new(i, &f.cells, &f.substrate, &index, slot, 0);
+        let mut host = CellHost::new(
+            i,
+            &f.cells,
+            &f.substrate,
+            &index,
+            slot,
+            0,
+            f.config.ecology.spike_damage,
+        );
         assert_eq!(host.eat(10, 5), 10);
         assert_eq!(host.eat(10, 5), 0, "the square was already spoken for");
     }

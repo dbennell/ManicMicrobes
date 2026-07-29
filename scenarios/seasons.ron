@@ -1,0 +1,45 @@
+// Seasons — a world where the right answer keeps changing.
+//
+// Every other scenario in the library poses a fixed question: this much light, from this
+// direction, forever. A lineage that finds the best answer to a fixed question stops, and a
+// slide where nothing is changing is a slide nobody watches for hours.
+//
+// Here there are two clocks. A short one — day and night, a few hundred ticks — and a long
+// one, a year, over which noon itself falls from bright summer to a dim winter and climbs
+// back. The strategy that pays in summer is a big chloroplast and a fast metabolism; the one
+// that pays in winter is a small body and low upkeep. Neither wins, because winter always
+// ends and so does summer.
+//
+// Nothing selects for that. It is a consequence of the light not sitting still.
+//
+// This is also the library's day/night world. `Seasonal` *is* a day/night cycle — the fast
+// triangle is a day — with a second, slower one modulating how bright noon gets, so a separate
+// `DayNight` scenario would be this one with the year switched off. The plain regime is still
+// there for a scenario that wants it, and `light.rs` tests it directly.
+//
+//   mm-cli run scenarios/seasons.ron --genome genomes/ancestor.mm --ticks 1000000
+(
+    name: "seasons",
+    seed: 20250811,
+    width: 128,
+    height: 128,
+
+    // A year is four hundred days. Long enough that a lineage lives many generations inside
+    // one season and can actually adapt to it, which is what makes the next season a problem.
+    light: Seasonal(
+        day_ticks: 240,
+        year_ticks: 96000,
+        summer_day: 1280,
+        winter_day: 224,
+        night: 0,
+    ),
+    current: Shear(strength: 64),
+    fluid_interval: 1,
+
+    seeding: [
+        Uniform(chemical: 11, per_square: 409600),
+        Uniform(chemical: 14, per_square: 409600),
+        Uniform(chemical: 4, per_square: 409600),
+    ],
+    barriers: [],
+)

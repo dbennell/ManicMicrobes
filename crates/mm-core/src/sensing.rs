@@ -401,6 +401,10 @@ pub struct PhysicsReport {
     pub energy_spent: i64,
     /// Overlapping pairs pushed apart.
     pub separated: u32,
+    /// Hard-junction distance constraints solved this tick (SPEC §8.4).
+    pub constraints: u32,
+    /// Junctions broken because an end died or drifted out of range.
+    pub junctions_broken: u32,
 }
 
 #[cfg(test)]

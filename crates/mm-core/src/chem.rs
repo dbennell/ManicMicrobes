@@ -199,7 +199,25 @@ impl ChemTable {
                 decay_rate: Q10_ONE / 64,
             },
             ChemicalDef::inert("brine"),
-            ChemicalDef::inert("silt"),
+            // What a dead cell leaves behind (SPEC §7.2, M8). A chemical rather than an
+            // object, so it is conserved, diffuses and decays through machinery that already
+            // exists — but barely diffuses, so a corpse stays where it fell and is worth
+            // swimming to, and decays slowly into ordinary waste so nothing accumulates
+            // forever. A lysosome turns it back into substrate, which is scavenging.
+            ChemicalDef {
+                name: "carrion".to_string(),
+                diffusion: Q10_ONE / 64,
+                toxicity: 0,
+                energy_yield: 0,
+                // Not build material. `structural` means "a cell can build its body out of
+                // this", and a cell cannot build itself out of a corpse — it has to digest one
+                // into substrate first, which is what a lysosome is for. Marking it structural
+                // would let a cell skip the digestion and eat the dead directly.
+                structural: false,
+                colour: [150, 90, 90],
+                decay_to: Some(11),
+                decay_rate: Q10_ONE / 512,
+            },
         ])
     }
 

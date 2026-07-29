@@ -25,6 +25,7 @@
 //! | `w` | species wiki, tree and timeline |
 //! | `e` | genome editor |
 //! | `d` | debugger |
+//! | `f` | food web |
 //! | `F1`–`F5` | tool: select, move, remove, wall, erase |
 //! | `o` | optics on/off |
 //! | `r` | wipe and reseed the slide |
@@ -163,6 +164,7 @@ impl SlideRes {
             return;
         };
         let world = self.slide.world_mut();
+        let structural = world.biology().structural_chemical;
         for k in 0..16u32 {
             let Ok(genome) = world.genomes().intern(bytes.clone()) else {
                 continue;
@@ -186,6 +188,11 @@ impl SlideRes {
                 cells.slots_mut(i)[1] = Organelle::finished(OrganelleType::Nucleus, 40);
                 cells.slots_mut(i)[2] = Organelle::finished(OrganelleType::Mitochondrion, 50);
                 cells.slots_mut(i)[3] = Organelle::finished(OrganelleType::Chloroplast, 60);
+                // Including build material. Without it a seeded cell can never build anything
+                // — every `BUILD` is silently skipped for want of structural matter — so the
+                // slide would run its four given organelles forever and differentiation would
+                // look like a genome that does not work.
+                cells.interior_mut(i)[structural] = q10(200);
                 cells.interior_mut(i)[11] = q10(40);
                 cells.interior_mut(i)[14] = q10(40);
             }
@@ -265,6 +272,8 @@ struct View {
     /// The genome editor and the debugger (M6).
     editor: bool,
     debugger: bool,
+    /// The food web (M8).
+    foodweb: bool,
     /// Which laboratory tool the mouse is holding.
     tool: Tool,
     /// Which species page is open.
@@ -283,6 +292,7 @@ impl Default for View {
             wiki: false,
             editor: false,
             debugger: false,
+            foodweb: false,
             tool: Tool::Select,
             species: None,
         }
@@ -328,6 +338,10 @@ struct OrganelleSprite {
 
 #[derive(Component)]
 struct MoteSprite(usize);
+
+/// A junction, drawn as a thin sprite stretched between two cells (M7).
+#[derive(Component)]
+struct JunctionSprite(usize);
 
 fn setup(mut commands: Commands) {
     commands.spawn(Camera2dBundle::default());
@@ -404,6 +418,9 @@ fn handle_input(
     }
     if keys.just_pressed(KeyCode::KeyD) {
         view.debugger = !view.debugger;
+    }
+    if keys.just_pressed(KeyCode::KeyF) {
+        view.foodweb = !view.foodweb;
     }
     for (key, tool) in [
         (KeyCode::F1, Tool::Select),
@@ -558,6 +575,16 @@ fn redraw(
             Without<OverlaySquare>,
             Without<CellSprite>,
             Without<OrganelleSprite>,
+            Without<JunctionSprite>,
+        ),
+    >,
+    mut junctions: Query<
+        (&JunctionSprite, &mut Sprite, &mut Transform),
+        (
+            Without<OverlaySquare>,
+            Without<CellSprite>,
+            Without<OrganelleSprite>,
+            Without<MoteSprite>,
         ),
     >,
 ) {
@@ -715,6 +742,44 @@ fn redraw(
         transform.translation = at;
     }
 
+    // Junctions. A stretched, rotated sprite per link: hard ones solid because they are
+    // structure, soft ones faint because they are a channel rather than a body.
+    let junction_pool = junctions.iter().count();
+    for i in junction_pool..frame.junctions.len() {
+        commands.spawn((
+            JunctionSprite(i),
+            SpriteBundle {
+                sprite: Sprite {
+                    color: Color::NONE,
+                    custom_size: Some(Vec2::splat(1.0)),
+                    ..default()
+                },
+                ..default()
+            },
+        ));
+    }
+    for (marker, mut sprite, mut transform) in &mut junctions {
+        let Some(link) = frame.junctions.get(marker.0) else {
+            sprite.color = Color::NONE;
+            continue;
+        };
+        let a = to_screen(link.from.0, link.from.1);
+        let b = to_screen(link.to.0, link.to.1);
+        let delta = (b - a).truncate();
+        let length = delta.length().max(1.0);
+        let dim = optics.vignette(field_radius((a + b) / 2.0));
+        sprite.color = if link.hard {
+            Color::srgba(0.80 * dim, 0.78 * dim, 0.70 * dim, 0.85)
+        } else {
+            Color::srgba(0.55 * dim, 0.70 * dim, 0.85 * dim, 0.35)
+        };
+        sprite.custom_size = Some(Vec2::new(length, if link.hard { 2.0 } else { 1.0 }));
+        // Drawn under the cells, so a junction reads as something the cells sit on rather
+        // than something laid over them.
+        transform.translation = ((a + b) / 2.0).with_z(0.5);
+        transform.rotation = Quat::from_rotation_z(delta.y.atan2(delta.x));
+    }
+
     // Dust on the objective: drawn in screen space, in front of everything, and not affected
     // by pan or zoom, because it is on the lens and not in the water.
     let mote_pool = motes.iter().count();
@@ -758,6 +823,9 @@ fn panels(mut contexts: EguiContexts, mut sim: ResMut<SlideRes>, mut view: ResMu
             .show(ctx, |ui| {
                 ui.label(format!("tick {}", frame.tick));
                 ui.label(format!("{} cells", frame.population));
+                if frame.largest_cluster > 1 {
+                    ui.label(format!("largest organism: {} cells", frame.largest_cluster));
+                }
                 ui.label(match frame.lod {
                     Lod::Dots => "detail: points",
                     Lod::Organelles => "detail: organelles",
@@ -854,6 +922,9 @@ fn panels(mut contexts: EguiContexts, mut sim: ResMut<SlideRes>, mut view: ResMu
     }
     if view.debugger {
         debugger_panel(ctx, &mut sim);
+    }
+    if view.foodweb {
+        foodweb_panel(ctx, &sim);
     }
 
     if view.inspector {
@@ -1044,6 +1115,125 @@ fn wiki_panel(ctx: &egui::Context, sim: &SlideRes, view: &mut View) {
                         .map(|b| format!("{b:02x}"))
                         .collect();
                     ui.small(egui::RichText::new(hex).monospace());
+                });
+        });
+}
+
+/// The food web (M8).
+///
+/// Nodes are stacked by trophic level and edges are drawn as arrows whose width is the matter
+/// that actually went along them over the last window. Edges the engine measured exactly are
+/// solid; edges whose total is known but whose attribution is not are dashed, so the panel
+/// never presents arithmetic as observation.
+fn foodweb_panel(ctx: &egui::Context, sim: &SlideRes) {
+    use mm_app::foodweb::{Basis, Node};
+
+    let web = sim.slide.food_web();
+    let peak = web.peak() as f32;
+
+    egui::Window::new("food web")
+        .anchor(egui::Align2::RIGHT_TOP, [-8.0, 8.0])
+        .default_width(360.0)
+        .show(ctx, |ui| {
+            ui.label(web.summary());
+            ui.weak(format!("averaged over {} ticks", web.window_ticks));
+            ui.separator();
+
+            let (rect, _) = ui
+                .allocate_exact_size(egui::vec2(ui.available_width(), 220.0), egui::Sense::hover());
+            let painter = ui.painter();
+
+            // Levels run 0..=3 with carrion on top; put level 0 at the bottom of the rect so
+            // the picture reads the way a food pyramid does.
+            let place = |node: Node| -> egui::Pos2 {
+                let across = match node {
+                    Node::Light | Node::Producers | Node::Scavengers => 0.25,
+                    Node::Dissolved | Node::Osmotrophs | Node::Predators => 0.75,
+                    Node::Carrion => 0.5,
+                };
+                let up = node.level() as f32 / 3.0;
+                egui::pos2(
+                    rect.left() + rect.width() * across,
+                    rect.bottom() - 12.0 - (rect.height() - 32.0) * up,
+                )
+            };
+
+            for edge in &web.edges {
+                if edge.weight <= 0 {
+                    continue;
+                }
+                let (a, b) = (place(edge.from), place(edge.to));
+                let width = 1.0 + 5.0 * (edge.weight as f32 / peak).clamp(0.0, 1.0);
+                let colour = if edge.is_recycling() {
+                    egui::Color32::from_rgb(150, 200, 120)
+                } else if edge.is_death() {
+                    egui::Color32::from_rgb(140, 110, 110)
+                } else {
+                    egui::Color32::from_rgb(110, 150, 190)
+                };
+                if edge.basis == Basis::Measured {
+                    painter.line_segment([a, b], egui::Stroke::new(width, colour));
+                } else {
+                    // Dashed, because the total is measured but who it belongs to is not.
+                    let steps = 9;
+                    for k in 0..steps {
+                        if k % 2 == 1 {
+                            continue;
+                        }
+                        let t0 = k as f32 / steps as f32;
+                        let t1 = (k + 1) as f32 / steps as f32;
+                        painter.line_segment(
+                            [a.lerp(b, t0), a.lerp(b, t1)],
+                            egui::Stroke::new(width, colour),
+                        );
+                    }
+                }
+            }
+
+            for occ in &web.nodes {
+                let at = place(occ.node);
+                let text = if occ.node.is_source() {
+                    occ.node.label().to_string()
+                } else {
+                    format!("{} {}", occ.node.label(), occ.count)
+                };
+                let fill = if occ.node.is_source() {
+                    egui::Color32::from_black_alpha(200)
+                } else {
+                    egui::Color32::from_rgb(30, 45, 40)
+                };
+                let galley = painter.layout_no_wrap(
+                    text,
+                    egui::FontId::proportional(11.0),
+                    egui::Color32::from_gray(220),
+                );
+                let box_rect =
+                    egui::Rect::from_center_size(at, galley.size() + egui::vec2(10.0, 6.0));
+                painter.rect_filled(box_rect, 3.0, fill);
+                painter.galley(box_rect.center() - galley.size() / 2.0, galley, egui::Color32::WHITE);
+            }
+
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .max_height(120.0)
+                .show(ui, |ui| {
+                    for edge in &web.edges {
+                        if edge.weight <= 0 {
+                            continue;
+                        }
+                        ui.small(format!(
+                            "{} → {}: {}{}",
+                            edge.from.label(),
+                            edge.to.label(),
+                            edge.weight / mm_core::Q10_ONE as i64,
+                            if edge.basis == Basis::Measured {
+                                ""
+                            } else {
+                                " (shared out)"
+                            }
+                        ))
+                        .on_hover_text(edge.note);
+                    }
                 });
         });
 }

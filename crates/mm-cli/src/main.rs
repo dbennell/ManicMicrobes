@@ -201,7 +201,11 @@ fn cmd_match(args: &[String]) -> Result<(), String> {
         // honoured. Falling back to assembly when it is not one.
         match mm_core::genome_file::GenomeFile::from_text(&text) {
             Ok(file) => Ok(mm_core::arena::Entry::new(
-                if file.name.is_empty() { name } else { file.name },
+                if file.name.is_empty() {
+                    name
+                } else {
+                    file.name
+                },
                 file.bytes,
             )),
             Err(mm_core::genome_file::GenomeFileError::NotAGenomeFile) => {

@@ -26,6 +26,7 @@
 
 pub mod debugger;
 pub mod editor;
+pub mod foodweb;
 pub mod inspector;
 pub mod optics;
 pub mod slide;

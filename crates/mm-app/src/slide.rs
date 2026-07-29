@@ -19,6 +19,7 @@
 
 use mm_core::chem::CHEM_COUNT;
 use mm_core::fixed::{pos_to_square, POS_ONE, Q10_ONE};
+use mm_core::ecology::TrophicMix;
 use mm_core::metrics::Sample;
 use mm_core::{Scenario, World};
 
@@ -45,6 +46,9 @@ pub struct CellDot {
     /// at far zoom nobody can see them and building the list would be a hundred thousand
     /// allocations for nothing.
     pub organelles: Vec<OrganelleDot>,
+    /// How many cells are in this one's organism, over hard junctions (M7). One means a
+    /// solitary cell.
+    pub cluster_size: u32,
 }
 
 /// One organelle, as it is drawn inside its cell.
@@ -122,6 +126,22 @@ pub struct Frame {
     pub lod: Lod,
     /// Dust on the objective. Presentation only — see [`crate::optics`].
     pub motes: Vec<crate::optics::Mote>,
+    /// Junctions, present only at [`Lod::Organelles`] and above — at whole-slide zoom a
+    /// junction is shorter than a pixel and there may be fifty thousand of them.
+    pub junctions: Vec<JunctionLine>,
+    /// The largest organism on the slide, in cells.
+    pub largest_cluster: u32,
+}
+
+/// One junction, as it is drawn.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct JunctionLine {
+    /// Both ends, in substrate squares.
+    pub from: (f32, f32),
+    pub to: (f32, f32),
+    /// Hard junctions are structure and are drawn solid; soft ones are channels and are drawn
+    /// faint, because one is a body and the other is a conversation.
+    pub hard: bool,
 }
 
 /// One chemical field, ready to draw.
@@ -154,7 +174,16 @@ pub struct Slide {
     pub optics: crate::optics::Optics,
     /// Rolling history for the live plots.
     history: MetricHistory,
+    /// Trophic flows over the last complete window, and the one still filling (M8).
+    flows: crate::foodweb::Flows,
+    flows_filling: crate::foodweb::Flows,
 }
+
+/// How many ticks the food web averages over.
+///
+/// Long enough that a single tick's births and deaths do not make the arrows twitch, short
+/// enough that a shift in the ecosystem shows up while the user is still looking at it.
+const FLOW_WINDOW_TICKS: u64 = 600;
 
 impl Slide {
     /// # Errors
@@ -169,6 +198,8 @@ impl Slide {
         }
         Ok(Slide {
             world: World::new(scenario)?,
+            flows: crate::foodweb::Flows::default(),
+            flows_filling: crate::foodweb::Flows::default(),
             overlays,
             speed: 1,
             pending_steps: 0,
@@ -196,7 +227,36 @@ impl Slide {
         for _ in 0..ticks {
             self.world.step();
             self.history.maybe_sample(&self.world);
+            self.accumulate_flows();
         }
+    }
+
+    /// Fold this tick's flows into the food web's window, rolling it over when it is full.
+    ///
+    /// The window is what stops the web reading as a run-long average that stops moving after
+    /// the first ten thousand ticks. It is a display average and nothing reads it back, so a
+    /// run that never opens the panel produces exactly the same world as one that does.
+    fn accumulate_flows(&mut self) {
+        let report = self.world.report();
+        self.flows_filling.accumulate(&report);
+        if self.flows_filling.ticks >= FLOW_WINDOW_TICKS {
+            self.flows = self.flows_filling;
+            self.flows_filling.reset();
+        }
+    }
+
+    /// The food web as of the last complete window.
+    ///
+    /// Falls back to the window still filling, so the panel says something on a young run
+    /// rather than sitting empty for its first six hundred ticks.
+    #[must_use]
+    pub fn food_web(&self) -> crate::foodweb::FoodWeb {
+        let flows = if self.flows.ticks > 0 {
+            &self.flows
+        } else {
+            &self.flows_filling
+        };
+        crate::foodweb::web(TrophicMix::of(self.world.cells()), flows)
     }
 
     /// Advance by whatever the current speed setting owes, once per frame.
@@ -314,6 +374,41 @@ impl Slide {
             .collect();
 
         let detailed = self.lod.resolves_organelles();
+
+        // Components, for colouring a cluster as one thing. Rebuilt here rather than kept,
+        // because they are derived from the junctions and a stale copy would draw an organism
+        // that came apart three ticks ago.
+        let mut components = mm_core::junction::Components::new();
+        components.rebuild(cells);
+        let largest_cluster = components.largest();
+
+        let mut junctions: Vec<JunctionLine> = Vec::new();
+        if detailed {
+            for i in cells.iter() {
+                for j in cells.junctions(i) {
+                    let Some(other) = cells.index(j.other) else {
+                        continue;
+                    };
+                    // Drawn once per pair, by the lower slot. Both ends hold the junction, so
+                    // drawing from both would lay every line on top of itself.
+                    if other <= i {
+                        continue;
+                    }
+                    junctions.push(JunctionLine {
+                        from: (
+                            cells.x[i] as f32 / POS_ONE as f32,
+                            cells.y[i] as f32 / POS_ONE as f32,
+                        ),
+                        to: (
+                            cells.x[other] as f32 / POS_ONE as f32,
+                            cells.y[other] as f32 / POS_ONE as f32,
+                        ),
+                        hard: j.kind == mm_core::junction::JunctionKind::Hard,
+                    });
+                }
+            }
+        }
+
         let dots = cells
             .iter()
             .map(|i| {
@@ -331,6 +426,7 @@ impl Slide {
                     } else {
                         Vec::new()
                     },
+                    cluster_size: components.size_of(i),
                 }
             })
             .collect();
@@ -345,6 +441,8 @@ impl Slide {
             population: cells.len(),
             lod: self.lod,
             motes: crate::optics::motes(&self.optics, self.world.tick_count()),
+            junctions,
+            largest_cluster,
         }
     }
 
@@ -850,6 +948,71 @@ mod tests {
         let n = pop.normalised();
         assert_eq!(n.len(), pop.values.len());
         assert!(n.iter().all(|v| (0.0..=1.0).contains(v)));
+    }
+
+    #[test]
+    fn junctions_are_drawn_once_per_pair_not_twice() {
+        // Both cells hold a junction, so a naive loop lays every line on top of itself and the
+        // soft ones look as solid as the hard ones.
+        use mm_core::cell::CellSeed;
+        use mm_core::fixed::{pos, q10};
+        use mm_core::junction::{Junction, JunctionKind};
+
+        let mut slide = Slide::new(scenario()).unwrap();
+        let g = slide.world_mut().genomes().intern(vec![0x2E; 4]).unwrap();
+        let mut ids = Vec::new();
+        for k in 0..4 {
+            let id = slide.world_mut().spawn_cell(CellSeed {
+                x: pos(4 + k * 2),
+                y: pos(6),
+                mass: q10(30),
+                energy: q10(500),
+                membrane: 24,
+                key: 11,
+                species: 0,
+                parent: mm_core::CellId::NONE,
+                birth_tick: 0,
+                genome: g.clone(),
+            });
+            ids.push(id);
+        }
+        slide.world_mut().adopt_current_contents_as_baseline();
+        for pair in ids.windows(2) {
+            let (ia, ib) = (
+                slide.world().cells().index(pair[0]).unwrap(),
+                slide.world().cells().index(pair[1]).unwrap(),
+            );
+            let cells = slide.world_mut().cells_mut();
+            let sa = mm_core::junction::free_slot(cells, ia).unwrap();
+            cells.junctions_mut(ia)[sa] = Junction {
+                kind: JunctionKind::Hard,
+                other: pair[1],
+                rest: 256,
+            };
+            let sb = mm_core::junction::free_slot(cells, ib).unwrap();
+            cells.junctions_mut(ib)[sb] = Junction {
+                kind: JunctionKind::Hard,
+                other: pair[0],
+                rest: 256,
+            };
+        }
+
+        slide.set_zoom(64.0);
+        let f = slide.frame();
+        assert_eq!(
+            f.junctions.len(),
+            3,
+            "three links drawn as {:?}",
+            f.junctions.len()
+        );
+        assert!(f.junctions.iter().all(|j| j.hard));
+        assert_eq!(f.largest_cluster, 4, "the chain is not one organism");
+        assert!(f.cells.iter().any(|c| c.cluster_size == 4));
+
+        // And at far zoom the lines are not built at all: a junction is sub-pixel and there
+        // may be fifty thousand of them.
+        slide.set_zoom(1.0);
+        assert!(slide.frame().junctions.is_empty());
     }
 
     #[test]

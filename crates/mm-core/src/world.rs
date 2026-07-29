@@ -23,6 +23,23 @@ use crate::scenario::{Barrier, Scenario, ScenarioError, Seeding};
 use crate::state_hash::{StateHash, StateHasher};
 use crate::substrate::Substrate;
 
+/// The world's narrative counters, restored from a snapshot together.
+///
+/// A struct rather than nine positional arguments: the list gained one at each of the last two
+/// milestones, and nine numbers in a row is a call nobody can read and anybody can transpose.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct RestoredStory {
+    pub events: Vec<crate::events::Event>,
+    pub window_population: u32,
+    pub window_at: u64,
+    pub generations: u32,
+    pub dominant: Option<crate::phylogeny::SpeciesId>,
+    pub births_total: u64,
+    pub foreign_injections_total: u64,
+    pub forced_joins_total: u64,
+    pub wounds_total: u64,
+}
+
 /// A running simulation.
 #[derive(Clone, Debug)]
 pub struct World {
@@ -55,6 +72,20 @@ pub struct World {
     events: crate::events::EventLog,
     /// Births since the run began. Feeds the replication detector and nothing else.
     births_total: u64,
+    /// Genome bytes written into another cell's nucleus, and junctions forced against a key
+    /// mismatch. Counted as they happen, because neither leaves a trace a later scan could
+    /// find — the byte is just a byte, and a forced junction looks like any other.
+    foreign_injections_total: u64,
+    forced_joins_total: u64,
+    /// Spike wounds dealt since the run began, for the predation detector.
+    wounds_total: u64,
+    /// Constraint list, reused by the junction solver so it does not allocate per tick.
+    /// Scratch: rebuilt from the junctions every solve.
+    constraints: Vec<(u32, u32, i32)>,
+    /// Connected components over hard junctions — which cells are one organism (SPEC §8.4).
+    /// Scratch: derived entirely from the junctions, rebuilt when asked, so it is excluded
+    /// from equality and from the hash the way `scratch` and `radii` are.
+    components: crate::junction::Components,
     /// Reused between censuses so counting species does not allocate every time.
     census: std::collections::BTreeMap<crate::phylogeny::SpeciesId, u32>,
     scratch: crate::fluid::FluidScratch,
@@ -88,6 +119,7 @@ pub struct TickReport {
     pub biology: BiologyReport,
     pub metabolism: MetabolicReport,
     pub physics: crate::sensing::PhysicsReport,
+    pub ecology: crate::ecology::EcologyReport,
 }
 
 // `scratch` and `radii` are scratchpads, so two worlds that differ only in what happens to be
@@ -105,6 +137,9 @@ impl PartialEq for World {
             && self.archive == other.archive
             && self.events == other.events
             && self.births_total == other.births_total
+            && self.foreign_injections_total == other.foreign_injections_total
+            && self.forced_joins_total == other.forced_joins_total
+            && self.wounds_total == other.wounds_total
     }
 }
 
@@ -142,6 +177,11 @@ impl World {
             archive: crate::phylogeny::Phylogeny::new(),
             events: crate::events::EventLog::new(),
             births_total: 0,
+            foreign_injections_total: 0,
+            forced_joins_total: 0,
+            wounds_total: 0,
+            constraints: Vec::new(),
+            components: crate::junction::Components::new(),
             census: std::collections::BTreeMap::new(),
             scratch: crate::fluid::FluidScratch::new(n),
             radii: Vec::new(),
@@ -376,6 +416,7 @@ impl World {
                 &self.scenario.vm,
                 tick,
                 seed,
+                self.biology.ecology.spike_damage,
             );
 
             // 3. Resolve. Intents applied in slot order, which is cell-id order, so a
@@ -383,6 +424,7 @@ impl World {
             report.biology = biology::resolve(
                 &mut self.cells,
                 &mut self.substrate,
+                &self.genomes,
                 &self.intents,
                 &self.biology,
                 &self.scenario.chemicals,
@@ -416,6 +458,30 @@ impl World {
             if report.physics.energy_spent > 0 {
                 self.ledger.dissipate(report.physics.energy_spent);
             }
+            // 4b. Junctions (SPEC §8.4). Broken ends first, so the solver never pulls on a
+            //     junction to a cell that is not there, then the distance constraints.
+            //
+            //     After physics and before collision separation, deliberately: cilia have
+            //     already pushed the cells they are attached to, and the constraints now drag
+            //     the rest. That ordering is the whole of "colony locomotion is emergent" —
+            //     nothing in the engine moves a cluster as a unit.
+            //     Solve first, then break what is left over. The other order looks natural —
+            //     tidy up, then do the work — and is wrong: physics has just moved every cell,
+            //     so a junction is routinely overstretched at this instant and the solver
+            //     exists precisely to pull it back. Pruning first broke junctions the solver
+            //     would have saved, and a cluster with one cilium tore itself apart within a
+            //     few hundred ticks.
+            //
+            //     Breaking strain means "the constraint could not hold it", not "it was
+            //     briefly stretched".
+            report.physics.constraints = crate::junction::solve(
+                &mut self.cells,
+                &self.biology.junctions,
+                &mut self.constraints,
+            );
+            report.physics.junctions_broken =
+                crate::junction::prune(&mut self.cells, &self.biology.junctions);
+
             // Cells occupy space, so a crowded patch is crowded and there is a reason to
             // leave it. Rebuilt first because everything just moved.
             self.neighbours
@@ -465,13 +531,28 @@ impl World {
                 &mut self.starving,
             );
             self.pending.deaths.append(&mut self.starving);
-            report.biology.deaths = biology::apply_deaths(
+            // 6b. Ecology: spikes wound, lysosomes digest (M8). Before deaths, so a cell
+            //     wounded past its limit dies this tick rather than next — and after the
+            //     neighbour index was rebuilt by the physics phase, so "touching" means where
+            //     things are now.
+            report.ecology = crate::ecology::step(
+                &mut self.cells,
+                &mut self.substrate,
+                &self.neighbours,
+                &self.biology.ecology,
+                &self.biology.metabolism.catalogue.metabolism,
+                &mut self.ledger,
+            );
+
+            let dead = biology::apply_deaths(
                 &mut self.cells,
                 &mut self.substrate,
                 &self.biology,
                 &mut self.ledger,
                 &mut self.pending,
             );
+            report.biology.deaths = dead.deaths;
+            report.biology.to_carrion = dead.to_carrion;
             report.biology.births = biology::apply_births(
                 &mut self.cells,
                 &self.genomes,
@@ -483,6 +564,15 @@ impl World {
             self.births_total = self
                 .births_total
                 .saturating_add(u64::from(report.biology.births));
+            self.foreign_injections_total = self
+                .foreign_injections_total
+                .saturating_add(u64::from(report.biology.foreign_injections));
+            self.forced_joins_total = self
+                .forced_joins_total
+                .saturating_add(u64::from(report.biology.junctions_forced));
+            self.wounds_total = self
+                .wounds_total
+                .saturating_add(u64::from(report.ecology.wounded));
         }
 
         // 7. The story: who is alive, who just stopped, and anything happening for the first
@@ -639,6 +729,16 @@ impl World {
         id
     }
 
+    /// Connected components over hard junctions, rebuilt from the current junctions.
+    ///
+    /// Takes `&mut self` because the union-find compresses paths as it answers, which is what
+    /// makes it near-constant. It reads junctions and writes only its own scratch, so it is
+    /// not part of the world's identity — see the `PartialEq` note.
+    pub fn components(&mut self) -> &mut crate::junction::Components {
+        self.components.rebuild(&self.cells);
+        &mut self.components
+    }
+
     /// The species archive and the tree over it.
     #[must_use]
     pub fn archive(&self) -> &crate::phylogeny::Phylogeny {
@@ -658,6 +758,21 @@ impl World {
     #[must_use]
     pub fn births_total(&self) -> u64 {
         self.births_total
+    }
+
+    #[must_use]
+    pub fn foreign_injections_total(&self) -> u64 {
+        self.foreign_injections_total
+    }
+
+    #[must_use]
+    pub fn forced_joins_total(&self) -> u64 {
+        self.forced_joins_total
+    }
+
+    #[must_use]
+    pub fn wounds_total(&self) -> u64 {
+        self.wounds_total
     }
 
     /// Census the population, update the archive, and look for firsts.
@@ -702,27 +817,38 @@ impl World {
             }
         }
         self.archive.census(&self.census, tick);
+        // Components are rebuilt here rather than inside the detectors, because the wiki and
+        // the renderer want them too and rebuilding twice would be paying twice.
+        self.components.rebuild(&self.cells);
         let view = crate::events::WorldView {
             cells: &self.cells,
             archive: Some(&self.archive),
             births_so_far: self.births_total,
+            foreign_injections: self.foreign_injections_total,
+            forced_joins: self.forced_joins_total,
+            wounds: self.wounds_total,
+            components: Some(&mut self.components),
         };
         self.events.observe(&view, tick);
     }
 
     /// Rebuild the archive's narrative half from a snapshot. Hard rule 7.
-    pub fn restore_story(
-        &mut self,
-        events: Vec<crate::events::Event>,
-        window_population: u32,
-        window_at: u64,
-        generations: u32,
-        dominant: Option<crate::phylogeny::SpeciesId>,
-        births_total: u64,
-    ) {
-        self.events
-            .restore(events, window_population, window_at, generations, dominant);
-        self.births_total = births_total;
+    ///
+    /// Takes a struct rather than nine positional arguments. It has gained one at each of the
+    /// last two milestones and would gain more at the next, and nine `u64`s in a row is a
+    /// call nobody can read and anybody can transpose.
+    pub fn restore_story(&mut self, story: RestoredStory) {
+        self.events.restore(
+            story.events,
+            story.window_population,
+            story.window_at,
+            story.generations,
+            story.dominant,
+        );
+        self.births_total = story.births_total;
+        self.foreign_injections_total = story.foreign_injections_total;
+        self.forced_joins_total = story.forced_joins_total;
+        self.wounds_total = story.wounds_total;
     }
 
     /// Drop extinct branches that carry no story (SPEC §10.3).
@@ -962,6 +1088,9 @@ impl StateHash for World {
         self.archive.hash_into(h);
         self.events.hash_into(h);
         h.u64(self.births_total);
+        h.u64(self.foreign_injections_total);
+        h.u64(self.forced_joins_total);
+        h.u64(self.wounds_total);
     }
 }
 

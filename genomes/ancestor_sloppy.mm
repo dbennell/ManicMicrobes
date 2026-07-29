@@ -76,9 +76,17 @@
 ; This is the strain that does NOT excrete its peroxide, and it exists to be beaten.
 ;
 ; It differs from `ancestor.mm` by one template bit: where the tidy strain excretes chemical
-; 13, this one excretes chemical 15, an inert filler it is not carrying, so the instruction
-; runs and achieves nothing. Same length in bytes, same number of instructions, same time
-; round the cycle, same cost to copy at division.
+; 13, this one excretes chemical 15, which it is not carrying, so the instruction runs and
+; achieves nothing. Same length in bytes, same number of instructions, same time round the
+; cycle, same cost to copy at division.
+;
+; Amended at M8. Chemical 15 was inert filler when this was written and is now carrion, so
+; "inert" is no longer the reason the instruction does nothing — the reason is that a cell
+; never comes to hold carrion. Digestion converts it straight to substrate and a corpse is
+; deposited into the water, so nothing puts carrion in a cytoplasm. A descendant that mutated
+; its way to `EAT 15` would break that, and this `EMIT` would start working. Which is a fine
+; thing to happen and costs the comparison nothing: what makes this strain the control is the
+; peroxide it does *not* excrete, not this instruction achieving nothing in particular.
 ;
 ; That control matters more than it looks. Padding with different instructions left the tidy
 ; strain a few bytes longer, and a few bytes longer means a few more COPYB in every division —
@@ -91,7 +99,7 @@
 
         GENE    #grow
         IMM     255
-        IMM     15              ; ...into chemical 15, which it does not have
+        IMM     15              ; ...into chemical 15, which it does not hold
         EMIT
         DROP
         IMM     8

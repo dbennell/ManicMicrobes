@@ -126,17 +126,16 @@ impl OrganelleType {
 
     /// Whether this milestone implements the type. Unimplemented types can still be built and
     /// paid for; they simply do nothing, which is what `RESERVED` means.
+    ///
+    /// As of M8 that is the two reserved slots and nothing else: M2 brought the metabolic
+    /// types, M3 the sensors and the cilium, M7 the junction port, M8 the lysosome and the
+    /// spike. `Empty` is not a type a cell can hold.
     #[inline]
     #[must_use]
     pub const fn is_implemented(self) -> bool {
-        matches!(
+        !matches!(
             self,
-            OrganelleType::Membrane
-                | OrganelleType::Nucleus
-                | OrganelleType::Mitochondrion
-                | OrganelleType::Chloroplast
-                | OrganelleType::Vacuole
-                | OrganelleType::Pump
+            OrganelleType::Empty | OrganelleType::ReservedA | OrganelleType::ReservedB
         )
     }
 
@@ -439,6 +438,34 @@ impl OrganelleCatalogue {
             teardown_recovery: Q10_ONE / 2,
         };
 
+        // A spike is the dearest thing in the catalogue to build and the dearest to carry —
+        // dearer than a chloroplast, before the per-tick cost of actually extending it. This is
+        // the main dial on whether the food web has a second level: on the `cheap` default a
+        // spike costs less than a mitochondrion, and if violence is cheaper than metabolism
+        // then every lineage grows one, eats everything and starves. Predation has to be a
+        // commitment that only pays when there is enough prey about to repay it.
+        specs[OrganelleType::Spike as usize] = OrganelleSpec {
+            build_matter: q10(9),
+            build_matter_per_param: q10(1) / 4,
+            build_energy: q10(20),
+            build_ticks: 20,
+            upkeep: q10(1) / 24,
+            upkeep_per_param: q10(1) / 384,
+            teardown_recovery: Q10_ONE / 2,
+        };
+
+        // Scavenging is the cheaper trade and the lower-yield one: a lysosome costs about what
+        // a mitochondrion costs, and what it digests has already been through someone else.
+        specs[OrganelleType::Lysosome as usize] = OrganelleSpec {
+            build_matter: q10(6),
+            build_matter_per_param: q10(1) / 8,
+            build_energy: q10(12),
+            build_ticks: 12,
+            upkeep: q10(1) / 56,
+            upkeep_per_param: q10(1) / 896,
+            teardown_recovery: Q10_ONE / 2,
+        };
+
         OrganelleCatalogue {
             specs,
             metabolism: MetabolicChemistry::default(),
@@ -586,7 +613,15 @@ mod tests {
     }
 
     #[test]
-    fn exactly_the_m2_types_are_implemented() {
+    fn only_the_reserved_slots_are_unimplemented() {
+        // The list is written out rather than derived, so that filling a `RESERVED` slot has to
+        // be a deliberate edit here as well as in the mechanism.
+        let unimplemented: Vec<&str> = OrganelleType::all()
+            .iter()
+            .filter(|k| !k.is_implemented())
+            .map(|k| k.name())
+            .collect();
+        assert_eq!(unimplemented, vec!["reserved_a", "reserved_b"]);
         let implemented: Vec<&str> = OrganelleType::all()
             .iter()
             .filter(|k| k.is_implemented())
@@ -600,7 +635,15 @@ mod tests {
                 "mitochondrion",
                 "chloroplast",
                 "vacuole",
-                "pump"
+                "pump",
+                "cilium",
+                "chemosensor",
+                "photosensor",
+                "touch sensor",
+                "junction port",
+                "lysosome",
+                "spike",
+                "oscillator",
             ]
         );
     }

@@ -326,5 +326,242 @@ fn phylogeny_gate(_c: &mut Criterion) {
     );
 }
 
-criterion_group!(benches, gate, phylogeny_gate, phase_breakdown, phases);
+/// M7's gate: the junction solve under 5% of tick time at 50,000 junctions.
+///
+/// Measured the same way as M5's — two clones of one grown world, stepped from the same state,
+/// differing only in whether the junctions are there. Comparing like with like is the whole
+/// measurement; the alternative of timing two consecutive windows on a growing population
+/// reported the archive as costing negative time, which is how that lesson was learned.
+fn junction_gate(_c: &mut Criterion) {
+    if cfg!(debug_assertions) {
+        return;
+    }
+    let Some(world) = grown("ancestor.mm", 1) else {
+        return;
+    };
+    let population = world.cells().len();
+
+    // Wire genuinely adjacent cells together until the target is reached.
+    //
+    // By spatial neighbour, not by arena slot. The first version paired consecutive slots —
+    // which follow birth order, not position — and managed fourteen junctions out of fifty
+    // thousand before reporting the gate as MET. A gate measured on a thousandth of the load
+    // it names has measured nothing, which is why the count is printed either way.
+    let mut wired = world.clone();
+    let target = 50_000usize;
+    let mut made = 0usize;
+    {
+        let mut index = NeighbourIndex::default();
+        let (w, h) = (wired.substrate().width(), wired.substrate().height());
+        index.rebuild(wired.cells(), w, h);
+        let slots: Vec<usize> = wired.cells().iter().collect();
+        for i in slots {
+            if made >= target {
+                break;
+            }
+            let (sx, sy) = (
+                mm_core::fixed::pos_to_square(wired.cells().x[i]),
+                mm_core::fixed::pos_to_square(wired.cells().y[i]),
+            );
+            let near: Vec<usize> = index.around(sx, sy).collect();
+            for j in near {
+                if made >= target || j <= i || !wired.cells().occupied(j) {
+                    continue;
+                }
+                let (Some(sa), Some(sb)) = (
+                    mm_core::junction::free_slot(wired.cells(), i),
+                    mm_core::junction::free_slot(wired.cells(), j),
+                ) else {
+                    break;
+                };
+                let id_i = wired.cells().id_at(i);
+                let id_j = wired.cells().id_at(j);
+                let rest = mm_core::junction::distance(wired.cells(), i, j)
+                    .max(mm_core::fixed::POS_ONE / 2);
+                wired.cells_mut().junctions_mut(i)[sa] = mm_core::junction::Junction {
+                    kind: mm_core::junction::JunctionKind::Hard,
+                    other: id_j,
+                    rest,
+                };
+                wired.cells_mut().junctions_mut(j)[sb] = mm_core::junction::Junction {
+                    kind: mm_core::junction::JunctionKind::Hard,
+                    other: id_i,
+                    rest,
+                };
+                made += 1;
+            }
+        }
+    }
+
+    let mut bare = world;
+    let n = 120u64;
+    bare.run(10);
+    let t = Instant::now();
+    bare.run(n);
+    let without = t.elapsed().as_secs_f64() / n as f64;
+
+    wired.run(10);
+    let t = Instant::now();
+    wired.run(n);
+    let with = t.elapsed().as_secs_f64() / n as f64;
+
+    let share = ((with - without) / with * 100.0).max(0.0);
+    eprintln!("\nM7 junction gate at {population} cells, {made} junctions:");
+    eprintln!(
+        "  with junctions {:.2}ms/tick, without {:.2}ms/tick — {share:.2}% (need under 5%)  {}",
+        with * 1000.0,
+        without * 1000.0,
+        if share < 5.0 { "MET" } else { "MISSED" }
+    );
+    if made < target {
+        // Said out loud: a gate measured at a tenth of the population it names has measured
+        // something else. `JUNCTIONS_PER_CELL` is four, so fifty thousand junctions needs
+        // twenty-five thousand cells with every slot full and a neighbour for each.
+        eprintln!("  (only {made} junctions of the {target} the gate names)");
+    }
+}
+
+/// M8's gate: the ecology phase under 5% of tick time with a population that all carries the
+/// machinery.
+///
+/// Measured on two clones like M5's and M7's. The worst case is not a world with a few
+/// predators in it — it is a world where *every* cell has an extended spike and a lysosome, so
+/// every cell does a neighbour scan and a substrate read every tick. That is the load the
+/// phase has to be affordable under, so that is what is measured, even though no run would
+/// ever look like it.
+///
+/// # The spikes deal no damage, on purpose
+///
+/// The first version of this armed every cell for real and reported the phase at **0.00%,
+/// MET** — on the strength of the armed world running at 3.25ms/tick against the control's
+/// 46.05ms. It was faster because everything had stabbed everything: the population fell from
+/// 52,737 to 2,989 while the control grew to 129,525, and `.max(0.0)` turned an impossible
+/// negative into a pass. Which is precisely the trap [`phylogeny_gate`] documents four
+/// functions up, reproduced in the gate written after reading it.
+///
+/// So `spike_damage` is zeroed in the armed clone. Every line of the hot path still runs —
+/// extension is computed, upkeep is charged, the neighbour index is scanned, reach is tested,
+/// carrion is digested — and nothing dies, so the two clones stay the same size and the
+/// difference between them is the phase rather than the body count. Killing the population is
+/// a *behavioural* consequence of predation, not part of what the phase costs to run.
+fn ecology_gate(_c: &mut Criterion) {
+    if cfg!(debug_assertions) {
+        return;
+    }
+    let Some(mut world) = grown("ancestor.mm", 1) else {
+        return;
+    };
+    let population = world.cells().len();
+
+    // Carrion under every cell, so the digestion half has something to do — placed *before*
+    // the clone, so both worlds hold exactly the same matter. Putting it in only the armed
+    // clone made it a food subsidy rather than a workload: the armed world grew to 151,218
+    // against the control's 129,525, and the drift assertion below caught it.
+    let slots: Vec<usize> = world.cells().iter().collect();
+    for i in &slots {
+        let (x, y) = (
+            mm_core::fixed::pos_to_square(world.cells().x[*i]),
+            mm_core::fixed::pos_to_square(world.cells().y[*i]),
+        );
+        world
+            .substrate_mut()
+            .add_chem(mm_core::ecology::CARRION, x, y, mm_core::fixed::q10(400));
+    }
+    world.adopt_current_contents_as_baseline();
+
+    // Arm every cell, and arrange for the phase to do its work without changing the outcome.
+    //
+    // The spike is the expensive half — a neighbour scan and a reach test per cell per tick —
+    // so it runs at full extension with `spike_damage` zeroed. Nothing dies, and the scan is
+    // measured at full load, which is what the gate is for.
+    //
+    // `spike_upkeep` is zeroed too, and *that* is what took three goes to find. An extended
+    // spike does nothing unless the cell can pay for it, so the first version granted every
+    // armed cell `q10(50_000)` of energy to make sure the scan ran — fifty thousand units
+    // against the hundred or so a cell normally holds. The armed world grew to 151,218 against
+    // the control's 129,525, and the two guesses that followed (throttling digestion, then
+    // zeroing `digestion_efficiency`) moved it to 151,275 and 151,281, which is how it became
+    // clear the food was never the problem. It was the energy. With the upkeep at zero the
+    // `paid >= cost` check passes on nothing, the scan runs, and no cell is handed anything.
+    //
+    // The lysosome is throttled to `param 1` at a sixty-fourth rather than opened wide, so the
+    // digestion path — capacity, substrate read, `add_chem`, both ledger conversions, the
+    // interior write — runs every tick for every cell while moving a negligible amount of
+    // matter. That much was a good idea for the wrong reason.
+    // And the catalogue upkeep of the two organelles is zeroed as well, which is the last of
+    // it. `EcologyConfig::spike_upkeep` is the cost of holding a spike *out*; the catalogue's
+    // `upkeep` is the cost of having one at all, charged by the metabolism phase, and a spike
+    // at `param 200` is the dearest thing in the catalogue to carry — deliberately, since that
+    // is what stops every lineage growing one. Zeroing only the extension cost left the armed
+    // clone at 116,277 against 129,525: it had stopped being fed extra and started paying rent.
+    //
+    // The pattern across all four of these is one rule: neutralise every effect the organelles
+    // have on the *outcome*, keep every line of the code path. What is left is the phase.
+    let mut armed = world.clone();
+    let mut specs = *armed.biology().metabolism.catalogue.specs();
+    for kind in [mm_core::OrganelleType::Spike, mm_core::OrganelleType::Lysosome] {
+        specs[kind as usize].upkeep = 0;
+        specs[kind as usize].upkeep_per_param = 0;
+    }
+    let mut biology = armed.biology().clone();
+    biology.metabolism.catalogue.set_specs(specs);
+    biology.ecology.spike_damage = 0;
+    biology.ecology.spike_upkeep = 0;
+    armed.set_biology(biology);
+    for i in &slots {
+        let cells = armed.cells_mut();
+        cells.slots_mut(*i)[12] =
+            mm_core::Organelle::finished(mm_core::OrganelleType::Spike, 200);
+        let mut lysosome = mm_core::Organelle::finished(mm_core::OrganelleType::Lysosome, 1);
+        lysosome.control[0] = (mm_core::Q10_ONE / 64) as i16;
+        cells.slots_mut(*i)[11] = lysosome;
+    }
+    armed.adopt_current_contents_as_baseline();
+
+    let mut bare = world;
+    let n = 120u64;
+    bare.run(10);
+    let t = Instant::now();
+    bare.run(n);
+    let without = t.elapsed().as_secs_f64() / n as f64;
+
+    armed.run(10);
+    let t = Instant::now();
+    armed.run(n);
+    let with = t.elapsed().as_secs_f64() / n as f64;
+
+    // The clones have to still be describing the same world, or the difference between them is
+    // not the phase. Asserted before the number is reported rather than printed beside it: the
+    // first version printed a 43x population gap and called the gate MET in the line above it.
+    let (armed_n, bare_n) = (armed.cells().len(), bare.cells().len());
+    let drift = armed_n.abs_diff(bare_n);
+    assert!(
+        (drift as f64) < population.max(1) as f64 * 0.05,
+        "the clones drifted apart in population ({armed_n} against {bare_n}); they are no \
+         longer comparable and the difference between their tick times is not the ecology phase"
+    );
+
+    let share = ((with - without) / with * 100.0).max(0.0);
+    eprintln!(
+        "\nM8 ecology gate at {population} cells, every one scanning at full spike reach and \
+         digesting:"
+    );
+    eprintln!(
+        "  with ecology {:.2}ms/tick, without {:.2}ms/tick — {share:.2}% (need under 5%)  {}",
+        with * 1000.0,
+        without * 1000.0,
+        if share < 5.0 { "MET" } else { "MISSED" }
+    );
+    eprintln!("  populations {armed_n} against {bare_n} ({drift} apart)");
+}
+
+criterion_group!(
+    benches,
+    gate,
+    phylogeny_gate,
+    junction_gate,
+    ecology_gate,
+    phase_breakdown,
+    phases
+);
 criterion_main!(benches);

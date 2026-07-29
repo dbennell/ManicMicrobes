@@ -1,0 +1,30 @@
+// Predator introduction — a well-fed world for something to eat something else in.
+//
+// Nothing here makes a predator. The scenario supplies what predation needs to be *possible*:
+// plenty of prey, room to chase them across, and a slide big enough that a predator cannot
+// simply exhaust it. Whether anything picks up a spike is up to the run.
+//
+// M8's second acceptance test looks for a predator-prey oscillation here. Seed it with a
+// hand-written hunter alongside the ancestor to watch one deliberately, or leave it to
+// mutation and find out how long it takes.
+//
+//   mm-cli match genomes/ancestor.mm genomes/hunter.mm
+//   mm-cli run scenarios/predator_introduction.ron --genome genomes/ancestor.mm --ticks 1000000
+(
+    name: "predator introduction",
+    seed: 20250803,
+    width: 128,
+    height: 128,
+
+    light: Uniform(intensity: 1024),
+    // A slow stir, so prey are not evenly spread and a hunter has somewhere worth being.
+    current: Rotational(strength: 96),
+    fluid_interval: 1,
+
+    seeding: [
+        Uniform(chemical: 11, per_square: 409600),
+        Uniform(chemical: 14, per_square: 409600),
+        Uniform(chemical: 4, per_square: 409600),
+    ],
+    barriers: [],
+)

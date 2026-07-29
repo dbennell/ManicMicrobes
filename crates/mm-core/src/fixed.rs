@@ -22,6 +22,29 @@ pub const POS_ONE: i32 = 256;
 /// `log2(POS_ONE)`.
 pub const POS_BITS: u32 = 8;
 
+/// Convert a `Q10` length into `POS` units.
+///
+/// Both measure squares — one square is `Q10_ONE` in one and `POS_ONE` in the other — so a
+/// length that crosses between them has to be rescaled. `biology::radius` returns `Q10` and
+/// junction rest lengths are `POS`, and the first version of M7 added one to the other
+/// directly: every rest length and every join reach came out four times too long, so cells
+/// could join from eight squares away and a "contracted" muscle was longer than a relaxed one.
+///
+/// Named rather than written inline wherever it is needed, because a bare `/ 4` is exactly the
+/// kind of thing that reads as correct.
+#[inline(always)]
+#[must_use]
+pub const fn q10_to_pos(v: i32) -> i32 {
+    v >> (Q10_BITS - POS_BITS)
+}
+
+/// Convert a `POS` length into `Q10` units.
+#[inline(always)]
+#[must_use]
+pub const fn pos_to_q10(v: i32) -> i32 {
+    v << (Q10_BITS - POS_BITS)
+}
+
 /// Multiply two `Q10` values. Computed in `i64` and saturated back, so no product can
 /// overflow regardless of operands.
 ///

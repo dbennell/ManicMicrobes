@@ -69,6 +69,26 @@ pub enum LightRegime {
         end: i32,
         over_ticks: u64,
     },
+
+    /// Day and night, with the day itself getting longer and shorter over a much slower
+    /// cycle — summer noon down to winter noon and back.
+    ///
+    /// Two timescales, which is why it is a variant rather than something a scenario can
+    /// compose out of `DayNight`: one triangle cannot modulate another. What it buys is a
+    /// world where the right strategy in summer is the wrong one in winter, so nothing can
+    /// settle on a single answer and stop — which is what acceptance 4 is asking for.
+    Seasonal {
+        /// Length of one day.
+        day_ticks: u32,
+        /// Length of one year, in ticks. Should be a large multiple of `day_ticks`.
+        year_ticks: u64,
+        /// Noon at midsummer.
+        summer_day: i32,
+        /// Noon at midwinter.
+        winter_day: i32,
+        /// Midnight, in either season.
+        night: i32,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -178,6 +198,30 @@ impl LightRegime {
                 let t = tick.min(span);
                 lerp(*start, *end, t as i64, span as i64)
             }
+
+            LightRegime::Seasonal {
+                day_ticks,
+                year_ticks,
+                summer_day,
+                winter_day,
+                night,
+            } => {
+                // The slow triangle first: what noon is worth today.
+                let noon = lerp(
+                    *summer_day,
+                    *winter_day,
+                    triangle(tick, (*year_ticks).max(1)),
+                    ((*year_ticks).max(1) / 2).max(1) as i64,
+                );
+                // Then the fast one, between tonight's midnight and today's noon.
+                let period = (*day_ticks).max(1) as u64;
+                lerp(
+                    *night,
+                    noon,
+                    triangle(tick, period),
+                    (period / 2).max(1) as i64,
+                )
+            }
         };
         v.max(0)
     }
@@ -188,9 +232,30 @@ impl LightRegime {
     pub fn is_time_varying(&self) -> bool {
         matches!(
             self,
-            LightRegime::DayNight { .. } | LightRegime::SlowDecline { .. }
+            LightRegime::DayNight { .. }
+                | LightRegime::SlowDecline { .. }
+                | LightRegime::Seasonal { .. }
         )
     }
+}
+
+/// Position within a triangular wave of a given period: rises from 0 to `period / 2`, then
+/// falls back to 0. The shape of both a day and a year.
+///
+/// A triangle rather than a sine because a triangle is exact in integers and a sine is not
+/// (hard rule 2), and because nothing here needs the difference.
+#[inline]
+#[must_use]
+fn triangle(tick: u64, period: u64) -> i64 {
+    let period = period.max(1);
+    let phase = tick % period;
+    let half = (period / 2).max(1);
+    let t = if phase < half {
+        phase
+    } else {
+        period.saturating_sub(phase)
+    };
+    t.min(half) as i64
 }
 
 /// Integer linear interpolation from `a` at `num == 0` to `b` at `num == den`.
@@ -249,6 +314,20 @@ impl StateHash for LightRegime {
                 h.i32(*start);
                 h.i32(*end);
                 h.u64(*over_ticks);
+            }
+            LightRegime::Seasonal {
+                day_ticks,
+                year_ticks,
+                summer_day,
+                winter_day,
+                night,
+            } => {
+                h.u8(5);
+                h.u32(*day_ticks);
+                h.u64(*year_ticks);
+                h.i32(*summer_day);
+                h.i32(*winter_day);
+                h.i32(*night);
             }
         }
     }
@@ -387,6 +466,56 @@ mod tests {
     }
 
     #[test]
+    fn seasons_modulate_days_rather_than_replacing_them() {
+        let r = LightRegime::Seasonal {
+            day_ticks: 100,
+            year_ticks: 10_000,
+            summer_day: 1000,
+            winter_day: 200,
+            night: 0,
+        };
+        assert!(r.is_time_varying());
+
+        // Midsummer noon is the brightest moment there is; midwinter noon is much dimmer; and
+        // midnight is midnight whatever the season. Two timescales, which is the whole reason
+        // this is a variant rather than a `DayNight` a scenario could already write.
+        let at = |t: u64| r.intensity_at(0, 0, 8, 8, t);
+        let midsummer_noon = at(50);
+        let midwinter_noon = at(5_000 + 50);
+        assert!(
+            midsummer_noon > midwinter_noon * 3,
+            "summer noon {midsummer_noon} is barely brighter than winter noon {midwinter_noon}"
+        );
+        assert_eq!(at(0), 0, "midnight in summer");
+        assert_eq!(at(5_000), 0, "midnight in winter");
+
+        // And it comes back round: the same point in the next year matches.
+        assert_eq!(at(50), at(10_000 + 50));
+
+        // Never negative, whatever the numbers, and never above the brightest configured value.
+        for t in 0..2_000u64 {
+            let v = at(t * 13);
+            assert!((0..=1000).contains(&v), "{v} at tick {}", t * 13);
+        }
+    }
+
+    #[test]
+    fn a_pathological_season_does_not_divide_by_zero() {
+        // Any scenario file is a legal scenario file. A year shorter than a day is nonsense
+        // but it must not be a panic.
+        let r = LightRegime::Seasonal {
+            day_ticks: 0,
+            year_ticks: 0,
+            summer_day: i32::MAX,
+            winter_day: i32::MIN,
+            night: -5,
+        };
+        for t in 0..64u64 {
+            assert!(r.intensity_at(0, 0, 4, 4, t) >= 0);
+        }
+    }
+
+    #[test]
     fn day_night_reaches_both_ends_and_repeats() {
         let r = LightRegime::DayNight {
             period_ticks: 100,
@@ -503,7 +632,19 @@ mod tests {
                 end: i32::MAX,
                 over_ticks: 0,
             },
+            LightRegime::Seasonal {
+                day_ticks: 0,
+                year_ticks: 0,
+                summer_day: i32::MIN,
+                winter_day: i32::MAX,
+                night: i32::MIN,
+            },
         ];
+        assert_eq!(
+            regimes.len(),
+            6,
+            "a regime has been added without being swept here"
+        );
         for r in regimes {
             for t in [0u64, 1, 12345, u64::MAX] {
                 for x in 0..12u32 {
@@ -585,6 +726,18 @@ mod tests {
             y: 4,
             intensity: 900,
             half_life_squares: 7,
+        };
+        let back: LightRegime = ron::from_str(&ron::to_string(&r).unwrap()).unwrap();
+        assert_eq!(back, r);
+
+        // The snapshot embeds the scenario as `.ron`, so a regime that does not round-trip is
+        // a run that cannot be resumed (hard rule 7).
+        let r = LightRegime::Seasonal {
+            day_ticks: 240,
+            year_ticks: 96_000,
+            summer_day: 1100,
+            winter_day: 260,
+            night: 8,
         };
         let back: LightRegime = ron::from_str(&ron::to_string(&r).unwrap()).unwrap();
         assert_eq!(back, r);

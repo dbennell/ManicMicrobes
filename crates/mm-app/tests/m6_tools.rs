@@ -254,7 +254,12 @@ fn the_tools_never_break_conservation_however_they_are_used() {
     // where a matter leak would come from.
     let mut world = world_running(&ancestor());
     world.run(120);
-    let before = world.total_matter();
+    // Summed across chemicals rather than compared per chemical: since M8 a death converts
+    // part of the body to carrion, a balanced conversion the ledger accounts for, so the
+    // per-species totals move by design where the total cannot. `check_matter` is the strict
+    // check and is called after every step below.
+    let before: i64 = world.total_matter().iter().sum();
+    let total = |w: &mm_core::World| -> i64 { w.total_matter().iter().sum() };
 
     let ids: Vec<CellId> = world
         .cells()
@@ -265,7 +270,7 @@ fn the_tools_never_break_conservation_however_they_are_used() {
 
     tools::relocate(&mut world, ids[0], 5, 5);
     world.check_matter().expect("after relocate");
-    assert_eq!(world.total_matter(), before, "relocate moved matter");
+    assert_eq!(total(&world), before, "relocate moved matter");
 
     tools::set_barrier(&mut world, 20, 20, true);
     world.check_matter().expect("after drawing a barrier");
@@ -274,7 +279,7 @@ fn the_tools_never_break_conservation_however_they_are_used() {
 
     tools::remove(&mut world, ids[1]);
     world.check_matter().expect("after remove");
-    assert_eq!(world.total_matter(), before, "removing a cell lost matter");
+    assert_eq!(total(&world), before, "removing a cell lost matter");
 
     let _ = tools::cells_in(&world, 0, 0, 47, 47);
     let _ = tools::copy_genome(&world, ids[2]);
@@ -282,7 +287,7 @@ fn the_tools_never_break_conservation_however_they_are_used() {
 
     tools::isolate(&mut world, ids[2]);
     world.check_matter().expect("after isolate");
-    assert_eq!(world.total_matter(), before, "isolating lost matter");
+    assert_eq!(total(&world), before, "isolating lost matter");
     assert_eq!(world.cells().len(), 1);
 
     // And the world still runs afterwards.

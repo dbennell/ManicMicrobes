@@ -1,0 +1,42 @@
+// The vent — a world with one small sun at the bottom of it.
+//
+// There is no daylight here. All the energy in the world comes from a point source that falls
+// off by half every eight squares, so within about forty squares there is effectively nothing.
+// A chloroplast is worth carrying near the vent and is dead weight away from it, and the
+// carrying capacity is a disc rather than a slide.
+//
+// What that makes interesting is the edge. The centre is crowded and the periphery is empty,
+// so the pressure at any moment is either to get closer — which everything else is also doing
+// — or to find a way to live further out. Nothing here rewards either; both are simply
+// available, and which one a lineage takes is the run's answer rather than the scenario's.
+//
+// Note what is *not* here: no chemosynthesis pathway distinct from photosynthesis. A
+// chloroplast near a vent and a chloroplast in daylight run the same reaction on a different
+// intensity. If chemosynthesis should be its own pathway, that is a chemistry change, and the
+// chemical table lives in the scenario for exactly that reason.
+//
+//   mm-cli run scenarios/the_vent.ron --genome genomes/ancestor.mm --ticks 500000
+(
+    name: "the vent",
+    seed: 20250812,
+    width: 128,
+    height: 128,
+
+    light: PointSource(
+        x: 64,
+        y: 64,
+        intensity: 4096,
+        half_life_squares: 8,
+    ),
+    // Convection off the vent: a slow rotation that carries chemistry outward and keeps the
+    // gradient from settling into a perfect bullseye.
+    current: Rotational(strength: 64),
+    fluid_interval: 1,
+
+    seeding: [
+        Uniform(chemical: 11, per_square: 409600),
+        Uniform(chemical: 14, per_square: 409600),
+        Uniform(chemical: 4, per_square: 409600),
+    ],
+    barriers: [],
+)

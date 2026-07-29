@@ -1,0 +1,37 @@
+// Archipelago — one slide cut into four habitats.
+//
+// Two walls, each with a narrow gap, divide a 96x96 world into quadrants that exchange only
+// through those gaps. M8's first acceptance test compares speciation here against
+// `archipelago_control.ron`, which is this scenario with the walls taken out and nothing else
+// changed.
+//
+// That pairing is the point. "Populations diverge faster when separated" is only a claim if
+// there is something to be faster *than*, and the control has to differ in exactly one thing
+// or the comparison measures whatever else moved.
+//
+// The gaps are deliberately not zero. A slide cut into four sealed boxes is four separate
+// runs sharing a file, and allopatric speciation is interesting because the barrier is
+// leaky — divergence has to outrun the trickle of migrants that would otherwise homogenise it.
+//
+//   mm-cli run scenarios/archipelago.ron --genome genomes/ancestor.mm --ticks 500000 --archive islands.ndjson
+(
+    name: "archipelago",
+    seed: 20250804,
+    width: 96,
+    height: 96,
+
+    light: Uniform(intensity: 1024),
+    current: Still,
+    fluid_interval: 1,
+
+    seeding: [
+        Uniform(chemical: 11, per_square: 409600),
+        Uniform(chemical: 14, per_square: 409600),
+        Uniform(chemical: 4, per_square: 409600),
+    ],
+
+    barriers: [
+        WallWithGap(at: 48, vertical: true, gap_start: 46, gap_len: 4),
+        WallWithGap(at: 48, vertical: false, gap_start: 46, gap_len: 4),
+    ],
+)

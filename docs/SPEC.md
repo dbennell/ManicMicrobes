@@ -472,7 +472,14 @@ struct ChemicalDef {
 ```
 
 Default table: 4 inert signalling species, 4 structural monomers, 3 energy substrates,
-2 metabolic wastes, 1 toxin, 2 inert filler.
+2 metabolic wastes, 1 toxin, 1 inert filler, and carrion.
+
+**Carrion is chemical 15** (M8). A corpse is not an object with a decay timer: when a cell
+dies, part of its structural mass is deposited on the square it died on as chemical 15,
+which diffuses very slowly, decays into ordinary waste on its own, and is conserved exactly
+because it is conserved by the same machinery as everything else in the fluid. It is not
+`structural`, so it cannot be built from directly — a cell has to digest it with a lysosome
+first, which is the whole of what makes scavenging a distinct trade.
 
 ### 7.2 The matter loop
 
@@ -504,6 +511,9 @@ The user-facing scenario knobs are the **shape of the gradient**, not open-vs-cl
 - directional gradient — bright at one edge, dark at the other
 - hydrothermal vent — a chemical energy source at a point, no light
 - slow decline — declining flux over millions of ticks, forcing adaptation or extinction
+- seasons — a day/night cycle whose noon itself rises and falls over a much longer year
+  (added at M8: two timescales, which a single cycle cannot express, so that the strategy
+  that pays in summer is not the one that pays in winter and nothing can settle)
 
 These generate mass extinctions and radiations, which are the events the wiki timeline
 exists to report.
@@ -771,7 +781,15 @@ by `mm-cli` as newline-delimited JSON, and rendered as live plots in `mm-app`:
 - **Organisational complexity** — count of distinct organelle configurations present;
   distribution of connected-component sizes.
 - **Ecology** — population, births, deaths, mean age, mean energy, trophic composition
-  (fraction of energy income from light vs predation vs scavenging).
+  (fraction of matter income from light vs from carrion, plus the guild census).
+
+  Amended at M8. This originally said "energy income from light vs predation vs scavenging",
+  which describes an engine with a direct predation-to-predator flow. There is no such flow
+  and there deliberately is not one: a spike does damage, damage kills, death makes carrion,
+  and a lysosome digests carrion. So predation is measured as damage dealt and as the carrion
+  it produces, and the only route by which a kill reaches anything living is scavenging —
+  which a predator has to acquire separately if it wants to eat what it killed. Reporting a
+  "predation income" would mean inventing a number for a mechanism the engine does not have.
 
 ---
 

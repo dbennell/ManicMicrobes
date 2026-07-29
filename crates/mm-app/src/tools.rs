@@ -331,24 +331,29 @@ mod tests {
     fn removing_a_cell_returns_what_it_held_to_the_water() {
         // The tool that most obviously could break I4, and the reason it uses the death path.
         let mut world = living(32, 6);
-        let before = world.total_matter();
+        let before: i64 = world.total_matter().iter().sum();
         let cell = first(&world);
         assert_eq!(remove(&mut world, cell), ToolEvent::Removed(cell));
         assert!(world.cells().index(cell).is_none());
-        assert_eq!(world.total_matter(), before, "removing a cell lost matter");
+        // Summed across chemicals rather than compared per chemical: since M8 a death turns
+        // part of the body into carrion, which is a balanced conversion the ledger accounts
+        // for, so the per-species totals move by design while the total cannot.
+        let after: i64 = world.total_matter().iter().sum();
+        assert_eq!(after, before, "removing a cell lost matter");
         world.check_matter().expect("books balance");
     }
 
     #[test]
     fn isolating_leaves_one_cell_and_all_the_matter() {
         let mut world = living(32, 6);
-        let before = world.total_matter();
+        let before: i64 = world.total_matter().iter().sum();
         let keep = first(&world);
         let events = isolate(&mut world, keep);
         assert_eq!(events.len(), 5);
         assert_eq!(world.cells().len(), 1);
         assert!(world.cells().index(keep).is_some());
-        assert_eq!(world.total_matter(), before, "isolating lost matter");
+        let after: i64 = world.total_matter().iter().sum();
+        assert_eq!(after, before, "isolating lost matter");
         world.check_matter().expect("books balance");
     }
 

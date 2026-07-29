@@ -29,6 +29,7 @@ use std::sync::Arc;
 
 use crate::chem::CHEM_COUNT;
 use crate::genome::Genome;
+use crate::junction::{Junction, JUNCTIONS_PER_CELL};
 use crate::organelle::{Organelle, OrganelleType, SLOT_COUNT};
 use crate::state_hash::{StateHash, StateHasher};
 use crate::vm::Vm;
@@ -111,6 +112,9 @@ pub struct CellArena {
     pub interior: Vec<i32>,
     /// Organelle loadout, `SLOT_COUNT` per cell.
     pub slots: Vec<Organelle>,
+    /// Junctions, `JUNCTIONS_PER_CELL` per cell (SPEC §8). Both ends of a junction hold one,
+    /// so a cell can see and `LEAVE` anything attached to it.
+    pub junctions: Vec<Junction>,
 
     /// Per-cell VM state.
     pub vm: Vec<Vm>,
@@ -258,6 +262,8 @@ impl CellArena {
                 self.interior.extend(std::iter::repeat_n(0, CHEM_COUNT));
                 self.slots
                     .extend(std::iter::repeat_n(Organelle::empty(), SLOT_COUNT));
+                self.junctions
+                    .extend(std::iter::repeat_n(Junction::empty(), JUNCTIONS_PER_CELL));
                 self.vm.push(Vm::new());
                 self.genome.push(Arc::clone(&seed.genome));
                 self.daughter.push(None);
@@ -289,6 +295,11 @@ impl CellArena {
         let slots = self.slots_mut(i);
         slots.fill(Organelle::empty());
         slots[0] = Organelle::finished(OrganelleType::Membrane, seed.membrane);
+        // A newborn is attached to nothing. Junctions are not inherited: a daughter that woke
+        // up already bound to whatever its parent was bound to would make colonies form
+        // without anybody paying `join_base_cost`, and M7's first acceptance test is that
+        // forming one is an act with a price.
+        self.junctions_mut(i).fill(Junction::empty());
         self.vm[i] = Vm::new();
         self.genome[i] = seed.genome;
         self.daughter[i] = None;
@@ -341,6 +352,18 @@ impl CellArena {
         &mut self.slots[base..base + SLOT_COUNT]
     }
 
+    #[inline(always)]
+    pub fn junctions(&self, i: usize) -> &[Junction] {
+        let base = i * JUNCTIONS_PER_CELL;
+        &self.junctions[base..base + JUNCTIONS_PER_CELL]
+    }
+
+    #[inline(always)]
+    pub fn junctions_mut(&mut self, i: usize) -> &mut [Junction] {
+        let base = i * JUNCTIONS_PER_CELL;
+        &mut self.junctions[base..base + JUNCTIONS_PER_CELL]
+    }
+
     /// The loadout as a fixed array, for the catalogue's upkeep sum.
     #[must_use]
     pub fn loadout(&self, i: usize) -> [Organelle; SLOT_COUNT] {
@@ -391,6 +414,7 @@ impl CellArena {
             damage: self.damage[i],
             interior: self.interior(i),
             slots: self.slots(i),
+            junctions: self.junctions(i),
             vm: &self.vm[i],
             genome: &self.genome[i],
             daughter: self.daughter[i].as_deref(),
@@ -442,6 +466,10 @@ impl CellArena {
                 self.interior.extend(std::iter::repeat_n(0, CHEM_COUNT));
                 self.slots
                     .extend(std::iter::repeat_n(Organelle::empty(), SLOT_COUNT));
+                // A dead slot still needs its junction entries, or every parallel array after
+                // it is a different length from the rest and indexing one goes out of range.
+                self.junctions
+                    .extend(std::iter::repeat_n(Junction::empty(), JUNCTIONS_PER_CELL));
                 self.vm.push(Vm::new());
                 self.genome.push(Arc::new(crate::genome::Genome::empty()));
                 self.daughter.push(None);
@@ -464,6 +492,7 @@ impl CellArena {
             self.damage.push(c.damage);
             self.interior.extend_from_slice(&c.interior);
             self.slots.extend_from_slice(&c.slots);
+            self.junctions.extend_from_slice(&c.junctions);
             self.vm.push(c.vm);
             self.genome.push(c.genome);
             self.daughter.push(c.daughter);
@@ -499,6 +528,7 @@ pub(crate) struct SlotSnapshot<'a> {
     pub damage: i32,
     pub interior: &'a [i32],
     pub slots: &'a [Organelle],
+    pub junctions: &'a [Junction],
     pub vm: &'a Vm,
     pub genome: &'a Arc<Genome>,
     pub daughter: Option<&'a [u8]>,
@@ -527,6 +557,7 @@ pub(crate) struct RestoredCell {
     pub damage: i32,
     pub interior: Vec<i32>,
     pub slots: Vec<Organelle>,
+    pub junctions: Vec<Junction>,
     pub vm: Vm,
     pub genome: Arc<Genome>,
     pub daughter: Option<Vec<u8>>,
@@ -591,6 +622,7 @@ impl PartialEq for CellArena {
                 && self.damage[i] == other.damage[i]
                 && self.interior(i) == other.interior(i)
                 && self.slots(i) == other.slots(i)
+                && self.junctions(i) == other.junctions(i)
                 && self.vm[i] == other.vm[i]
                 && self.genome[i].bytes() == other.genome[i].bytes()
                 && self.daughter[i] == other.daughter[i]
@@ -633,6 +665,9 @@ impl StateHash for CellArena {
             }
             for o in self.slots(i) {
                 o.hash_state(h);
+            }
+            for j in self.junctions(i) {
+                j.hash_state(h);
             }
             self.vm[i].hash_state(h);
             h.u64(self.genome[i].hash());

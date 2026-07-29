@@ -1,0 +1,573 @@
+//! Predation, corpses and digestion (M8, SPEC §6.2 and §7.2).
+//!
+//! # A corpse is a chemical, not an object
+//!
+//! SPEC §7.2 asks for dead cells to become "a localised deposit that lysosomes can digest and
+//! that decays into the fluid over time". The obvious reading is a new kind of entity sitting
+//! on the substrate with its own lifetime, its own storage and its own place in the tick order.
+//!
+//! It is a **chemical** instead — carrion, in the chemical table — and that is not a shortcut.
+//! The substrate already diffuses, decays and conserves every chemical exactly; a corpse
+//! expressed as one inherits all of it for free, and inherits it *correctly*, which a second
+//! implementation of the same ideas would not. Carrion has a very low diffusion rate, so a
+//! corpse stays where it fell; it decays slowly into ordinary waste, so nothing accumulates
+//! forever; and a lysosome turns it back into substrate, which is scavenging.
+//!
+//! It also keeps CLAUDE.md's design rule intact. "No special-cased viruses, colonies or
+//! organisms" is about not inventing a flag where a mechanism will do, and a corpse entity
+//! would have been exactly that flag.
+//!
+//! # Predation is a spike and a wound
+//!
+//! A spike does contact damage to whatever the cell is touching. It does not "eat" anything —
+//! there is no predation code path, no predator flag and nothing in the engine that knows one
+//! cell from another. What happens is that damage kills, death makes carrion, and a cell with
+//! a lysosome standing in carrion gets substrate out of it. Predator, scavenger and detritivore
+//! are all the same three mechanisms in different proportions, which is why the analysis layer
+//! infers trophic level rather than reading it off a field.
+
+use crate::cell::CellArena;
+use crate::chem::CHEM_COUNT;
+use crate::fixed::{q10_scale, Q10_ONE};
+use crate::ledger::Ledger;
+use crate::organelle::OrganelleType;
+use crate::substrate::Substrate;
+
+/// The chemical a corpse becomes.
+///
+/// Index 15, which the default table calls `silt` and nothing has ever used. Redefining an
+/// inert chemical is contained: the table lives in the scenario (SPEC §7.1), so a world that
+/// wants different chemistry says so, and nothing that ran before this had any carrion in it
+/// to mean something else.
+pub const CARRION: usize = 15;
+
+/// What predation and digestion cost and yield.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct EcologyConfig {
+    /// Membrane damage a spike deals per tick per unit of extension, `Q10`.
+    pub spike_damage: i32,
+    /// Energy a spike costs per tick per unit of extension, `Q10`. Violence is not free.
+    pub spike_upkeep: i32,
+    /// How much of a cell's structural mass becomes carrion rather than returning straight to
+    /// the fluid as its constituent chemical, `Q10` fraction.
+    ///
+    /// Not all of it: a cell that starves has already spent itself, and a body that vanished
+    /// entirely into carrion would make starvation and predation indistinguishable to whatever
+    /// comes along afterwards.
+    pub carrion_fraction: i32,
+    /// Carrion a lysosome digests per tick per unit of `param`, `Q10`.
+    pub digestion_rate: i32,
+    /// Fraction of digested carrion that becomes usable substrate, `Q10`. The rest is waste:
+    /// scavenging is lossy, or a corpse would be worth more than the cell that made it.
+    pub digestion_efficiency: i32,
+}
+
+impl Default for EcologyConfig {
+    fn default() -> EcologyConfig {
+        EcologyConfig {
+            spike_damage: Q10_ONE / 16,
+            // Comparable to a mitochondrion's upkeep, so carrying a spike is a real commitment
+            // rather than something every cell does because it might as well.
+            spike_upkeep: Q10_ONE / 64,
+            carrion_fraction: Q10_ONE / 2,
+            digestion_rate: Q10_ONE / 8,
+            digestion_efficiency: (Q10_ONE * 2) / 3,
+        }
+    }
+}
+
+/// What one tick of ecology did.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct EcologyReport {
+    /// Damage dealt by spikes, `Q10`.
+    pub damage_dealt: i64,
+    /// Cells wounded by a spike this tick.
+    pub wounded: u32,
+    /// Carrion digested, `Q10`.
+    pub digested: i64,
+    /// Substrate recovered from carrion, `Q10`.
+    pub scavenged: i64,
+    /// Energy spent keeping spikes extended.
+    pub spike_upkeep: i64,
+}
+
+/// A cell's total spike extension, `0..` — zero if it has none.
+///
+/// The control input is signed, and a retracted spike does nothing: SPEC §8's catalogue calls
+/// it "signed extension", so a genome can put a spike away without tearing it off.
+#[must_use]
+pub fn spike_extension(cells: &CellArena, i: usize) -> i32 {
+    let mut total = 0i32;
+    for o in cells.slots(i) {
+        if o.kind == OrganelleType::Spike && o.is_active() {
+            let extension = (o.control[0] as i32).clamp(0, Q10_ONE);
+            // Scaled by how big the spike is, so a bigger one hurts more and costs more.
+            total = total.saturating_add(q10_scale(extension, crate::fixed::q10(o.param as i32)));
+        }
+    }
+    total
+}
+
+/// A cell's total lysosome capacity, `0..`.
+#[must_use]
+pub fn digestive_capacity(cells: &CellArena, i: usize) -> i32 {
+    let mut total = 0i32;
+    for o in cells.slots(i) {
+        if o.kind == OrganelleType::Lysosome && o.is_active() {
+            let throttle = (o.control[0] as i32).clamp(0, Q10_ONE);
+            total = total.saturating_add(q10_scale(
+                crate::fixed::q10(o.param as i32),
+                throttle,
+            ));
+        }
+    }
+    total
+}
+
+/// Spikes wound whatever their owner is touching, and lysosomes digest what they are standing
+/// in (SPEC §6.2).
+///
+/// # Why there is no predator here
+///
+/// Nothing in this function knows what a predator is. A cell with a spike damages its
+/// neighbours; a cell that takes enough damage dies; a dead cell becomes carrion; a cell with
+/// a lysosome standing in carrion recovers substrate from it. Predation is what those three
+/// look like when one lineage does them in that order, and the analysis layer infers it from
+/// the trophic accounting rather than from a flag.
+///
+/// # Determinism
+///
+/// Slot order over cells, then the neighbour list in its own fixed order — the same discipline
+/// as collision separation, and for the same reason: damage is applied pairwise and pairwise
+/// application does not commute (I1, I6).
+pub fn step(
+    cells: &mut CellArena,
+    substrate: &mut Substrate,
+    neighbours: &crate::neighbours::NeighbourIndex,
+    config: &EcologyConfig,
+    chemistry: &crate::organelle::MetabolicChemistry,
+    ledger: &mut Ledger,
+) -> EcologyReport {
+    let mut report = EcologyReport::default();
+
+    for i in 0..cells.capacity() {
+        if !cells.occupied(i) {
+            continue;
+        }
+
+        // --- spikes ---
+        let extension = spike_extension(cells, i);
+        if extension > 0 {
+            let cost = q10_scale(config.spike_upkeep, extension);
+            let paid = cells.energy[i].min(cost);
+            cells.energy[i] = cells.energy[i].saturating_sub(paid);
+            report.spike_upkeep += paid as i64;
+            ledger.dissipate(paid as i64);
+            // An extended spike a cell cannot afford does nothing. Violence is not free, and a
+            // starving cell is not a threat.
+            if paid >= cost {
+                let (sx, sy) = (
+                    crate::fixed::pos_to_square(cells.x[i]),
+                    crate::fixed::pos_to_square(cells.y[i]),
+                );
+                let reach = crate::junction::reach(cells, i);
+                let victims: Vec<usize> = neighbours
+                    .around(sx, sy)
+                    .filter(|j| *j != i)
+                    .filter(|j| cells.occupied(*j))
+                    .filter(|j| crate::junction::distance(cells, i, *j) <= reach)
+                    .collect();
+                for j in victims {
+                    let damage = q10_scale(config.spike_damage, extension);
+                    if damage <= 0 {
+                        continue;
+                    }
+                    cells.damage[j] = cells.damage[j].saturating_add(damage);
+                    report.damage_dealt += damage as i64;
+                    report.wounded = report.wounded.saturating_add(1);
+                }
+            }
+        }
+
+        // --- lysosomes ---
+        let capacity = digestive_capacity(cells, i);
+        if capacity <= 0 {
+            continue;
+        }
+        let (sx, sy) = (
+            crate::fixed::pos_to_square(cells.x[i]),
+            crate::fixed::pos_to_square(cells.y[i]),
+        );
+        let available = substrate.chem_at(CARRION, sx, sy);
+        let taken = capacity.min(available).max(0);
+        if taken <= 0 {
+            continue;
+        }
+        let moved = -substrate.add_chem(CARRION, sx, sy, -taken);
+        if moved <= 0 {
+            continue;
+        }
+        // Carrion becomes substrate, lossily. Both are chemicals inside the conserved total,
+        // so this is a balanced reaction and goes through the ledger — an unaccounted
+        // transmutation is indistinguishable from a conservation bug (I4).
+        let recovered = q10_scale(moved, config.digestion_efficiency);
+        let wasted = moved.saturating_sub(recovered);
+        // From the scenario's chemistry, not written down here. A scenario can pose a
+        // different metabolic loop (SPEC §7.1), and digestion that always produced chemical 8
+        // would be quietly making the wrong substance in any world that did.
+        let substrate_chem = chemistry.substrate % CHEM_COUNT;
+        let waste_chem = chemistry.waste % CHEM_COUNT;
+
+        let room = crate::biology::interior_capacity(cells, i)
+            .saturating_sub(cells.interior(i)[substrate_chem])
+            .max(0);
+        let into_cell = recovered.min(room);
+        if into_cell > 0 {
+            cells.interior_mut(i)[substrate_chem] =
+                cells.interior(i)[substrate_chem].saturating_add(into_cell);
+            ledger.convert(CARRION, substrate_chem, into_cell as i64);
+        }
+        // Whatever the cell had no room for, plus the digestion loss, goes back to the water
+        // as waste rather than being destroyed.
+        let spilled = recovered.saturating_sub(into_cell).saturating_add(wasted);
+        if spilled > 0 {
+            let placed = substrate.add_chem(waste_chem, sx, sy, spilled);
+            ledger.convert(CARRION, waste_chem, placed as i64);
+            let lost = spilled.saturating_sub(placed);
+            if lost > 0 {
+                // Nowhere to put it. Written off explicitly, the way a walled-in corpse is.
+                let mut evicted = [0i32; CHEM_COUNT];
+                evicted[CARRION] = lost;
+                ledger.record_evicted(&evicted);
+            }
+        }
+        report.digested += moved as i64;
+        report.scavenged += into_cell as i64;
+    }
+
+    report
+}
+
+/// How a population earns its living, in parts per thousand.
+///
+/// The trophic analysis of SPEC §13. Inferred from what cells are *built* out of rather than
+/// from anything they declare, because there is no cell-type enum and there must not be one:
+/// a cell with chloroplasts is a producer whatever it calls itself.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct TrophicMix {
+    /// Cells carrying chloroplasts.
+    pub producers: u32,
+    /// Cells carrying a spike — the machinery of predation.
+    pub predators: u32,
+    /// Cells carrying a lysosome — the machinery of scavenging.
+    pub scavengers: u32,
+    /// Cells carrying neither, living on what is dissolved in the water.
+    pub osmotrophs: u32,
+    pub total: u32,
+}
+
+impl TrophicMix {
+    /// Read the mix off a population.
+    #[must_use]
+    pub fn of(cells: &CellArena) -> TrophicMix {
+        let mut mix = TrophicMix::default();
+        for i in cells.iter() {
+            let mut producer = false;
+            let mut predator = false;
+            let mut scavenger = false;
+            for o in cells.slots(i) {
+                if !o.is_active() {
+                    continue;
+                }
+                match o.kind {
+                    OrganelleType::Chloroplast => producer = true,
+                    OrganelleType::Spike => predator = true,
+                    OrganelleType::Lysosome => scavenger = true,
+                    _ => {}
+                }
+            }
+            // A cell can be counted in more than one column, because a mixotroph is a real
+            // thing and forcing every cell into one box would be inventing the cell-type enum
+            // by the back door.
+            mix.producers += u32::from(producer);
+            mix.predators += u32::from(predator);
+            mix.scavengers += u32::from(scavenger);
+            mix.osmotrophs += u32::from(!producer && !predator && !scavenger);
+            mix.total += 1;
+        }
+        mix
+    }
+
+    /// Whether the population has collapsed onto one strategy.
+    ///
+    /// M8's fourth acceptance test: no scenario in the library should end up with everybody
+    /// doing the same thing. Measured as "one column holds essentially all of it", with a
+    /// floor on population so that three surviving cells are not reported as a monoculture.
+    #[must_use]
+    pub fn is_monoculture(&self, threshold_permille: u32) -> bool {
+        if self.total < 32 {
+            return false;
+        }
+        let permille = |n: u32| (n as u64 * 1000 / self.total.max(1) as u64) as u32;
+        [
+            self.producers,
+            self.predators,
+            self.scavengers,
+            self.osmotrophs,
+        ]
+        .into_iter()
+        .any(|n| permille(n) >= threshold_permille)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cell::{CellId, CellSeed};
+    use crate::fixed::{pos, q10};
+    use crate::genome::GenomePool;
+    use crate::organelle::Organelle;
+    use crate::scenario::Scenario;
+
+    fn arena() -> (CellArena, GenomePool, Substrate, Ledger) {
+        let scenario = Scenario::stress(16, 16);
+        let substrate = Substrate::new(16, 16).expect("substrate");
+        let ledger = Ledger::new();
+        let _ = scenario;
+        (CellArena::new(), GenomePool::new(), substrate, ledger)
+    }
+
+    fn spawn(cells: &mut CellArena, pool: &GenomePool, x: i32, y: i32) -> CellId {
+        let genome = pool.intern(vec![0x2E; 4]).expect("genome");
+        cells.spawn(CellSeed {
+            x: pos(x),
+            y: pos(y),
+            mass: q10(30),
+            energy: q10(1_000),
+            membrane: 24,
+            key: 11,
+            species: 0,
+            parent: CellId::NONE,
+            birth_tick: 0,
+            genome,
+        })
+    }
+
+    #[test]
+    fn a_spike_wounds_what_it_touches_and_nothing_else() {
+        let (mut cells, pool, mut substrate, mut ledger) = arena();
+        let attacker = spawn(&mut cells, &pool, 5, 5);
+        let victim = spawn(&mut cells, &pool, 5, 5);
+        let bystander = spawn(&mut cells, &pool, 14, 14);
+        let ia = cells.index(attacker).unwrap();
+        let mut spike = Organelle::finished(OrganelleType::Spike, 200);
+        spike.control[0] = Q10_ONE as i16;
+        cells.slots_mut(ia)[4] = spike;
+
+        let mut index = crate::neighbours::NeighbourIndex::default();
+        index.rebuild(&cells, 16, 16);
+        let report = step(
+            &mut cells,
+            &mut substrate,
+            &index,
+            &EcologyConfig::default(),
+            &crate::organelle::MetabolicChemistry::default(),
+            &mut ledger,
+        );
+
+        let iv = cells.index(victim).unwrap();
+        let ib = cells.index(bystander).unwrap();
+        assert!(cells.damage[iv] > 0, "the victim took no damage");
+        assert_eq!(cells.damage[ib], 0, "a cell across the slide was wounded");
+        assert!(report.damage_dealt > 0);
+        assert!(report.spike_upkeep > 0, "the spike cost nothing to hold out");
+    }
+
+    #[test]
+    fn a_retracted_spike_is_harmless() {
+        let (mut cells, pool, mut substrate, mut ledger) = arena();
+        let attacker = spawn(&mut cells, &pool, 5, 5);
+        let victim = spawn(&mut cells, &pool, 5, 5);
+        let ia = cells.index(attacker).unwrap();
+        let mut spike = Organelle::finished(OrganelleType::Spike, 200);
+        spike.control[0] = 0; // put away
+        cells.slots_mut(ia)[4] = spike;
+
+        let mut index = crate::neighbours::NeighbourIndex::default();
+        index.rebuild(&cells, 16, 16);
+        step(
+            &mut cells,
+            &mut substrate,
+            &index,
+            &EcologyConfig::default(),
+            &crate::organelle::MetabolicChemistry::default(),
+            &mut ledger,
+        );
+        assert_eq!(cells.damage[cells.index(victim).unwrap()], 0);
+    }
+
+    #[test]
+    fn a_starving_cell_cannot_afford_to_be_dangerous() {
+        let (mut cells, pool, mut substrate, mut ledger) = arena();
+        let attacker = spawn(&mut cells, &pool, 5, 5);
+        let victim = spawn(&mut cells, &pool, 5, 5);
+        let ia = cells.index(attacker).unwrap();
+        let mut spike = Organelle::finished(OrganelleType::Spike, 255);
+        spike.control[0] = Q10_ONE as i16;
+        cells.slots_mut(ia)[4] = spike;
+        cells.energy[ia] = 1;
+
+        let mut index = crate::neighbours::NeighbourIndex::default();
+        index.rebuild(&cells, 16, 16);
+        step(
+            &mut cells,
+            &mut substrate,
+            &index,
+            &EcologyConfig::default(),
+            &crate::organelle::MetabolicChemistry::default(),
+            &mut ledger,
+        );
+        assert_eq!(
+            cells.damage[cells.index(victim).unwrap()],
+            0,
+            "a cell with one unit of energy still managed to stab something"
+        );
+    }
+
+    #[test]
+    fn a_lysosome_digests_carrion_into_substrate() {
+        let (mut cells, pool, mut substrate, mut ledger) = arena();
+        let scavenger = spawn(&mut cells, &pool, 5, 5);
+        let i = cells.index(scavenger).unwrap();
+        cells.slots_mut(i)[4] = Organelle::finished(OrganelleType::Lysosome, 200);
+        substrate.add_chem(CARRION, 5, 5, q10(50));
+        ledger.set_baseline(substrate.total_chem());
+
+        let before_carrion = substrate.chem_at(CARRION, 5, 5);
+        let mut index = crate::neighbours::NeighbourIndex::default();
+        index.rebuild(&cells, 16, 16);
+        let report = step(
+            &mut cells,
+            &mut substrate,
+            &index,
+            &EcologyConfig::default(),
+            &crate::organelle::MetabolicChemistry::default(),
+            &mut ledger,
+        );
+
+        assert!(report.digested > 0, "nothing was digested");
+        assert!(report.scavenged > 0, "digesting recovered no substrate");
+        assert!(substrate.chem_at(CARRION, 5, 5) < before_carrion);
+        assert!(cells.interior(i)[8] > 0, "the scavenger gained no substrate");
+    }
+
+    #[test]
+    fn digestion_is_lossy_so_a_corpse_is_worth_less_than_the_cell() {
+        let (mut cells, pool, mut substrate, mut ledger) = arena();
+        let scavenger = spawn(&mut cells, &pool, 5, 5);
+        let i = cells.index(scavenger).unwrap();
+        cells.slots_mut(i)[4] = Organelle::finished(OrganelleType::Lysosome, 255);
+        substrate.add_chem(CARRION, 5, 5, q10(200));
+        ledger.set_baseline(substrate.total_chem());
+
+        let mut index = crate::neighbours::NeighbourIndex::default();
+        index.rebuild(&cells, 16, 16);
+        let report = step(
+            &mut cells,
+            &mut substrate,
+            &index,
+            &EcologyConfig::default(),
+            &crate::organelle::MetabolicChemistry::default(),
+            &mut ledger,
+        );
+        assert!(
+            report.scavenged < report.digested,
+            "scavenging recovered {} of {} digested — a corpse is worth as much as the cell",
+            report.scavenged,
+            report.digested
+        );
+    }
+
+    #[test]
+    fn a_cell_with_no_lysosome_ignores_carrion() {
+        let (mut cells, pool, mut substrate, mut ledger) = arena();
+        let plain = spawn(&mut cells, &pool, 5, 5);
+        substrate.add_chem(CARRION, 5, 5, q10(50));
+        ledger.set_baseline(substrate.total_chem());
+        let before = substrate.chem_at(CARRION, 5, 5);
+
+        let mut index = crate::neighbours::NeighbourIndex::default();
+        index.rebuild(&cells, 16, 16);
+        step(
+            &mut cells,
+            &mut substrate,
+            &index,
+            &EcologyConfig::default(),
+            &crate::organelle::MetabolicChemistry::default(),
+            &mut ledger,
+        );
+        assert_eq!(substrate.chem_at(CARRION, 5, 5), before);
+        assert_eq!(cells.interior(cells.index(plain).unwrap())[8], 0);
+    }
+
+    #[test]
+    fn the_trophic_mix_reads_what_cells_are_built_of() {
+        let (mut cells, pool, _s, _l) = arena();
+        let producer = spawn(&mut cells, &pool, 2, 2);
+        let predator = spawn(&mut cells, &pool, 4, 4);
+        let scavenger = spawn(&mut cells, &pool, 6, 6);
+        let plain = spawn(&mut cells, &pool, 8, 8);
+        cells.slots_mut(cells.index(producer).unwrap())[3] =
+            Organelle::finished(OrganelleType::Chloroplast, 60);
+        cells.slots_mut(cells.index(predator).unwrap())[3] =
+            Organelle::finished(OrganelleType::Spike, 60);
+        cells.slots_mut(cells.index(scavenger).unwrap())[3] =
+            Organelle::finished(OrganelleType::Lysosome, 60);
+        let _ = plain;
+
+        let mix = TrophicMix::of(&cells);
+        assert_eq!(mix.total, 4);
+        assert_eq!(mix.producers, 1);
+        assert_eq!(mix.predators, 1);
+        assert_eq!(mix.scavengers, 1);
+        assert_eq!(mix.osmotrophs, 1);
+    }
+
+    #[test]
+    fn a_mixotroph_is_counted_in_both_columns() {
+        // Forcing every cell into exactly one box would be the cell-type enum by the back
+        // door, and a cell with chloroplasts *and* a spike is a real and interesting thing.
+        let (mut cells, pool, _s, _l) = arena();
+        let both = spawn(&mut cells, &pool, 2, 2);
+        let i = cells.index(both).unwrap();
+        cells.slots_mut(i)[3] = Organelle::finished(OrganelleType::Chloroplast, 60);
+        cells.slots_mut(i)[4] = Organelle::finished(OrganelleType::Spike, 60);
+        let mix = TrophicMix::of(&cells);
+        assert_eq!(mix.producers, 1);
+        assert_eq!(mix.predators, 1);
+        assert_eq!(mix.osmotrophs, 0);
+    }
+
+    #[test]
+    fn a_handful_of_survivors_is_not_a_monoculture() {
+        // A population that has crashed to three cells is not evidence that one strategy won.
+        let (mut cells, pool, _s, _l) = arena();
+        for k in 0..3 {
+            let id = spawn(&mut cells, &pool, 2 + k, 2);
+            cells.slots_mut(cells.index(id).unwrap())[3] =
+                Organelle::finished(OrganelleType::Chloroplast, 60);
+        }
+        assert!(!TrophicMix::of(&cells).is_monoculture(900));
+    }
+
+    #[test]
+    fn everybody_doing_the_same_thing_is_a_monoculture() {
+        let (mut cells, pool, _s, _l) = arena();
+        for k in 0..40 {
+            let id = spawn(&mut cells, &pool, 1 + (k % 12), 1 + (k / 12));
+            cells.slots_mut(cells.index(id).unwrap())[3] =
+                Organelle::finished(OrganelleType::Chloroplast, 60);
+        }
+        assert!(TrophicMix::of(&cells).is_monoculture(900));
+    }
+}

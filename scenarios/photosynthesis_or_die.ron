@@ -1,0 +1,30 @@
+// Photosynthesis or die — a world with nothing dissolved in it.
+//
+// The soup has carbon dioxide, an oxidant and carbon lying about, so a cell can live on what
+// it finds. Here there is almost none of any of it: what there is arrives as light, and a
+// lineage without chloroplasts has no second way to pay its upkeep.
+//
+// The point is not that photosynthesis wins — it is that the *cost* of a chloroplast is being
+// weighed against something. A scenario where every strategy works measures nothing.
+//
+//   mm-cli run scenarios/photosynthesis_or_die.ron --genome genomes/ancestor.mm --ticks 100000
+(
+    name: "photosynthesis or die",
+    seed: 20250801,
+    width: 64,
+    height: 64,
+
+    // Bright and unvarying, so the only gradient is the one between having a chloroplast and
+    // not having one.
+    light: Uniform(intensity: 1536),
+    current: Still,
+    fluid_interval: 1,
+
+    // A tenth of the soup's chemistry. Enough to get started and not enough to live on.
+    seeding: [
+        Uniform(chemical: 11, per_square: 40960),
+        Uniform(chemical: 14, per_square: 40960),
+        Uniform(chemical: 4, per_square: 61440),
+    ],
+    barriers: [],
+)

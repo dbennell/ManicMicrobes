@@ -61,6 +61,18 @@ pub enum Intent {
     Split,
     /// Set the receptor key (SPEC §8.2).
     SetKey { key: u8 },
+
+    // --- junctions (SPEC §8, M7) ---
+    /// Form a junction with the cell at `handle`, offering `key`.
+    Join { key: u8, kind: u8, handle: i16 },
+    /// Dissolve the junction in this slot, from both ends.
+    Leave { jidx: u8 },
+    /// Move something across a junction.
+    Transfer { jidx: u8, what: u8, amount: i32 },
+    /// Modulate a hard junction's rest length. This is muscle.
+    SetRest { jidx: u8, value: i16 },
+    /// Write a genome byte through a junction, or into the cell's own nucleus.
+    Inject { jidx: u8, dst: u16, src: u8 },
 }
 
 /// Per-cell intent lists for one tick, in one flat buffer.

@@ -35,7 +35,7 @@ use crate::world::World;
 pub const MAGIC: [u8; 8] = *b"MMSNAP\0\x01";
 /// Snapshot format version, distinct from the ISA version. The format may change without
 /// the meaning of a genome changing, and vice versa.
-pub const FORMAT_VERSION: u16 = 3;
+pub const FORMAT_VERSION: u16 = 5;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum SnapshotError {
@@ -482,6 +482,19 @@ impl Snapshot {
                         w.u16(o.control[0] as u16);
                         w.u16(o.control[1] as u16);
                     }
+                    // Junctions (SPEC §8). Both ends are written, so a restored world has the
+                    // same relationships and not merely the same cells.
+                    w.u64(c.junctions.len() as u64);
+                    for j in c.junctions {
+                        w.u8(match j.kind {
+                            crate::junction::JunctionKind::None => 0,
+                            crate::junction::JunctionKind::Soft => 1,
+                            crate::junction::JunctionKind::Hard => 2,
+                        });
+                        w.u32(j.other.slot());
+                        w.u32(j.other.generation());
+                        w.i32(j.rest);
+                    }
                     write_vm(&mut w, c.vm);
                     w.blob(c.genome.bytes());
                     match c.daughter {
@@ -542,6 +555,24 @@ impl Snapshot {
         w.i32(b.division_energy);
         w.u64(b.structural_chemical as u64);
         w.i32(b.copy_energy_per_byte);
+
+        let j = &b.junctions;
+        w.i32(j.join_base_cost);
+        w.i32(j.join_forced_penalty);
+        w.i32(j.soft_max_range);
+        w.i32(j.breaking_strain);
+        w.i32(j.stiffness);
+        w.u8(j.iterations);
+        w.i32(j.muscle_range);
+        w.bool(j.probe_leaks_distance);
+        w.i32(j.transfer_cost);
+
+        let e = &b.ecology;
+        w.i32(e.spike_damage);
+        w.i32(e.spike_upkeep);
+        w.i32(e.carrion_fraction);
+        w.i32(e.digestion_rate);
+        w.i32(e.digestion_efficiency);
 
         let r = &b.metabolism.rates;
         w.i32(r.photosynthesis_efficiency);
@@ -632,6 +663,11 @@ impl Snapshot {
             w.i32(e.y);
         }
         w.u64(world.births_total());
+        // The junction-era counters. Hard rule 7 again — and added here in the same edit that
+        // put them in the hash, which is the only way not to repeat the `BiologyConfig` bug.
+        w.u64(world.foreign_injections_total());
+        w.u64(world.forced_joins_total());
+        w.u64(world.wounds_total());
 
         Ok(w.bytes)
     }
@@ -770,6 +806,32 @@ impl Snapshot {
                     control: [c0, c1],
                 });
             }
+            let n_junctions = r.u64()? as usize;
+            if n_junctions != crate::junction::JUNCTIONS_PER_CELL {
+                return Err(SnapshotError::Corrupt(format!(
+                    "a cell has {n_junctions} junction slots, expected {}",
+                    crate::junction::JUNCTIONS_PER_CELL
+                )));
+            }
+            let mut junctions = Vec::with_capacity(crate::junction::JUNCTIONS_PER_CELL);
+            for _ in 0..crate::junction::JUNCTIONS_PER_CELL {
+                let kind = match r.u8()? {
+                    0 => crate::junction::JunctionKind::None,
+                    1 => crate::junction::JunctionKind::Soft,
+                    2 => crate::junction::JunctionKind::Hard,
+                    other => {
+                        return Err(SnapshotError::Corrupt(format!(
+                            "junction kind {other} is not one this build knows"
+                        )))
+                    }
+                };
+                junctions.push(crate::junction::Junction {
+                    kind,
+                    other: CellId::from_parts(r.u32()?, r.u32()?),
+                    rest: r.i32()?,
+                });
+            }
+
             let vm = read_vm(&mut r)?;
             let genome_bytes = r.byte_vec()?;
             let genome = pool
@@ -793,6 +855,7 @@ impl Snapshot {
                     damage,
                     interior,
                     slots,
+                    junctions,
                     vm,
                     genome,
                     daughter,
@@ -847,6 +910,24 @@ impl Snapshot {
         let division_energy = r.i32()?;
         let structural_chemical = r.u64()? as usize;
         let copy_energy_per_byte = r.i32()?;
+        let junctions = crate::junction::JunctionConfig {
+            join_base_cost: r.i32()?,
+            join_forced_penalty: r.i32()?,
+            soft_max_range: r.i32()?,
+            breaking_strain: r.i32()?,
+            stiffness: r.i32()?,
+            iterations: r.u8()?,
+            muscle_range: r.i32()?,
+            probe_leaks_distance: r.bool()?,
+            transfer_cost: r.i32()?,
+        };
+        let ecology = crate::ecology::EcologyConfig {
+            spike_damage: r.i32()?,
+            spike_upkeep: r.i32()?,
+            carrion_fraction: r.i32()?,
+            digestion_rate: r.i32()?,
+            digestion_efficiency: r.i32()?,
+        };
         let rates = crate::metabolism::MetabolicRates {
             photosynthesis_efficiency: r.i32()?,
             respiration_efficiency: r.i32()?,
@@ -887,6 +968,8 @@ impl Snapshot {
             division_energy,
             structural_chemical,
             copy_energy_per_byte,
+            junctions,
+            ecology,
         });
 
         // --- the species archive and the world's newspaper ---
@@ -994,6 +1077,9 @@ impl Snapshot {
             });
         }
         let births_total = r.u64()?;
+        let foreign_injections_total = r.u64()?;
+        let forced_joins_total = r.u64()?;
+        let wounds_total = r.u64()?;
 
         world.restore_cells(cells, free);
         world.restore(
@@ -1020,14 +1106,17 @@ impl Snapshot {
             archive.sample_interval = sample_interval;
             archive.restore(species, next_species, pruned, forks);
         }
-        world.restore_story(
+        world.restore_story(crate::world::RestoredStory {
             events,
-            window_pop,
+            window_population: window_pop,
             window_at,
             generations,
             dominant,
             births_total,
-        );
+            foreign_injections_total,
+            forced_joins_total,
+            wounds_total,
+        });
         Ok(world)
     }
 }

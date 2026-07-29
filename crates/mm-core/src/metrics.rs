@@ -45,8 +45,25 @@ pub struct Sample {
     pub mean_fidelity: i64,
 
     /// Trophic composition: what fraction of the world's energy income came from light, in
-    /// parts per thousand (SPEC §13). Predation and scavenging arrive at M8.
+    /// parts per thousand (SPEC §13).
     pub trophic_light: i64,
+    /// The guild census (M8): cells carrying a chloroplast, a lysosome, a spike, and cells
+    /// carrying none of the machinery that would make them anything but an osmotroph.
+    ///
+    /// Counts rather than fractions, and overlapping rather than a partition: a cell with a
+    /// chloroplast and a lysosome is both, because it is both. There is no cell-type enum
+    /// here any more than anywhere else — these are inferences from organelle loadouts.
+    pub producers: u64,
+    pub scavengers: u64,
+    pub predators: u64,
+    pub osmotrophs: u64,
+    /// Carrion in the fluid, `Q10`. The size of the detrital pool: a number that climbs and
+    /// stays climbed means nothing is eating the dead.
+    pub carrion: i64,
+    /// Carrion digested back into substrate since the last sample, `Q10`.
+    pub scavenged: i64,
+    /// Spike damage dealt since the last sample, `Q10`.
+    pub wounding: i64,
     /// Per-chemical totals over fluid, cell interiors and cell mass.
     pub chemicals: [i64; CHEM_COUNT],
     /// Total matter across every species — the number that must never move.
@@ -100,6 +117,8 @@ impl Sample {
             None => 0,
         };
 
+        let mix = crate::ecology::TrophicMix::of(cells);
+
         Sample {
             tick: world.tick_count(),
             population: cells.len() as u64,
@@ -117,6 +136,13 @@ impl Sample {
             distinct_loadouts: loadouts.len() as u64,
             mean_fidelity: fidelity / n,
             trophic_light: ledger.trophic_share(crate::TrophicSource::Light),
+            producers: mix.producers as u64,
+            scavengers: mix.scavengers as u64,
+            predators: mix.predators as u64,
+            osmotrophs: mix.osmotrophs as u64,
+            carrion: chemicals[crate::ecology::CARRION],
+            scavenged: report.ecology.scavenged,
+            wounding: report.ecology.damage_dealt,
             chemicals,
             total_matter: chemicals.iter().sum(),
         }
@@ -132,7 +158,8 @@ impl Sample {
                 r#""dissipation":{},"energy_in":{},"energy_out":{},"energy_stored":{},"#,
                 r#""mean_age":{},"mean_energy":{},"mean_mass":{},"mean_genome_len":{},"#,
                 r#""distinct_genomes":{},"distinct_loadouts":{},"mean_fidelity":{},"#,
-                r#""trophic_light":{},"#,
+                r#""trophic_light":{},"producers":{},"scavengers":{},"predators":{},"#,
+                r#""osmotrophs":{},"carrion":{},"scavenged":{},"wounding":{},"#,
                 r#""total_matter":{},"chemicals":[{}]}}"#
             ),
             self.tick,
@@ -151,34 +178,85 @@ impl Sample {
             self.distinct_loadouts,
             self.mean_fidelity,
             self.trophic_light,
+            self.producers,
+            self.scavengers,
+            self.predators,
+            self.osmotrophs,
+            self.carrion,
+            self.scavenged,
+            self.wounding,
             self.total_matter,
             chems.join(",")
         )
     }
 
+    /// The terminal table's columns: heading, and how wide the column is.
+    ///
+    /// One list, used to build both the heading row and the data rows, because the two were
+    /// two separate format strings and they had drifted. `"population"` is ten characters in
+    /// an eight-wide column, so the heading had been pushing every column to its right out of
+    /// line since M1 — visible in every run anybody watched, and invisible to every test,
+    /// because nothing compared the two strings. Derived from one list, they cannot disagree.
+    ///
+    /// The widths are wide enough for the headings, and a value that overruns its column
+    /// pushes the rest of *its own* row along. That is the right way round: a number too big
+    /// for its column should be shown in full rather than truncated.
+    const COLUMNS: [(&'static str, usize); 11] = [
+        ("tick", 10),
+        ("cells", 8),
+        ("births", 7),
+        ("deaths", 7),
+        ("dissipation", 13),
+        ("energy", 10),
+        ("genome", 8),
+        ("distinct", 9),
+        ("produc", 7),
+        ("scav", 6),
+        ("pred", 6),
+    ];
+
     /// A fixed-width line for a terminal, for watching a run go by.
+    ///
+    /// The three guild counts were added at M8. Watching a run and being unable to see whether
+    /// anything is eating the dead is watching the wrong half of it — and a predator column
+    /// that stays at zero for a million ticks is the single most useful thing the terminal can
+    /// tell you about a scenario.
     #[must_use]
     pub fn to_row(&self) -> String {
-        format!(
-            "{:>10} {:>8} {:>6} {:>6} {:>12} {:>9} {:>8} {:>6}",
-            self.tick,
-            self.population,
-            self.births,
-            self.deaths,
+        let values: [i64; 11] = [
+            self.tick as i64,
+            self.population as i64,
+            self.births as i64,
+            self.deaths as i64,
             self.dissipation,
             self.mean_energy,
             self.mean_genome_len,
-            self.distinct_genomes,
-        )
+            self.distinct_genomes as i64,
+            self.producers as i64,
+            self.scavengers as i64,
+            self.predators as i64,
+        ];
+        let mut out = String::new();
+        for (v, (_, width)) in values.iter().zip(Sample::COLUMNS) {
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(&format!("{v:>width$}"));
+        }
+        out
     }
 
     /// Column headings matching [`Sample::to_row`].
     #[must_use]
     pub fn header() -> String {
-        format!(
-            "{:>10} {:>8} {:>6} {:>6} {:>12} {:>9} {:>8} {:>6}",
-            "tick", "population", "births", "deaths", "dissipation", "energy", "genome", "distinct"
-        )
+        let mut out = String::new();
+        for (label, width) in Sample::COLUMNS {
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(&format!("{label:>width$}"));
+        }
+        out
     }
 }
 
@@ -186,6 +264,31 @@ impl Sample {
 mod tests {
     use super::*;
     use crate::Scenario;
+
+    #[test]
+    fn the_row_lines_up_with_its_header() {
+        let world = World::new(Scenario::stress(8, 8)).unwrap();
+        let row = Sample::take(&world, None).to_row();
+        let header = Sample::header();
+        assert_eq!(
+            row.len(),
+            header.len(),
+            "the row and its header are different widths:\n{header}\n{row}"
+        );
+        assert_eq!(
+            row.split_whitespace().count(),
+            Sample::COLUMNS.len(),
+            "the row has a different number of columns than there are columns:\n{header}\n{row}"
+        );
+        // Every heading has to fit its column, or it pushes the ones after it along.
+        for (label, width) in Sample::COLUMNS {
+            assert!(
+                label.len() <= width,
+                "the heading {label:?} is {} characters in a {width}-wide column",
+                label.len()
+            );
+        }
+    }
 
     #[test]
     fn a_sample_of_an_empty_world_is_well_formed() {
@@ -205,6 +308,42 @@ mod tests {
         let line = Sample::take(&world, None).to_json();
         assert!(!line.contains('\n'));
         assert_eq!(line.matches("\"tick\"").count(), 1);
+
+        // The line is built from one long format string, so a field added to the struct and
+        // forgotten here is a silent hole in every export. Naming them makes that a failure.
+        for key in [
+            "population",
+            "births",
+            "deaths",
+            "dissipation",
+            "energy_in",
+            "energy_out",
+            "energy_stored",
+            "mean_age",
+            "mean_energy",
+            "mean_mass",
+            "mean_genome_len",
+            "distinct_genomes",
+            "distinct_loadouts",
+            "mean_fidelity",
+            "trophic_light",
+            "producers",
+            "scavengers",
+            "predators",
+            "osmotrophs",
+            "carrion",
+            "scavenged",
+            "wounding",
+            "total_matter",
+            "chemicals",
+        ] {
+            assert_eq!(
+                line.matches(&format!("\"{key}\":")).count(),
+                1,
+                "{key} is not in the exported line exactly once:\n{line}"
+            );
+        }
+        assert!(line.starts_with('{') && line.ends_with('}'));
     }
 
     #[test]

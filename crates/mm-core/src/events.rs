@@ -48,46 +48,66 @@ pub enum Occurrence {
     /// Population fell by more than half inside the detection window.
     MassExtinction,
 
-    // --- Declared, not yet detectable. The mechanisms arrive at M7 and M8. ---
-    /// M8. Requires a predation mechanism.
-    Predation,
-    /// M7. Requires `INJECT` to reach another cell's nucleus.
+    /// A cell wrote genome bytes into another cell's nucleus. Parasitism — and nothing in the
+    /// engine knows the word (SPEC §8.3).
     ForeignInjection,
-    /// M7.
+    /// A transfer channel formed.
     SoftJunction,
-    /// M7.
+    /// A structural junction formed. The beginning of multicellularity.
     HardJunction,
-    /// M7. A connected component of this size.
+    /// A connected component reached this size.
     Cluster(u32),
-    /// M7. Two distinct organelle loadouts inside one component.
+    /// Two distinct organelle loadouts inside one component.
     DifferentiatedCluster,
-    /// M7. A signal passed along a junction chain of at least three.
+    /// A chain of at least three hard junctions — a body long enough to relay through.
     SignalRelay,
-    /// M7. A junction forced against a key mismatch.
+    /// A junction forced against a key mismatch, paid for at the full penalty.
     KeyMismatchJunction,
-    /// M8. A cell entering a dormant state.
+
+    /// A cell wounded another with a spike. Predation — and as with parasitism, nothing in
+    /// the engine knows the word: a spike does damage, damage kills, and death makes carrion.
+    Predation,
+
+    // --- Declared, not yet detectable. ---
+    /// Requires a dormant state, which nothing implements.
     Dormancy,
 }
 
 impl Occurrence {
+    /// Every kind of occurrence, once each, in timeline order.
+    ///
+    /// The two parameterised variants stand in with a representative threshold — this is for
+    /// walking the *kinds*, as the timeline legend and the staleness tests do, not for
+    /// enumerating every event a run can produce.
+    pub const ALL: [Occurrence; 16] = [
+        Occurrence::EndogenousReplication,
+        Occurrence::Motility,
+        Occurrence::ChemotacticMachinery,
+        Occurrence::PhototacticMachinery,
+        Occurrence::Generations(4),
+        Occurrence::NewDominantSpecies,
+        Occurrence::MassExtinction,
+        Occurrence::ForeignInjection,
+        Occurrence::SoftJunction,
+        Occurrence::HardJunction,
+        Occurrence::Cluster(4),
+        Occurrence::DifferentiatedCluster,
+        Occurrence::SignalRelay,
+        Occurrence::KeyMismatchJunction,
+        Occurrence::Predation,
+        Occurrence::Dormancy,
+    ];
+
     /// Whether the mechanism this describes exists in the engine yet.
     ///
     /// A detector for something unimplementable must never fire — a newspaper that reports
     /// events that did not happen is worse than one with fewer pages.
     #[must_use]
     pub fn detectable_now(&self) -> bool {
-        !matches!(
-            self,
-            Occurrence::Predation
-                | Occurrence::ForeignInjection
-                | Occurrence::SoftJunction
-                | Occurrence::HardJunction
-                | Occurrence::Cluster(_)
-                | Occurrence::DifferentiatedCluster
-                | Occurrence::SignalRelay
-                | Occurrence::KeyMismatchJunction
-                | Occurrence::Dormancy
-        )
+        // M7 filled in the junction half; M8 filled in predation. `Dormancy` is what is left,
+        // and there is no dormant state to enter — SPEC lists it, nothing implements it, and a
+        // detector that fired for it would be reporting fiction.
+        !matches!(self, Occurrence::Dormancy)
     }
 
     /// A headline, in the register of a newspaper rather than a log file.
@@ -198,6 +218,8 @@ impl EventLog {
         self.observe_population(world, tick);
         self.observe_lineage(world, tick);
 
+        self.observe_junctions(world, tick);
+
         // The per-cell scan, skipped once there is nothing left for it to find.
         let wanted = [
             Occurrence::Motility,
@@ -250,6 +272,72 @@ impl EventLog {
             if wanted.iter().all(|w| self.already(*w)) {
                 return;
             }
+        }
+    }
+
+    /// Junctions, clusters and the things that only happen once cells are joined (SPEC §8).
+    fn observe_junctions(&mut self, world: &WorldView<'_>, tick: u64) {
+        use crate::junction::JunctionKind;
+
+        if !self.already(Occurrence::ForeignInjection) && world.foreign_injections > 0 {
+            let (species, x, y) = world.any_cell().unwrap_or((0, 0, 0));
+            self.record(tick, Occurrence::ForeignInjection, species, x, y);
+        }
+        if !self.already(Occurrence::Predation) && world.wounds > 0 {
+            let (species, x, y) = world.any_cell().unwrap_or((0, 0, 0));
+            self.record(tick, Occurrence::Predation, species, x, y);
+        }
+        if !self.already(Occurrence::KeyMismatchJunction) && world.forced_joins > 0 {
+            let (species, x, y) = world.any_cell().unwrap_or((0, 0, 0));
+            self.record(tick, Occurrence::KeyMismatchJunction, species, x, y);
+        }
+
+        let want_soft = !self.already(Occurrence::SoftJunction);
+        let want_hard = !self.already(Occurrence::HardJunction);
+        if want_soft || want_hard {
+            'scan: for i in world.cells.iter() {
+                for j in world.cells.junctions(i) {
+                    let what = match j.kind {
+                        JunctionKind::Soft if want_soft => Occurrence::SoftJunction,
+                        JunctionKind::Hard if want_hard => Occurrence::HardJunction,
+                        _ => continue,
+                    };
+                    if self.already(what) {
+                        continue;
+                    }
+                    let (x, y) = (
+                        crate::fixed::pos_to_square(world.cells.x[i]),
+                        crate::fixed::pos_to_square(world.cells.y[i]),
+                    );
+                    self.record(tick, what, world.cells.species[i], x, y);
+                    if self.already(Occurrence::SoftJunction)
+                        && self.already(Occurrence::HardJunction)
+                    {
+                        break 'scan;
+                    }
+                }
+            }
+        }
+
+        // Clusters need the components, which the caller may not have built.
+        let Some(components) = &world.components else {
+            return;
+        };
+        // Milestones, not every size: a headline for every cluster size from four to sixty-four
+        // would bury the ones that matter.
+        for size in [4u32, 16, 64] {
+            let what = Occurrence::Cluster(size);
+            if self.already(what) || components.largest() < size {
+                continue;
+            }
+            let (species, x, y) = world.any_cell().unwrap_or((0, 0, 0));
+            self.record(tick, what, species, x, y);
+        }
+        // A chain of three hard junctions is a body long enough for a signal to relay along.
+        // Measured as a component of at least four, which is what three links make.
+        if !self.already(Occurrence::SignalRelay) && components.largest() >= 4 {
+            let (species, x, y) = world.any_cell().unwrap_or((0, 0, 0));
+            self.record(tick, Occurrence::SignalRelay, species, x, y);
         }
     }
 
@@ -376,6 +464,17 @@ pub struct WorldView<'a> {
     pub archive: Option<&'a crate::phylogeny::Phylogeny>,
     /// Births since the run began, for the replication detector.
     pub births_so_far: u64,
+    /// Foreign injections so far. Counted as they happen in `resolve`, because a byte written
+    /// into a neighbour leaves no trace afterwards that a scan could find.
+    pub foreign_injections: u64,
+    /// Junctions forced against a key mismatch so far, for the same reason.
+    pub forced_joins: u64,
+    /// Spike wounds dealt so far. Counted as they happen: a wound is damage on a cell and
+    /// leaves nothing afterwards to say what caused it.
+    pub wounds: u64,
+    /// Connected components, if the caller has them. Rebuilt outside the detectors because
+    /// they are wanted by the wiki and the renderer too.
+    pub components: Option<&'a mut crate::junction::Components>,
 }
 
 impl WorldView<'_> {
@@ -397,33 +496,55 @@ mod tests {
 
     #[test]
     fn nothing_that_cannot_happen_yet_claims_to_be_detectable() {
-        for what in [
-            Occurrence::Predation,
-            Occurrence::ForeignInjection,
-            Occurrence::SoftJunction,
-            Occurrence::HardJunction,
-            Occurrence::Cluster(4),
-            Occurrence::DifferentiatedCluster,
-            Occurrence::SignalRelay,
-            Occurrence::KeyMismatchJunction,
-            Occurrence::Dormancy,
-        ] {
-            assert!(
-                !what.detectable_now(),
-                "{what:?} claims to be detectable, but its mechanism arrives at M7 or M8"
+        // The list shrank at M7, which is the point of having it: junctions, clusters and
+        // foreign injection all became real, so they moved from one half to the other and
+        // this test had to be updated deliberately rather than drifting.
+        // Everything except dormancy is implemented as of M8.
+        for what in Occurrence::ALL {
+            assert_eq!(
+                what.detectable_now(),
+                !matches!(what, Occurrence::Dormancy),
+                "{what:?} disagrees with what the engine actually implements"
             );
         }
-        for what in [
-            Occurrence::EndogenousReplication,
-            Occurrence::Motility,
-            Occurrence::ChemotacticMachinery,
-            Occurrence::PhototacticMachinery,
-            Occurrence::Generations(4),
-            Occurrence::NewDominantSpecies,
-            Occurrence::MassExtinction,
-        ] {
-            assert!(what.detectable_now(), "{what:?} should be detectable at M5");
+    }
+
+    #[test]
+    fn all_lists_every_kind_of_occurrence() {
+        // `ALL` is what the timeline legend walks and what the staleness tests filter, so a
+        // variant missing from it is a variant nothing checks. The match below does not compile
+        // if a variant is added, which is the point of writing it out rather than counting.
+        for what in Occurrence::ALL {
+            let seen = match what {
+                Occurrence::EndogenousReplication
+                | Occurrence::Motility
+                | Occurrence::ChemotacticMachinery
+                | Occurrence::PhototacticMachinery
+                | Occurrence::Generations(_)
+                | Occurrence::NewDominantSpecies
+                | Occurrence::MassExtinction
+                | Occurrence::ForeignInjection
+                | Occurrence::SoftJunction
+                | Occurrence::HardJunction
+                | Occurrence::Cluster(_)
+                | Occurrence::DifferentiatedCluster
+                | Occurrence::SignalRelay
+                | Occurrence::KeyMismatchJunction
+                | Occurrence::Predation
+                | Occurrence::Dormancy => 1,
+            };
+            assert_eq!(seen, 1);
         }
+        // And no duplicates, so the count is a real count.
+        let mut sorted = Occurrence::ALL;
+        sorted.sort_unstable();
+        let mut deduped = sorted.to_vec();
+        deduped.dedup();
+        assert_eq!(deduped.len(), Occurrence::ALL.len(), "ALL repeats a variant");
+        assert!(
+            !Occurrence::ALL.iter().all(|o| o.detectable_now()),
+            "if everything is detectable, the silence test has nothing left to check"
+        );
     }
 
     #[test]
