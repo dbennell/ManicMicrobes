@@ -111,7 +111,9 @@ cargo bench --workspace                      # criterion gates
 cargo run -p mm-cli -- run scenarios/soup.ron --ticks 1000000 --metrics out.ndjson
 cargo run -p mm-cli -- sweep scenarios/soup.ron --param mutation_rate --range 1..64
 cargo run -p mm-cli -- hash scenarios/soup.ron --ticks 100000   # determinism check
-cargo run -p mm-app --release                # the microscope
+cargo run -p mm-app --features render --release   # the microscope
+# `--features render` is required: Bevy is an optional dependency so that the
+# simulation/render wall in slide.rs stays testable without a graphics stack.
 ```
 
 ## Layout
