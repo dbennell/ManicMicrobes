@@ -686,6 +686,7 @@ pub fn apply_births(
     cells: &mut CellArena,
     pool: &GenomePool,
     pending: &mut Pending,
+    archive: &mut crate::phylogeny::Phylogeny,
     tick: u64,
     seed: u64,
 ) -> u32 {
@@ -700,6 +701,26 @@ pub fn apply_births(
         let jitter_x = (ctx.draw_below(Purpose::Jitter, 1, 257) as i32) - 128;
         let jitter_y = (ctx.draw_below(Purpose::Jitter, 2, 257) as i32) - 128;
 
+        // Speciation (SPEC §10.3). A daughter stays in its parent's species unless its
+        // fingerprint has drifted past the threshold from that species' founder, in which case
+        // it founds a new one parented to the old. An unmutated daughter interns to the same
+        // `Arc<Genome>` as its parent, so the common case is a comparison of two equal
+        // fingerprints and costs nothing.
+        // Read off the *parent*, not the newborn. A daughter is born with a membrane and
+        // nothing else — it builds its organelles over the following ticks from the same
+        // genome — so asking the newborn what it is made of would name every species after an
+        // empty cell. The parent is expressing the genome the daughter inherited, which is
+        // exactly the thing being named.
+        let traits = cells
+            .index(birth.parent)
+            .map(|p| crate::names::Traits::of(cells.slots(p), genome.len()))
+            .unwrap_or_else(|| crate::names::Traits {
+                counts: [0; crate::organelle::SLOT_COUNT],
+                genome_len: genome.len().min(u16::MAX as usize) as u16,
+            });
+        let species = archive.on_birth(birth.species, &genome, traits, tick);
+        archive.record_birth(species);
+
         let id = cells.spawn(CellSeed {
             x: birth.x.saturating_add(jitter_x),
             y: birth.y.saturating_add(jitter_y),
@@ -707,10 +728,7 @@ pub fn apply_births(
             energy: birth.energy,
             membrane: birth.membrane,
             key: birth.key,
-            // Lineage marker, inherited from the parent. Real speciation — forking on
-            // fingerprint distance from a founder — is M5's; until then this is what lets a
-            // run tell two seeded strains apart.
-            species: birth.species,
+            species,
             parent: birth.parent,
             birth_tick: tick,
             genome,
@@ -1237,7 +1255,14 @@ mod tests {
         let report = f.resolve();
         assert_eq!(report.births, 1);
 
-        let born = apply_births(&mut f.cells, &f.pool, &mut f.pending, 1, 1);
+        let born = apply_births(
+            &mut f.cells,
+            &f.pool,
+            &mut f.pending,
+            &mut crate::phylogeny::Phylogeny::new(),
+            1,
+            1,
+        );
         assert_eq!(born, 1);
         assert_eq!(f.cells.len(), 2);
 
@@ -1287,7 +1312,14 @@ mod tests {
         f.intents.begin_tick(f.cells.capacity());
         f.intents.push(i, Intent::Split);
         f.resolve();
-        apply_births(&mut f.cells, &f.pool, &mut f.pending, 1, 1);
+        apply_births(
+            &mut f.cells,
+            &f.pool,
+            &mut f.pending,
+            &mut crate::phylogeny::Phylogeny::new(),
+            1,
+            1,
+        );
         let daughter = f.cells.iter().find(|j| *j != i).unwrap();
         assert_eq!(f.cells.genome[daughter].len(), capacity);
     }

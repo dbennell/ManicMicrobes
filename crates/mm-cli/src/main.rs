@@ -43,6 +43,9 @@ OPTIONS:
     --metrics <file>       write NDJSON metrics here
     --every <n>            ticks between metric samples        [default: 1000]
     --quiet                do not print progress to the terminal
+    --archive <file>       write the species archive as NDJSON when the run ends
+    --prune-every <n>      drop uninteresting extinct branches this often  [default: 0, off]
+    --prune-keep <n>       peak population a dead species needs to survive pruning [default: 32]
     --save <file>          write a snapshot when the run ends
     --load <file>          resume from a snapshot instead of a scenario
     --check                verify the invariants at every sample, and fail if one breaks
@@ -78,6 +81,9 @@ struct Options {
     every: u64,
     quiet: bool,
     save: Option<PathBuf>,
+    archive: Option<PathBuf>,
+    prune_every: u64,
+    prune_keep: u32,
     load: Option<PathBuf>,
     check: bool,
     param: Option<String>,
@@ -97,6 +103,9 @@ impl Default for Options {
             every: 1_000,
             quiet: false,
             save: None,
+            archive: None,
+            prune_every: 0,
+            prune_keep: 32,
             load: None,
             check: false,
             param: None,
@@ -158,6 +167,17 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--every" => o.every = parse_u64(&value()?, "--every")?.max(1),
             "--quiet" => o.quiet = true,
             "--save" => o.save = Some(PathBuf::from(value()?)),
+            "--archive" => o.archive = Some(PathBuf::from(value()?)),
+            "--prune-every" => {
+                o.prune_every = value()?
+                    .parse()
+                    .map_err(|_| "--prune-every wants a number".to_string())?
+            }
+            "--prune-keep" => {
+                o.prune_keep = value()?
+                    .parse()
+                    .map_err(|_| "--prune-keep wants a number".to_string())?
+            }
             "--load" => o.load = Some(PathBuf::from(value()?)),
             "--check" => o.check = true,
             "--param" => o.param = Some(value()?),
@@ -313,12 +333,41 @@ fn cmd_run(opts: &Options) -> Result<(), String> {
                     .map_err(|e| format!("invariant broken at tick {}: {e}", world.tick_count()))?;
             }
         }
+        // Pruning on a schedule (SPEC §10.3). Off by default: a sweep that wants every dead
+        // end has as good a claim as a long run that needs the archive bounded, and silently
+        // discarding branches would make two runs of the same scenario disagree about their
+        // own history for reasons the operator never asked for.
+        if opts.prune_every > 0 && (tick + 1) % opts.prune_every == 0 {
+            let dropped = world.prune_archive(opts.prune_keep);
+            if dropped > 0 && !opts.quiet {
+                eprintln!(
+                    "tick {}: pruned {dropped} extinct branches, {} species remain",
+                    world.tick_count(),
+                    world.archive().len()
+                );
+            }
+        }
     }
     emit(&world, &mut previous)?;
 
     if let Some(w) = out.as_mut() {
         w.flush()
             .map_err(|e| format!("cannot flush metrics: {e}"))?;
+    }
+    if let Some(path) = &opts.archive {
+        let text = mm_core::phylogeny::export::archive_ndjson(world.archive(), world.events());
+        std::fs::write(path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        if !opts.quiet {
+            eprintln!(
+                "wrote {} species and {} events to {}",
+                world.archive().len(),
+                world.events().events().len(),
+                path.display()
+            );
+        }
+    }
+    if !opts.quiet {
+        report_story(&world);
     }
     if let Some(path) = &opts.save {
         let bytes = Snapshot::write(&world).map_err(|e| e.to_string())?;
@@ -328,6 +377,45 @@ fn cmd_run(opts: &Options) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Print what happened, in the register of a newspaper rather than a log file.
+///
+/// This is the point of M5. A run that ends with a population count has told you a number; a
+/// run that ends with "first motility at tick 12,400, *Cilius rapidus* took the slide at
+/// 41,000, three species extinct" has told you what happened.
+fn report_story(world: &World) {
+    let archive = world.archive();
+    let events = world.events();
+    if archive.is_empty() {
+        return;
+    }
+
+    println!();
+    println!(
+        "{} species over the run, {} still alive, {} pruned",
+        archive.len(),
+        archive.living(),
+        archive.pruned()
+    );
+
+    if !events.is_empty() {
+        println!("\nthe newspaper:");
+        for e in events.events() {
+            let who = archive
+                .get(e.species)
+                .map_or_else(|| format!("species {}", e.species), |s| s.name.full());
+            println!("  tick {:>10}  {} — {who}", e.tick, e.what.headline());
+        }
+    }
+
+    // The five biggest species by peak, which is the closest thing to "who mattered".
+    let mut by_peak: Vec<_> = archive.iter().collect();
+    by_peak.sort_by_key(|s| std::cmp::Reverse(s.peak_population));
+    println!("\nthe cast:");
+    for s in by_peak.iter().take(5) {
+        println!("  {}", s.describe(archive));
+    }
 }
 
 /// Print the state hash. Two machines running this on the same scenario must agree (I1).

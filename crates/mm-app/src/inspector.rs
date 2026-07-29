@@ -185,7 +185,10 @@ mod tests {
         let (world, id) = world_with_a_cell();
         let v = Inspection::of(&world, id).expect("the cell is alive");
         assert_eq!(v.id, id);
-        assert_eq!(v.species, 3);
+        // Not the 3 the seed asked for: since M5, `World::spawn_cell` assigns a species from
+        // the archive by fingerprint rather than taking the caller's word for it, and this is
+        // the first cell so it founds species 0.
+        assert_eq!(v.species, 0);
         assert_eq!(v.key, 7);
         assert_eq!(v.genome_len, 32);
         assert_eq!(v.energy, q10(100));

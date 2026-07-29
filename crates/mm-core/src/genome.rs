@@ -60,6 +60,73 @@ pub struct Promoter {
     pub template: Template,
 }
 
+/// How far apart two genomes are, as the bits their fingerprints disagree on (SPEC §10.2).
+///
+/// `0..=64`. Not a metric on genomes — two unrelated genomes average 32 — but monotonic enough
+/// in edit distance for naming, which is the only thing it is used for.
+#[inline]
+#[must_use]
+pub fn fingerprint_distance(a: u64, b: u64) -> u32 {
+    (a ^ b).count_ones()
+}
+
+/// SimHash over 4-byte k-mers.
+///
+/// Each window of four bytes votes on all 64 bits: a set bit in the window's hash pushes that
+/// column up, a clear bit pushes it down, and the sign of each column becomes the fingerprint.
+/// One byte changing moves only the four windows that contain it, so it perturbs a few columns
+/// rather than rerolling the whole value — which is exactly the property a content hash does
+/// not have and speciation cannot do without.
+///
+/// Genomes shorter than a window hash their whole selves as one, so a two-byte genome still
+/// gets a fingerprint rather than a zero that would make it look identical to every other
+/// short genome.
+#[must_use]
+pub fn simhash(bytes: &[u8]) -> u64 {
+    // i16 columns: a genome long enough to overflow one would need 32,767 windows voting the
+    // same way, and `MAX_GENOME_LEN` is 65,536 — so saturate rather than wrap. Hard rule 4
+    // says magnitudes saturate, and a wrapped column would flip a bit for no reason.
+    let mut columns = [0i32; 64];
+    let mut windows = 0u32;
+    let vote = |h: u64, columns: &mut [i32; 64]| {
+        for (bit, column) in columns.iter_mut().enumerate() {
+            if (h >> bit) & 1 == 1 {
+                *column = column.saturating_add(1);
+            } else {
+                *column = column.saturating_sub(1);
+            }
+        }
+    };
+    for window in bytes.windows(4) {
+        let h = mix_bytes(window);
+        vote(h, &mut columns);
+        windows += 1;
+    }
+    if windows == 0 {
+        // Shorter than one k-mer, including empty.
+        vote(mix_bytes(bytes), &mut columns);
+    }
+    let mut out = 0u64;
+    for (bit, column) in columns.iter().enumerate() {
+        // Ties resolve up, so the all-zero genome has a defined fingerprint rather than one
+        // that depends on which way `>` happens to round.
+        if *column >= 0 {
+            out |= 1u64 << bit;
+        }
+    }
+    out
+}
+
+/// Hash one k-mer. The simulation's mixer, so nothing here needs its own constants.
+fn mix_bytes(bytes: &[u8]) -> u64 {
+    let mut acc = 0xCBF2_9CE4_8422_2325u64;
+    for b in bytes {
+        acc ^= *b as u64;
+        acc = crate::rng::mix64(acc);
+    }
+    acc
+}
+
 /// An immutable, content-addressed genome.
 pub struct Genome {
     bytes: Box<[u8]>,
@@ -70,6 +137,7 @@ pub struct Genome {
     /// resolves ties to the lowest offset, as SPEC §4.4 requires.
     promoters: Box<[Promoter]>,
     hash: u64,
+    fingerprint: u64,
 }
 
 impl Genome {
@@ -82,11 +150,13 @@ impl Genome {
         let hash = content_hash(&bytes);
         let templates = build_template_table(&bytes);
         let promoters = build_promoter_table(&bytes, &templates);
+        let fingerprint = simhash(&bytes);
         Ok(Genome {
             bytes: bytes.into_boxed_slice(),
             templates,
             promoters,
             hash,
+            fingerprint,
         })
     }
 
@@ -98,6 +168,7 @@ impl Genome {
             templates: Box::new([]),
             promoters: Box::new([]),
             hash: content_hash(&[]),
+            fingerprint: simhash(&[]),
         }
     }
 
@@ -125,6 +196,23 @@ impl Genome {
     #[must_use]
     pub fn hash(&self) -> u64 {
         self.hash
+    }
+
+    /// 64-bit SimHash over 4-byte k-mers (SPEC §10.2).
+    ///
+    /// Unlike [`Genome::hash`], which is a content hash and tells you only same-or-different,
+    /// this is a *locality-sensitive* hash: two genomes that differ in a few bytes differ in a
+    /// few bits, so Hamming distance between fingerprints stands in for edit distance. That is
+    /// what speciation needs — "has this lineage drifted far enough to deserve a new name" is
+    /// a question about degree.
+    ///
+    /// Free on unmutated division. A daughter that copied its parent exactly interns to the
+    /// same `Arc<Genome>`, so it shares this field rather than recomputing it; the cost is paid
+    /// once per genome that has never been seen before.
+    #[inline(always)]
+    #[must_use]
+    pub fn fingerprint(&self) -> u64 {
+        self.fingerprint
     }
 
     #[inline(always)]

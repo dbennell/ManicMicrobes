@@ -360,10 +360,30 @@ fn selection_run(ticks: u64, seeds: &[u64]) -> usize {
 
         world.run(ticks);
         let total = world.cells().len();
+
+        // Counted by *lineage root*, not by species id.
+        //
+        // This used to filter on `species == 1`, back when `CellSeed::species` was a marker
+        // the caller set and the engine carried unchanged. Since M5 the archive assigns
+        // species by genome fingerprint, so the ids depend on seeding order rather than on
+        // what the test asked for, and a drifted descendant is a different species from its
+        // own founder. Both would break a count keyed on a fixed id.
+        //
+        // Walking each cell's species back to its root and asking which genome founded it is
+        // what the test always meant: which of the two seeded strains does this cell descend
+        // from. It is also robust to mutation being turned on later.
+        let archive = world.archive();
+        let tidy_root = archive
+            .iter()
+            .find(|s| s.parent.is_none() && s.founder_genome.bytes() == tidy.as_slice())
+            .map(|s| s.id)
+            .expect("the tidy strain founded a species");
         let tidy_now = world
             .cells()
             .iter()
-            .filter(|i| world.cells().species[*i] == 1)
+            .filter(|i| {
+                archive.ancestry(world.cells().species[*i]).last().copied() == Some(tidy_root)
+            })
             .count();
         let share = if total == 0 {
             0.0

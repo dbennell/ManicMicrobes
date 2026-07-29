@@ -82,7 +82,7 @@ impl CellId {
 ///
 /// Adding a field here means adding it to [`CellArena::spawn`], to the snapshot format and to
 /// [`StateHash`] — hard rule 7, and the reason those three are next to each other.
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct CellArena {
     /// Slot occupancy and generation. A free slot has `alive[i] == false` and keeps its
     /// generation so the next occupant gets a fresh one.
@@ -503,6 +503,12 @@ pub(crate) struct SlotSnapshot<'a> {
     pub genome: &'a Arc<Genome>,
     pub daughter: Option<&'a [u8]>,
     pub key: u8,
+    /// Ignored by [`crate::World::spawn_cell`], which assigns a species from the archive by
+    /// the genome's fingerprint (SPEC §10.3) — two seedings of one genome are one species and
+    /// two different genomes are two, without the caller having to say so.
+    ///
+    /// Still honoured by [`CellArena::spawn`], which is the lower level and has no archive to
+    /// ask. Set it to zero unless you are building an arena by hand.
     pub species: u32,
     pub parent: CellId,
     pub birth_tick: u64,
@@ -552,6 +558,55 @@ pub struct CellSeed {
     pub birth_tick: u64,
     pub genome: Arc<Genome>,
 }
+
+// A dead slot keeps whatever its last occupant left in it — position, mass, genome, VM state,
+// all of it — because clearing sixteen parallel arrays on every death would be work done for
+// nobody. That garbage is not state: nothing reads it, and `hash_state` skips it.
+//
+// So equality has to skip it too. Deriving `PartialEq` compares the leftovers, and a world
+// restored from a snapshot has defaults in its dead slots where the original had the remains
+// of a cell that lived there — two identical worlds comparing unequal, with a megabyte of
+// `CellId { slot: 4294967295 }` to explain it. This mirrors `hash_state` exactly, and the two
+// are next to each other so they stay that way.
+impl PartialEq for CellArena {
+    fn eq(&self, other: &Self) -> bool {
+        if self.count != other.count
+            || self.alive != other.alive
+            || self.generation != other.generation
+            || self.free != other.free
+        {
+            return false;
+        }
+        for i in 0..self.alive.len() {
+            if !self.alive[i] {
+                continue;
+            }
+            let same = self.x[i] == other.x[i]
+                && self.y[i] == other.y[i]
+                && self.vx[i] == other.vx[i]
+                && self.vy[i] == other.vy[i]
+                && self.mass[i] == other.mass[i]
+                && self.energy[i] == other.energy[i]
+                && self.age[i] == other.age[i]
+                && self.damage[i] == other.damage[i]
+                && self.interior(i) == other.interior(i)
+                && self.slots(i) == other.slots(i)
+                && self.vm[i] == other.vm[i]
+                && self.genome[i].bytes() == other.genome[i].bytes()
+                && self.daughter[i] == other.daughter[i]
+                && self.key[i] == other.key[i]
+                && self.species[i] == other.species[i]
+                && self.parent[i] == other.parent[i]
+                && self.birth_tick[i] == other.birth_tick[i];
+            if !same {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+impl Eq for CellArena {}
 
 impl StateHash for CellArena {
     fn hash_state(&self, h: &mut StateHasher) {

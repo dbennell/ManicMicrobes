@@ -22,7 +22,9 @@
 //! | `l` | legend |
 //! | `p` | plots |
 //! | `i` | inspector |
+//! | `w` | species wiki, tree and timeline |
 //! | `o` | optics on/off |
+//! | `r` | wipe and reseed the slide |
 //!
 //! # What it is not allowed to be
 //!
@@ -53,6 +55,7 @@ use bevy_egui::{egui, EguiContexts, EguiPlugin};
 
 use mm_app::inspector::Inspection;
 use mm_app::slide::{Frame, Lod, Slide};
+use mm_app::wiki;
 use mm_core::biology::BiologyConfig;
 use mm_core::cell::CellSeed;
 use mm_core::fixed::{pos, q10};
@@ -235,6 +238,10 @@ struct View {
     legend: bool,
     plots: bool,
     inspector: bool,
+    /// The species wiki, the tree and the timeline (M5).
+    wiki: bool,
+    /// Which species page is open.
+    species: Option<mm_core::phylogeny::SpeciesId>,
 }
 
 impl Default for View {
@@ -246,6 +253,8 @@ impl Default for View {
             legend: true,
             plots: true,
             inspector: false,
+            wiki: false,
+            species: None,
         }
     }
 }
@@ -331,6 +340,9 @@ fn handle_input(
     }
     if keys.just_pressed(KeyCode::KeyO) {
         sim.slide.optics.enabled = !sim.slide.optics.enabled;
+    }
+    if keys.just_pressed(KeyCode::KeyW) {
+        view.wiki = !view.wiki;
     }
     if keys.just_pressed(KeyCode::KeyR) {
         // Wipe and start the ancestor over. The nearest thing to a tool the microscope has
@@ -706,6 +718,10 @@ fn panels(mut contexts: EguiContexts, mut sim: ResMut<SlideRes>, mut view: ResMu
             });
     }
 
+    if view.wiki {
+        wiki_panel(ctx, &sim, &mut view);
+    }
+
     if view.inspector {
         let inspection = sim.inspection.clone();
         egui::Window::new("cell")
@@ -765,6 +781,137 @@ fn panels(mut contexts: EguiContexts, mut sim: ResMut<SlideRes>, mut view: ResMu
                 });
             });
     }
+}
+
+/// The species wiki, the phylogenetic tree and the world timeline (M5, SPEC §10.5).
+///
+/// Reads the archive through [`mm_app::wiki`], which copies everything out — so this panel
+/// holds no borrow of the world and nothing in it can reach a tick.
+fn wiki_panel(ctx: &egui::Context, sim: &SlideRes, view: &mut View) {
+    let world = sim.slide.world();
+    let archive = world.archive();
+
+    egui::Window::new("wiki")
+        .anchor(egui::Align2::RIGHT_BOTTOM, [-8.0, -8.0])
+        .default_width(420.0)
+        .default_height(460.0)
+        .show(ctx, |ui| {
+            if archive.is_empty() {
+                ui.weak("nothing has lived here yet");
+                return;
+            }
+            ui.label(format!(
+                "{} species, {} alive, {} pruned",
+                archive.len(),
+                archive.living(),
+                archive.pruned()
+            ));
+            ui.separator();
+
+            // --- the timeline ---
+            let timeline = wiki::timeline(archive, world.events().events(), world.tick_count());
+            ui.label("timeline");
+            let (rect, _) = ui
+                .allocate_exact_size(egui::vec2(ui.available_width(), 26.0), egui::Sense::hover());
+            let painter = ui.painter();
+            painter.rect_filled(rect, 2.0, egui::Color32::from_black_alpha(90));
+            for entry in &timeline.entries {
+                let x = rect.left() + rect.width() * (entry.at as f32 / 1000.0);
+                painter.line_segment(
+                    [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+                    egui::Stroke::new(1.5, egui::Color32::from_rgb(220, 180, 110)),
+                );
+            }
+            for entry in timeline.entries.iter().rev().take(6) {
+                ui.small(format!(
+                    "tick {} — {} ({})",
+                    entry.tick, entry.headline, entry.species_name
+                ));
+            }
+            ui.separator();
+
+            // --- the tree ---
+            ui.label("tree");
+            egui::ScrollArea::vertical()
+                .max_height(140.0)
+                .id_source("tree")
+                .show(ui, |ui| {
+                    let tree = wiki::layout(archive);
+                    for node in &tree.nodes {
+                        // Indent by depth: the column is the number of speciation events
+                        // between this species and the seeded founder.
+                        let indent = "  ".repeat(node.depth.min(12) as usize);
+                        let label = format!(
+                            "{indent}{} {} ({})",
+                            if node.alive { "●" } else { "○" },
+                            node.name,
+                            if node.alive {
+                                node.population.to_string()
+                            } else {
+                                format!("peak {}", node.peak_population)
+                            }
+                        );
+                        if ui
+                            .selectable_label(view.species == Some(node.id), label)
+                            .clicked()
+                        {
+                            view.species = Some(node.id);
+                        }
+                    }
+                });
+            ui.separator();
+
+            // --- the page ---
+            let showing = view
+                .species
+                .or_else(|| wiki::notable(archive, 1).first().copied());
+            let Some(page) = showing.and_then(|id| wiki::page(archive, id)) else {
+                ui.weak("select a species");
+                return;
+            };
+            egui::ScrollArea::vertical()
+                .id_source("page")
+                .show(ui, |ui| {
+                    ui.heading(&page.name);
+                    ui.label(&page.description);
+                    ui.separator();
+                    ui.label(format!(
+                        "founded {}  ·  {} births  ·  {} deaths  ·  {} generations deep",
+                        page.founded_tick, page.births, page.deaths, page.depth
+                    ));
+                    if let Some((id, name)) = &page.parent {
+                        if ui.link(format!("diverged from {name}")).clicked() {
+                            view.species = Some(*id);
+                        }
+                    }
+                    if !page.children.is_empty() {
+                        ui.label(format!("{} descendant species:", page.children.len()));
+                        for (id, name) in page.children.iter().take(8) {
+                            if ui.link(format!("  {name}")).clicked() {
+                                view.species = Some(*id);
+                            }
+                        }
+                    }
+                    ui.separator();
+                    ui.label(format!("population — peak {}", page.curve_peak));
+                    let values: Vec<f32> = page.curve.iter().map(|(_, v)| *v).collect();
+                    sparkline(ui, &values);
+                    ui.separator();
+                    ui.small(format!(
+                        "founder genome, {} bytes, fingerprint {:016x}",
+                        page.founder_genome.len(),
+                        page.fingerprint
+                    ));
+                    // Loading it into an editor is M6. Showing it is not.
+                    let hex: String = page
+                        .founder_genome
+                        .iter()
+                        .take(64)
+                        .map(|b| format!("{b:02x}"))
+                        .collect();
+                    ui.small(egui::RichText::new(hex).monospace());
+                });
+        });
 }
 
 /// A minimal line plot. Values are already `0..=1`.

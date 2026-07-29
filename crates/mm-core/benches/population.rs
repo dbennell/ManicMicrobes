@@ -262,5 +262,69 @@ fn phases(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, gate, phase_breakdown, phases);
+/// M5's gate: phylogeny and metrics under 5% of tick time at scale.
+///
+/// # Measured on two clones, not two windows
+///
+/// The obvious version — step the world, then turn sampling off and step it again — is wrong,
+/// and wrong in a way that reported success. The population is still growing, so the second
+/// window runs on a bigger world than the first: the measurement came back with the archive
+/// *disabled* costing 559ms a tick against 158ms with it enabled, and `.max(0.0)` dutifully
+/// turned that impossible negative into "0.00%, MET".
+///
+/// It was printing both absolute timings that gave it away, which is the argument for printing
+/// them. So: two clones of one grown world, stepped the same number of ticks from the same
+/// state, differing only in whether the census runs. Comparing like with like is the whole
+/// measurement.
+///
+/// The difference has to be measured from outside because no timer can go inside `World` —
+/// hard rule 5 forbids it carrying a clock.
+fn phylogeny_gate(_c: &mut Criterion) {
+    if cfg!(debug_assertions) {
+        return;
+    }
+    let Some(world) = grown("ancestor.mm", 1) else {
+        return;
+    };
+    let population = world.cells().len();
+    let species = world.archive().len();
+    let n = 200u64;
+
+    // Sampling at its normal interval.
+    let mut with = world.clone();
+    with.run(10);
+    let t = Instant::now();
+    with.run(n);
+    let with_archive = t.elapsed().as_secs_f64() / n as f64;
+
+    // The same world, from the same state, with sampling pushed beyond the window so no
+    // census falls inside it.
+    let mut without = world.clone();
+    without.archive_mut().sample_interval = u64::MAX / 2;
+    without.run(10);
+    let t = Instant::now();
+    without.run(n);
+    let bare = t.elapsed().as_secs_f64() / n as f64;
+
+    // The two clones must still be describing the same world, or the difference between them
+    // is not the archive.
+    let drift = with.cells().len().abs_diff(without.cells().len());
+    assert!(
+        (drift as f64) < population.max(1) as f64 * 0.05,
+        "the clones drifted apart in population ({} against {}); they are no longer comparable",
+        with.cells().len(),
+        without.cells().len()
+    );
+
+    let share = (with_archive - bare) / with_archive * 100.0;
+    eprintln!("\nM5 phylogeny gate at {population} cells, {species} species:");
+    eprintln!(
+        "  with archive {:.2}ms/tick, without {:.2}ms/tick — {share:.2}% (need under 5%)  {}",
+        with_archive * 1000.0,
+        bare * 1000.0,
+        if share < 5.0 { "MET" } else { "MISSED" }
+    );
+}
+
+criterion_group!(benches, gate, phylogeny_gate, phase_breakdown, phases);
 criterion_main!(benches);

@@ -8,6 +8,8 @@
 //! move at all are the fluid solver, which exchanges across edges and therefore conserves by
 //! construction, and the explicit seed/evict paths, which go through the ledger.
 
+use std::sync::Arc;
+
 use crate::biology::{self, BiologyConfig, BiologyReport};
 use crate::cell::{CellArena, CellId, CellSeed};
 use crate::chem::CHEM_COUNT;
@@ -47,6 +49,14 @@ pub struct World {
     diffusion_rates: [i32; CHEM_COUNT],
     /// Working buffer for the fluid solver. Not state: it holds nothing between steps, and
     /// is excluded from equality, hashing and snapshots for that reason.
+    /// The species archive and the tree over it (SPEC §10).
+    archive: crate::phylogeny::Phylogeny,
+    /// The world's newspaper: first occurrences and mass extinctions (SPEC §10.6).
+    events: crate::events::EventLog,
+    /// Births since the run began. Feeds the replication detector and nothing else.
+    births_total: u64,
+    /// Reused between censuses so counting species does not allocate every time.
+    census: std::collections::BTreeMap<crate::phylogeny::SpeciesId, u32>,
     scratch: crate::fluid::FluidScratch,
     /// Per-cell radii, reused by collision separation so it does not allocate per tick.
     /// Scratch like `scratch`: excluded from equality and from the hash.
@@ -92,6 +102,9 @@ impl PartialEq for World {
             && self.impulse_x == other.impulse_x
             && self.impulse_y == other.impulse_y
             && self.cells == other.cells
+            && self.archive == other.archive
+            && self.events == other.events
+            && self.births_total == other.births_total
     }
 }
 
@@ -126,6 +139,10 @@ impl World {
             velocity_written: false,
             active_impulses: 0,
             diffusion_rates,
+            archive: crate::phylogeny::Phylogeny::new(),
+            events: crate::events::EventLog::new(),
+            births_total: 0,
+            census: std::collections::BTreeMap::new(),
             scratch: crate::fluid::FluidScratch::new(n),
             radii: Vec::new(),
             cells: CellArena::new(),
@@ -455,14 +472,24 @@ impl World {
                 &mut self.ledger,
                 &mut self.pending,
             );
-            biology::apply_births(
+            report.biology.births = biology::apply_births(
                 &mut self.cells,
                 &self.genomes,
                 &mut self.pending,
+                &mut self.archive,
                 tick,
                 seed,
             );
+            self.births_total = self
+                .births_total
+                .saturating_add(u64::from(report.biology.births));
         }
+
+        // 7. The story: who is alive, who just stopped, and anything happening for the first
+        //    time. Read-only over the world — nothing here can change a tick's outcome, which
+        //    is why it runs last and why it may be sampled rather than run in full.
+        self.observe(tick);
+
         report.population = self.cells.len() as u32;
         self.last_report = report;
 
@@ -578,10 +605,115 @@ impl World {
     ///
     /// A genome longer than the addressing limit.
     pub fn spawn_cell(&mut self, seed: CellSeed) -> CellId {
+        let genome = Arc::clone(&seed.genome);
         let id = self.cells.spawn(seed);
+        // A seeded cell founds a species, or joins the one already founded for its genome —
+        // twelve founders of one ancestor are one species, not twelve rivals. Its traits are
+        // read after the caller has finished dressing it, so this registers the species now
+        // and `observe` corrects the loadout once the cell has organelles.
+        if let Some(i) = self.cells.index(id) {
+            let traits = crate::names::Traits::of(self.cells.slots(i), genome.len());
+            let species = self.archive.found(&genome, traits, self.tick);
+            self.cells.species[i] = species;
+        }
         self.ledger.set_baseline(self.total_matter());
         self.rebaseline_energy();
         id
+    }
+
+    /// The species archive and the tree over it.
+    #[must_use]
+    pub fn archive(&self) -> &crate::phylogeny::Phylogeny {
+        &self.archive
+    }
+
+    pub fn archive_mut(&mut self) -> &mut crate::phylogeny::Phylogeny {
+        &mut self.archive
+    }
+
+    /// The world's newspaper.
+    #[must_use]
+    pub fn events(&self) -> &crate::events::EventLog {
+        &self.events
+    }
+
+    #[must_use]
+    pub fn births_total(&self) -> u64 {
+        self.births_total
+    }
+
+    /// Census the population, update the archive, and look for firsts.
+    ///
+    /// # Why this is sampled rather than run every tick
+    ///
+    /// M5's gate is that phylogeny and metrics cost under 5% of tick time at a hundred
+    /// thousand cells. A census is a walk over every cell — the same order as the tick itself,
+    /// with a much smaller constant, but not free — and a population curve does not want
+    /// per-tick resolution anyway. So it runs on the archive's sample interval, and the
+    /// detectors run with it.
+    ///
+    /// Births and deaths are *not* sampled: those are counted as they happen, in
+    /// `apply_births` and `apply_deaths`, so no birth is ever missed by a census that did not
+    /// happen to fall on it.
+    fn observe(&mut self, tick: u64) {
+        let due = tick % self.archive.sample_interval == 0;
+        if !due {
+            return;
+        }
+        self.census.clear();
+        // One pass: count each species, and remember one member of each that has finished
+        // building itself, so the archive can settle what the species is actually made of.
+        // The member with the most organelles is chosen rather than the first, because the
+        // first is as likely as not to be a newborn that is still a bare membrane.
+        let mut exemplar: std::collections::BTreeMap<crate::phylogeny::SpeciesId, (usize, usize)> =
+            Default::default();
+        for i in self.cells.iter() {
+            let species = self.cells.species[i];
+            *self.census.entry(species).or_insert(0) += 1;
+            let built = self.cells.slots(i).iter().filter(|o| o.is_active()).count();
+            let entry = exemplar.entry(species).or_insert((0, i));
+            if built > entry.0 {
+                *entry = (built, i);
+            }
+        }
+        for (species, (built, i)) in exemplar {
+            if built > 1 {
+                let traits =
+                    crate::names::Traits::of(self.cells.slots(i), self.cells.genome[i].len());
+                self.archive.settle_traits(species, traits);
+            }
+        }
+        self.archive.census(&self.census, tick);
+        let view = crate::events::WorldView {
+            cells: &self.cells,
+            archive: Some(&self.archive),
+            births_so_far: self.births_total,
+        };
+        self.events.observe(&view, tick);
+    }
+
+    /// Rebuild the archive's narrative half from a snapshot. Hard rule 7.
+    pub fn restore_story(
+        &mut self,
+        events: Vec<crate::events::Event>,
+        window_population: u32,
+        window_at: u64,
+        generations: u32,
+        dominant: Option<crate::phylogeny::SpeciesId>,
+        births_total: u64,
+    ) {
+        self.events
+            .restore(events, window_population, window_at, generations, dominant);
+        self.births_total = births_total;
+    }
+
+    /// Drop extinct branches that carry no story (SPEC §10.3).
+    ///
+    /// Not on a timer inside `step`: how much history is worth keeping is a decision for
+    /// whoever is running the simulation, and a headless sweep that wants every dead end has
+    /// as good a claim as a viewer that wants a legible tree. `mm-cli` prunes on a schedule.
+    pub fn prune_archive(&mut self, keep_above: u32) -> usize {
+        self.archive.prune(keep_above)
     }
 
     /// Advance many ticks.
@@ -745,6 +877,12 @@ impl StateHash for World {
         for v in &self.impulse_y {
             h.i32(*v);
         }
+        // The archive and the log are world state: a species founded, a name given, an event
+        // recorded. Two runs that diverged only in their phylogeny would be two different
+        // worlds, and leaving these out of the hash would let that divergence go unnoticed.
+        self.archive.hash_into(h);
+        self.events.hash_into(h);
+        h.u64(self.births_total);
     }
 }
 

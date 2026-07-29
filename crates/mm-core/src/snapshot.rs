@@ -35,7 +35,7 @@ use crate::world::World;
 pub const MAGIC: [u8; 8] = *b"MMSNAP\0\x01";
 /// Snapshot format version, distinct from the ISA version. The format may change without
 /// the meaning of a genome changing, and vice versa.
-pub const FORMAT_VERSION: u16 = 1;
+pub const FORMAT_VERSION: u16 = 2;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum SnapshotError {
@@ -264,6 +264,99 @@ impl<'a> Reader<'a> {
     }
 }
 
+/// Extinction causes as a tag plus an optional species id.
+///
+/// Written longhand rather than derived, so that adding a cause is a visible edit to the
+/// format in both directions rather than a silent change of meaning.
+fn write_extinction(w: &mut Writer, cause: Option<crate::phylogeny::Extinction>) {
+    use crate::phylogeny::Extinction;
+    let (tag, id) = match cause {
+        None => (0u8, 0u32),
+        Some(Extinction::SucceededByDescendant(id)) => (1, id),
+        Some(Extinction::Outcompeted(id)) => (2, id),
+        Some(Extinction::MassExtinction) => (3, 0),
+        Some(Extinction::NeverEstablished) => (4, 0),
+        Some(Extinction::Unknown) => (5, 0),
+    };
+    w.u8(tag);
+    w.u32(id);
+}
+
+fn read_extinction(
+    r: &mut Reader<'_>,
+) -> Result<Option<crate::phylogeny::Extinction>, SnapshotError> {
+    use crate::phylogeny::Extinction;
+    let tag = r.u8()?;
+    let id = r.u32()?;
+    Ok(match tag {
+        0 => None,
+        1 => Some(Extinction::SucceededByDescendant(id)),
+        2 => Some(Extinction::Outcompeted(id)),
+        3 => Some(Extinction::MassExtinction),
+        4 => Some(Extinction::NeverEstablished),
+        5 => Some(Extinction::Unknown),
+        // An unknown tag is a file this build does not understand, not a cause to guess at.
+        other => {
+            return Err(SnapshotError::Corrupt(format!(
+                "extinction cause tag {other} is not one this build knows"
+            )))
+        }
+    })
+}
+
+fn write_occurrence(w: &mut Writer, what: crate::events::Occurrence) {
+    use crate::events::Occurrence as O;
+    let (tag, n) = match what {
+        O::EndogenousReplication => (0u8, 0u32),
+        O::Motility => (1, 0),
+        O::ChemotacticMachinery => (2, 0),
+        O::PhototacticMachinery => (3, 0),
+        O::Generations(n) => (4, n),
+        O::NewDominantSpecies => (5, 0),
+        O::MassExtinction => (6, 0),
+        O::Predation => (7, 0),
+        O::ForeignInjection => (8, 0),
+        O::SoftJunction => (9, 0),
+        O::HardJunction => (10, 0),
+        O::Cluster(n) => (11, n),
+        O::DifferentiatedCluster => (12, 0),
+        O::SignalRelay => (13, 0),
+        O::KeyMismatchJunction => (14, 0),
+        O::Dormancy => (15, 0),
+    };
+    w.u8(tag);
+    w.u32(n);
+}
+
+fn read_occurrence(r: &mut Reader<'_>) -> Result<crate::events::Occurrence, SnapshotError> {
+    use crate::events::Occurrence as O;
+    let tag = r.u8()?;
+    let n = r.u32()?;
+    Ok(match tag {
+        0 => O::EndogenousReplication,
+        1 => O::Motility,
+        2 => O::ChemotacticMachinery,
+        3 => O::PhototacticMachinery,
+        4 => O::Generations(n),
+        5 => O::NewDominantSpecies,
+        6 => O::MassExtinction,
+        7 => O::Predation,
+        8 => O::ForeignInjection,
+        9 => O::SoftJunction,
+        10 => O::HardJunction,
+        11 => O::Cluster(n),
+        12 => O::DifferentiatedCluster,
+        13 => O::SignalRelay,
+        14 => O::KeyMismatchJunction,
+        15 => O::Dormancy,
+        other => {
+            return Err(SnapshotError::Corrupt(format!(
+                "event tag {other} is not one this build knows"
+            )))
+        }
+    })
+}
+
 fn write_vm(w: &mut Writer, vm: &Vm) {
     for v in vm.data {
         w.u16(v as u16);
@@ -427,6 +520,69 @@ impl Snapshot {
         for v in l.income() {
             w.i64(v);
         }
+
+        // --- the species archive and the world's newspaper (SPEC §10) ---
+        //
+        // Founder genomes are written out in full, which is the one place this format stores
+        // genome bytes for something that may be long dead. That is deliberate and it is what
+        // SPEC §10.3 asks for: full genomes for species founders, aggregates for everyone
+        // else. A wiki page whose founder genome could not be loaded into the editor would be
+        // a page about nothing.
+        let archive = world.archive();
+        w.u32(archive.next_id());
+        w.u64(archive.pruned());
+        w.u64(archive.forks());
+        w.u32(archive.speciation_threshold);
+        w.u32(archive.genus_threshold);
+        w.u64(archive.sample_interval);
+        w.u32(archive.len() as u32);
+        for s in archive.iter() {
+            w.u32(s.id);
+            // `u32::MAX` for "no parent": a root. Species ids are handed out from zero and
+            // never reused, so the sentinel cannot collide with a real one.
+            w.u32(s.parent.unwrap_or(u32::MAX));
+            w.string(&s.name.genus);
+            w.string(&s.name.epithet);
+            w.u32(s.genus);
+            w.u64(s.founded_tick);
+            w.u64(s.founder_fingerprint);
+            w.blob(s.founder_genome.bytes());
+            for c in s.traits.counts {
+                w.u8(c);
+            }
+            w.u16(s.traits.genome_len);
+            w.u32(s.population);
+            w.u32(s.peak_population);
+            w.u64(s.peak_tick);
+            w.u64(s.births);
+            w.u64(s.deaths);
+            w.u32(s.depth);
+            w.u64(s.extinct_tick.unwrap_or(u64::MAX));
+            write_extinction(&mut w, s.extinction);
+            w.bool(s.traits_settled);
+            w.u64(s.curve.interval());
+            w.u32(s.curve.points().len() as u32);
+            for p in s.curve.points() {
+                w.u64(p.tick);
+                w.u32(p.population);
+            }
+        }
+
+        let log = world.events();
+        let (window_pop, window_at, generations, dominant) = log.window_state();
+        w.u32(window_pop);
+        w.u64(window_at);
+        w.u32(generations);
+        w.u32(dominant.unwrap_or(u32::MAX));
+        w.u32(log.events().len() as u32);
+        for e in log.events() {
+            w.u64(e.tick);
+            write_occurrence(&mut w, e.what);
+            w.u32(e.species);
+            w.i32(e.x);
+            w.i32(e.y);
+        }
+        w.u64(world.births_total());
 
         Ok(w.bytes)
     }
@@ -627,6 +783,112 @@ impl Snapshot {
             *slot = r.i64()?;
         }
 
+        // --- the species archive and the world's newspaper ---
+        let next_species = r.u32()?;
+        let pruned = r.u64()?;
+        let forks = r.u64()?;
+        let speciation_threshold = r.u32()?;
+        let genus_threshold = r.u32()?;
+        let sample_interval = r.u64()?;
+        let species_count = r.u32()? as usize;
+        let mut species = Vec::with_capacity(species_count.min(1 << 20));
+        for _ in 0..species_count {
+            let id = r.u32()?;
+            let parent = match r.u32()? {
+                u32::MAX => None,
+                p => Some(p),
+            };
+            let genus_name = r.string()?;
+            let epithet = r.string()?;
+            let genus = r.u32()?;
+            let founded_tick = r.u64()?;
+            let founder_fingerprint = r.u64()?;
+            let genome_len = r.u64()? as usize;
+            let genome_bytes = r.take(genome_len)?.to_vec();
+            let founder_genome = world
+                .genomes()
+                .intern(genome_bytes)
+                .map_err(|e| SnapshotError::Scenario(e.to_string()))?;
+            let mut counts = [0u8; crate::organelle::SLOT_COUNT];
+            for c in counts.iter_mut() {
+                *c = r.u8()?;
+            }
+            let trait_genome_len = r.u16()?;
+            let population = r.u32()?;
+            let peak_population = r.u32()?;
+            let peak_tick = r.u64()?;
+            let births = r.u64()?;
+            let deaths = r.u64()?;
+            let depth = r.u32()?;
+            let extinct_tick = match r.u64()? {
+                u64::MAX => None,
+                t => Some(t),
+            };
+            let extinction = read_extinction(&mut r)?;
+            let traits_settled = r.bool()?;
+            let interval = r.u64()?;
+            let point_count = r.u32()? as usize;
+            let mut curve = crate::phylogeny::Curve::new(interval);
+            let mut points = Vec::with_capacity(point_count.min(1 << 16));
+            for _ in 0..point_count {
+                points.push(crate::phylogeny::CurvePoint {
+                    tick: r.u64()?,
+                    population: r.u32()?,
+                });
+            }
+            curve.restore(points, interval);
+            species.push(crate::phylogeny::Species {
+                id,
+                parent,
+                name: crate::names::Binomial {
+                    genus: genus_name,
+                    epithet,
+                },
+                genus,
+                founded_tick,
+                founder_fingerprint,
+                founder_genome,
+                traits: crate::names::Traits {
+                    counts,
+                    genome_len: trait_genome_len,
+                },
+                population,
+                peak_population,
+                peak_tick,
+                births,
+                deaths,
+                depth,
+                extinct_tick,
+                extinction,
+                curve,
+                // Rebuilt from the parent links by `Phylogeny::restore`.
+                children: Vec::new(),
+                traits_settled,
+            });
+        }
+
+        let window_pop = r.u32()?;
+        let window_at = r.u64()?;
+        let generations = r.u32()?;
+        let dominant = match r.u32()? {
+            u32::MAX => None,
+            d => Some(d),
+        };
+        let event_count = r.u32()? as usize;
+        let mut events = Vec::with_capacity(event_count.min(1 << 20));
+        for _ in 0..event_count {
+            let tick = r.u64()?;
+            let what = read_occurrence(&mut r)?;
+            events.push(crate::events::Event {
+                tick,
+                what,
+                species: r.u32()?,
+                x: r.i32()?,
+                y: r.i32()?,
+            });
+        }
+        let births_total = r.u64()?;
+
         world.restore_cells(cells, free);
         world.restore(
             tick,
@@ -644,6 +906,21 @@ impl Snapshot {
             energy_stored,
             converted,
             income,
+        );
+        {
+            let archive = world.archive_mut();
+            archive.speciation_threshold = speciation_threshold;
+            archive.genus_threshold = genus_threshold;
+            archive.sample_interval = sample_interval;
+            archive.restore(species, next_species, pruned, forks);
+        }
+        world.restore_story(
+            events,
+            window_pop,
+            window_at,
+            generations,
+            dominant,
+            births_total,
         );
         Ok(world)
     }

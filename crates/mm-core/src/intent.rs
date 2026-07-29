@@ -236,7 +236,8 @@ pub struct PendingBirth {
     pub y: i32,
     pub membrane: u8,
     pub key: u8,
-    /// Inherited from the parent. M5 replaces this with real speciation.
+    /// The parent's species. `apply_births` decides whether the daughter stays in it or
+    /// founds a new one, by fingerprint distance from that species' founder (SPEC §10.3).
     pub species: u32,
 }
 
