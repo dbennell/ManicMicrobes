@@ -281,3 +281,44 @@ fn detail_costs_nothing_until_it_is_asked_for() {
     // The same cells either way — the tier changes detail, never contents.
     assert_eq!(far.cells.len(), near.cells.len());
 }
+
+#[test]
+fn the_microscope_opens_on_something_alive() {
+    // Written after the first look through the viewer, which opened on `Scenario::stress` and
+    // reported "0 cells" — a microscope built to show cells, showing none. The default slide
+    // has to have life on it and that life has to still be there a few thousand ticks later,
+    // or the front-end is a picture of chemistry.
+    //
+    // Uses this file's own `seed_life` rather than `main.rs`'s default, because `main.rs` is
+    // behind the `render` feature and this has to run without a graphics stack. They are not
+    // the same slide — this one seeds twelve founders on 64x64, the viewer seeds sixteen on
+    // 96x96 — so what is guarded here is the *property*: the ancestor is alive on a slide of
+    // this shape and stays alive. A viewer default that broke while this passed would be a
+    // gap, and closing it properly needs the scenario loading M6 brings.
+    let mut slide = Slide::new(scenario(1)).expect("scenario");
+    seed_life(slide.world_mut());
+    let seeded = slide.frame().population;
+    assert!(seeded > 0, "nothing was seeded");
+
+    slide.advance(3_000);
+    let f = slide.frame();
+    assert!(
+        f.population > seeded,
+        "the ancestor did not divide: {} cells after 3,000 ticks, from {seeded}",
+        f.population
+    );
+    assert!(
+        f.cells.iter().any(|c| c.rgb != [0.0, 0.0, 0.0]),
+        "every cell drew as pure black"
+    );
+
+    // And the chemistry has to be visible, not a black square. The overlay is normalised
+    // against its own peak, so what matters is that a typical square is not rounding to zero.
+    let layer = f.overlays.first().expect("an overlay is on by default");
+    let lit = layer.field.iter().filter(|v| **v > 0.02).count();
+    assert!(
+        lit * 4 > layer.field.len(),
+        "only {lit} of {} squares carry any visible chemistry; the slide renders black",
+        layer.field.len()
+    );
+}

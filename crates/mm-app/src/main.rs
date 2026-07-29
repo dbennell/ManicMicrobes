@@ -53,8 +53,12 @@ use bevy_egui::{egui, EguiContexts, EguiPlugin};
 
 use mm_app::inspector::Inspection;
 use mm_app::slide::{Frame, Lod, Slide};
+use mm_core::biology::BiologyConfig;
+use mm_core::cell::CellSeed;
+use mm_core::fixed::{pos, q10};
+use mm_core::light::CurrentField;
 use mm_core::metrics::Sample;
-use mm_core::{CellId, Scenario};
+use mm_core::{CellId, LightRegime, MutationRates, Organelle, OrganelleType, Scenario, Seeding};
 
 /// Pixels per substrate square at zoom 1.
 const BASE_SCALE: f32 = 8.0;
@@ -103,19 +107,120 @@ struct SlideRes {
 
 impl SlideRes {
     fn new() -> SlideRes {
-        // The default slide until scenario loading arrives (M6's slide save/load).
-        let scenario = Scenario {
-            width: 96,
-            height: 96,
-            ..Scenario::stress(96, 96)
-        };
-        let slide = Slide::new(scenario).expect("default scenario");
-        let frame = slide.frame();
-        SlideRes {
+        // A living slide, not `Scenario::stress`.
+        //
+        // The viewer used to boot into the stress scenario, which is a physics workload with
+        // nothing alive on it — so a microscope built to show cells opened on a slide that had
+        // none, and the first thing anyone saw was "0 cells". Whatever else this is, it is
+        // supposed to be the thing people want to look at.
+        //
+        // Loading a *chosen* scenario is M6's slide save/load and is still not here. This is
+        // the built-in default: the same petri dish M2's tests use, seeded with the ancestor
+        // from `genomes/`, which divides and fills it within a few thousand ticks.
+        let slide = Slide::new(petri()).expect("default scenario");
+        let mut res = SlideRes {
             slide,
-            frame,
+            frame: Frame::default(),
             selected: None,
             inspection: None,
+        };
+        res.reseed();
+        res.frame = res.slide.frame();
+        res
+    }
+
+    /// Wipe the slide and start the ancestor over. Bound to `r`.
+    fn reseed(&mut self) {
+        *self.slide.world_mut() = mm_core::World::new(petri()).expect("default scenario");
+        self.slide.world_mut().set_biology(BiologyConfig {
+            mutation: MutationRates::default(),
+            ..BiologyConfig::default()
+        });
+        let Some(bytes) = ancestor_genome() else {
+            return;
+        };
+        let world = self.slide.world_mut();
+        for k in 0..16u32 {
+            let Ok(genome) = world.genomes().intern(bytes.clone()) else {
+                continue;
+            };
+            let id = world.spawn_cell(CellSeed {
+                x: pos((8 + (k % 4) * 20) as i32),
+                y: pos((8 + (k / 4) * 20) as i32),
+                mass: q10(30),
+                energy: q10(400),
+                membrane: 24,
+                key: 11,
+                species: 0,
+                parent: CellId::NONE,
+                birth_tick: 0,
+                genome,
+            });
+            if let Some(i) = world.cells_mut().index(id) {
+                let cells = world.cells_mut();
+                // The organelles its build gene would otherwise take many ticks to afford, so
+                // there is something metabolising to look at straight away.
+                cells.slots_mut(i)[1] = Organelle::finished(OrganelleType::Nucleus, 40);
+                cells.slots_mut(i)[2] = Organelle::finished(OrganelleType::Mitochondrion, 50);
+                cells.slots_mut(i)[3] = Organelle::finished(OrganelleType::Chloroplast, 60);
+                cells.interior_mut(i)[11] = q10(40);
+                cells.interior_mut(i)[14] = q10(40);
+            }
+        }
+        // Filling a cytoplasm by hand creates matter, which is what scenario setup is for.
+        self.slide.world_mut().adopt_current_contents_as_baseline();
+        self.selected = None;
+        self.inspection = None;
+    }
+}
+
+/// The default slide: light, food, no flow. The habitat the ancestor was written for.
+fn petri() -> Scenario {
+    Scenario {
+        name: "petri".to_string(),
+        seed: 1,
+        width: 96,
+        height: 96,
+        light: LightRegime::Uniform {
+            intensity: mm_core::Q10_ONE,
+        },
+        current: CurrentField::Still,
+        seeding: vec![
+            Seeding::Uniform {
+                chemical: 11,
+                per_square: q10(400),
+            },
+            Seeding::Uniform {
+                chemical: 14,
+                per_square: q10(400),
+            },
+            Seeding::Uniform {
+                chemical: 4,
+                per_square: q10(400),
+            },
+        ],
+        ..Scenario::default()
+    }
+}
+
+/// Assemble `genomes/ancestor.mm`, or `None` if it cannot be found or does not assemble.
+///
+/// Returns rather than panics: a missing genome file should open an empty slide with a
+/// complaint on stderr, not refuse to start the microscope.
+fn ancestor_genome() -> Option<Vec<u8>> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../genomes/ancestor.mm");
+    let src = match std::fs::read_to_string(&path) {
+        Ok(src) => src,
+        Err(e) => {
+            eprintln!("cannot read {}: {e}", path.display());
+            return None;
+        }
+    };
+    match mm_asm::assemble(&src) {
+        Ok(out) => Some(out.bytes),
+        Err(e) => {
+            eprintln!("{} does not assemble: {e}", path.display());
+            None
         }
     }
 }
@@ -226,6 +331,11 @@ fn handle_input(
     }
     if keys.just_pressed(KeyCode::KeyO) {
         sim.slide.optics.enabled = !sim.slide.optics.enabled;
+    }
+    if keys.just_pressed(KeyCode::KeyR) {
+        // Wipe and start the ancestor over. The nearest thing to a tool the microscope has
+        // until M6 brings tweezers and slide loading.
+        sim.reseed();
     }
 
     for ev in wheel.read() {
@@ -363,11 +473,17 @@ fn redraw(
         let mut rgb = [warm, warm * 0.92, warm * 0.75];
         // Layers add, so overlapping chemicals mix rather than one winning. Two overlays on
         // at once should look like two overlays on at once.
+        let layers = (frame.overlays.len() as f32).max(1.0);
         for layer in &frame.overlays {
-            let v = frame.overlays.len() as f32;
             if let Some(c) = layer.field.get(i) {
+                // Square root, not the raw fraction. A field is normalised against its own
+                // peak, and in a diffused world almost every square sits far below that peak —
+                // so linear mapping renders the whole slide black except wherever the maximum
+                // happens to be. The curve is presentation only; `layer.field` stays linear
+                // and the legend still reports the peak the eye is being lied to about.
+                let shade = c.max(0.0).sqrt();
                 for k in 0..3 {
-                    rgb[k] += layer.rgb[k] * c / v.max(1.0);
+                    rgb[k] += layer.rgb[k] * shade / layers;
                 }
             }
         }

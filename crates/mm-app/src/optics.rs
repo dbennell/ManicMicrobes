@@ -175,8 +175,11 @@ pub fn motes(optics: &Optics, tick: u64) -> Vec<Mote> {
             Mote {
                 u,
                 v,
-                radius: 0.7 + ((a >> 40) & 7) as f32 * 0.45,
-                alpha: 0.05 + ((b >> 40) & 15) as f32 * 0.006,
+                // Small and very faint. The first look through this thing had them as
+                // half-visible grey squares, which reads as dead pixels rather than as dust —
+                // a mote should be something you notice once and then stop seeing.
+                radius: 0.6 + ((a >> 40) & 7) as f32 * 0.18,
+                alpha: 0.018 + ((b >> 40) & 15) as f32 * 0.0025,
             }
         })
         .collect()
@@ -273,7 +276,7 @@ mod tests {
         for m in a.iter().chain(b.iter()) {
             assert!((0.0..=1.0).contains(&m.u), "mote left the field: {m:?}");
             assert!((0.0..=1.0).contains(&m.v), "mote left the field: {m:?}");
-            assert!(m.alpha > 0.0 && m.alpha < 0.2, "dust should be faint");
+            assert!(m.alpha > 0.0 && m.alpha < 0.07, "dust should be faint");
         }
     }
 
