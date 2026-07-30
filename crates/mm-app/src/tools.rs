@@ -47,6 +47,11 @@ pub enum ToolEvent {
         x: u32,
         y: u32,
     },
+    /// A cell's genome was replaced while it was running.
+    Rewritten {
+        cell: CellId,
+        bytes: usize,
+    },
     /// The operation could not be done, and why.
     Refused(String),
 }
@@ -102,6 +107,61 @@ pub fn copy_genome(world: &World, cell: CellId) -> Option<GenomeFile> {
         ));
     }
     Some(file)
+}
+
+/// Replace a living cell's genome and let it carry on running.
+///
+/// The laboratory's most invasive instrument: it rewrites what a cell *is* without stopping
+/// the world. Everything else about the cell — its body, its chemistry, its position, its
+/// energy — is left exactly as it was, so what you get is the same organism running different
+/// code, which is the only way to ask what a change does to a cell that already exists.
+///
+/// # What happens to the machine
+///
+/// The instruction pointer is **kept**, reduced modulo the new length. A small edit to a
+/// genome of the same length therefore carries on from the same place, which is what "let it
+/// carry on running" has to mean to be worth anything. It may well resume in the middle of
+/// what used to be an instruction — that is safe, because every byte is a legal instruction
+/// (hard rule 3), and it is honest, because that is exactly what happens to a descendant
+/// whose genome mutated under it.
+///
+/// A division in flight is **abandoned**. `pa`, `pb` and `ln` point into the old genome, and
+/// letting the copy finish would build a daughter out of two different genomes spliced at
+/// whatever offset the edit happened to land on. The daughter buffer is dropped and the
+/// counter cleared, so the cell simply divides again later.
+///
+/// The cell keeps its species. It is the same individual with new instructions, not a new
+/// lineage — and if the new genome has drifted far enough, the ordinary speciation check will
+/// found a species for its descendants at the next division without being told to.
+pub fn rewrite_genome(world: &mut World, cell: CellId, bytes: Vec<u8>) -> ToolEvent {
+    if bytes.is_empty() {
+        return ToolEvent::Refused("a cell cannot have an empty genome".to_string());
+    }
+    if world.cells().index(cell).is_none() {
+        return ToolEvent::Refused("that cell is no longer alive".to_string());
+    }
+    let length = bytes.len();
+    let Ok(genome) = world.genomes().intern(bytes) else {
+        return ToolEvent::Refused("that genome is longer than this engine allows".to_string());
+    };
+    // Interned, so this points the one cell at a shared genome rather than editing anything
+    // its clones are also using. Every other cell on the old genome keeps it.
+    let Some(i) = world.cells_mut().index(cell) else {
+        return ToolEvent::Refused("that cell is no longer alive".to_string());
+    };
+    let cells = world.cells_mut();
+    cells.genome[i] = genome;
+    cells.daughter[i] = None;
+    let vm = &mut cells.vm[i];
+    vm.ln = 0;
+    vm.pa = 0;
+    vm.pb = 0;
+    vm.ip = (vm.ip as usize % length) as u16;
+
+    ToolEvent::Rewritten {
+        cell,
+        bytes: length,
+    }
 }
 
 /// Remove a cell, returning everything it held to the water.
@@ -290,6 +350,135 @@ mod tests {
         }
         world.adopt_current_contents_as_baseline();
         world
+    }
+
+    #[test]
+    fn rewriting_a_genome_changes_one_cell_and_leaves_its_clones_alone() {
+        // Genomes are interned and shared, so the mistake this guards against is editing one
+        // cell and silently editing every clone of it along with it.
+        let mut world = living(32, 4);
+        let target = first(&world);
+        let before: Vec<u64> = world
+            .cells()
+            .iter()
+            .map(|i| world.cells().genome[i].hash())
+            .collect();
+        assert!(
+            before.windows(2).all(|w| w[0] == w[1]),
+            "the fixture should start as clones"
+        );
+
+        let new_bytes = vec![0x2Eu8; 64];
+        assert!(matches!(
+            rewrite_genome(&mut world, target, new_bytes),
+            ToolEvent::Rewritten { bytes: 64, .. }
+        ));
+
+        let i = world.cells().index(target).expect("still alive");
+        assert_eq!(world.cells().genome[i].len(), 64);
+        let others: Vec<u64> = world
+            .cells()
+            .iter()
+            .filter(|j| *j != i)
+            .map(|j| world.cells().genome[j].hash())
+            .collect();
+        assert!(
+            others.iter().all(|h| *h == before[0]),
+            "editing one cell edited its clones too"
+        );
+    }
+
+    #[test]
+    fn a_rewritten_cell_keeps_its_body_and_carries_on_running() {
+        let mut world = living(32, 1);
+        let target = first(&world);
+        world.run(60);
+        let (mass, energy, organelles, ip_before) = {
+            let i = world.cells().index(target).expect("alive");
+            let c = world.cells();
+            (
+                c.mass[i],
+                c.energy[i],
+                c.slots(i).to_vec(),
+                c.vm[i].ip,
+            )
+        };
+        assert!(ip_before > 0, "the fixture should have got somewhere first");
+
+        // Same length, so the pointer is untouched and the cell really does carry on from
+        // where it was rather than restarting.
+        let same_length = vec![0x2Eu8; world.cells().genome[world.cells().index(target).unwrap()].len()];
+        rewrite_genome(&mut world, target, same_length);
+
+        let i = world.cells().index(target).expect("alive");
+        assert_eq!(world.cells().vm[i].ip, ip_before, "the pointer was reset");
+        assert_eq!(world.cells().mass[i], mass, "the body was disturbed");
+        assert_eq!(world.cells().energy[i], energy);
+        assert_eq!(world.cells().slots(i), organelles.as_slice());
+
+        // And the world runs on without complaint.
+        world.run(200);
+        world.check_invariants().expect("rewriting broke an invariant");
+    }
+
+    #[test]
+    fn a_shorter_genome_pulls_the_pointer_inside_it() {
+        let mut world = living(32, 1);
+        let target = first(&world);
+        world.run(60);
+        assert!(world.cells().vm[world.cells().index(target).unwrap()].ip > 8);
+
+        rewrite_genome(&mut world, target, vec![0x2Eu8; 8]);
+        let i = world.cells().index(target).expect("alive");
+        assert!(
+            (world.cells().vm[i].ip as usize) < 8,
+            "the pointer is outside the genome it points into"
+        );
+        world.run(50);
+        world.check_invariants().expect("invariant");
+    }
+
+    #[test]
+    fn rewriting_abandons_a_division_in_flight() {
+        // `pa`, `pb` and `ln` index the old genome. Letting the copy run on would build a
+        // daughter spliced out of two different genomes at whatever offset the edit landed on.
+        let mut world = living(32, 1);
+        let target = first(&world);
+        // Run until the ancestor is mid-copy.
+        let mut copying = false;
+        for _ in 0..400 {
+            world.run(1);
+            let Some(i) = world.cells().index(target) else {
+                break;
+            };
+            if world.cells().vm[i].ln > 0 {
+                copying = true;
+                break;
+            }
+        }
+        assert!(copying, "the fixture never started a division");
+
+        rewrite_genome(&mut world, target, vec![0x2Eu8; 40]);
+        let i = world.cells().index(target).expect("alive");
+        assert_eq!(world.cells().vm[i].ln, 0, "the copy counter survived");
+        assert!(world.cells().daughter[i].is_none(), "the daughter buffer survived");
+        world.run(100);
+        world.check_invariants().expect("invariant");
+    }
+
+    #[test]
+    fn rewriting_refuses_the_impossible_rather_than_doing_something_odd() {
+        let mut world = living(32, 1);
+        let target = first(&world);
+        assert!(matches!(
+            rewrite_genome(&mut world, target, Vec::new()),
+            ToolEvent::Refused(_)
+        ));
+        remove(&mut world, target);
+        assert!(matches!(
+            rewrite_genome(&mut world, target, vec![0x2Eu8; 16]),
+            ToolEvent::Refused(_)
+        ));
     }
 
     fn first(world: &World) -> CellId {

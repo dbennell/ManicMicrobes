@@ -716,7 +716,12 @@ pub fn resolve(
                     // The copy error rate is set by the nucleus's fidelity control, and
                     // fidelity costs energy per byte. That is what makes the mutation rate an
                     // evolvable, physically costly trait rather than a constant.
-                    let fidelity = nucleus_fidelity(cells, i);
+                    //
+                    // No nucleus, no copy. SPEC §4.1: a genome is "physically resident in the
+                    // cell's nucleus organelles", so there is nowhere for a copy to go.
+                    let Some(fidelity) = nucleus_fidelity(cells, i) else {
+                        continue;
+                    };
                     let rate = copy_error_rate(&config.mutation, fidelity);
                     let cost = q10_scale(config.copy_energy_per_byte, fidelity);
                     if cells.energy[i] < cost {
@@ -819,13 +824,22 @@ impl BiologyReport {
 
 /// The nucleus copy-fidelity control input, `Q10`, or zero without a nucleus.
 #[must_use]
-pub fn nucleus_fidelity(cells: &CellArena, i: usize) -> i32 {
+/// `None` for a cell with no working nucleus — which is **not** the same as a nucleus turned
+/// down to zero, and conflating the two was worth measuring.
+///
+/// It used to return `0` for both. Downstream, `q10_scale(copy_energy_per_byte, 0)` is zero,
+/// so a cell with no nucleus copied its genome for nothing; and `try_split` skipped truncation
+/// when capacity was zero, so it passed on a full-length genome as well. Between them, the
+/// organelle whose entire job is to make genome bloat cost something (SPEC §4.1) was optional,
+/// and dropping it was cheaper in energy, exempt from the length cap and free of its own
+/// upkeep. Between 55% and 80% of every population had found that out.
+pub fn nucleus_fidelity(cells: &CellArena, i: usize) -> Option<i32> {
     for o in cells.slots(i) {
         if o.kind == OrganelleType::Nucleus && o.is_active() {
-            return (o.control[0] as i32).clamp(0, Q10_ONE);
+            return Some((o.control[0] as i32).clamp(0, Q10_ONE));
         }
     }
-    0
+    None
 }
 
 /// The rest length a junction naturally takes: the two cells just touching.
@@ -1073,6 +1087,39 @@ fn try_split(
         return false;
     }
 
+    // Everything that can refuse the division happens *before* anything is taken from the
+    // parent. Preparing the daughter's genome is one of those things, so it goes here rather
+    // than after the halving.
+    //
+    // It used to be the other way round, and the last refusal — an empty genome — sat below
+    // the point where the parent had already given up half its mass and half its cytoplasm.
+    // Anything that reached it destroyed that matter. Nothing ever did, because a genome could
+    // only come out empty by being truncated to a zero-capacity nucleus and the truncation
+    // skipped zero capacity. Fixing that hole made this one reachable and I4 caught it inside
+    // one run: `chemical 4: ledger claims 141946363, world holds 141846333`. A latent leak
+    // behind an unreachable branch is still a leak.
+
+    // Structural mutation happens here, once, on the daughter's copy.
+    let mut genome = buffer;
+    let _ = mutate_structural(&mut genome, &config.mutation, ctx);
+
+    // A cell whose genome outgrew its nucleus is truncated at division (SPEC §4.1).
+    //
+    // Zero capacity is a capacity, not an exemption. The guard here used to read
+    // `capacity > 0 &&`, which reads as caution about truncating to nothing and worked out as
+    // the exact opposite: a cell with no nucleus at all was the only one that got to pass on a
+    // full-length genome. Truncating to empty makes the division fail, which is what "the
+    // genome lives in the nucleus" has to mean for a cell that has not got one.
+    let capacity = nucleus_capacity(cells, i);
+    if genome.len() > capacity {
+        genome.truncate(capacity);
+    }
+    if genome.is_empty() {
+        return false;
+    }
+
+    // Committed. From here nothing may refuse, because from here the parent is being taken
+    // apart.
     cells.energy[i] = cells.energy[i].saturating_sub(config.division_energy);
     ledger.dissipate(config.division_energy as i64);
 
@@ -1089,19 +1136,6 @@ fn try_split(
         let half = cells.interior(i)[c] / 2;
         *share = half;
         cells.interior_mut(i)[c] = cells.interior(i)[c].saturating_sub(half);
-    }
-
-    // Structural mutation happens here, once, on the daughter's copy.
-    let mut genome = buffer;
-    let _ = mutate_structural(&mut genome, &config.mutation, ctx);
-
-    // A cell whose genome outgrew its nucleus is truncated at division (SPEC §4.1).
-    let capacity = nucleus_capacity(cells, i);
-    if capacity > 0 && genome.len() > capacity {
-        genome.truncate(capacity);
-    }
-    if genome.is_empty() {
-        return false;
     }
 
     let membrane = cells.slots(i)[MEMBRANE_SLOT].param;
@@ -1599,6 +1633,121 @@ mod tests {
         assert_eq!(f.cells.interior(i)[7], q10(5));
         assert_eq!(f.substrate.chem_at(7, 8, 8), q10(15));
         assert_eq!(f.total(), before);
+    }
+
+    #[test]
+    fn a_cell_with_no_nucleus_cannot_copy_its_genome_or_divide() {
+        // SPEC §4.1: the genome is "physically resident in the cell's nucleus organelles". A
+        // cell without one has nowhere to put a copy, so it cannot reproduce.
+        //
+        // This was the most consequential bug in the project so far and it was invisible from
+        // every direction. `nucleus_fidelity` returned 0 both for "no nucleus" and for "a
+        // nucleus turned all the way down"; `q10_scale(copy_energy_per_byte, 0)` is 0, so
+        // copying cost nothing; and `try_split` skipped truncation when capacity was 0, so a
+        // full-length genome went to the daughter. Dropping the nucleus was therefore cheaper
+        // in energy, exempt from the length cap, and free of the nucleus's own upkeep — and
+        // between 55% and 80% of every population had found that out. What the metrics showed
+        // was a falling mean fidelity, which reads as mutator alleles evolving and was in fact
+        // a majority with no nucleus at all.
+        let mut f = Fixture::new();
+        let i = f.spawn(vec![0x2E; 32]);
+        // A body, but the nucleus slot left empty.
+        f.cells.slots_mut(i)[2] = Organelle::finished(OrganelleType::Mitochondrion, 40);
+        f.cells.mass[i] = q10(200);
+        f.cells.energy[i] = q10(4_000);
+        assert_eq!(nucleus_fidelity(&f.cells, i), None);
+        assert_eq!(nucleus_capacity(&f.cells, i), 0);
+
+        // A copy attempt does nothing, and costs nothing, because there is nowhere to copy to.
+        let energy_before = f.cells.energy[i];
+        f.cells.daughter[i] = Some(vec![0u8; 32]);
+        f.intents.begin_tick(f.cells.capacity());
+        f.intents.push(i, Intent::CopyByte { dst: 0, src: 0x11 });
+        f.resolve();
+        assert_eq!(
+            f.cells.daughter[i].as_ref().map(|d| d[0]),
+            Some(0),
+            "a cell with no nucleus copied a byte into a daughter"
+        );
+        assert_eq!(
+            f.cells.energy[i], energy_before,
+            "it was charged for a copy it could not make"
+        );
+
+        // And a division fails rather than producing a daughter with a full-length genome.
+        f.intents.begin_tick(f.cells.capacity());
+        f.intents.push(i, Intent::Split);
+        let report = f.resolve();
+        assert_eq!(report.births, 0, "a cell with no nucleus divided");
+        assert_eq!(report.failed_splits, 1);
+    }
+
+    #[test]
+    fn a_refused_division_costs_the_parent_no_matter() {
+        // I4 is not conditional on the division succeeding. A refusal must leave the parent
+        // exactly as it found it, or every failed split quietly destroys half a cell.
+        //
+        // This leaked for six milestones behind an unreachable branch: the last refusal — an
+        // empty genome — sat below the halving, and a genome could only come out empty by
+        // being truncated to a zero-capacity nucleus, which the truncation skipped. Closing
+        // that hole made this one reachable, and the M2 conservation guard found it in one
+        // run at seed 2.
+        let mut f = Fixture::new();
+        let i = f.spawn(vec![0x2E; 32]);
+        // A body with no nucleus, so the daughter's genome truncates to nothing and the
+        // division is refused at the last possible moment.
+        f.cells.slots_mut(i)[2] = Organelle::finished(OrganelleType::Mitochondrion, 40);
+        f.cells.mass[i] = q10(200);
+        f.cells.energy[i] = q10(4_000);
+        f.cells.interior_mut(i)[8] = q10(60);
+        f.cells.daughter[i] = Some(vec![0x2E; 32]);
+
+        let before = f.total();
+        let (mass, energy, interior) = (
+            f.cells.mass[i],
+            f.cells.energy[i],
+            f.cells.interior(i).to_vec(),
+        );
+
+        f.intents.begin_tick(f.cells.capacity());
+        f.intents.push(i, Intent::Split);
+        let report = f.resolve();
+
+        assert_eq!(report.births, 0, "it should have been refused");
+        assert_eq!(f.total(), before, "a refused division destroyed matter");
+        assert_eq!(f.cells.mass[i], mass, "the parent was halved and got nothing back");
+        assert_eq!(f.cells.energy[i], energy, "the parent paid for a division it did not get");
+        assert_eq!(f.cells.interior(i), interior.as_slice());
+    }
+
+    #[test]
+    fn a_nucleus_dialled_to_zero_is_not_the_same_as_no_nucleus() {
+        // The other half. A nucleus at zero fidelity is a real nucleus: it copies, cheaply and
+        // badly, and it caps the genome length. That is the evolvable mutator allele SPEC §9
+        // is about, and it must stay possible — the fix above must not have taken it away.
+        let mut f = Fixture::new();
+        let i = f.spawn(vec![0x2E; 32]);
+        let mut nucleus = Organelle::finished(OrganelleType::Nucleus, 40);
+        nucleus.control[0] = 0;
+        f.cells.slots_mut(i)[1] = nucleus;
+        f.cells.mass[i] = q10(200);
+        f.cells.energy[i] = q10(4_000);
+
+        assert_eq!(nucleus_fidelity(&f.cells, i), Some(0), "it has a fidelity, and it is zero");
+        assert!(nucleus_capacity(&f.cells, i) > 0);
+
+        f.cells.daughter[i] = Some(vec![0u8; 32]);
+        f.intents.begin_tick(f.cells.capacity());
+        f.intents.push(i, Intent::CopyByte { dst: 0, src: 0x11 });
+        f.resolve();
+        assert!(
+            f.cells.daughter[i].as_ref().is_some_and(|d| d[0] != 0),
+            "a sloppy nucleus is still a nucleus and must be able to copy"
+        );
+
+        f.intents.begin_tick(f.cells.capacity());
+        f.intents.push(i, Intent::Split);
+        assert_eq!(f.resolve().births, 1, "a sloppy cell must still divide");
     }
 
     #[test]

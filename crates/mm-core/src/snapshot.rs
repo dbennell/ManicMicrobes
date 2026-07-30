@@ -35,7 +35,7 @@ use crate::world::World;
 pub const MAGIC: [u8; 8] = *b"MMSNAP\0\x01";
 /// Snapshot format version, distinct from the ISA version. The format may change without
 /// the meaning of a genome changing, and vice versa.
-pub const FORMAT_VERSION: u16 = 5;
+pub const FORMAT_VERSION: u16 = 6;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum SnapshotError {
@@ -583,6 +583,11 @@ impl Snapshot {
         w.i32(r.toxicity_threshold);
         w.i32(r.growth_rate);
         w.i32(r.repair_per_tick);
+        w.i32(r.metabolic_floor);
+        w.i32(r.repair_energy_per_unit);
+        w.i32(r.background_damage);
+        // Appended, not inserted: a reader walks these in order, so a new field goes on the
+        // end and the version goes up (hard rule 7).
 
         let m = b.metabolism.catalogue.metabolism;
         w.u64(m.substrate as u64);
@@ -937,6 +942,9 @@ impl Snapshot {
             toxicity_threshold: r.i32()?,
             growth_rate: r.i32()?,
             repair_per_tick: r.i32()?,
+            metabolic_floor: r.i32()?,
+            repair_energy_per_unit: r.i32()?,
+            background_damage: r.i32()?,
         };
         let chemistry = crate::organelle::MetabolicChemistry {
             substrate: r.u64()? as usize,

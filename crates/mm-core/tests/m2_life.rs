@@ -440,14 +440,21 @@ fn acceptance_selection_works() {
 // it. `mutator.mm` sets it every tick from a genome immediate, which is what turns a constant
 // into a trait. See the comment at the top of that file.
 
-/// Mean nucleus copy fidelity across the living population, `Q10`, or `None` if all dead.
+/// Mean nucleus copy fidelity across the living population, `Q10`, or `None` if nothing alive
+/// has a nucleus to have a fidelity.
+///
+/// Over the cells that *have* a nucleus. Counting a cell without one as a zero averages a
+/// missing organelle in with a dialled-down control, and those are different things — see
+/// `biology::nucleus_fidelity`.
 fn mean_fidelity(world: &World) -> Option<i64> {
     let cells = world.cells();
     let mut total = 0i64;
     let mut n = 0i64;
     for i in cells.iter() {
-        total += i64::from(mm_core::biology::nucleus_fidelity(cells, i));
-        n += 1;
+        if let Some(f) = mm_core::biology::nucleus_fidelity(cells, i) {
+            total += i64::from(f);
+            n += 1;
+        }
     }
     (n > 0).then(|| total / n)
 }

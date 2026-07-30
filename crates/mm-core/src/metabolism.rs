@@ -95,9 +95,51 @@ pub struct MetabolicRates {
     /// than it can mend has a definite and finite life — and one that respires harder has a
     /// shorter one. That is senescence with a cause.
     ///
-    /// Repair is free at M2. Making it cost energy is the obvious next turn of the screw and
-    /// belongs with the M8 balancing pass.
+    /// Repair costs energy: see `repair_energy_per_unit`.
     pub repair_per_tick: i32,
+
+    /// Energy to mend one `Q10` unit of damage.
+    ///
+    /// Repair used to be free, which made the whole damage mechanism a one-way filter: a cell
+    /// either out-repaired its poison or it did not, and the choice cost it nothing either
+    /// way. Charging for it turns maintenance into part of the metabolic budget, so a cell
+    /// that is only just breaking even ages, and a cell that is doing well does not.
+    pub repair_energy_per_unit: i32,
+
+    /// Damage every cell takes per tick, whatever it is doing, `Q10`.
+    ///
+    /// Wear. Nothing in the engine aged a cell that did not respire: peroxide is respiration's
+    /// byproduct, so a cell with no mitochondrion made no poison, took no damage and lived
+    /// forever. Measured, that was between 44% and 80% of a soup — inert hulls with about one
+    /// organelle, ages in the tens of thousands and energy still climbing.
+    ///
+    /// This is deliberately *not* an age limit. Nothing counts a cell's birthdays and nothing
+    /// kills it for reaching a number. Damage accrues at a flat rate and repair costs energy,
+    /// so a cell lives exactly as long as it can afford to keep mending itself — which makes
+    /// lifespan a consequence of how well it earns rather than a constant somebody chose. A
+    /// thriving cell pays it out of pocket and never notices; one that has stopped earning
+    /// falls behind and eventually fails its own membrane.
+    pub background_damage: i32,
+
+    /// The cost of being alive at all, `Q10` energy per tick, before any organelle is paid
+    /// for.
+    ///
+    /// Charged per *cell*, not per organelle, and that is the whole point. Organelle upkeep
+    /// scales with what a cell is carrying, so a cell that sheds its organelles sheds its
+    /// costs: a bare membrane at `param 24` pays 80 `Q10` a tick and nothing else, which it
+    /// can meet forever. Measured, between 55% and 80% of a soup was cells with roughly one
+    /// organelle, no nucleus, ages in the thousands and energy still climbing — immortal
+    /// because doing nothing had no floor under it.
+    ///
+    /// Attaching the cost to the membrane instead would have been evadable by shrinking its
+    /// `param` towards zero, which is the same hole one step along.
+    ///
+    /// Deliberately small: a nudge towards oblivion rather than a cull. A working cell should
+    /// not notice it; a hull that has stopped doing anything should take thousands of ticks to
+    /// go. It is a first value and expected to move — it is also the single biggest dial on
+    /// the carrying capacity of every scenario at once, so it wants measuring rather than
+    /// guessing at.
+    pub metabolic_floor: i32,
 }
 
 impl Default for MetabolicRates {
@@ -111,6 +153,29 @@ impl Default for MetabolicRates {
             growth_rate: q10(1) / 4,
             toxicity_threshold: q10(8),
             repair_per_tick: 100,
+            // Chosen by measurement, in a soup at 40,000 ticks. The first value tried was 64,
+            // which cost half a unit of energy a tick against an idle cell's income of about
+            // 240 — noise, and every cell mended itself completely forever.
+            //
+            //   cost      population   inert   working
+            //   none           4,615     56%     2,021
+            //   64             3,547     49%     1,804
+            //   q10(8)         4,764     40%     2,822
+            //   q10(24)        1,628     37%     1,020
+            //
+            // `q10(8)` is the only one that buys anything. It cuts the inert share from 56% to
+            // 40% while leaving the carrying capacity alone and raising the number of *working*
+            // cells by 40% — the tax falls on the cells that were not earning. `q10(24)` buys
+            // three more points of inert share for two thirds of the population, which is a
+            // cull wearing a nudge's clothes.
+            repair_energy_per_unit: q10(8),
+            // Slow. A membrane at `param 24` tolerates 24 units of damage, so an unrepaired
+            // cell fails after roughly 24 * 1024 / 8 = 3,000 ticks — thousands, as intended,
+            // and far longer for anything that can pay to keep up.
+            background_damage: 8,
+            // About the same again as a bare membrane's own upkeep, so merely existing costs
+            // roughly twice what it did and a working cell barely feels it.
+            metabolic_floor: Q10_ONE / 32,
         }
     }
 }
@@ -355,7 +420,24 @@ impl Metabolism {
                         inflicted = inflicted.saturating_add(q10_scale(excess, toxicity));
                     }
                 }
-                let repaired = self.rates.repair_per_tick.min(cells.damage[i]).max(0);
+                // Wear, on top of whatever the cell is poisoning itself with. Everything ages
+                // now, including the cells that never respire.
+                inflicted = inflicted.saturating_add(self.rates.background_damage.max(0));
+
+                // Repair, as far as the cell can pay for it. Bounded by three things: the
+                // damage there is to mend, the rate it can mend at, and what it can afford.
+                let want = self.rates.repair_per_tick.min(cells.damage[i]).max(0);
+                let repaired = if self.rates.repair_energy_per_unit > 0 && want > 0 {
+                    let affordable = ((cells.energy[i] as i64 * Q10_ONE as i64)
+                        / self.rates.repair_energy_per_unit as i64)
+                        .min(want as i64) as i32;
+                    let spent = q10_scale(affordable, self.rates.repair_energy_per_unit);
+                    cells.energy[i] = cells.energy[i].saturating_sub(spent);
+                    report.dissipated += ledger.dissipate(spent as i64);
+                    affordable
+                } else {
+                    want
+                };
                 cells.damage[i] = cells.damage[i]
                     .saturating_sub(repaired)
                     .saturating_add(inflicted)
@@ -373,7 +455,14 @@ impl Metabolism {
             }
 
             // --- upkeep: the cost of being alive ---
-            let upkeep = self.catalogue.upkeep(&cells.loadout(i));
+            //
+            // The floor first, then what the body costs. A cell that has shed everything still
+            // pays to be a cell.
+            let upkeep = self
+                .rates
+                .metabolic_floor
+                .max(0)
+                .saturating_add(self.catalogue.upkeep(&cells.loadout(i)));
             if upkeep > 0 {
                 let paid = cells.energy[i].min(upkeep);
                 cells.energy[i] = cells.energy[i].saturating_sub(paid);
@@ -487,6 +576,124 @@ mod tests {
     /// Total matter across every species — the quantity no reaction may move.
     fn grand_total(cells: &CellArena, substrate: &Substrate) -> i64 {
         total_matter(cells, substrate).iter().sum()
+    }
+
+    #[test]
+    fn an_idle_cell_wears_out_even_though_nothing_poisons_it() {
+        // The gap this closes: peroxide is respiration's byproduct, so a cell with no
+        // mitochondrion made no poison, took no damage and lived forever. Between 44% and 80%
+        // of a soup was exactly that — inert hulls with about one organelle and ages in the
+        // tens of thousands.
+        //
+        // Deliberately not an age limit. Nothing counts birthdays. Damage accrues and repair
+        // costs energy, so a cell lives as long as it can afford to keep mending itself.
+        let (mut cells, sub, chem, mut ledger, met, pool) = world();
+        assert!(met.rates.background_damage > 0, "nothing wears out");
+
+        let i = spawn(&mut cells, &pool);
+        cells.energy[i] = 0;
+        let mut starving = Vec::new();
+        met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+        assert_eq!(
+            cells.damage[i], met.rates.background_damage,
+            "a cell carrying no toxin at all took no wear"
+        );
+
+        // With nothing to pay with, damage only goes up, and the membrane eventually fails on
+        // its own tolerance rather than on a clock.
+        let tolerance = q10(cells.slots(i)[0].param as i32).max(q10(1));
+        let mut ticks = 0u32;
+        while cells.damage[i] <= tolerance && ticks < 100_000 {
+            cells.energy[i] = 0;
+            met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+            ticks += 1;
+        }
+        assert!(
+            cells.damage[i] > tolerance,
+            "an unmaintained cell never failed in 100,000 ticks"
+        );
+        // Thousands of ticks, not hundreds: a nudge into oblivion, as asked for.
+        assert!(
+            ticks > 1_000,
+            "an unmaintained cell died in {ticks} ticks; that is a cull, not wear"
+        );
+    }
+
+    #[test]
+    fn repair_costs_energy_and_a_cell_that_can_pay_stays_whole() {
+        let (mut cells, sub, chem, mut ledger, met, pool) = world();
+        let i = spawn(&mut cells, &pool);
+        cells.damage[i] = q10(5);
+        cells.energy[i] = q10(10_000);
+        let before = cells.energy[i];
+
+        let mut starving = Vec::new();
+        met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+
+        assert!(cells.damage[i] < q10(5), "a cell that could pay did not mend");
+        assert!(
+            cells.energy[i] < before,
+            "mending cost nothing, so maintenance is not part of the budget"
+        );
+    }
+
+    #[test]
+    fn a_cell_with_no_energy_cannot_mend_at_all() {
+        // The other half of charging for it: repair is not something a dying cell gets for
+        // free. This is what makes falling behind irreversible rather than a plateau.
+        let (mut cells, sub, chem, mut ledger, met, pool) = world();
+        let i = spawn(&mut cells, &pool);
+        cells.damage[i] = q10(5);
+        cells.energy[i] = 0;
+
+        let mut starving = Vec::new();
+        met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+        assert!(
+            cells.damage[i] >= q10(5),
+            "a cell with no energy repaired itself anyway"
+        );
+    }
+
+    #[test]
+    fn an_idle_cell_pays_a_floor_and_eventually_runs_out() {
+        // The floor exists because organelle upkeep scales with what a cell carries, so a cell
+        // that has shed everything sheds its costs and lives forever doing nothing. It is
+        // meant to be a nudge, not a cull: a bare hull should take a long time to go, and a
+        // working cell should not notice it.
+        let rates = MetabolicRates::default();
+        assert!(rates.metabolic_floor > 0, "there is no floor at all");
+
+        let catalogue = OrganelleCatalogue::balanced();
+        let mut bare = [Organelle::empty(); crate::organelle::SLOT_COUNT];
+        bare[0] = Organelle::finished(OrganelleType::Membrane, 24);
+        let hull_upkeep = catalogue.upkeep(&bare);
+        let hull_total = hull_upkeep + rates.metabolic_floor;
+
+        // A working body: membrane, nucleus, mitochondrion, chloroplast.
+        let mut working = bare;
+        working[1] = Organelle::finished(OrganelleType::Nucleus, 40);
+        working[2] = Organelle::finished(OrganelleType::Mitochondrion, 50);
+        working[3] = Organelle::finished(OrganelleType::Chloroplast, 60);
+        let working_total = catalogue.upkeep(&working) + rates.metabolic_floor;
+
+        // The floor has to be a real share of an idle cell's costs, or it changes nothing...
+        assert!(
+            rates.metabolic_floor * 4 > hull_total,
+            "the floor is lost in the noise of a bare membrane's own upkeep"
+        );
+        // ...and a small share of a working one's, or it is a cull rather than a nudge.
+        assert!(
+            rates.metabolic_floor * 3 < working_total,
+            "the floor is a large share of a working cell's upkeep; that is a cull"
+        );
+        // Which together means an idle hull is a long time dying. Thousands of ticks from a
+        // typical energy reserve, not hundreds.
+        let reserve = q10(400);
+        assert!(
+            reserve / hull_total > 1_000,
+            "a hull with a full reserve dies in {} ticks; too abrupt",
+            reserve / hull_total
+        );
     }
 
     #[test]
@@ -636,7 +843,13 @@ mod tests {
     fn a_toxin_damages_a_membrane_only_above_its_threshold() {
         // SPEC §7.1: "membrane damage per unit above threshold". Below it a cell is coping,
         // which is what makes excreting a toxin a strategy rather than a formality.
-        let (mut cells, sub, chem, mut ledger, met, pool) = world();
+        //
+        // Background wear switched off, so this measures the toxin and only the toxin.
+        // Everything ages now — see `an_idle_cell_wears_out_even_though_nothing_poisons_it` —
+        // and leaving it on here would make "a survivable dose did no harm" a claim about the
+        // sum of two mechanisms rather than about toxicity.
+        let (mut cells, sub, chem, mut ledger, mut met, pool) = world();
+        met.rates.background_damage = 0;
         let toxin = chem
             .all()
             .iter()
@@ -695,7 +908,7 @@ mod tests {
 
     #[test]
     fn a_world_with_no_toxin_takes_no_damage() {
-        let (mut cells, sub, mut chem, mut ledger, met, pool) = world();
+        let (mut cells, sub, mut chem, mut ledger, mut met, pool) = world();
         let defs: Vec<_> = chem
             .all()
             .iter()
@@ -705,6 +918,8 @@ mod tests {
             })
             .collect();
         chem = ChemTable::new(defs);
+        // As above: this is a claim about toxins, so wear is switched off for it.
+        met.rates.background_damage = 0;
         let i = spawn(&mut cells, &pool);
         for c in 0..CHEM_COUNT {
             cells.interior_mut(i)[c] = q10(10_000);

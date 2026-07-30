@@ -40,9 +40,17 @@ pub struct Sample {
     /// Distinct organelle loadouts present. The cheapest measure of organisational
     /// complexity, and the one that will show differentiation when M7 arrives.
     pub distinct_loadouts: u64,
-    /// Mean nucleus copy fidelity, `Q10`. The plottable trait that makes mutation rate
-    /// evolvable rather than a constant somebody chose (SPEC §9).
+    /// Mean nucleus copy fidelity, `Q10`, over the cells that *have* a nucleus. The plottable
+    /// trait that makes mutation rate evolvable rather than a constant somebody chose
+    /// (SPEC §9).
     pub mean_fidelity: i64,
+    /// Cells with no working nucleus.
+    ///
+    /// Its own column rather than folded into the mean, because it used to be folded in — a
+    /// cell with no nucleus reported a fidelity of zero, so a population that had mostly
+    /// abandoned its nuclei showed up as a population with poor copy fidelity. The two are
+    /// very different things and only one of them is evolution.
+    pub no_nucleus: u64,
 
     /// Trophic composition: what fraction of the world's energy income came from light, in
     /// parts per thousand (SPEC §13).
@@ -85,6 +93,10 @@ impl Sample {
         let mut mass = 0i64;
         let mut genome_len = 0i64;
         let mut fidelity = 0i64;
+        // Counted apart, because averaging a cell that *has* no fidelity in as a zero is what
+        // hid a nucleus-free majority behind a plausible-looking mean.
+        let mut with_nucleus = 0i64;
+        let mut no_nucleus = 0u64;
         let mut loadouts: Vec<u64> = Vec::with_capacity(cells.len());
 
         for i in cells.iter() {
@@ -92,7 +104,13 @@ impl Sample {
             energy += cells.energy[i] as i64;
             mass += cells.mass[i] as i64;
             genome_len += cells.genome[i].len() as i64;
-            fidelity += crate::biology::nucleus_fidelity(cells, i) as i64;
+            match crate::biology::nucleus_fidelity(cells, i) {
+                Some(f) => {
+                    fidelity += f as i64;
+                    with_nucleus += 1;
+                }
+                None => no_nucleus += 1,
+            }
 
             // A loadout is which types are in which slots, ignoring size: two cells with the
             // same organelles in the same places are the same kind of thing.
@@ -134,7 +152,8 @@ impl Sample {
             mean_genome_len: genome_len / n,
             distinct_genomes: cells.distinct_genomes() as u64,
             distinct_loadouts: loadouts.len() as u64,
-            mean_fidelity: fidelity / n,
+            mean_fidelity: fidelity / with_nucleus.max(1),
+            no_nucleus,
             trophic_light: ledger.trophic_share(crate::TrophicSource::Light),
             producers: mix.producers as u64,
             scavengers: mix.scavengers as u64,
@@ -158,7 +177,8 @@ impl Sample {
                 r#""dissipation":{},"energy_in":{},"energy_out":{},"energy_stored":{},"#,
                 r#""mean_age":{},"mean_energy":{},"mean_mass":{},"mean_genome_len":{},"#,
                 r#""distinct_genomes":{},"distinct_loadouts":{},"mean_fidelity":{},"#,
-                r#""trophic_light":{},"producers":{},"scavengers":{},"predators":{},"#,
+                r#""no_nucleus":{},"trophic_light":{},"producers":{},"scavengers":{},"#,
+                r#""predators":{},"#,
                 r#""osmotrophs":{},"carrion":{},"scavenged":{},"wounding":{},"#,
                 r#""total_matter":{},"chemicals":[{}]}}"#
             ),
@@ -177,6 +197,7 @@ impl Sample {
             self.distinct_genomes,
             self.distinct_loadouts,
             self.mean_fidelity,
+            self.no_nucleus,
             self.trophic_light,
             self.producers,
             self.scavengers,
@@ -326,6 +347,7 @@ mod tests {
             "distinct_genomes",
             "distinct_loadouts",
             "mean_fidelity",
+            "no_nucleus",
             "trophic_light",
             "producers",
             "scavengers",

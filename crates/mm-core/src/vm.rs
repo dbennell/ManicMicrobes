@@ -714,12 +714,17 @@ fn search_backward(
 
 /// `EXPRESS`: the `GENE` promoter closest in Hamming distance to `t` (SPEC §4.4).
 ///
+/// Public so the inspector can label an `EXPRESS` with the gene it will actually reach. A
+/// second implementation of binding in the front-end would eventually disagree with this one,
+/// and the moment it did the panel would be confidently describing a jump that does not
+/// happen.
+///
 /// This is transcription-factor binding, and it is why deleting a gene does not orphan its
 /// callers — they bind the next-best match. Ties resolve to the lowest genome offset, which
 /// falls out of the promoter table being in ascending offset order and this scan keeping
 /// only a strict improvement.
 #[inline]
-fn find_promoter(genome: &Genome, t: Template, threshold: u16) -> Option<u16> {
+pub fn find_promoter(genome: &Genome, t: Template, threshold: u16) -> Option<u16> {
     if t.is_empty() {
         return None;
     }

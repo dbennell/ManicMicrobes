@@ -335,6 +335,29 @@ impl Slide {
         crate::inspector::Inspection::of(&self.world, id)
     }
 
+    /// Chemical names from the scenario's table, in index order.
+    ///
+    /// So a panel can say "carbon_dioxide 6.00" instead of "11: 6.00". The table is authored
+    /// per scenario (SPEC §7.1), so the names have to come from the world rather than from a
+    /// list in the front-end that would be wrong for any scenario that posed its own
+    /// chemistry.
+    #[must_use]
+    pub fn chemical_names(&self) -> Vec<String> {
+        (0..CHEM_COUNT)
+            .map(|c| self.world.scenario().chemicals.get(c).name.clone())
+            .collect()
+    }
+
+    /// What the wiki calls this species, or a placeholder if the archive has not named it yet.
+    #[must_use]
+    pub fn species_name(&self, species: u32) -> String {
+        self.world
+            .archive()
+            .get(species)
+            .map(|s| s.name.to_string())
+            .unwrap_or_else(|| format!("species {species}"))
+    }
+
     /// Take a frame. Read-only: nothing here can reach the world.
     #[must_use]
     pub fn frame(&self) -> Frame {
@@ -507,6 +530,13 @@ fn organelle_dots(cells: &mm_core::CellArena, i: usize, radius: f32) -> Vec<Orga
         });
     }
     out
+}
+
+/// The colour an organelle is drawn in, so the inspector's schematic and the cell on the
+/// slide agree about which blob is which.
+#[must_use]
+pub fn organelle_rgb(kind: mm_core::OrganelleType) -> [f32; 3] {
+    organelle_colour(kind)
 }
 
 fn organelle_colour(kind: mm_core::OrganelleType) -> [f32; 3] {

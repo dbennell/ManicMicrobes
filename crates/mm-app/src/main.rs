@@ -14,7 +14,8 @@
 //! |---|---|
 //! | drag | pan |
 //! | wheel | zoom, whole-slide to single cell |
-//! | click | select a cell for the inspector |
+//! | left click | select a cell for the inspector |
+//! | right click | apply the current tool |
 //! | `space` | pause / resume |
 //! | `.` | step one tick |
 //! | `0` `-` `=` `backspace` | speed: paused, 1×, 8×, as fast as it will go |
@@ -26,6 +27,8 @@
 //! | `e` | genome editor |
 //! | `d` | debugger |
 //! | `f` | food web |
+//! | `t` | track the selected cell |
+//! | `g` | the selected cell's genome, live |
 //! | `F1`–`F5` | tool: select, move, remove, wall, erase |
 //! | `o` | optics on/off |
 //! | `r` | wipe and reseed the slide |
@@ -122,6 +125,11 @@ struct SlideRes {
     last_tool: Option<ToolEvent>,
     /// Where a genome exported from the editor was written.
     last_export: Option<String>,
+    /// The selected cell's genome, disassembled once and kept until the genome changes.
+    listing: mm_app::inspector::Listing,
+    /// Which cell the editor's buffer was loaded from, so "apply to this cell" cannot write a
+    /// genome into a cell it was never taken from.
+    editing: Option<CellId>,
 }
 
 impl SlideRes {
@@ -147,6 +155,8 @@ impl SlideRes {
             sandbox: None,
             last_tool: None,
             last_export: None,
+            listing: mm_app::inspector::Listing::default(),
+            editing: None,
         };
         res.reseed();
         res.frame = res.slide.frame();
@@ -274,6 +284,21 @@ struct View {
     debugger: bool,
     /// The food web (M8).
     foodweb: bool,
+    /// Keep the camera centred on the selected cell.
+    follow: bool,
+    /// The genome listing, in its own window (M9 QoL).
+    genome: bool,
+    /// Keep the listing scrolled to the instruction pointer.
+    genome_follow_ip: bool,
+    /// The last `ip` the listing was scrolled to, so it scrolls when the pointer *moves*
+    /// rather than on every frame the marker happens to be visible. Scrolling every frame
+    /// pins the view to the pointer and there is no way to read the rest of the genome —
+    /// worst when paused, where the pointer is not even moving and the scrollbar still will
+    /// not stay where it is put.
+    genome_scrolled_to: Option<u16>,
+    /// Pixels the pointer has moved since the left button went down, so a click can be told
+    /// from a drag. Not a preference — transient input state that happens to live here.
+    drag_distance: f32,
     /// Which laboratory tool the mouse is holding.
     tool: Tool,
     /// Which species page is open.
@@ -293,6 +318,11 @@ impl Default for View {
             editor: false,
             debugger: false,
             foodweb: false,
+            follow: false,
+            genome: false,
+            genome_follow_ip: true,
+            genome_scrolled_to: None,
+            drag_distance: 0.0,
             tool: Tool::Select,
             species: None,
         }
@@ -355,7 +385,12 @@ fn handle_input(
     mut view: ResMut<View>,
     mut sim: ResMut<SlideRes>,
     window: Query<&Window, With<PrimaryWindow>>,
+    mut contexts: EguiContexts,
 ) {
+    // Whether the pointer is over a panel. Without this, clicking a button in the inspector
+    // would also select whatever cell happened to be underneath it.
+    let over_ui = contexts.ctx_mut().is_pointer_over_area();
+
     if keys.just_pressed(KeyCode::Space) {
         view.paused = !view.paused;
         let speed = if view.paused { 0 } else { 1 };
@@ -422,6 +457,12 @@ fn handle_input(
     if keys.just_pressed(KeyCode::KeyF) {
         view.foodweb = !view.foodweb;
     }
+    if keys.just_pressed(KeyCode::KeyT) {
+        view.follow = !view.follow;
+    }
+    if keys.just_pressed(KeyCode::KeyG) {
+        view.genome = !view.genome;
+    }
     for (key, tool) in [
         (KeyCode::F1, Tool::Select),
         (KeyCode::F2, Tool::Move),
@@ -445,6 +486,9 @@ fn handle_input(
     let scale = BASE_SCALE * view.zoom;
     sim.slide.set_zoom(scale);
 
+    if buttons.just_pressed(MouseButton::Left) {
+        view.drag_distance = 0.0;
+    }
     if buttons.pressed(MouseButton::Left) {
         for ev in motion.read() {
             // Both axes drag the slide with the pointer: push the mouse down and the slide
@@ -454,19 +498,37 @@ fn handle_input(
             // which is exactly the sort of thing that reads as correct on paper and wrong in
             // the hand.
             view.centre -= ev.delta / scale;
+            view.drag_distance += ev.delta.length();
         }
     } else {
         motion.clear();
     }
 
+    // Left click selects; left *drag* pans. The two share a button because dragging the plate
+    // around is what a hand does to a microscope, and clicking the thing you want to look at
+    // is what a hand does to everything else. They are told apart by how far the pointer moved
+    // between press and release — under a few pixels was a click, however long it was held.
+    //
+    // Selection used to be on the right button, where the header table had been claiming the
+    // left one since M4. Anybody following the documentation got a pan and concluded there was
+    // no inspector.
+    if buttons.just_released(MouseButton::Left) && view.drag_distance < 4.0 && !over_ui {
+        if let Some((slide_x, slide_y)) = pointer_on_slide(&window, &view, scale) {
+            let hit = sim.slide.cell_at(slide_x, slide_y, 3.0);
+            if hit.is_some() {
+                sim.selected = hit;
+                view.inspector = true;
+                // A new selection invalidates the sandbox: it was a copy of a different cell
+                // and showing it under a new name would be a lie.
+                sim.sandbox = None;
+            }
+        }
+    }
+
     // Right-click applies the current tool. `Select` is the default and is the only one that
     // cannot change the world; the rest write, which is why the tool is chosen explicitly.
     if buttons.just_pressed(MouseButton::Right) {
-        if let Some(cursor) = window.get_single().ok().and_then(|w| w.cursor_position()) {
-            let size = window.get_single().map(|w| w.size()).unwrap_or(Vec2::ONE);
-            let from_centre = cursor - size / 2.0;
-            let slide_x = view.centre.x + from_centre.x / scale;
-            let slide_y = view.centre.y + from_centre.y / scale;
+        if let Some((slide_x, slide_y)) = pointer_on_slide(&window, &view, scale) {
             let square = (slide_x.floor() as i32, slide_y.floor() as i32);
             match view.tool {
                 Tool::Select => {
@@ -514,7 +576,7 @@ fn handle_input(
 /// Deliberately ignores `Time`: a simulation stepped by elapsed wall-clock would produce a
 /// different world on a fast machine than on a slow one, and every guarantee in the spec rests
 /// on it not doing that.
-fn advance_simulation(mut sim: ResMut<SlideRes>) {
+fn advance_simulation(mut sim: ResMut<SlideRes>, mut view: ResMut<View>) {
     // Breakpoints act on the viewer, not on the world: when one holds, the slide stops
     // advancing. Pausing provably does not change a world (`slide.rs`), so a breakpoint
     // cannot either — and there is no stop-in-the-middle-of-a-tick, because a tick is the
@@ -533,9 +595,22 @@ fn advance_simulation(mut sim: ResMut<SlideRes>) {
     sim.slide.advance_one_frame();
     sim.frame = sim.slide.frame();
     sim.inspection = sim.selected.and_then(|id| sim.slide.inspect(id));
-    if sim.inspection.is_none() {
-        // The cell died. Forget it rather than leaving a stale panel that looks live.
-        sim.selected = None;
+    // The decision itself is in `inspector::tracking`, where it can be tested without a
+    // graphics stack. This applies it and nothing more.
+    match mm_app::inspector::tracking(
+        sim.inspection.as_ref(),
+        view.follow,
+        sim.selected.is_some(),
+    ) {
+        // Set rather than eased: the camera has to be exactly on the cell or a fast one
+        // outruns the lerp and drifts to the edge of the view, and a microscope stage does not
+        // have momentum anyway.
+        mm_app::inspector::Track::MoveTo(x, y) => view.centre = Vec2::new(x, y),
+        mm_app::inspector::Track::Stay => {}
+        mm_app::inspector::Track::Lost => {
+            sim.selected = None;
+            view.follow = false;
+        }
     }
 }
 
@@ -928,64 +1003,383 @@ fn panels(mut contexts: EguiContexts, mut sim: ResMut<SlideRes>, mut view: ResMu
     }
 
     if view.inspector {
-        let inspection = sim.inspection.clone();
+        cell_panel(ctx, &mut sim, &mut view);
+    }
+    if view.genome {
+        genome_panel(ctx, &mut sim, &mut view);
+    }
+}
+
+/// The genome of the selected cell, live, in its own window (`g`).
+///
+/// Read-only by default and running: the highlighted line is where the cell's own instruction
+/// pointer is right now, and it moves while you watch. "edit" hands the disassembly to the
+/// editor, and applying it writes the new bytes back into the same living cell without
+/// stopping the world — see [`tools::rewrite_genome`] for what happens to the machine.
+fn genome_panel(ctx: &egui::Context, sim: &mut SlideRes, view: &mut View) {
+    let Some(c) = sim.inspection.clone() else {
+        return;
+    };
+
+    let here = {
+        sim.listing.of(&c.genome, c.genome_hash);
+        sim.listing.line_at(c.ip)
+    };
+    let over_nucleus = c.nucleus_capacity > 0 && c.genome_len > c.nucleus_capacity;
+    let mut apply: Option<Vec<u8>> = None;
+
+    egui::Window::new("genome")
+        .default_width(420.0)
+        .default_height(520.0)
+        .open(&mut view.genome)
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(sim.slide.species_name(c.species))
+                        .strong(),
+                );
+                ui.weak(format!("{:016x}", c.genome_hash));
+            });
+            ui.horizontal(|ui| {
+                ui.label(format!("{} bytes / nucleus {}", c.genome_len, c.nucleus_capacity));
+                if over_nucleus {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(230, 130, 90),
+                        "⚠ truncated at division",
+                    )
+                    .on_hover_text(
+                        "SPEC §4.1: a genome longer than its nucleus is cut short in every \
+                         daughter. The lineage stops without an error.",
+                    );
+                }
+            });
+
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui
+                    .button("edit")
+                    .on_hover_text("load this genome into the editor")
+                    .clicked()
+                {
+                    sim.editor.load_bytes(
+                        c.genome.bytes(),
+                        sim.slide.species_name(c.species),
+                    );
+                    sim.editing = Some(c.id);
+                    view.editor = true;
+                }
+                ui.separator();
+                ui.checkbox(&mut view.genome_follow_ip, "follow ip")
+                    .on_hover_text("scroll to the pointer when it moves");
+                if sim.editing == Some(c.id) {
+                    let built = sim.editor.build().bytes().map(|b| b.to_vec());
+                    let ready = built.is_some() && !sim.editor.is_dirty();
+                    if ui
+                        .add_enabled(ready, egui::Button::new("apply to this cell"))
+                        .on_hover_text(
+                            "replace this cell's genome and let it carry on running. Its body, \
+                             chemistry and position are untouched; a division in progress is \
+                             abandoned.",
+                        )
+                        .clicked()
+                    {
+                        apply = built;
+                    }
+                    if !ready {
+                        ui.weak("assemble in the editor first");
+                    }
+                }
+            });
+
+            // Scroll when the pointer has moved to a line we have not already followed it
+            // to — not on every frame it is on screen.
+            let chase = view.genome_follow_ip && view.genome_scrolled_to != Some(c.ip);
+
+            ui.separator();
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                for (n, line) in sim.listing.lines().iter().enumerate() {
+                    let current = here == Some(n);
+                    ui.horizontal(|ui| {
+                        // The pointer, in the margin, so the eye has one column to follow
+                        // rather than hunting for a highlight.
+                        ui.label(
+                            egui::RichText::new(if current { "▶" } else { " " })
+                                .monospace()
+                                .color(egui::Color32::from_rgb(140, 230, 140)),
+                        );
+                        let body = egui::RichText::new(format!(
+                            "{:>4}  {:<22}",
+                            line.offset, line.text
+                        ))
+                        .monospace()
+                        .size(11.0);
+                        ui.label(if current {
+                            body.background_color(egui::Color32::from_rgb(45, 70, 45))
+                                .color(egui::Color32::from_rgb(210, 255, 210))
+                        } else {
+                            body.color(egui::Color32::from_gray(175))
+                        });
+                        if let Some(label) = &line.label {
+                            ui.label(
+                                egui::RichText::new(label)
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(150, 175, 215)),
+                            );
+                        }
+                    });
+                    if current && chase {
+                        ui.scroll_to_cursor(Some(egui::Align::Center));
+                    }
+                }
+            });
+            if chase {
+                view.genome_scrolled_to = Some(c.ip);
+            }
+        });
+
+    if let Some(bytes) = apply {
+        let event = tools::rewrite_genome(sim.slide.world_mut(), c.id, bytes);
+        sim.last_tool = Some(event);
+    }
+}
+
+/// Where the pointer is, in substrate squares. `None` if there is no window or no cursor.
+fn pointer_on_slide(
+    window: &Query<&Window, With<PrimaryWindow>>,
+    view: &View,
+    scale: f32,
+) -> Option<(f32, f32)> {
+    let w = window.get_single().ok()?;
+    let cursor = w.cursor_position()?;
+    let from_centre = cursor - w.size() / 2.0;
+    Some((
+        view.centre.x + from_centre.x / scale,
+        view.centre.y + from_centre.y / scale,
+    ))
+}
+
+/// The cell inspector (M4, extended for tracking and the genome listing).
+///
+/// Everything drawn here comes from an [`Inspection`], which is a copy — the panel holds no
+/// borrow of the world and there is no path from a click in it back to a tick.
+fn cell_panel(ctx: &egui::Context, sim: &mut SlideRes, view: &mut View) {
+    let Some(c) = sim.inspection.clone() else {
         egui::Window::new("cell")
             .anchor(egui::Align2::LEFT_BOTTOM, [8.0, -8.0])
-            .default_width(300.0)
+            .default_width(340.0)
             .show(ctx, |ui| {
-                let Some(c) = inspection else {
-                    ui.weak("right-click a cell");
-                    return;
-                };
-                ui.label(format!("species {}  age {}", c.species, c.age));
-                ui.label(format!(
-                    "energy {:.1}  mass {:.1}  damage {:.1}",
-                    c.energy as f32 / mm_core::Q10_ONE as f32,
-                    c.mass as f32 / mm_core::Q10_ONE as f32,
-                    c.damage as f32 / mm_core::Q10_ONE as f32
-                ));
-                ui.label(format!(
-                    "genome {} bytes  fidelity {:.2}",
-                    c.genome_len,
-                    c.fidelity as f32 / mm_core::Q10_ONE as f32
-                ));
-                ui.separator();
-                ui.label(format!(
-                    "ip {}  {}",
-                    c.ip,
-                    if c.halted { "halted" } else { "running" }
-                ));
-                ui.label(format!("stack {:?}", c.stack));
-                ui.collapsing("registers", |ui| {
-                    ui.label(format!("{:?}", c.registers));
-                });
-                ui.collapsing("ram", |ui| {
-                    ui.label(format!("{:?}", c.ram));
-                });
-                ui.collapsing("organelles", |ui| {
-                    for s in c.slots.iter().filter(|s| s.active || s.param > 0) {
-                        ui.label(format!(
-                            "{}: {:?} param {} control {:?}{}",
-                            s.index,
-                            s.kind,
-                            s.param,
-                            s.control,
-                            match s.remaining_build {
-                                Some(n) => format!("  building, {n} left"),
-                                None => String::new(),
+                ui.weak("click a cell to inspect it");
+            });
+        return;
+    };
+
+    let q10 = |v: i32| v as f32 / mm_core::Q10_ONE as f32;
+    let chem_names = sim.slide.chemical_names();
+
+    egui::Window::new("cell")
+        .anchor(egui::Align2::LEFT_BOTTOM, [8.0, -8.0])
+        .default_width(340.0)
+        .default_height(560.0)
+        .show(ctx, |ui| {
+            // --- who and where ---
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(sim.slide.species_name(c.species))
+                        .strong()
+                        .size(14.0),
+                );
+                if ui
+                    .selectable_label(view.follow, "track")
+                    .on_hover_text("keep the camera centred on this cell (t)")
+                    .clicked()
+                {
+                    view.follow = !view.follow;
+                }
+            });
+            ui.weak(format!(
+                "age {}  born tick {}  at ({:.1}, {:.1})",
+                c.age,
+                c.birth_tick,
+                c.x as f32 / mm_core::fixed::POS_ONE as f32,
+                c.y as f32 / mm_core::fixed::POS_ONE as f32
+            ));
+
+            // --- the bars that say whether it is doing well ---
+            ui.add_space(4.0);
+            bar(ui, "energy", q10(c.energy), 400.0, egui::Color32::from_rgb(230, 200, 90));
+            bar(ui, "mass", q10(c.mass), 120.0, egui::Color32::from_rgb(140, 190, 230));
+            if c.damage > 0 {
+                bar(ui, "damage", q10(c.damage), 40.0, egui::Color32::from_rgb(220, 110, 110));
+            }
+
+            ui.separator();
+
+            // --- the schematic ---
+            let placed = mm_app::inspector::placements(&c.slots);
+            let (rect, response) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), 150.0),
+                egui::Sense::hover(),
+            );
+            let painter = ui.painter();
+            let centre = rect.center();
+            let r = (rect.height() / 2.0 - 8.0).max(8.0);
+            // The membrane: the circle everything else lives inside.
+            painter.circle_stroke(
+                centre,
+                r,
+                egui::Stroke::new(2.0, egui::Color32::from_rgb(150, 160, 170)),
+            );
+            for p in &placed {
+                let at = centre + egui::vec2(p.dx * r, p.dy * r);
+                let rgb = mm_app::slide::organelle_rgb(p.kind);
+                let colour = egui::Color32::from_rgba_unmultiplied(
+                    (rgb[0] * 255.0) as u8,
+                    (rgb[1] * 255.0) as u8,
+                    (rgb[2] * 255.0) as u8,
+                    (255.0 * p.built) as u8,
+                );
+                painter.circle_filled(at, p.radius * r, colour);
+                if response.hover_pos().is_some_and(|h| h.distance(at) <= p.radius * r) {
+                    let slot = c.slots[p.slot];
+                    egui::show_tooltip_at_pointer(
+                        ui.ctx(),
+                        ui.layer_id(),
+                        egui::Id::new("organelle"),
+                        |ui| {
+                            ui.label(format!("slot {}: {}", slot.index, slot.kind.name()));
+                            ui.label(format!("param {}", slot.param));
+                            ui.label(format!("control {:?}", slot.control));
+                            if let Some(n) = slot.remaining_build {
+                                ui.weak(format!("building, {n} to go"));
                             }
-                        ));
+                        },
+                    );
+                }
+            }
+            if placed.is_empty() {
+                painter.text(
+                    centre,
+                    egui::Align2::CENTER_CENTER,
+                    "bare membrane",
+                    egui::FontId::proportional(11.0),
+                    egui::Color32::from_gray(130),
+                );
+            }
+
+            ui.separator();
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                // --- the genome, with the cell's own instruction pointer in it ---
+                let over = c.nucleus_capacity > 0 && c.genome_len > c.nucleus_capacity;
+                ui.horizontal(|ui| {
+                    ui.label(format!(
+                        "genome {} bytes / nucleus {}",
+                        c.genome_len, c.nucleus_capacity
+                    ));
+                    if over {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(230, 130, 90),
+                            "⚠ truncated at division",
+                        )
+                        .on_hover_text(
+                            "SPEC §4.1: a genome longer than its nucleus is cut short in every \
+                             daughter. The lineage will stop without an error.",
+                        );
                     }
                 });
+                ui.horizontal(|ui| {
+                    match c.fidelity {
+                        Some(f) => ui.weak(format!("fidelity {:.2}", q10(f))),
+                        // Not "fidelity 0.00". A cell with no nucleus has no fidelity, cannot
+                        // copy its genome and cannot divide — which is a different and much
+                        // louder fact than copying badly.
+                        None => ui.colored_label(
+                            egui::Color32::from_rgb(230, 130, 90),
+                            "no nucleus — cannot divide",
+                        ),
+                    };
+                    ui.weak(format!(
+                        "{}   ip {}",
+                        if c.halted { "halted" } else { "running" },
+                        c.ip
+                    ));
+                });
+
+                if ui
+                    .button("open genome ▸")
+                    .on_hover_text("the disassembly, live, in its own window (g)")
+                    .clicked()
+                {
+                    view.genome = true;
+                }
+
+                // --- what it is holding ---
                 ui.collapsing("chemistry", |ui| {
                     for (i, v) in c.interior.iter().enumerate() {
                         if *v != 0 {
-                            ui.label(format!("{i}: {:.2}", *v as f32 / mm_core::Q10_ONE as f32));
+                            ui.label(format!("{:<16} {:.2}", chem_names[i], q10(*v)));
                         }
                     }
                 });
+
+                ui.collapsing("machine", |ui| {
+                    ui.label(format!("stack {:?}", c.stack));
+                    ui.label(format!("calls {:?}", c.call_stack));
+                    if c.ln > 0 {
+                        ui.label(format!(
+                            "copying: {} bytes to go, from {} to {}",
+                            c.ln, c.pa, c.pb
+                        ));
+                    }
+                    let live: Vec<String> = c
+                        .registers
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, v)| **v != 0)
+                        .map(|(n, v)| format!("r{n}={v}"))
+                        .collect();
+                    ui.label(if live.is_empty() {
+                        "registers all zero".to_string()
+                    } else {
+                        live.join("  ")
+                    });
+                    let ram: Vec<String> = c
+                        .ram
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, v)| **v != 0)
+                        .map(|(n, v)| format!("[{n}]={v}"))
+                        .collect();
+                    ui.label(if ram.is_empty() {
+                        "ram all zero".to_string()
+                    } else {
+                        ram.join("  ")
+                    });
+                });
             });
-    }
+        });
+}
+
+/// A labelled bar, for the two or three numbers worth seeing at a glance rather than reading.
+///
+/// `full` is what counts as a full bar. There is no maximum for energy or mass, so it is a
+/// reference point rather than a limit and the bar clamps at it.
+fn bar(ui: &mut egui::Ui, label: &str, value: f32, full: f32, colour: egui::Color32) {
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 16.0), egui::Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 2.0, egui::Color32::from_black_alpha(120));
+    let fraction = (value / full).clamp(0.0, 1.0);
+    let mut filled = rect;
+    filled.set_width(rect.width() * fraction);
+    painter.rect_filled(filled, 2.0, colour.gamma_multiply(0.55));
+    painter.text(
+        rect.left_center() + egui::vec2(6.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        format!("{label}  {value:.1}"),
+        egui::FontId::proportional(11.0),
+        egui::Color32::from_gray(230),
+    );
 }
 
 /// The species wiki, the phylogenetic tree and the world timeline (M5, SPEC §10.5).
