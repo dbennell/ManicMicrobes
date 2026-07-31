@@ -73,6 +73,7 @@
 //! by convolution. A real separable blur belongs in the post-process pass this leaves room
 //! for.
 
+use bevy::diagnostic::{Diagnostic, DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -80,7 +81,7 @@ use bevy_egui::{egui, EguiContexts, EguiPlugin};
 
 use mm_app::debugger::{Breakpoint, Breakpoints, Sandbox};
 use mm_app::editor::Editor;
-use mm_app::inspector::Inspection;
+use mm_app::engine::{Engine, Published, Rate};
 use mm_app::slide::{Frame, Lod, Slide};
 use mm_app::tools::{self, ToolEvent};
 use mm_app::ui::{self, Dock, Focus, Panel, Panels, Rect, Target};
@@ -104,6 +105,7 @@ fn main() {
             }),
             ..default()
         }))
+        .add_plugins(FrameTimeDiagnosticsPlugin)
         .add_plugins(EguiPlugin)
         .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.03)))
         .insert_resource(SlideRes::new())
@@ -115,7 +117,7 @@ fn main() {
                 handle_input,
                 // Ordered so that a frame always shows the tick that has just finished,
                 // rather than one caught halfway through being computed.
-                advance_simulation,
+                collect_simulation,
                 redraw,
                 panels,
             )
@@ -126,15 +128,23 @@ fn main() {
 
 /// The simulation, as a Bevy resource.
 ///
-/// Bevy owns the *box*, not the contents: nothing in this file can reach `World` except
-/// through `Slide`, which only lends out frames.
+/// Bevy owns the *box*, not the contents: nothing in this file can reach `World` except through
+/// [`Engine`], and the world is not even on this thread.
+///
+/// [`Self::latest`] is what the per-frame panels read. It is a copy, gathered on the simulation
+/// thread, and reading it takes no lock at all — see [`mm_app::engine::Published`] for why that
+/// matters and which panels are exempt.
 #[derive(Resource)]
 struct SlideRes {
-    slide: Slide,
-    frame: Frame,
+    engine: Engine,
+    /// The last bundle collected. Held rather than re-fetched so a frame the simulation has not
+    /// finished yet redraws the previous one instead of blinking.
+    latest: Published,
+    /// Chemical names, cached at load. They come from the scenario and never change, and
+    /// fetching them each frame would be a lock for a constant.
+    chem_names: Vec<String>,
     /// The cell the inspector is pointed at, if any.
     selected: Option<CellId>,
-    inspection: Option<Inspection>,
     /// The genome editor (M6).
     editor: Editor,
     /// Breakpoints over the live world, and the sandbox for instruction stepping.
@@ -163,12 +173,22 @@ impl SlideRes {
         // Loading a *chosen* scenario is M6's slide save/load and is still not here. This is
         // the built-in default: the same petri dish M2's tests use, seeded with the ancestor
         // from `genomes/`, which divides and fills it within a few thousand ticks.
-        let slide = Slide::new(petri()).expect("default scenario");
-        let mut res = SlideRes {
-            slide,
-            frame: Frame::default(),
-            selected: None,
+        let mut slide = Slide::new(petri()).expect("default scenario");
+        seed_ancestors(&mut slide);
+        let chem_names = slide.chemical_names();
+        let latest = Published {
+            frame: slide.frame(),
             inspection: None,
+            species: String::new(),
+            history: slide.history().clone(),
+            web: slide.food_web(),
+            optics: slide.optics,
+        };
+        SlideRes {
+            engine: Engine::start(slide, Rate::times(1)),
+            latest,
+            chem_names,
+            selected: None,
             editor: Editor::new(),
             breakpoints: Breakpoints::new(),
             sandbox: None,
@@ -176,23 +196,43 @@ impl SlideRes {
             last_export: None,
             listing: mm_app::inspector::Listing::default(),
             editing: None,
-        };
-        res.reseed();
-        res.frame = res.slide.frame();
-        res
+        }
+    }
+
+    /// Point the inspector at a cell, or at nothing.
+    ///
+    /// Three things move together and always have to: what the front end thinks is selected,
+    /// what the simulation thread is publishing a reading of, and the sandbox — which was a
+    /// copy of a *different* cell and would be shown under the new one's name.
+    fn select(&mut self, cell: Option<CellId>) {
+        self.selected = cell;
+        self.engine.select(cell);
+        self.sandbox = None;
     }
 
     /// Wipe the slide and start the ancestor over. Bound to `r`.
     fn reseed(&mut self) {
-        *self.slide.world_mut() = mm_core::World::new(petri()).expect("default scenario");
-        self.slide.world_mut().set_biology(BiologyConfig {
-            mutation: MutationRates::default(),
-            ..BiologyConfig::default()
-        });
-        let Some(bytes) = ancestor_genome() else {
-            return;
-        };
-        let world = self.slide.world_mut();
+        let held = self.engine.handle();
+        seed_ancestors(&mut held.slide());
+        self.selected = None;
+        self.engine.select(None);
+        self.sandbox = None;
+        self.breakpoints.rearm();
+    }
+}
+
+/// Replace whatever is on the slide with a fresh petri dish and sixteen ancestors.
+fn seed_ancestors(slide: &mut Slide) {
+    *slide.world_mut() = mm_core::World::new(petri()).expect("default scenario");
+    slide.world_mut().set_biology(BiologyConfig {
+        mutation: MutationRates::default(),
+        ..BiologyConfig::default()
+    });
+    let Some(bytes) = ancestor_genome() else {
+        return;
+    };
+    {
+        let world = slide.world_mut();
         let structural = world.biology().structural_chemical;
         for k in 0..16u32 {
             let Ok(genome) = world.genomes().intern(bytes.clone()) else {
@@ -226,13 +266,9 @@ impl SlideRes {
                 cells.interior_mut(i)[14] = q10(40);
             }
         }
-        // Filling a cytoplasm by hand creates matter, which is what scenario setup is for.
-        self.slide.world_mut().adopt_current_contents_as_baseline();
-        self.selected = None;
-        self.inspection = None;
-        self.sandbox = None;
-        self.breakpoints.rearm();
     }
+    // Filling a cytoplasm by hand creates matter, which is what scenario setup is for.
+    slide.world_mut().adopt_current_contents_as_baseline();
 }
 
 /// The default slide: light, food, no flow. The habitat the ancestor was written for.
@@ -454,25 +490,28 @@ fn handle_input(
 fn keyboard(keys: &ButtonInput<KeyCode>, view: &mut View, sim: &mut SlideRes) {
     if keys.just_pressed(KeyCode::Space) {
         view.paused = !view.paused;
-        let speed = if view.paused { 0 } else { 1 };
-        sim.slide.set_speed(speed);
+        sim.engine.set_rate(if view.paused {
+            Rate::Paused
+        } else {
+            Rate::times(1)
+        });
     }
     if keys.just_pressed(KeyCode::Period) {
         // Step one tick, whatever the speed. A paused world you cannot advance is a
         // screenshot.
-        sim.slide.request_step();
+        sim.engine.step();
     }
     // Speed control, including "run as fast as the machine will go" (SPEC §14): the render
     // detaches from the tick rate rather than the tick rate bending to the render.
-    for (key, speed) in [
-        (KeyCode::Digit0, 0),
-        (KeyCode::Minus, 1),
-        (KeyCode::Equal, 8),
-        (KeyCode::Backspace, 256),
+    for (key, rate) in [
+        (KeyCode::Digit0, Rate::Paused),
+        (KeyCode::Minus, Rate::times(1)),
+        (KeyCode::Equal, Rate::times(8)),
+        (KeyCode::Backspace, Rate::Unlimited),
     ] {
         if keys.just_pressed(key) {
-            sim.slide.set_speed(speed);
-            view.paused = speed == 0;
+            sim.engine.set_rate(rate);
+            view.paused = rate == Rate::Paused;
         }
     }
     // Chemical overlays, individually toggleable.
@@ -491,7 +530,7 @@ fn keyboard(keys: &ButtonInput<KeyCode>, view: &mut View, sim: &mut SlideRes) {
     .enumerate()
     {
         if keys.just_pressed(key) {
-            sim.slide.toggle_overlay(i);
+            sim.engine.toggle_overlay(i);
         }
     }
     // Panels, from the one list the View menu is also built from.
@@ -501,13 +540,16 @@ fn keyboard(keys: &ButtonInput<KeyCode>, view: &mut View, sim: &mut SlideRes) {
         }
     }
     if keys.just_pressed(KeyCode::KeyO) {
-        sim.slide.optics.enabled = !sim.slide.optics.enabled;
+        sim.engine.set_optics(!sim.engine.optics_enabled());
     }
     if keys.just_pressed(KeyCode::KeyT) {
         view.follow = !view.follow;
     }
     if keys.just_pressed(KeyCode::Home) {
-        view.centre = Vec2::new(sim.frame.width as f32 / 2.0, sim.frame.height as f32 / 2.0);
+        view.centre = Vec2::new(
+            sim.latest.frame.width as f32 / 2.0,
+            sim.latest.frame.height as f32 / 2.0,
+        );
         view.zoom = 1.0;
     }
     for (key, tool) in [
@@ -583,7 +625,7 @@ fn handle_mouse(
         }
     }
     let scale = BASE_SCALE * view.zoom;
-    sim.slide.set_zoom(scale);
+    sim.engine.set_zoom(scale);
 
     if buttons.pressed(MouseButton::Left) && target == Target::Slide {
         for ev in motion.read() {
@@ -611,13 +653,13 @@ fn handle_mouse(
     if buttons.just_released(MouseButton::Left) {
         if target == Target::Slide && view.drag_distance < 4.0 {
             if let Some((slide_x, slide_y)) = pointer_on_slide(window, view, scale) {
-                let hit = sim.slide.cell_at(slide_x, slide_y, 3.0);
+                // Picking a cell is the one thing a click does that has to ask the world, and
+                // it happens once per click rather than once per frame.
+                let held = sim.engine.handle();
+                let hit = held.slide().cell_at(slide_x, slide_y, 3.0);
                 if hit.is_some() {
-                    sim.selected = hit;
+                    sim.select(hit);
                     view.panels.set(Panel::Cell, true);
-                    // A new selection invalidates the sandbox: it was a copy of a different
-                    // cell and showing it under a new name would be a lie.
-                    sim.sandbox = None;
                 }
             }
         }
@@ -630,35 +672,34 @@ fn handle_mouse(
     if buttons.just_pressed(MouseButton::Right) && target == Target::Slide {
         if let Some((slide_x, slide_y)) = pointer_on_slide(window, view, scale) {
             let square = (slide_x.floor() as i32, slide_y.floor() as i32);
+            let held = sim.engine.handle();
             match view.tool {
                 Tool::Select => {
-                    sim.selected = sim.slide.cell_at(slide_x, slide_y, 3.0);
-                    view.panels.set(Panel::Cell, sim.selected.is_some());
-                    // A new selection invalidates the sandbox: it was a copy of a different
-                    // cell and showing it under a new name would be a lie.
-                    sim.sandbox = None;
+                    let hit = held.slide().cell_at(slide_x, slide_y, 3.0);
+                    sim.select(hit);
+                    view.panels.set(Panel::Cell, hit.is_some());
                 }
                 Tool::Move => {
                     if let Some(cell) = sim.selected {
                         let event =
-                            tools::relocate(sim.slide.world_mut(), cell, square.0, square.1);
+                            tools::relocate(held.slide().world_mut(), cell, square.0, square.1);
                         sim.last_tool = Some(event);
                     }
                 }
                 Tool::Remove => {
-                    if let Some(cell) = sim.slide.cell_at(slide_x, slide_y, 3.0) {
-                        let event = tools::remove(sim.slide.world_mut(), cell);
+                    let hit = held.slide().cell_at(slide_x, slide_y, 3.0);
+                    if let Some(cell) = hit {
+                        let event = tools::remove(held.slide().world_mut(), cell);
                         sim.last_tool = Some(event);
                         if sim.selected == Some(cell) {
-                            sim.selected = None;
-                            sim.sandbox = None;
+                            sim.select(None);
                         }
                     }
                 }
                 Tool::DrawBarrier | Tool::EraseBarrier => {
                     if square.0 >= 0 && square.1 >= 0 {
                         let event = tools::set_barrier(
-                            sim.slide.world_mut(),
+                            held.slide().world_mut(),
                             square.0 as u32,
                             square.1 as u32,
                             view.tool == Tool::DrawBarrier,
@@ -671,14 +712,19 @@ fn handle_mouse(
     }
 }
 
-/// Advance by a whole number of ticks, decided by the speed setting and nothing else.
+/// Collect whatever the simulation has finished, and follow the tracked cell.
 ///
-/// Deliberately ignores `Time`: a simulation stepped by elapsed wall-clock would produce a
-/// different world on a fast machine than on a slow one, and every guarantee in the spec rests
-/// on it not doing that.
-fn advance_simulation(mut sim: ResMut<SlideRes>, mut view: ResMut<View>) {
-    // Breakpoints act on the viewer, not on the world: when one holds, the slide stops
-    // advancing. Pausing provably does not change a world (`slide.rs`), so a breakpoint
+/// Advancing the world is no longer this thread's job (M10.1). This takes the newest bundle if
+/// there is one and otherwise leaves the last one in place — a render slower than the
+/// simulation misses frames rather than holding it up, and a render faster than the simulation
+/// redraws what it has rather than blinking.
+fn collect_simulation(mut sim: ResMut<SlideRes>, mut view: ResMut<View>) {
+    if let Some(published) = sim.engine.collect() {
+        sim.latest = published;
+    }
+
+    // Breakpoints act on the viewer, not on the world: when one holds, the world stops being
+    // asked to advance. Pausing provably does not change a world (`engine.rs`), so a breakpoint
     // cannot either — and there is no stop-in-the-middle-of-a-tick, because a tick is the
     // simulation's atom.
     if sim.breakpoints.tripped().is_none() {
@@ -686,26 +732,30 @@ fn advance_simulation(mut sim: ResMut<SlideRes>, mut view: ResMut<View>) {
         // `&mut` for the tripped marker — can hold `&World` at the same time. Both live in the
         // same resource; neither can reach the other.
         let mut points = std::mem::take(&mut sim.breakpoints);
-        let hit = points.check(sim.slide.world());
+        let held = sim.engine.handle();
+        let hit = points.check(held.slide().world());
         sim.breakpoints = points;
         if hit {
-            sim.slide.set_speed(0);
+            sim.engine.set_rate(Rate::Paused);
+            view.paused = true;
         }
     }
-    sim.slide.advance_one_frame();
-    sim.frame = sim.slide.frame();
-    sim.inspection = sim.selected.and_then(|id| sim.slide.inspect(id));
+
     // The decision itself is in `inspector::tracking`, where it can be tested without a
     // graphics stack. This applies it and nothing more.
-    match mm_app::inspector::tracking(sim.inspection.as_ref(), view.follow, sim.selected.is_some())
-    {
+    let track = mm_app::inspector::tracking(
+        sim.latest.inspection.as_ref(),
+        view.follow,
+        sim.selected.is_some(),
+    );
+    match track {
         // Set rather than eased: the camera has to be exactly on the cell or a fast one
         // outruns the lerp and drifts to the edge of the view, and a microscope stage does not
         // have momentum anyway.
         mm_app::inspector::Track::MoveTo(x, y) => view.centre = Vec2::new(x, y),
         mm_app::inspector::Track::Stay => {}
         mm_app::inspector::Track::Lost => {
-            sim.selected = None;
+            sim.select(None);
             view.follow = false;
         }
     }
@@ -760,8 +810,8 @@ fn redraw(
         ),
     >,
 ) {
-    let frame = &sim.frame;
-    let optics = &sim.slide.optics;
+    let frame = &sim.latest.frame;
+    let optics = &sim.latest.optics;
     let scale = BASE_SCALE * view.zoom;
     let Ok(window) = window.get_single() else {
         return;
@@ -1011,16 +1061,17 @@ fn panels(
     mut sim: ResMut<SlideRes>,
     mut view: ResMut<View>,
     mut exit: EventWriter<AppExit>,
+    diagnostics: Res<DiagnosticsStore>,
 ) {
     let ctx = contexts.ctx_mut();
-    let frame = sim.frame.clone();
+    let frame = sim.latest.frame.clone();
 
     // Order is layout: egui hands space out from the outside in, so the menu takes the top, the
     // status bar the very bottom, the drawer the strip above it, and the rails what is left
     // between them.
     let mut quit = false;
     menu_bar(ctx, &mut sim, &mut view, &mut quit);
-    status_bar(ctx, &sim, &view, &frame);
+    status_bar(ctx, &sim, &view, &frame, &diagnostics);
     drawer(ctx, &mut sim, &mut view);
 
     if view.panels.cell {
@@ -1112,7 +1163,7 @@ fn menu_bar(ctx: &egui::Context, sim: &mut SlideRes, view: &mut View, quit: &mut
             });
 
             ui.menu_button("Simulation", |ui| {
-                let running = sim.slide.speed() > 0;
+                let running = sim.engine.rate().is_running();
                 if ui
                     .add(
                         egui::Button::new(if running { "Pause" } else { "Run" })
@@ -1120,31 +1171,34 @@ fn menu_bar(ctx: &egui::Context, sim: &mut SlideRes, view: &mut View, quit: &mut
                     )
                     .clicked()
                 {
-                    let speed = if running { 0 } else { 1 };
-                    sim.slide.set_speed(speed);
-                    view.paused = speed == 0;
+                    sim.engine.set_rate(if running {
+                        Rate::Paused
+                    } else {
+                        Rate::times(1)
+                    });
+                    view.paused = running;
                     ui.close_menu();
                 }
                 if ui
                     .add(egui::Button::new("Step one tick").shortcut_text("."))
                     .clicked()
                 {
-                    sim.slide.request_step();
+                    sim.engine.step();
                 }
                 ui.menu_button("Speed", |ui| {
-                    for (label, key, speed) in [
-                        ("paused", "0", 0u32),
-                        ("1×", "-", 1),
-                        ("8×", "=", 8),
-                        ("as fast as it will go", "backspace", 256),
+                    for (label, key, rate) in [
+                        ("paused", "0", Rate::Paused),
+                        ("1× — 60 ticks a second", "-", Rate::times(1)),
+                        ("8×", "=", Rate::times(8)),
+                        ("as fast as it will go", "backspace", Rate::Unlimited),
                     ] {
-                        let now = sim.slide.speed() == speed;
+                        let now = sim.engine.rate() == rate;
                         if ui
                             .add(egui::Button::new(label).shortcut_text(key).selected(now))
                             .clicked()
                         {
-                            sim.slide.set_speed(speed);
-                            view.paused = speed == 0;
+                            sim.engine.set_rate(rate);
+                            view.paused = rate == Rate::Paused;
                             ui.close_menu();
                         }
                     }
@@ -1170,8 +1224,8 @@ fn menu_bar(ctx: &egui::Context, sim: &mut SlideRes, view: &mut View, quit: &mut
                 }
                 ui.separator();
                 ui.menu_button("Overlays", |ui| {
-                    for (i, name) in sim.slide.chemical_names().into_iter().enumerate() {
-                        let on = sim.slide.overlay_enabled(i);
+                    for (i, name) in sim.chem_names.clone().into_iter().enumerate() {
+                        let on = sim.engine.overlay_enabled(i);
                         let key = if i < 9 {
                             (i + 1).to_string()
                         } else {
@@ -1181,7 +1235,7 @@ fn menu_bar(ctx: &egui::Context, sim: &mut SlideRes, view: &mut View, quit: &mut
                             .add(egui::Button::new(name).shortcut_text(key).selected(on))
                             .clicked()
                         {
-                            sim.slide.toggle_overlay(i);
+                            sim.engine.toggle_overlay(i);
                         }
                     }
                 });
@@ -1189,12 +1243,12 @@ fn menu_bar(ctx: &egui::Context, sim: &mut SlideRes, view: &mut View, quit: &mut
                     .add(
                         egui::Button::new("Optics")
                             .shortcut_text("O")
-                            .selected(sim.slide.optics.enabled),
+                            .selected(sim.engine.optics_enabled()),
                     )
                     .on_hover_text("vignette, defocus and dust on the objective")
                     .clicked()
                 {
-                    sim.slide.optics.enabled = !sim.slide.optics.enabled;
+                    sim.engine.set_optics(!sim.engine.optics_enabled());
                 }
                 ui.separator();
                 if ui
@@ -1211,8 +1265,10 @@ fn menu_bar(ctx: &egui::Context, sim: &mut SlideRes, view: &mut View, quit: &mut
                     .add(egui::Button::new("Reset camera").shortcut_text("Home"))
                     .clicked()
                 {
-                    view.centre =
-                        Vec2::new(sim.frame.width as f32 / 2.0, sim.frame.height as f32 / 2.0);
+                    view.centre = Vec2::new(
+                        sim.latest.frame.width as f32 / 2.0,
+                        sim.latest.frame.height as f32 / 2.0,
+                    );
                     view.zoom = 1.0;
                     ui.close_menu();
                 }
@@ -1261,26 +1317,33 @@ fn menu_bar(ctx: &egui::Context, sim: &mut SlideRes, view: &mut View, quit: &mut
             // them. `right_to_left` so it stays pinned to the edge as the window resizes.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("⏭").on_hover_text("step one tick  (.)").clicked() {
-                    sim.slide.request_step();
+                    sim.engine.step();
                 }
-                for (label, speed) in [("256×", 256u32), ("8×", 8), ("1×", 1)] {
+                for (label, rate) in [
+                    ("max", Rate::Unlimited),
+                    ("8×", Rate::times(8)),
+                    ("1×", Rate::times(1)),
+                ] {
                     if ui
-                        .add(egui::Button::new(label).selected(sim.slide.speed() == speed))
+                        .add(egui::Button::new(label).selected(sim.engine.rate() == rate))
                         .clicked()
                     {
-                        sim.slide.set_speed(speed);
+                        sim.engine.set_rate(rate);
                         view.paused = false;
                     }
                 }
-                let running = sim.slide.speed() > 0;
+                let running = sim.engine.rate().is_running();
                 if ui
                     .button(if running { "⏸" } else { "▶" })
                     .on_hover_text("run / pause  (space)")
                     .clicked()
                 {
-                    let speed = if running { 0 } else { 1 };
-                    sim.slide.set_speed(speed);
-                    view.paused = speed == 0;
+                    sim.engine.set_rate(if running {
+                        Rate::Paused
+                    } else {
+                        Rate::times(1)
+                    });
+                    view.paused = running;
                 }
             });
         });
@@ -1292,15 +1355,17 @@ fn menu_bar(ctx: &egui::Context, sim: &mut SlideRes, view: &mut View, quit: &mut
 /// The scale bar is the microscope's, not a debug readout — it is the thing in the corner of
 /// every frame of the footage this is modelled on, and it is the only honest way to say how
 /// big anything on the slide is.
-fn status_bar(ctx: &egui::Context, sim: &SlideRes, view: &View, frame: &Frame) {
+fn status_bar(
+    ctx: &egui::Context,
+    sim: &SlideRes,
+    view: &View,
+    frame: &Frame,
+    diagnostics: &DiagnosticsStore,
+) {
     egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
         ui.horizontal(|ui| {
-            if let Some(c) = &sim.inspection {
-                ui.label(
-                    egui::RichText::new(sim.slide.species_name(c.species))
-                        .italics()
-                        .strong(),
-                );
+            if sim.latest.inspection.is_some() {
+                ui.label(egui::RichText::new(&sim.latest.species).italics().strong());
                 ui.separator();
             }
             ui.label(format!("tick {}", frame.tick));
@@ -1323,6 +1388,27 @@ fn status_bar(ctx: &egui::Context, sim: &SlideRes, view: &View, frame: &Frame) {
                     Lod::Organelles => "organelles",
                     Lod::Full => "full",
                 });
+                ui.separator();
+                // The two halves of the working target, side by side and never added together
+                // (`docs/MILESTONES.md`). Until M10.1 there was only one number here and it was
+                // both of them at once, which is how a slow tick and a slow frame became
+                // indistinguishable.
+                let fps = diagnostics
+                    .get(&FrameTimeDiagnosticsPlugin::FPS)
+                    .and_then(Diagnostic::smoothed)
+                    .unwrap_or(0.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{:.0} fps · {} t/s",
+                        fps,
+                        sim.engine.ticks_per_second()
+                    ))
+                    .monospace(),
+                )
+                .on_hover_text(
+                    "frames a second and ticks a second, measured separately. The working \
+                     target is 50,000 cells at 30 of each.",
+                );
             });
         });
     });
@@ -1412,7 +1498,7 @@ fn legend_body(ui: &mut egui::Ui, sim: &SlideRes, view: &View, frame: &Frame) {
 /// The live metric plots.
 fn metrics_body(ui: &mut egui::Ui, sim: &SlideRes) {
     ui.label(egui::RichText::new("metrics").strong());
-    let history = sim.slide.history();
+    let history = &sim.latest.history;
     if history.is_empty() {
         ui.weak("no samples yet");
         return;
@@ -1451,7 +1537,7 @@ fn metrics_body(ui: &mut egui::Ui, sim: &SlideRes) {
 /// editor, and applying it writes the new bytes back into the same living cell without
 /// stopping the world — see [`tools::rewrite_genome`] for what happens to the machine.
 fn genome_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
-    let Some(c) = sim.inspection.clone() else {
+    let Some(c) = sim.latest.inspection.clone() else {
         ui.weak("no cell selected — click one on the slide");
         return;
     };
@@ -1464,7 +1550,7 @@ fn genome_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
     let mut apply: Option<Vec<u8>> = None;
 
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(sim.slide.species_name(c.species)).strong());
+        ui.label(egui::RichText::new(sim.latest.species.clone()).strong());
         ui.weak(format!("{:016x}", c.genome_hash));
         ui.separator();
         ui.label(format!(
@@ -1490,7 +1576,7 @@ fn genome_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
             .clicked()
         {
             sim.editor
-                .load_bytes(c.genome.bytes(), sim.slide.species_name(c.species));
+                .load_bytes(c.genome.bytes(), sim.latest.species.clone());
             sim.editing = Some(c.id);
             view.panels.set(Panel::Editor, true);
         }
@@ -1564,7 +1650,8 @@ fn genome_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
     }
 
     if let Some(bytes) = apply {
-        let event = tools::rewrite_genome(sim.slide.world_mut(), c.id, bytes);
+        let held = sim.engine.handle();
+        let event = tools::rewrite_genome(held.slide().world_mut(), c.id, bytes);
         sim.last_tool = Some(event);
     }
 }
@@ -1593,18 +1680,18 @@ fn pointer_on_slide(
 /// Everything drawn here comes from an [`Inspection`], which is a copy — the panel holds no
 /// borrow of the world and there is no path from a click in it back to a tick.
 fn cell_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
-    let Some(c) = sim.inspection.clone() else {
+    let Some(c) = sim.latest.inspection.clone() else {
         ui.weak("click a cell to inspect it");
         return;
     };
 
     let q10 = |v: i32| v as f32 / mm_core::Q10_ONE as f32;
-    let chem_names = sim.slide.chemical_names();
+    let chem_names = sim.chem_names.clone();
 
     // --- who and where ---
     ui.horizontal(|ui| {
         ui.label(
-            egui::RichText::new(sim.slide.species_name(c.species))
+            egui::RichText::new(sim.latest.species.clone())
                 .strong()
                 .size(14.0),
         );
@@ -1826,7 +1913,12 @@ fn bar(ui: &mut egui::Ui, label: &str, value: f32, full: f32, colour: egui::Colo
 /// Reads the archive through [`mm_app::wiki`], which copies everything out — so this panel
 /// holds no borrow of the world and nothing in it can reach a tick.
 fn wiki_body(ui: &mut egui::Ui, sim: &SlideRes, view: &mut View) {
-    let world = sim.slide.world();
+    // One of the panels that does take the world's lock: the archive is far too large to
+    // publish every frame and the wiki is opened deliberately, to read. See
+    // `engine::Published` for which panels are exempt and why.
+    let held = sim.engine.handle();
+    let slide = held.slide();
+    let world = slide.world();
     let archive = world.archive();
 
     if archive.is_empty() {
@@ -1955,7 +2047,7 @@ fn wiki_body(ui: &mut egui::Ui, sim: &SlideRes, view: &mut View) {
 fn foodweb_body(ui: &mut egui::Ui, sim: &SlideRes) {
     use mm_app::foodweb::{Basis, Node};
 
-    let web = sim.slide.food_web();
+    let web = sim.latest.web.clone();
     let peak = web.peak() as f32;
 
     ui.label(web.summary());
@@ -2082,7 +2174,9 @@ fn editor_body(ui: &mut egui::Ui, sim: &mut SlideRes) {
         }
         if ui.button("from selected cell").clicked() {
             if let Some(cell) = sim.selected {
-                if let Some(file) = tools::copy_genome(sim.slide.world(), cell) {
+                let held = sim.engine.handle();
+                let file = tools::copy_genome(held.slide().world(), cell);
+                if let Some(file) = file {
                     sim.editor.load_bytes(&file.bytes, file.name);
                 }
             }
@@ -2155,10 +2249,10 @@ fn debugger_body(ui: &mut egui::Ui, sim: &mut SlideRes) {
         );
         if ui.button("continue").clicked() {
             sim.breakpoints.rearm();
-            sim.slide.set_speed(1);
+            sim.engine.set_rate(Rate::times(1));
         }
     }
-    let tick = sim.slide.world().tick_count();
+    let tick = sim.latest.frame.tick;
     ui.horizontal(|ui| {
         if ui.button("+1,000 ticks").clicked() {
             sim.breakpoints.add(Breakpoint::AtTick(tick + 1_000));
@@ -2184,11 +2278,13 @@ fn debugger_body(ui: &mut egui::Ui, sim: &mut SlideRes) {
 
     // --- the sandbox, for instruction stepping ---
     ui.label("sandbox");
-    let world_tick = sim.slide.world().tick_count();
+    let world_tick = sim.latest.frame.tick;
     if ui.button("take from selected cell").clicked() {
-        sim.sandbox = sim
+        let held = sim.engine.handle();
+        let taken = sim
             .selected
-            .and_then(|cell| Sandbox::of(sim.slide.world(), cell));
+            .and_then(|cell| Sandbox::of(held.slide().world(), cell));
+        sim.sandbox = taken;
     }
     let Some(sandbox) = sim.sandbox.as_mut() else {
         ui.weak("select a cell and take a copy");

@@ -164,10 +164,6 @@ pub struct Slide {
     /// Which chemical overlays are switched on. Individually toggleable (M4), so this is a
     /// set and not a choice.
     overlays: [bool; CHEM_COUNT],
-    /// Ticks per frame when running. Zero means paused.
-    speed: u32,
-    /// Ticks still owed from a `step` request, honoured whatever the frame rate is.
-    pending_steps: u64,
     /// Detail tier the next frame will be built at.
     lod: Lod,
     /// The microscope's look.
@@ -201,8 +197,6 @@ impl Slide {
             flows: crate::foodweb::Flows::default(),
             flows_filling: crate::foodweb::Flows::default(),
             overlays,
-            speed: 1,
-            pending_steps: 0,
             lod: Lod::Dots,
             optics: crate::optics::Optics::default(),
             history: MetricHistory::new(600),
@@ -259,31 +253,6 @@ impl Slide {
         crate::foodweb::web(TrophicMix::of(self.world.cells()), flows)
     }
 
-    /// Advance by whatever the current speed setting owes, once per frame.
-    ///
-    /// Paused means paused: zero speed advances nothing, however long the frame took.
-    pub fn advance_one_frame(&mut self) {
-        let owed = self.pending_steps + self.speed as u64;
-        self.pending_steps = 0;
-        self.advance(owed);
-    }
-
-    /// Ticks per frame. Zero pauses.
-    pub fn set_speed(&mut self, ticks_per_frame: u32) {
-        self.speed = ticks_per_frame;
-    }
-
-    #[must_use]
-    pub fn speed(&self) -> u32 {
-        self.speed
-    }
-
-    /// Advance exactly one tick on the next frame, whatever the speed is. The debugger's
-    /// step button (M6), and the thing that makes a paused world inspectable.
-    pub fn request_step(&mut self) {
-        self.pending_steps = self.pending_steps.saturating_add(1);
-    }
-
     /// Show this chemical's overlay and no other. The number keys.
     pub fn set_overlay(&mut self, chemical: usize) {
         self.overlays = [false; CHEM_COUNT];
@@ -296,6 +265,28 @@ impl Slide {
     pub fn toggle_overlay(&mut self, chemical: usize) {
         if let Some(on) = self.overlays.get_mut(chemical % CHEM_COUNT) {
             *on = !*on;
+        }
+    }
+
+    /// Every overlay's state as one bit per chemical.
+    ///
+    /// So the simulation thread can be handed the renderer's overlay choices in a single atomic
+    /// rather than through the world's lock — see [`crate::engine`] for why a menu click must
+    /// not wait for a tick.
+    #[must_use]
+    pub fn overlay_mask(&self) -> u32 {
+        let mut mask = 0u32;
+        for (i, on) in self.overlays.iter().enumerate() {
+            if *on {
+                mask |= 1u32 << i;
+            }
+        }
+        mask
+    }
+
+    pub fn set_overlay_mask(&mut self, mask: u32) {
+        for (i, on) in self.overlays.iter_mut().enumerate() {
+            *on = mask & (1u32 << i) != 0;
         }
     }
 
@@ -741,20 +732,26 @@ mod tests {
     }
 
     #[test]
-    fn the_frame_rate_cannot_change_the_world() {
+    fn how_the_ticks_were_grouped_cannot_change_the_world() {
         // M4 acceptance 3: dropping the render to 5fps must not change tick output or
         // ordering. Here that is the claim that the same total number of ticks gives the same
-        // world however they were grouped into frames.
+        // world however they were grouped.
+        //
+        // This used to be written in terms of `set_speed` and `advance_one_frame`, which
+        // belonged to `Slide` when the world was advanced once per rendered frame. Pacing moved
+        // to `engine.rs` in M10.1 and the claim came with it, in a stronger form — a real
+        // thread at a real rate. What is left here is the part that needs no thread: the
+        // grouping itself.
         let mut smooth = Slide::new(scenario()).unwrap();
-        smooth.set_speed(1);
         for _ in 0..600 {
-            smooth.advance_one_frame();
+            smooth.advance(1);
+            let _ = smooth.frame();
         }
 
         let mut stuttering = Slide::new(scenario()).unwrap();
-        stuttering.set_speed(12);
         for _ in 0..50 {
-            stuttering.advance_one_frame();
+            stuttering.advance(12);
+            let _ = stuttering.frame();
         }
 
         assert_eq!(smooth.world().tick_count(), 600);
@@ -762,37 +759,24 @@ mod tests {
         assert_eq!(
             smooth.world().state_hash(),
             stuttering.world().state_hash(),
-            "how the ticks were grouped into frames changed the world"
+            "how the ticks were grouped changed the world"
         );
     }
 
     #[test]
-    fn paused_means_paused() {
+    fn advancing_by_nothing_advances_nothing() {
+        // Zero is a legal tick count and has to mean zero, because that is what a paused world
+        // asks for. `engine::tests::paused_means_paused` asserts the same thing about a running
+        // thread that has been told to stop.
         let mut slide = Slide::new(scenario()).unwrap();
         slide.advance(10);
         let hash = slide.world().state_hash();
-        slide.set_speed(0);
         for _ in 0..1000 {
-            slide.advance_one_frame();
+            slide.advance(0);
             let _ = slide.frame();
         }
         assert_eq!(slide.world().tick_count(), 10);
         assert_eq!(slide.world().state_hash(), hash);
-    }
-
-    #[test]
-    fn stepping_a_paused_world_advances_exactly_one_tick() {
-        let mut slide = Slide::new(scenario()).unwrap();
-        slide.set_speed(0);
-        slide.request_step();
-        slide.advance_one_frame();
-        assert_eq!(slide.world().tick_count(), 1);
-        slide.advance_one_frame();
-        assert_eq!(
-            slide.world().tick_count(),
-            1,
-            "a step is one step, not a resume"
-        );
     }
 
     #[test]
@@ -872,6 +856,9 @@ mod tests {
             watched.advance(1);
             watched.set_zoom((tick % 120) as f32);
             watched.toggle_overlay(tick as usize % CHEM_COUNT);
+            // The mask form too: it is how `engine.rs` hands the renderer's overlay choices
+            // across, so it is a path from the front end into this struct like any other.
+            watched.set_overlay_mask(watched.overlay_mask() ^ (1 << (tick % 16)));
             watched.optics.focus = (tick % 7) as f32 * 0.1;
             watched.optics.enabled = tick % 3 == 0;
             let f = watched.frame();

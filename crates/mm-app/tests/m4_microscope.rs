@@ -167,23 +167,26 @@ fn acceptance_rendering_cannot_affect_simulation() {
 #[test]
 fn the_render_rate_does_not_change_tick_output() {
     // M4 acceptance 3. Sixty frames a second against five: the same ticks, grouped
-    // differently.
+    // differently, with a frame taken at each grouping.
+    //
+    // Written through `advance` since M10.1 moved pacing off `Slide` and onto the simulation
+    // thread. `engine::tests::how_the_ticks_were_grouped_does_not_change_the_world` is the
+    // version of this claim with a real thread behind it; this is the one that needs no
+    // scheduling to be reproducible, so it stays here.
     let ticks = if cfg!(debug_assertions) { 480 } else { 4_800 };
 
     let mut fast = Slide::new(scenario(2)).unwrap();
     seed_life(fast.world_mut());
-    fast.set_speed(1);
     for _ in 0..ticks {
-        fast.advance_one_frame();
+        fast.advance(1);
         let _ = fast.frame();
     }
 
     let mut slow = Slide::new(scenario(2)).unwrap();
     seed_life(slow.world_mut());
     // 5fps against 60fps is twelve ticks a frame instead of one.
-    slow.set_speed(12);
     for _ in 0..ticks / 12 {
-        slow.advance_one_frame();
+        slow.advance(12);
         let _ = slow.frame();
     }
 
@@ -193,6 +196,41 @@ fn the_render_rate_does_not_change_tick_output() {
         fast.world().state_hash(),
         slow.world().state_hash(),
         "the frame rate changed the world"
+    );
+}
+
+#[test]
+fn the_simulation_thread_runs_the_same_world_the_renderer_would_have() {
+    // M4 acceptance 1, restated for M10.1: moving the world onto its own thread must not change
+    // what it does. The engine's own tests check this against a small scenario; this checks it
+    // against the one M4 uses, with life on it.
+    use mm_app::engine::{Engine, Rate};
+    use std::time::Duration;
+
+    let ticks = if cfg!(debug_assertions) { 400 } else { 4_000 };
+
+    let mut threaded = Slide::new(scenario(2)).unwrap();
+    seed_life(threaded.world_mut());
+    let engine = Engine::start(threaded, Rate::Unlimited);
+    assert!(
+        engine.wait_for_tick(ticks, Duration::from_secs(120)),
+        "the simulation thread never reached {ticks} ticks"
+    );
+    engine.set_rate(Rate::Paused);
+    let held = engine.handle();
+    let (reached, threaded_hash) = {
+        let slide = held.slide();
+        (slide.world().tick_count(), slide.world().state_hash())
+    };
+
+    let mut headless = Slide::new(scenario(2)).unwrap();
+    seed_life(headless.world_mut());
+    headless.advance(reached);
+
+    assert_eq!(
+        threaded_hash,
+        headless.world().state_hash(),
+        "the simulation thread changed the world"
     );
 }
 

@@ -499,12 +499,28 @@ advances exactly once per frame and the tick rate *is* the frame rate. That make
 decoupling test ("dropping the render to 5fps does not change tick output") unfalsifiable, and
 it makes any frame-budget figure a measurement of the two costs added together.
 
-The split: the world moves to its own thread and publishes `Frame`s into a double buffer; the
-render thread takes the most recent one. `Frame` is already the entire render-side view of the
-world and is already a plain owned value with no borrows into `World`, so the wall in
-`slide.rs` is precisely where the thread boundary wants to go. The M4 guarantee gets *stronger*
-— the renderer stops being able to reach the simulation because it is not on the same thread —
-and the guarantee is still checked the same way, by hashing against `mm-cli`.
+The split: the world moves to its own thread behind one mutex, and publishes a bundle into a
+slot the render thread empties and the simulation refills. `Frame` was already the entire
+render-side view of the world and already a plain owned value with no borrows into `World`, so
+the wall in `slide.rs` is precisely where the thread boundary wants to go.
+
+The bundle is more than a `Frame`, and the reason is worth writing down. The simulation thread
+holds the lock for the duration of each tick, so **anything the render thread asks the world
+for once a frame will wait up to a whole tick** — thirty milliseconds at fifty thousand cells,
+which is a dropped frame every frame. So everything the always-on panels need is gathered on
+the simulation side and handed over with the frame: the selected cell's reading, its species
+name, the metric history, the food web, the objective's settings. The panels that are *not*
+covered — wiki, editor, debugger, and the tools — do take the lock, because they are opened
+deliberately to look at one thing and an occasional stutter is an honest price. Publishing
+their data is the fix if that stops being true, and M10.4 owns the ecology half of it.
+
+The presentation controls go the other way, and have the same problem in reverse: the zoom is
+set on every frame the wheel moves, and it lives on `Slide` because `frame()` reads it. Those
+cross as atomics and are applied by the simulation thread under the lock it is taking anyway.
+
+The M4 guarantee gets *stronger* — the renderer stops being able to reach the simulation
+because it is not on the same thread — and is still checked the same way, by hashing against a
+world advanced in one go.
 
 ---
 

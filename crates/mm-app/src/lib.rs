@@ -14,6 +14,8 @@
 //! # What is where
 //!
 //! - [`slide`] — the world, the frame, level of detail, overlays and the metric history.
+//! - [`engine`] — the simulation thread, and the only place wall-clock time is allowed to
+//!   decide anything.
 //! - [`optics`] — the microscope's look, as parameters rather than as a shader.
 //! - [`inspector`] — a read-only transcript of one cell.
 //! - [`editor`] — a `.mm` source buffer, its diagnostics and its exports.
@@ -27,6 +29,7 @@
 
 pub mod debugger;
 pub mod editor;
+pub mod engine;
 pub mod foodweb;
 pub mod inspector;
 pub mod optics;
