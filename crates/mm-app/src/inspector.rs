@@ -273,12 +273,37 @@ pub enum Track {
 /// Decide what tracking does, given what the inspection found.
 ///
 /// A decision with a right answer, so it lives here where it can be tested rather than inside
-/// a Bevy system where it cannot. The answer that matters is the last one: when the tracked
-/// cell dies, following stops. Leaving the camera pinned to the square where a cell used to be
+/// a Bevy system where it cannot. The answer that matters is `Lost`: when the tracked cell
+/// dies, following stops. Leaving the camera pinned to the square where a cell used to be
 /// gives you a view that has stopped responding to the arrow keys with nothing on screen
 /// saying why.
+///
+/// # Why there are two selections
+///
+/// `wanted` is the cell the front end has chosen. `read` is the cell the reading was taken of,
+/// on the simulation thread, possibly a frame ago.
+///
+/// They are usually the same and the distinction looks like pedantry. It is not. Since M10.1
+/// the reading is gathered on the other thread, so for a frame or two after a click the newest
+/// bundle was built before the click happened and has no reading for the new cell. Judging
+/// that as a death — which is what this did, because "no reading" was the only signal — clears
+/// the selection immediately after it is made. The cell appears in the panel for a few frames
+/// and vanishes, which is exactly what it looked like.
+///
+/// So a reading is only evidence about a cell when it was taken *of* that cell. Anything else
+/// is a bundle that predates the question.
 #[must_use]
-pub fn tracking(inspection: Option<&Inspection>, following: bool, selected: bool) -> Track {
+pub fn tracking(
+    inspection: Option<&Inspection>,
+    following: bool,
+    wanted: Option<mm_core::CellId>,
+    read: Option<mm_core::CellId>,
+) -> Track {
+    if wanted != read {
+        // The reading answers a question nobody is asking any more. It says nothing about the
+        // cell now selected, and silence is not death.
+        return Track::Stay;
+    }
     match inspection {
         Some(c) if following => Track::MoveTo(
             c.x as f32 / mm_core::fixed::POS_ONE as f32,
@@ -288,7 +313,7 @@ pub fn tracking(inspection: Option<&Inspection>, following: bool, selected: bool
         // Only `Lost` if there was something to lose. A frame with nothing selected is not a
         // bereavement, and reporting one would clear the follow flag every frame before the
         // user had picked anything.
-        None if selected => Track::Lost,
+        None if wanted.is_some() => Track::Lost,
         None => Track::Stay,
     }
 }
@@ -596,27 +621,66 @@ mod tests {
     fn tracking_follows_a_living_cell_and_lets_go_of_a_dead_one() {
         let (world, id) = world_with_a_cell();
         let c = Inspection::of(&world, id).expect("alive");
+        let picked = Some(id);
 
         assert_eq!(
-            tracking(Some(&c), false, true),
+            tracking(Some(&c), false, picked, picked),
             Track::Stay,
             "not following"
         );
-        match tracking(Some(&c), true, true) {
+        match tracking(Some(&c), true, picked, picked) {
             Track::MoveTo(x, y) => {
                 assert!((x - 4.0).abs() < 0.01 && (y - 5.0).abs() < 0.01, "{x},{y}");
             }
             other => panic!("following a live cell gave {other:?}"),
         }
 
-        // The cell dies. Following has to stop, or the camera stays pinned to an empty square
-        // and the view looks broken rather than finished.
-        assert_eq!(tracking(None, true, true), Track::Lost);
-        assert_eq!(tracking(None, false, true), Track::Lost);
+        // The cell dies: the simulation thread looked for this exact cell and found nothing.
+        // Following has to stop, or the camera stays pinned to an empty square and the view
+        // looks broken rather than finished.
+        assert_eq!(tracking(None, true, picked, picked), Track::Lost);
+        assert_eq!(tracking(None, false, picked, picked), Track::Lost);
 
         // But a frame with nothing selected at all is not a loss — reporting one would clear
         // the flag every frame before anybody had picked a cell.
-        assert_eq!(tracking(None, true, false), Track::Stay);
+        assert_eq!(tracking(None, true, None, None), Track::Stay);
+    }
+
+    #[test]
+    fn a_freshly_picked_cell_is_not_reported_dead_before_it_has_been_read() {
+        // The bug this argument exists for. A click sets the selection on this thread; the
+        // reading is taken on the other one and arrives a frame or two later. Until it does,
+        // the newest bundle was built against the *previous* selection and has nothing to say
+        // about the new cell — and "nothing to say" was being read as "died", which cleared the
+        // selection immediately after it was made. The cell flickered into the panel and
+        // vanished.
+        let (world, id) = world_with_a_cell();
+        let c = Inspection::of(&world, id).expect("alive");
+
+        // Just clicked: wanted is the new cell, the bundle was built with nothing selected.
+        assert_eq!(tracking(None, true, Some(id), None), Track::Stay);
+        assert_eq!(tracking(None, false, Some(id), None), Track::Stay);
+
+        // And the other way: the bundle still carries the previous cell's reading. It must not
+        // be followed, or the camera flies to a cell that is no longer selected.
+        assert_eq!(tracking(Some(&c), true, None, Some(id)), Track::Stay);
+
+        // Once the reading catches up, it is authoritative again.
+        match tracking(Some(&c), true, Some(id), Some(id)) {
+            Track::MoveTo(..) => {}
+            other => panic!("a caught-up reading gave {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_reading_of_a_different_cell_is_never_evidence() {
+        // Selection changed from one live cell to another. The bundle in hand describes the old
+        // one. Neither "follow it" nor "the new one is dead" is a defensible reading of that.
+        let (world, id) = world_with_a_cell();
+        let c = Inspection::of(&world, id).expect("alive");
+        let other = CellId::NONE;
+        assert_eq!(tracking(Some(&c), true, Some(other), Some(id)), Track::Stay);
+        assert_eq!(tracking(None, true, Some(other), Some(id)), Track::Stay);
     }
 
     fn world_with_a_cell() -> (World, CellId) {

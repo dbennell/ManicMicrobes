@@ -130,6 +130,13 @@ impl Rate {
 #[derive(Clone, Debug)]
 pub struct Published {
     pub frame: Frame,
+    /// The cell this bundle was built against, whether or not it turned out to be alive.
+    ///
+    /// Not the same question as `inspection.is_some()`, and the difference is load-bearing: a
+    /// bundle built a frame before a click has no reading for the newly picked cell, and that
+    /// is not the same as the cell being gone. See [`crate::inspector::tracking`], which read
+    /// the two as one thing and cleared every selection a few frames after it was made.
+    pub selection: Option<mm_core::CellId>,
     /// The selected cell, read where the world is rather than where the panel is.
     pub inspection: Option<Inspection>,
     /// The selected cell's species name. Needs the archive, so it cannot be worked out on the
@@ -395,6 +402,7 @@ fn run(shared: &Shared) {
                 let inspection = selected.and_then(|id| slide.inspect(id));
                 Published {
                     frame: slide.frame(),
+                    selection: selected,
                     species: inspection
                         .as_ref()
                         .map_or_else(String::new, |c| slide.species_name(c.species)),

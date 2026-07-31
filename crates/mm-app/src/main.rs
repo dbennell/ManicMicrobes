@@ -82,6 +82,7 @@ use bevy_egui::{egui, EguiContexts, EguiPlugin};
 use mm_app::debugger::{Breakpoint, Breakpoints, Sandbox};
 use mm_app::editor::Editor;
 use mm_app::engine::{Engine, Published, Rate};
+use mm_app::inspector::Inspection;
 use mm_app::slide::{Frame, Lod, Slide};
 use mm_app::tools::{self, ToolEvent};
 use mm_app::ui::{self, Dock, Focus, Panel, Panels, Rect, Target};
@@ -178,6 +179,7 @@ impl SlideRes {
         let chem_names = slide.chemical_names();
         let latest = Published {
             frame: slide.frame(),
+            selection: None,
             inspection: None,
             species: String::new(),
             history: slide.history().clone(),
@@ -196,6 +198,19 @@ impl SlideRes {
             last_export: None,
             listing: mm_app::inspector::Listing::default(),
             editing: None,
+        }
+    }
+
+    /// The reading for the cell that is actually selected, if one has arrived yet.
+    ///
+    /// Not `latest.inspection` directly. That is whatever the simulation thread last published,
+    /// and for a frame or two after a click it describes the *previous* selection — so a panel
+    /// reading it raw shows the cell you just stopped looking at, and then blinks.
+    fn reading(&self) -> Option<&Inspection> {
+        if self.latest.selection == self.selected {
+            self.latest.inspection.as_ref()
+        } else {
+            None
         }
     }
 
@@ -746,7 +761,8 @@ fn collect_simulation(mut sim: ResMut<SlideRes>, mut view: ResMut<View>) {
     let track = mm_app::inspector::tracking(
         sim.latest.inspection.as_ref(),
         view.follow,
-        sim.selected.is_some(),
+        sim.selected,
+        sim.latest.selection,
     );
     match track {
         // Set rather than eased: the camera has to be exactly on the cell or a fast one
@@ -1364,7 +1380,7 @@ fn status_bar(
 ) {
     egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
         ui.horizontal(|ui| {
-            if sim.latest.inspection.is_some() {
+            if sim.reading().is_some() {
                 ui.label(egui::RichText::new(&sim.latest.species).italics().strong());
                 ui.separator();
             }
@@ -1537,7 +1553,7 @@ fn metrics_body(ui: &mut egui::Ui, sim: &SlideRes) {
 /// editor, and applying it writes the new bytes back into the same living cell without
 /// stopping the world — see [`tools::rewrite_genome`] for what happens to the machine.
 fn genome_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
-    let Some(c) = sim.latest.inspection.clone() else {
+    let Some(c) = sim.reading().cloned() else {
         ui.weak("no cell selected — click one on the slide");
         return;
     };
@@ -1680,7 +1696,7 @@ fn pointer_on_slide(
 /// Everything drawn here comes from an [`Inspection`], which is a copy — the panel holds no
 /// borrow of the world and there is no path from a click in it back to a tick.
 fn cell_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
-    let Some(c) = sim.latest.inspection.clone() else {
+    let Some(c) = sim.reading().cloned() else {
         ui.weak("click a cell to inspect it");
         return;
     };
