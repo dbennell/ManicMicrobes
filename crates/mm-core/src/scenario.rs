@@ -105,6 +105,19 @@ pub struct Scenario {
     pub barriers: Vec<Barrier>,
 
     pub vm: VmConfig,
+
+    /// Costs, rates, mutation, junctions, ecology and the organelle catalogue (M10.2).
+    ///
+    /// This lived on `World` alone until M10.2, reachable through `World::set_biology` and from
+    /// nowhere else — so every scenario in `scenarios/` ran on the compiled-in defaults, and
+    /// the balancing numbers arrived at by measurement in M9 were constants no scenario could
+    /// vary and no user could touch. A parameter that is not in the file is not a parameter,
+    /// it is a decision somebody else made.
+    ///
+    /// Moving it here also deletes about sixty lines of hand-written serialisation from
+    /// `snapshot.rs`, which had been the reason the snapshot format version moved three times
+    /// in two milestones for changes that should have been free.
+    pub biology: crate::biology::BiologyConfig,
 }
 
 impl Default for Scenario {
@@ -124,6 +137,7 @@ impl Default for Scenario {
             seeding: Vec::new(),
             barriers: Vec::new(),
             vm: VmConfig::DEFAULT,
+            biology: crate::biology::BiologyConfig::default(),
         }
     }
 }
@@ -277,6 +291,7 @@ impl StateHash for Scenario {
         h.u16(self.vm.promoter_bind_threshold);
         h.u64(self.seeding.len() as u64);
         h.u64(self.barriers.len() as u64);
+        self.biology.hash_state(h);
         for c in 0..CHEM_COUNT {
             h.i32(self.chemicals.get(c).diffusion);
         }
@@ -300,6 +315,67 @@ mod tests {
         let s = Scenario::stress(64, 48);
         let back = Scenario::from_ron(&s.to_ron().unwrap()).unwrap();
         assert_eq!(back, s);
+    }
+
+    #[test]
+    fn every_biology_parameter_survives_the_file() {
+        // The point of M10.2. These lived on `World` and nowhere else, so a scenario could not
+        // express them and the numbers arrived at by measurement were constants. Each one is
+        // moved off its default here, because a round trip of the defaults would pass just as
+        // well against a field that serialises as a constant.
+        let mut s = Scenario::default();
+        s.biology.division_matter = 12_345;
+        s.biology.division_energy = 6_789;
+        s.biology.structural_chemical = 9;
+        s.biology.copy_energy_per_byte = 77;
+        s.biology.mutation.point = 4_242;
+        s.biology.mutation.duplication = 31;
+        s.biology.metabolism.rates.repair_energy_per_unit = 555;
+        s.biology.metabolism.rates.background_damage = 13;
+        s.biology.metabolism.rates.metabolic_floor = 21;
+        s.biology.metabolism.catalogue.metabolism.substrate = 3;
+        s.biology.junctions.join_forced_penalty = 999;
+        s.biology.junctions.probe_leaks_distance = true;
+        s.biology.ecology.spike_damage = 246;
+        s.biology.ecology.digestion_efficiency = 802;
+
+        let mut specs = *s.biology.metabolism.catalogue.specs();
+        specs[3].build_energy = 4_096;
+        specs[3].upkeep_per_param = 17;
+        s.biology.metabolism.catalogue.set_specs(specs);
+
+        let back = Scenario::from_ron(&s.to_ron().unwrap()).unwrap();
+        assert_eq!(
+            back, s,
+            "a biology parameter did not survive the round trip"
+        );
+    }
+
+    #[test]
+    fn a_scenario_that_says_nothing_about_biology_still_loads() {
+        // Every scenario in `scenarios/` was written before the parameters existed in the file,
+        // and none of them mention it. They have to keep working, and they have to keep meaning
+        // what they meant.
+        let text = r#"(name: "terse", width: 8, height: 8)"#;
+        let s = Scenario::from_ron(text).unwrap();
+        assert_eq!(s.biology, crate::biology::BiologyConfig::default());
+    }
+
+    #[test]
+    fn two_scenarios_differing_only_in_a_parameter_do_not_share_a_hash() {
+        // A world that costs more to divide in is a different world. A hash that could not say
+        // so would let a determinism test pass across a parameter change, which is the one
+        // thing the hash is for.
+        use crate::state_hash::StateHasher;
+        let a = Scenario::default();
+        let mut b = Scenario::default();
+        b.biology.division_energy += 1;
+
+        let mut ha = StateHasher::new();
+        a.hash_state(&mut ha);
+        let mut hb = StateHasher::new();
+        b.hash_state(&mut hb);
+        assert_ne!(ha.finish(), hb.finish());
     }
 
     #[test]

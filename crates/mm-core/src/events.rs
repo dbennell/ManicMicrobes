@@ -540,7 +540,11 @@ mod tests {
         sorted.sort_unstable();
         let mut deduped = sorted.to_vec();
         deduped.dedup();
-        assert_eq!(deduped.len(), Occurrence::ALL.len(), "ALL repeats a variant");
+        assert_eq!(
+            deduped.len(),
+            Occurrence::ALL.len(),
+            "ALL repeats a variant"
+        );
         assert!(
             !Occurrence::ALL.iter().all(|o| o.detectable_now()),
             "if everything is detectable, the silence test has nothing left to check"

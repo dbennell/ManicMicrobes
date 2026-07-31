@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use crate::biology::{self, BiologyConfig, BiologyReport};
+use crate::biology::{self, BiologyConfig, BiologyReport, Intervention};
 use crate::cell::{CellArena, CellId, CellSeed};
 use crate::chem::CHEM_COUNT;
 use crate::fluid;
@@ -98,7 +98,17 @@ pub struct World {
     /// Interned genomes, shared across the whole population.
     genomes: GenomePool,
     /// Costs, rates and mutation for the living half of the world.
+    ///
+    /// Starts as the scenario's and stays equal to it until somebody changes it mid-run, at
+    /// which point the change is recorded in `interventions`.
     biology: BiologyConfig,
+    /// Parameter changes made while the world was running, oldest first (M10.2).
+    ///
+    /// A run is reproducible from `(scenario, seed)` — I1 — and changing a parameter at tick
+    /// forty thousand breaks that unless the change is part of the record. So it is part of the
+    /// record. The alternative was to forbid mid-run edits, which makes every balancing
+    /// experiment a cold start, and this world is nowhere near balanced.
+    interventions: Vec<Intervention>,
     /// This tick's intents. Cleared at the start of every execute phase.
     intents: IntentBuffer,
     /// Deaths and births decided during resolve, applied during bookkeeping.
@@ -140,6 +150,12 @@ impl PartialEq for World {
             && self.foreign_injections_total == other.foreign_injections_total
             && self.forced_joins_total == other.forced_joins_total
             && self.wounds_total == other.wounds_total
+            // Both, though one implies the other: `biology` is the founding scenario's with the
+            // interventions replayed over it. Comparing the derived value as well as the record
+            // it comes from is what catches a restore that has the history right and applies it
+            // wrongly, which is the failure that would otherwise look like a correct file.
+            && self.biology == other.biology
+            && self.interventions == other.interventions
     }
 }
 
@@ -157,6 +173,7 @@ impl World {
     ///
     /// Bad grid dimensions, or an ISA version this engine cannot honour.
     pub fn new(scenario: Scenario) -> Result<World, ScenarioError> {
+        let biology = scenario.biology.clone();
         scenario.check_isa()?;
         let substrate =
             Substrate::new(scenario.width, scenario.height).map_err(ScenarioError::Substrate)?;
@@ -187,7 +204,8 @@ impl World {
             radii: Vec::new(),
             cells: CellArena::new(),
             genomes: GenomePool::new(),
-            biology: BiologyConfig::default(),
+            biology,
+            interventions: Vec::new(),
             intents: IntentBuffer::new(),
             pending: Pending::default(),
             starving: Vec::new(),
@@ -666,9 +684,49 @@ impl World {
         &self.biology
     }
 
-    #[inline]
+    /// Change the parameters the living half of the world runs on.
+    ///
+    /// Before the first tick this is scenario setup, so the scenario is updated to match: a
+    /// world whose parameters differ from the scenario that describes it is the bug M10.2
+    /// exists to fix, and it would be a poor showing to reintroduce it through the setter.
+    ///
+    /// After the first tick this is an *intervention* — a hand reaching into a running world —
+    /// and it is recorded as one, so that `(scenario, seed, interventions)` still reproduces
+    /// the run exactly and the timeline can say when somebody changed their mind.
     pub fn set_biology(&mut self, config: BiologyConfig) {
+        if self.biology == config {
+            return;
+        }
+        if self.tick == 0 {
+            self.scenario.biology = config.clone();
+        } else {
+            self.interventions.push(Intervention {
+                tick: self.tick,
+                biology: config.clone(),
+            });
+        }
         self.biology = config;
+    }
+
+    /// Every parameter change made to this world while it was running, oldest first.
+    ///
+    /// The experiment log. Replaying the founding scenario's parameters and then these, in
+    /// order, gives the configuration the world is running on now — which is how a snapshot
+    /// restores it without storing it twice.
+    #[inline]
+    #[must_use]
+    pub fn interventions(&self) -> &[Intervention] {
+        &self.interventions
+    }
+
+    /// Restore a recorded intervention list, when resuming a snapshot.
+    ///
+    /// Applies the last one, since that is by definition the configuration in force.
+    pub fn restore_interventions(&mut self, interventions: Vec<Intervention>) {
+        if let Some(last) = interventions.last() {
+            self.biology = last.biology.clone();
+        }
+        self.interventions = interventions;
     }
 
     /// What the last tick did.

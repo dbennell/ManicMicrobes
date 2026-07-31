@@ -50,7 +50,8 @@ use crate::substrate::Substrate;
 ///
 /// Scenario data at M8; named constants here so the numbers are visible rather than buried in
 /// the arithmetic that uses them.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct MetabolicRates {
     /// Fraction of absorbed light that ends up banked as substrate rather than heat.
     pub photosynthesis_efficiency: i32,
@@ -181,7 +182,8 @@ impl Default for MetabolicRates {
 }
 
 /// Everything the metabolic step needs that is not the world itself.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Metabolism {
     pub rates: MetabolicRates,
     pub catalogue: OrganelleCatalogue,
@@ -630,7 +632,10 @@ mod tests {
         let mut starving = Vec::new();
         met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
 
-        assert!(cells.damage[i] < q10(5), "a cell that could pay did not mend");
+        assert!(
+            cells.damage[i] < q10(5),
+            "a cell that could pay did not mend"
+        );
         assert!(
             cells.energy[i] < before,
             "mending cost nothing, so maintenance is not part of the budget"

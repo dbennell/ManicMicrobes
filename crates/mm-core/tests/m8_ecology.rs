@@ -98,7 +98,12 @@ fn seed(world: &mut World, genome: &[u8], n: u32, mutation: MutationRates) {
 #[test]
 fn a_dead_cell_leaves_a_corpse_where_it_fell() {
     let mut world = World::new(scenario("soup.ron")).expect("world");
-    seed(&mut world, &assemble("ancestor.mm"), 4, MutationRates::none());
+    seed(
+        &mut world,
+        &assemble("ancestor.mm"),
+        4,
+        MutationRates::none(),
+    );
     world.run(30);
     let victim = world
         .cells()
@@ -139,7 +144,10 @@ fn carrion_stays_near_where_it_fell_and_decays_rather_than_accumulating() {
     // table that anything could edit.
     let rates = soup.chemicals.diffusion_rates();
     assert!(
-        rates.iter().enumerate().all(|(i, r)| i == CARRION || *r > rates[CARRION]),
+        rates
+            .iter()
+            .enumerate()
+            .all(|(i, r)| i == CARRION || *r > rates[CARRION]),
         "carrion is no longer the least mobile chemical: {rates:?}"
     );
 
@@ -227,7 +235,12 @@ fn a_hunter_wounds_and_the_newspaper_reports_predation() {
 #[test]
 fn a_scavenger_gets_something_out_of_a_corpse() {
     let mut world = World::new(scenario("soup.ron")).expect("world");
-    seed(&mut world, &assemble("scavenger.mm"), 1, MutationRates::none());
+    seed(
+        &mut world,
+        &assemble("scavenger.mm"),
+        1,
+        MutationRates::none(),
+    );
     // Let it build its lysosome, then put a corpse under it.
     world.run(400);
     let cell = world
@@ -484,7 +497,10 @@ fn scavenging_is_cheaper_than_hunting_and_worth_less() {
     let cat = mm_core::organelle::OrganelleCatalogue::balanced();
     let lyso = cat.spec(OrganelleType::Lysosome);
     let spike = cat.spec(OrganelleType::Spike);
-    assert!(lyso.upkeep < spike.upkeep, "a lysosome costs as much as a spike");
+    assert!(
+        lyso.upkeep < spike.upkeep,
+        "a lysosome costs as much as a spike"
+    );
     assert!(lyso.matter_cost(90) < spike.matter_cost(90));
 
     let eco = mm_core::ecology::EcologyConfig::default();
@@ -623,7 +639,10 @@ fn the_barriers_actually_separate_the_slide() {
     );
     // And not sealed: a slide cut into four boxes is four runs sharing a file.
     let gap_open = (46..50).any(|y| !s.is_blocked(48, y));
-    assert!(gap_open, "the wall has no gap; the habitats cannot exchange");
+    assert!(
+        gap_open,
+        "the wall has no gap; the habitats cannot exchange"
+    );
 }
 
 #[test]
@@ -663,7 +682,11 @@ fn acceptance_allopatric_speciation() {
             islands.1,
             control.0,
             control.1,
-            if islands.0 > control.0 { "  <-- islands" } else { "" }
+            if islands.0 > control.0 {
+                "  <-- islands"
+            } else {
+                ""
+            }
         );
         if islands.0 > control.0 {
             islands_won += 1;
@@ -749,7 +772,11 @@ fn run_food_web(seed_value: u64, ticks: u64, sample: u64) -> Vec<TrophicMix> {
 fn a_food_web_holds_together_guard() {
     // The mechanism check behind acceptance 2: three strategies seeded together must all still
     // be present a while later. Not the million-tick oscillation, which is the ignored test.
-    let ticks = if cfg!(debug_assertions) { 2_000 } else { 20_000 };
+    let ticks = if cfg!(debug_assertions) {
+        2_000
+    } else {
+        20_000
+    };
     let history = run_food_web(1, ticks, ticks / 8);
     let last = history.last().copied().unwrap_or_default();
     eprintln!(
@@ -973,7 +1000,12 @@ fn the_library_list_is_the_scenarios_directory() {
 fn every_scenario_in_the_library_loads_and_runs() {
     for name in LIBRARY {
         let mut world = World::new(scenario(name)).expect(name);
-        seed(&mut world, &assemble("ancestor.mm"), 4, MutationRates::none());
+        seed(
+            &mut world,
+            &assemble("ancestor.mm"),
+            4,
+            MutationRates::none(),
+        );
         world.run(200);
         world
             .check_invariants()
@@ -983,7 +1015,11 @@ fn every_scenario_in_the_library_loads_and_runs() {
 
 #[test]
 fn no_degenerate_optimum_guard() {
-    let ticks = if cfg!(debug_assertions) { 1_000 } else { 10_000 };
+    let ticks = if cfg!(debug_assertions) {
+        1_000
+    } else {
+        10_000
+    };
     for name in LIBRARY {
         let Some(mix) = strategy_mix_after(name, ticks) else {
             eprintln!("{name}: extinct at {ticks} ticks");

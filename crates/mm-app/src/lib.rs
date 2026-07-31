@@ -22,6 +22,7 @@
 //! - [`debugger`] — breakpoints over the live world, instruction stepping in a sandbox.
 //! - [`wiki`] — the species wiki, the phylogenetic tree and the world timeline.
 //! - [`tools`] — tweezers and barriers: the one place that is *meant* to touch the world.
+//! - [`params`] — what the parameter editor calls each knob (M10.2).
 //! - [`ui`] — the shell: pointer routing, panel state, camera arithmetic.
 //!
 //! All of them are testable without a graphics stack, which is the point. `main.rs` is the
@@ -33,6 +34,7 @@ pub mod engine;
 pub mod foodweb;
 pub mod inspector;
 pub mod optics;
+pub mod params;
 pub mod slide;
 pub mod tools;
 pub mod ui;

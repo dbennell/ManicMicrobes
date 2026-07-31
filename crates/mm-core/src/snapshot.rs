@@ -35,7 +35,7 @@ use crate::world::World;
 pub const MAGIC: [u8; 8] = *b"MMSNAP\0\x01";
 /// Snapshot format version, distinct from the ISA version. The format may change without
 /// the meaning of a genome changing, and vice versa.
-pub const FORMAT_VERSION: u16 = 6;
+pub const FORMAT_VERSION: u16 = 7;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum SnapshotError {
@@ -534,76 +534,29 @@ impl Snapshot {
             w.i64(v);
         }
 
-        // --- the biology configuration ---
+        // --- interventions: parameter changes made while the world was running (M10.2) ---
         //
-        // Mutation rates, division costs, metabolic constants and the organelle catalogue.
-        // Not stored until M6, which is a hard-rule-7 bug that was latent from M2: a world
-        // restored into `BiologyConfig::default()` is a *different world*, and the first thing
-        // to notice was an arena match — mutation off when it was saved, back on when it was
-        // resumed, diverging twenty ticks later while the state hash at the moment of restore
-        // matched perfectly.
-        let b = world.biology();
-        w.u32(b.mutation.point);
-        w.u32(b.mutation.insertion);
-        w.u32(b.mutation.deletion);
-        w.u32(b.mutation.duplication);
-        w.u32(b.mutation.inversion);
-        w.u32(b.mutation.translocation);
-        w.u16(b.mutation.max_segment);
-        w.u32(b.mutation.copy_error_max);
-        w.i32(b.division_matter);
-        w.i32(b.division_energy);
-        w.u64(b.structural_chemical as u64);
-        w.i32(b.copy_energy_per_byte);
-
-        let j = &b.junctions;
-        w.i32(j.join_base_cost);
-        w.i32(j.join_forced_penalty);
-        w.i32(j.soft_max_range);
-        w.i32(j.breaking_strain);
-        w.i32(j.stiffness);
-        w.u8(j.iterations);
-        w.i32(j.muscle_range);
-        w.bool(j.probe_leaks_distance);
-        w.i32(j.transfer_cost);
-
-        let e = &b.ecology;
-        w.i32(e.spike_damage);
-        w.i32(e.spike_upkeep);
-        w.i32(e.carrion_fraction);
-        w.i32(e.digestion_rate);
-        w.i32(e.digestion_efficiency);
-
-        let r = &b.metabolism.rates;
-        w.i32(r.photosynthesis_efficiency);
-        w.i32(r.respiration_efficiency);
-        w.i32(r.reactive_fraction);
-        w.i32(r.throughput_per_param);
-        w.i32(r.latent_per_substrate);
-        w.i32(r.toxicity_threshold);
-        w.i32(r.growth_rate);
-        w.i32(r.repair_per_tick);
-        w.i32(r.metabolic_floor);
-        w.i32(r.repair_energy_per_unit);
-        w.i32(r.background_damage);
-        // Appended, not inserted: a reader walks these in order, so a new field goes on the
-        // end and the version goes up (hard rule 7).
-
-        let m = b.metabolism.catalogue.metabolism;
-        w.u64(m.substrate as u64);
-        w.u64(m.oxidant as u64);
-        w.u64(m.waste as u64);
-        w.u64(m.byproduct as u64);
-        w.u64(m.structural as u64);
-        w.u64(m.reactive as u64);
-        for spec in b.metabolism.catalogue.specs() {
-            w.i32(spec.build_matter);
-            w.i32(spec.build_matter_per_param);
-            w.i32(spec.build_energy);
-            w.u16(spec.build_ticks);
-            w.i32(spec.upkeep);
-            w.i32(spec.upkeep_per_param);
-            w.i32(spec.teardown_recovery);
+        // The configuration itself is *not* written here. It is in the embedded scenario, which
+        // this format has always carried, and M10.2 moved `BiologyConfig` into `Scenario` so
+        // that it would be. What is left is the history: the founding parameters plus these
+        // changes, replayed in order, are the parameters in force now.
+        //
+        // Sixty lines of hand-written field-by-field serialisation used to live here, and it
+        // was the reason this format's version moved three times in two milestones for changes
+        // that should have been free. It was also a hard-rule-7 bug when it did not exist at
+        // all: before M6, a world restored into `BiologyConfig::default()` was a *different
+        // world*, and the first thing to notice was an arena match — mutation off when it was
+        // saved, back on when it was resumed, diverging twenty ticks later while the state hash
+        // at the moment of restore matched perfectly.
+        let interventions = world.interventions();
+        w.u32(interventions.len() as u32);
+        for step in interventions {
+            w.u64(step.tick);
+            // RON rather than a field-by-field encoding, for exactly the reason above: a
+            // parameter added to `BiologyConfig` must not need a matching pair of lines here
+            // and a version bump. `serde(default)` on every config struct means an older
+            // snapshot's text still loads, with anything it does not name taking its default.
+            w.string(&ron::to_string(&step.biology).unwrap_or_default());
         }
 
         // --- the species archive and the world's newspaper (SPEC §10) ---
@@ -900,85 +853,21 @@ impl Snapshot {
             *slot = r.i64()?;
         }
 
-        // --- the biology configuration ---
-        let mutation = crate::mutation::MutationRates {
-            point: r.u32()?,
-            insertion: r.u32()?,
-            deletion: r.u32()?,
-            duplication: r.u32()?,
-            inversion: r.u32()?,
-            translocation: r.u32()?,
-            max_segment: r.u16()?,
-            copy_error_max: r.u32()?,
-        };
-        let division_matter = r.i32()?;
-        let division_energy = r.i32()?;
-        let structural_chemical = r.u64()? as usize;
-        let copy_energy_per_byte = r.i32()?;
-        let junctions = crate::junction::JunctionConfig {
-            join_base_cost: r.i32()?,
-            join_forced_penalty: r.i32()?,
-            soft_max_range: r.i32()?,
-            breaking_strain: r.i32()?,
-            stiffness: r.i32()?,
-            iterations: r.u8()?,
-            muscle_range: r.i32()?,
-            probe_leaks_distance: r.bool()?,
-            transfer_cost: r.i32()?,
-        };
-        let ecology = crate::ecology::EcologyConfig {
-            spike_damage: r.i32()?,
-            spike_upkeep: r.i32()?,
-            carrion_fraction: r.i32()?,
-            digestion_rate: r.i32()?,
-            digestion_efficiency: r.i32()?,
-        };
-        let rates = crate::metabolism::MetabolicRates {
-            photosynthesis_efficiency: r.i32()?,
-            respiration_efficiency: r.i32()?,
-            reactive_fraction: r.i32()?,
-            throughput_per_param: r.i32()?,
-            latent_per_substrate: r.i32()?,
-            toxicity_threshold: r.i32()?,
-            growth_rate: r.i32()?,
-            repair_per_tick: r.i32()?,
-            metabolic_floor: r.i32()?,
-            repair_energy_per_unit: r.i32()?,
-            background_damage: r.i32()?,
-        };
-        let chemistry = crate::organelle::MetabolicChemistry {
-            substrate: r.u64()? as usize,
-            oxidant: r.u64()? as usize,
-            waste: r.u64()? as usize,
-            byproduct: r.u64()? as usize,
-            structural: r.u64()? as usize,
-            reactive: r.u64()? as usize,
-        };
-        let mut specs = *crate::organelle::OrganelleCatalogue::balanced().specs();
-        for spec in specs.iter_mut() {
-            *spec = crate::organelle::OrganelleSpec {
-                build_matter: r.i32()?,
-                build_matter_per_param: r.i32()?,
-                build_energy: r.i32()?,
-                build_ticks: r.u16()?,
-                upkeep: r.i32()?,
-                upkeep_per_param: r.i32()?,
-                teardown_recovery: r.i32()?,
-            };
+        // --- interventions (M10.2) ---
+        //
+        // The configuration came back with the embedded scenario. These are the changes made
+        // to it since, and `restore_interventions` applies the last of them, which is by
+        // definition the one in force.
+        let intervention_count = r.u32()? as usize;
+        let mut interventions = Vec::with_capacity(intervention_count.min(1 << 16));
+        for _ in 0..intervention_count {
+            let tick = r.u64()?;
+            let text = r.string()?;
+            let biology = ron::from_str(&text)
+                .map_err(|e| SnapshotError::Corrupt(format!("intervention at tick {tick}: {e}")))?;
+            interventions.push(crate::biology::Intervention { tick, biology });
         }
-        let mut catalogue = crate::organelle::OrganelleCatalogue::balanced();
-        catalogue.metabolism = chemistry;
-        catalogue.set_specs(specs);
-        world.set_biology(crate::biology::BiologyConfig {
-            metabolism: crate::metabolism::Metabolism { rates, catalogue },
-            mutation,
-            division_matter,
-            division_energy,
-            structural_chemical,
-            copy_energy_per_byte,
-            junctions,
-            ecology,
-        });
+        world.restore_interventions(interventions);
 
         // --- the species archive and the world's newspaper ---
         let next_species = r.u32()?;
@@ -1140,6 +1029,75 @@ mod tests {
         w
     }
 
+    /// The same world, with somebody's hand in it twice.
+    fn meddled_with(ticks: u64) -> World {
+        let mut w = World::new(Scenario::stress(24, 20)).unwrap();
+        w.run(ticks / 3);
+        let mut config = w.biology().clone();
+        config.division_energy *= 3;
+        config.metabolism.rates.background_damage += 7;
+        w.set_biology(config);
+        w.run(ticks / 3);
+        let mut config = w.biology().clone();
+        config.mutation.point = 0;
+        config.junctions.probe_leaks_distance = true;
+        w.set_biology(config);
+        w.run(ticks / 3);
+        w
+    }
+
+    #[test]
+    fn a_world_that_was_meddled_with_resumes_as_it_was_left() {
+        // M10.2's central claim. Changing a parameter mid-run breaks I1 unless the change is
+        // part of the record, so it is part of the record — and this is what makes that more
+        // than an assertion in a doc comment.
+        let original = meddled_with(300);
+        assert_eq!(original.interventions().len(), 2);
+
+        let restored = Snapshot::read(&Snapshot::write(&original).unwrap()).unwrap();
+        assert_eq!(restored.state_hash(), original.state_hash());
+        assert_eq!(
+            restored.biology(),
+            original.biology(),
+            "the parameters in force were not restored"
+        );
+        assert_eq!(
+            restored.interventions(),
+            original.interventions(),
+            "the record of who changed what, and when, was lost"
+        );
+
+        // And it must carry on identically, not merely look identical at the moment of
+        // restore — which is exactly how the pre-M6 version of this bug hid.
+        let mut a = original;
+        let mut b = restored;
+        a.run(200);
+        b.run(200);
+        assert_eq!(
+            a.state_hash(),
+            b.state_hash(),
+            "they diverged after resuming"
+        );
+    }
+
+    #[test]
+    fn setting_the_parameters_before_the_first_tick_is_not_an_intervention() {
+        // Scenario setup, not a hand in a running world. It updates the scenario instead, so
+        // that the file describing the world always does describe it.
+        let mut w = World::new(Scenario::stress(16, 16)).unwrap();
+        let mut config = w.biology().clone();
+        config.division_energy += 100;
+        w.set_biology(config.clone());
+
+        assert!(w.interventions().is_empty());
+        assert_eq!(w.scenario().biology, config);
+
+        // And setting it to what it already is changes nothing either way.
+        w.run(5);
+        w.set_biology(config);
+        assert!(w.interventions().is_empty(), "a no-op was recorded");
+    }
+
     #[test]
     fn a_world_survives_a_round_trip() {
         let original = stirred(500);
@@ -1217,11 +1175,16 @@ mod tests {
 
     #[test]
     fn a_foreign_format_version_is_refused() {
+        // Derived from the current version rather than written out, because a literal here
+        // silently becomes the *current* version the next time the format changes — which is
+        // exactly what happened at version 7, where this test started asserting that a
+        // perfectly good snapshot was refused.
+        let foreign = FORMAT_VERSION.wrapping_add(1);
         let mut bytes = Snapshot::write(&stirred(1)).unwrap();
-        bytes[MAGIC.len()] = 7;
+        bytes[MAGIC.len()..MAGIC.len() + 2].copy_from_slice(&foreign.to_le_bytes());
         assert!(matches!(
             Snapshot::read(&bytes).unwrap_err(),
-            SnapshotError::FormatVersion { found: 7, .. }
+            SnapshotError::FormatVersion { found, .. } if found == foreign
         ));
     }
 

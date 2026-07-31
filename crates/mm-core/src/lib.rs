@@ -57,6 +57,7 @@ pub mod mutation;
 pub mod names;
 pub mod neighbours;
 pub mod organelle;
+pub mod params;
 pub mod phylogeny;
 pub mod rng;
 pub mod scenario;

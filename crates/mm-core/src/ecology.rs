@@ -42,7 +42,8 @@ use crate::substrate::Substrate;
 pub const CARRION: usize = 15;
 
 /// What predation and digestion cost and yield.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct EcologyConfig {
     /// Membrane damage a spike deals per tick per unit of extension, `Q10`.
     pub spike_damage: i32,
@@ -115,10 +116,7 @@ pub fn digestive_capacity(cells: &CellArena, i: usize) -> i32 {
     for o in cells.slots(i) {
         if o.kind == OrganelleType::Lysosome && o.is_active() {
             let throttle = (o.control[0] as i32).clamp(0, Q10_ONE);
-            total = total.saturating_add(q10_scale(
-                crate::fixed::q10(o.param as i32),
-                throttle,
-            ));
+            total = total.saturating_add(q10_scale(crate::fixed::q10(o.param as i32), throttle));
         }
     }
     total
@@ -380,7 +378,10 @@ mod tests {
         assert!(cells.damage[iv] > 0, "the victim took no damage");
         assert_eq!(cells.damage[ib], 0, "a cell across the slide was wounded");
         assert!(report.damage_dealt > 0);
-        assert!(report.spike_upkeep > 0, "the spike cost nothing to hold out");
+        assert!(
+            report.spike_upkeep > 0,
+            "the spike cost nothing to hold out"
+        );
     }
 
     #[test]
@@ -458,7 +459,10 @@ mod tests {
         assert!(report.digested > 0, "nothing was digested");
         assert!(report.scavenged > 0, "digesting recovered no substrate");
         assert!(substrate.chem_at(CARRION, 5, 5) < before_carrion);
-        assert!(cells.interior(i)[8] > 0, "the scavenger gained no substrate");
+        assert!(
+            cells.interior(i)[8] > 0,
+            "the scavenger gained no substrate"
+        );
     }
 
     #[test]

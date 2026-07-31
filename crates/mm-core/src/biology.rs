@@ -132,15 +132,7 @@ pub fn read_organelle(
     let Some(intents) = buffer.slots_mut().nth(cell) else {
         return 0;
     };
-    let mut host = CellHost::new(
-        cell,
-        cells,
-        substrate,
-        neighbours,
-        intents,
-        0,
-        spike_damage,
-    );
+    let mut host = CellHost::new(cell, cells, substrate, neighbours, intents, 0, spike_damage);
     Host::oget(&mut host, idx, slot as i16)
 }
 
@@ -525,7 +517,8 @@ impl Host for CellHost<'_> {
 }
 
 /// Everything resolve needs that is not the world.
-#[derive(Clone, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct BiologyConfig {
     pub metabolism: Metabolism,
     pub mutation: MutationRates,
@@ -541,6 +534,98 @@ pub struct BiologyConfig {
     pub junctions: crate::junction::JunctionConfig,
     /// What predation and digestion cost and yield (M8).
     pub ecology: crate::ecology::EcologyConfig,
+}
+
+/// Every parameter, folded into the world's rolling state hash.
+///
+/// Two worlds that differ only in what a division costs are different worlds, and a hash that
+/// could not tell them apart would let a determinism test pass across a parameter change. This
+/// is written out field by field rather than derived so that adding a parameter and forgetting
+/// to hash it is a visible omission here rather than an invisible one everywhere.
+impl crate::state_hash::StateHash for BiologyConfig {
+    fn hash_state(&self, h: &mut crate::state_hash::StateHasher) {
+        let m = &self.mutation;
+        h.u32(m.point);
+        h.u32(m.insertion);
+        h.u32(m.deletion);
+        h.u32(m.duplication);
+        h.u32(m.inversion);
+        h.u32(m.translocation);
+        h.u16(m.max_segment);
+        h.u32(m.copy_error_max);
+
+        h.i32(self.division_matter);
+        h.i32(self.division_energy);
+        h.u64(self.structural_chemical as u64);
+        h.i32(self.copy_energy_per_byte);
+
+        let j = &self.junctions;
+        h.i32(j.join_base_cost);
+        h.i32(j.join_forced_penalty);
+        h.i32(j.soft_max_range);
+        h.i32(j.breaking_strain);
+        h.i32(j.stiffness);
+        h.u8(j.iterations);
+        h.i32(j.muscle_range);
+        h.u8(u8::from(j.probe_leaks_distance));
+        h.i32(j.transfer_cost);
+
+        let e = &self.ecology;
+        h.i32(e.spike_damage);
+        h.i32(e.spike_upkeep);
+        h.i32(e.carrion_fraction);
+        h.i32(e.digestion_rate);
+        h.i32(e.digestion_efficiency);
+
+        let r = &self.metabolism.rates;
+        h.i32(r.photosynthesis_efficiency);
+        h.i32(r.respiration_efficiency);
+        h.i32(r.reactive_fraction);
+        h.i32(r.throughput_per_param);
+        h.i32(r.latent_per_substrate);
+        h.i32(r.toxicity_threshold);
+        h.i32(r.growth_rate);
+        h.i32(r.repair_per_tick);
+        h.i32(r.metabolic_floor);
+        h.i32(r.repair_energy_per_unit);
+        h.i32(r.background_damage);
+
+        let c = &self.metabolism.catalogue;
+        let chem = c.metabolism;
+        h.u64(chem.substrate as u64);
+        h.u64(chem.oxidant as u64);
+        h.u64(chem.waste as u64);
+        h.u64(chem.byproduct as u64);
+        h.u64(chem.structural as u64);
+        h.u64(chem.reactive as u64);
+        for spec in c.specs() {
+            h.i32(spec.build_matter);
+            h.i32(spec.build_matter_per_param);
+            h.i32(spec.build_energy);
+            h.u16(spec.build_ticks);
+            h.i32(spec.upkeep);
+            h.i32(spec.upkeep_per_param);
+            h.i32(spec.teardown_recovery);
+        }
+    }
+}
+
+/// A parameter change made to a world that was already running (M10.2).
+///
+/// The whole configuration rather than a description of what changed. A `set field X to V`
+/// encoding would need one variant per parameter — sixty of them, each a chance to forget one —
+/// and replaying it would have to reproduce the mutation exactly. Storing the configuration
+/// makes replay a copy, which cannot be wrong, and leaves the "what changed" question to the
+/// display layer, which can answer it by comparing two of these.
+///
+/// A few hundred bytes each. A world with a thousand interventions in its history is a world
+/// somebody has been fiddling with for hours, and it costs a quarter of a megabyte.
+#[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Intervention {
+    /// The tick it took effect on.
+    pub tick: u64,
+    /// The configuration in force from that tick until the next intervention.
+    pub biology: BiologyConfig,
 }
 
 impl Default for BiologyConfig {
@@ -1381,8 +1466,7 @@ pub fn execute(
         }
         let genome: Arc<Genome> = Arc::clone(&arena.genome[i]);
         let ctx = RandCtx::new(seed, tick, arena.id_at(i).ordering_key());
-        let mut host =
-            CellHost::new(i, arena, substrate, neighbours, slot, tick, spike_damage);
+        let mut host = CellHost::new(i, arena, substrate, neighbours, slot, tick, spike_damage);
         vm.tick(&genome, cfg, &ctx, &mut host);
         host.intents.dropped()
     };
@@ -1715,8 +1799,14 @@ mod tests {
 
         assert_eq!(report.births, 0, "it should have been refused");
         assert_eq!(f.total(), before, "a refused division destroyed matter");
-        assert_eq!(f.cells.mass[i], mass, "the parent was halved and got nothing back");
-        assert_eq!(f.cells.energy[i], energy, "the parent paid for a division it did not get");
+        assert_eq!(
+            f.cells.mass[i], mass,
+            "the parent was halved and got nothing back"
+        );
+        assert_eq!(
+            f.cells.energy[i], energy,
+            "the parent paid for a division it did not get"
+        );
         assert_eq!(f.cells.interior(i), interior.as_slice());
     }
 
@@ -1733,7 +1823,11 @@ mod tests {
         f.cells.mass[i] = q10(200);
         f.cells.energy[i] = q10(4_000);
 
-        assert_eq!(nucleus_fidelity(&f.cells, i), Some(0), "it has a fidelity, and it is zero");
+        assert_eq!(
+            nucleus_fidelity(&f.cells, i),
+            Some(0),
+            "it has a fidelity, and it is zero"
+        );
         assert!(nucleus_capacity(&f.cells, i) > 0);
 
         f.cells.daughter[i] = Some(vec![0u8; 32]);

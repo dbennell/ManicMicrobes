@@ -250,7 +250,10 @@ impl Organelle {
 ///
 /// Data-driven, so balancing (M8) is a matter of editing numbers rather than code, and so a
 /// scenario can pose a different economy without a different engine.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// `Default` is "costs nothing, does nothing" — the `Empty` slot's entry, and the right thing
+/// for a scenario that names some fields of a spec and leaves the rest out.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct OrganelleSpec {
     /// Structural matter to build one, at `param == 0`, `Q10`.
     pub build_matter: i32,
@@ -288,7 +291,8 @@ impl OrganelleSpec {
 }
 
 /// The costs and capabilities of every catalogue entry.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct OrganelleCatalogue {
     specs: [OrganelleSpec; SLOT_COUNT],
     /// Which chemical a mitochondrion oxidises, which a chloroplast produces, and so on.
@@ -301,7 +305,8 @@ pub struct OrganelleCatalogue {
 /// turn back into substrate, or matter conservation guarantees the world ends as an all-waste
 /// equilibrium. Naming the four chemicals here rather than hard-coding them lets a scenario
 /// pose a different chemistry, and lets the closure be checked rather than assumed.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct MetabolicChemistry {
     /// Burned by a mitochondrion for energy.
     pub substrate: usize,

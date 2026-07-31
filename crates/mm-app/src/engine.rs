@@ -144,6 +144,15 @@ pub struct Published {
     pub species: String,
     pub history: MetricHistory,
     pub web: FoodWeb,
+    /// Parameter changes made to this world while it was running, oldest first (M10.2).
+    ///
+    /// Published rather than read through the lock because the menu shows how many there are,
+    /// which means asking every frame. A few hundred bytes each and one per deliberate act, so
+    /// the copy is bounded by how much fiddling somebody has done.
+    pub interventions: Vec<mm_core::biology::Intervention>,
+    /// The parameters the scenario founded this world with, so the first intervention has
+    /// something to be a change *from*.
+    pub founding: mm_core::biology::BiologyConfig,
     /// The objective's settings as the frame was built under them, so the renderer draws the
     /// vignette this frame was measured for rather than the one that has since been toggled.
     pub optics: crate::optics::Optics,
@@ -494,6 +503,8 @@ fn run(shared: &Shared) {
                     inspection,
                     history: slide.history().clone(),
                     web: slide.food_web(),
+                    interventions: slide.world().interventions().to_vec(),
+                    founding: slide.world().scenario().biology.clone(),
                     optics: slide.optics,
                 }
             };

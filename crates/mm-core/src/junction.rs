@@ -137,7 +137,8 @@ impl StateHash for Junction {
 }
 
 /// The numbers that make junctions behave the way SPEC §8.2 describes.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct JunctionConfig {
     /// Energy to form a junction with a matching key, `Q10`. Meant to be nearly free.
     pub join_base_cost: i32,

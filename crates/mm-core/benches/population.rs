@@ -499,7 +499,10 @@ fn ecology_gate(_c: &mut Criterion) {
     // have on the *outcome*, keep every line of the code path. What is left is the phase.
     let mut armed = world.clone();
     let mut specs = *armed.biology().metabolism.catalogue.specs();
-    for kind in [mm_core::OrganelleType::Spike, mm_core::OrganelleType::Lysosome] {
+    for kind in [
+        mm_core::OrganelleType::Spike,
+        mm_core::OrganelleType::Lysosome,
+    ] {
         specs[kind as usize].upkeep = 0;
         specs[kind as usize].upkeep_per_param = 0;
     }
@@ -510,8 +513,7 @@ fn ecology_gate(_c: &mut Criterion) {
     armed.set_biology(biology);
     for i in &slots {
         let cells = armed.cells_mut();
-        cells.slots_mut(*i)[12] =
-            mm_core::Organelle::finished(mm_core::OrganelleType::Spike, 200);
+        cells.slots_mut(*i)[12] = mm_core::Organelle::finished(mm_core::OrganelleType::Spike, 200);
         let mut lysosome = mm_core::Organelle::finished(mm_core::OrganelleType::Lysosome, 1);
         lysosome.control[0] = (mm_core::Q10_ONE / 64) as i16;
         cells.slots_mut(*i)[11] = lysosome;

@@ -83,6 +83,7 @@ use mm_app::debugger::{Breakpoint, Breakpoints, Sandbox};
 use mm_app::editor::Editor;
 use mm_app::engine::{Engine, Published, Rate};
 use mm_app::inspector::Inspection;
+use mm_app::params;
 use mm_app::slide::{Frame, Lod, Slide};
 use mm_app::tools::{self, ToolEvent};
 use mm_app::ui::{self, Dock, Focus, Panel, Panels, Rect, Target};
@@ -160,6 +161,21 @@ struct SlideRes {
     /// Which cell the editor's buffer was loaded from, so "apply to this cell" cannot write a
     /// genome into a cell it was never taken from.
     editing: Option<CellId>,
+    /// The parameter editor's working copy, and the two things it is compared against.
+    ///
+    /// Edits are applied on a button rather than on a keystroke, because every apply is an
+    /// intervention that goes on the record and one per keystroke would be a useless record.
+    draft: Option<Draft>,
+}
+
+/// The parameter editor's state while it is open.
+struct Draft {
+    /// What will be applied.
+    editing: BiologyConfig,
+    /// What the world is running on now, so "changed" can be shown and reverted.
+    live: BiologyConfig,
+    /// What the scenario says, so a value that has drifted from the file can be marked.
+    founding: BiologyConfig,
 }
 
 impl SlideRes {
@@ -184,6 +200,8 @@ impl SlideRes {
             species: String::new(),
             history: slide.history().clone(),
             web: slide.food_web(),
+            interventions: Vec::new(),
+            founding: slide.world().scenario().biology.clone(),
             optics: slide.optics,
         };
         SlideRes {
@@ -198,6 +216,7 @@ impl SlideRes {
             last_export: None,
             listing: mm_app::inspector::Listing::default(),
             editing: None,
+            draft: None,
         }
     }
 
@@ -356,6 +375,13 @@ struct View {
     focus: Focus,
     /// Keep the camera centred on the selected cell.
     follow: bool,
+    /// The parameter editor, and the log of what has been changed in this world (M10.2).
+    ///
+    /// Floating windows rather than docked panels: both are things you open to do a job and
+    /// then close, and neither wants to hold a rail's worth of screen for the rest of the
+    /// session.
+    parameters: bool,
+    interventions: bool,
     /// Keep the listing scrolled to the instruction pointer.
     genome_follow_ip: bool,
     /// The last `ip` the listing was scrolled to, so it scrolls when the pointer *moves*
@@ -380,6 +406,8 @@ impl Default for View {
             zoom: 1.0,
             paused: false,
             panels: Panels::default(),
+            parameters: false,
+            interventions: false,
             viewport: Rect::default(),
             focus: Focus::default(),
             follow: false,
@@ -1125,6 +1153,13 @@ fn panels(
     // Whatever is left over is the slide. Recorded here for `handle_input` to route against on
     // the next frame — one frame stale, which is invisible for a rectangle that only moves when
     // a panel is opened or dragged, and much cheaper than laying the UI out twice.
+    if view.parameters {
+        parameter_window(ctx, &mut sim, &mut view);
+    }
+    if view.interventions {
+        intervention_window(ctx, &sim, &mut view);
+    }
+
     let rect = ctx.available_rect();
     view.viewport = Rect::new(rect.min.x, rect.min.y, rect.max.x, rect.max.y);
 
@@ -1170,7 +1205,18 @@ fn menu_bar(ctx: &egui::Context, sim: &mut SlideRes, view: &mut View, quit: &mut
             ui.menu_button("Slide", |ui| {
                 soon(ui, "Scenario library", "", LATER);
                 soon(ui, "Open scenario…", "", LATER);
-                soon(ui, "Parameters…", "Ctrl+,", LATER);
+                if ui
+                    .add(
+                        egui::Button::new("Parameters…")
+                            .shortcut_text("Ctrl+,")
+                            .selected(view.parameters),
+                    )
+                    .on_hover_text("every cost, rate and mutation the living half runs on")
+                    .clicked()
+                {
+                    view.parameters = !view.parameters;
+                    ui.close_menu();
+                }
                 soon(ui, "Save parameters as…", "", LATER);
                 ui.separator();
                 if ui
@@ -1225,7 +1271,22 @@ fn menu_bar(ctx: &egui::Context, sim: &mut SlideRes, view: &mut View, quit: &mut
                     }
                 });
                 ui.separator();
-                soon(ui, "Interventions…", "", LATER);
+                let count = sim.latest.interventions.len();
+                if ui
+                    .add(
+                        egui::Button::new(if count == 0 {
+                            "Interventions…".to_string()
+                        } else {
+                            format!("Interventions… ({count})")
+                        })
+                        .selected(view.interventions),
+                    )
+                    .on_hover_text("what has been changed in this world, and when")
+                    .clicked()
+                {
+                    view.interventions = !view.interventions;
+                    ui.close_menu();
+                }
             });
 
             ui.menu_button("View", |ui| {
@@ -1484,6 +1545,284 @@ fn drawer(ctx: &egui::Context, sim: &mut SlideRes, view: &mut View) {
                 Panel::Cell | Panel::Metrics | Panel::Legend => {}
             }
         });
+}
+
+/// The parameter editor (M10.2, `docs/UI.md` §4).
+///
+/// Every cost, rate and mutation the living half of the world runs on. Until M10.2 these were
+/// reachable from code and from nothing else, so every scenario ran on the compiled-in defaults
+/// and the numbers arrived at by measurement were constants.
+///
+/// Applying is a button, not a keystroke: each apply is an intervention that goes on the
+/// world's record, and one per keystroke would be a useless record.
+fn parameter_window(ctx: &egui::Context, sim: &mut SlideRes, view: &mut View) {
+    // Opened lazily, against the world as it stands. Taking the lock once on open rather than
+    // every frame is the whole reason this is cheap enough to leave sitting there.
+    if sim.draft.is_none() {
+        let held = sim.engine.handle();
+        let slide = held.slide();
+        let live = slide.world().biology().clone();
+        sim.draft = Some(Draft {
+            editing: live.clone(),
+            live,
+            founding: slide.world().scenario().biology.clone(),
+        });
+    }
+    let Some(draft) = sim.draft.take() else {
+        return;
+    };
+    let mut draft = draft;
+    let mut apply = false;
+    let mut open = view.parameters;
+
+    egui::Window::new("parameters")
+        .open(&mut open)
+        .default_width(560.0)
+        .default_height(520.0)
+        .show(ctx, |ui| {
+            let dirty = draft.editing != draft.live;
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(dirty, egui::Button::new("apply"))
+                    .on_hover_text(
+                        "change the running world. Recorded as an intervention, so the run \
+                         still replays exactly and the timeline says when you did it.",
+                    )
+                    .clicked()
+                {
+                    apply = true;
+                }
+                if ui
+                    .add_enabled(dirty, egui::Button::new("discard"))
+                    .on_hover_text("back to what the world is running on")
+                    .clicked()
+                {
+                    draft.editing = draft.live.clone();
+                }
+                if ui
+                    .add_enabled(
+                        draft.editing != draft.founding,
+                        egui::Button::new("back to the scenario"),
+                    )
+                    .on_hover_text("every value as the scenario file has it")
+                    .clicked()
+                {
+                    draft.editing = draft.founding.clone();
+                }
+                ui.separator();
+                if dirty {
+                    ui.colored_label(egui::Color32::from_rgb(240, 200, 120), "not applied");
+                } else {
+                    ui.weak("in force");
+                }
+            });
+            ui.separator();
+
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    for group in params::Group::ALL {
+                        egui::CollapsingHeader::new(group.title())
+                            .default_open(group == params::Group::Metabolism)
+                            .show(ui, |ui| {
+                                egui::Grid::new(group.title())
+                                    .num_columns(3)
+                                    .striped(true)
+                                    .show(ui, |ui| {
+                                        for field in params::group(group) {
+                                            parameter_row(ui, &mut draft, field, &sim.chem_names);
+                                            ui.end_row();
+                                        }
+                                    });
+                            });
+                    }
+                    // The catalogue is a hundred and twelve numbers, which is a table rather
+                    // than a form.
+                    egui::CollapsingHeader::new("organelle catalogue")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            catalogue_grid(ui, &mut draft);
+                        });
+                });
+        });
+
+    if apply {
+        let held = sim.engine.handle();
+        held.slide().world_mut().set_biology(draft.editing.clone());
+        draft.live = draft.editing.clone();
+    }
+    view.parameters = open;
+    sim.draft = Some(draft);
+    if !view.parameters {
+        // Closed. The draft goes with it, so reopening reads the world afresh rather than
+        // showing edits from ten minutes ago as though they were pending.
+        sim.draft = None;
+    }
+}
+
+/// One labelled parameter: its value, its reading, and whether it has been moved.
+fn parameter_row(
+    ui: &mut egui::Ui,
+    draft: &mut Draft,
+    field: &params::Field,
+    chemicals: &[String],
+) {
+    use mm_core::params::Value;
+
+    let Some(value) = mm_core::params::get(&draft.editing, field.path) else {
+        ui.weak(field.label);
+        ui.weak("unreadable");
+        return;
+    };
+
+    // Marked when it differs from the file, so a world that has drifted from the scenario
+    // describing it says so rather than looking freshly loaded.
+    let moved = mm_core::params::get(&draft.founding, field.path) != Some(value);
+    let label = if moved {
+        egui::RichText::new(format!("• {}", field.label))
+            .color(egui::Color32::from_rgb(230, 200, 130))
+    } else {
+        egui::RichText::new(field.label)
+    };
+    ui.label(label).on_hover_text(field.note);
+
+    let mut edited = None;
+    if let Value::Bool(b) = value {
+        let mut b = b;
+        if ui.checkbox(&mut b, "").changed() {
+            edited = Some(Value::Bool(b));
+        }
+    } else {
+        let mut v = value.as_int();
+        // A tenth of the current magnitude per pixel, so a value of twenty thousand drags in
+        // useful steps and a value of three does not leap past itself.
+        let speed = (v.abs() as f64 / 100.0).max(1.0);
+        if ui
+            .add(egui::DragValue::new(&mut v).speed(speed))
+            .on_hover_text(field.note)
+            .changed()
+        {
+            edited = Some(Value::Int(v));
+        }
+    }
+
+    match field.reading(value, chemicals) {
+        Some(reading) => {
+            ui.weak(reading);
+        }
+        None => {
+            ui.label("");
+        }
+    }
+
+    if let Some(value) = edited {
+        // Refused rather than clamped when it does not fit — see `mm_core::params::set`. The
+        // widget snaps back on the next frame, which is the honest thing for a value the
+        // simulation could not have held.
+        if let Some(next) = mm_core::params::set(&draft.editing, field.path, value) {
+            draft.editing = next;
+        }
+    }
+}
+
+/// The organelle catalogue: one row per slot type, one column per cost.
+fn catalogue_grid(ui: &mut egui::Ui, draft: &mut Draft) {
+    use mm_core::params::Value;
+
+    egui::Grid::new("catalogue")
+        .num_columns(params::CATALOGUE_COLUMNS.len() + 1)
+        .striped(true)
+        .show(ui, |ui| {
+            ui.label("");
+            for (_, heading) in params::CATALOGUE_COLUMNS {
+                ui.label(egui::RichText::new(heading).small().strong());
+            }
+            ui.end_row();
+
+            for slot in 0..mm_core::organelle::SLOT_COUNT {
+                let kind = mm_core::OrganelleType::from_operand(slot as i16);
+                ui.label(kind.name());
+                for (suffix, _) in params::CATALOGUE_COLUMNS {
+                    let path = format!("{}{slot}.{suffix}", params::CATALOGUE_PREFIX);
+                    let Some(value) = mm_core::params::get(&draft.editing, &path) else {
+                        ui.label("-");
+                        continue;
+                    };
+                    let mut v = value.as_int();
+                    let speed = (v.abs() as f64 / 100.0).max(1.0);
+                    if ui.add(egui::DragValue::new(&mut v).speed(speed)).changed() {
+                        if let Some(next) =
+                            mm_core::params::set(&draft.editing, &path, Value::Int(v))
+                        {
+                            draft.editing = next;
+                        }
+                    }
+                }
+                ui.end_row();
+            }
+        });
+}
+
+/// What has been changed in this world, and when (M10.2).
+///
+/// The experiment log. A run is reproducible from `(scenario, seed)` — I1 — and a parameter
+/// changed at tick forty thousand breaks that unless the change is part of the record. It is,
+/// and this is the record: the hand reaching into the world is part of the world's history, in
+/// the same way its extinctions are.
+fn intervention_window(ctx: &egui::Context, sim: &SlideRes, view: &mut View) {
+    let mut open = view.interventions;
+    egui::Window::new("interventions")
+        .open(&mut open)
+        .default_width(480.0)
+        .default_height(320.0)
+        .show(ctx, |ui| {
+            let log = &sim.latest.interventions;
+            if log.is_empty() {
+                ui.weak("nothing has been changed in this world");
+                ui.small(
+                    "Parameters you change while it is running are recorded here, so the run \
+                     still replays exactly from its scenario and seed.",
+                );
+                return;
+            }
+            ui.label(format!(
+                "{} change{} since tick 0",
+                log.len(),
+                if log.len() == 1 { "" } else { "s" }
+            ));
+            ui.separator();
+
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    // Each entry holds the whole configuration, so what *changed* is the
+                    // difference from the one before it — or from the scenario, for the first.
+                    let mut previous = sim.latest.founding.clone();
+                    for step in log {
+                        ui.label(
+                            egui::RichText::new(format!("tick {}", step.tick))
+                                .strong()
+                                .monospace(),
+                        );
+                        let before = mm_core::params::fields(&previous);
+                        let after = mm_core::params::fields(&step.biology);
+                        let mut said = false;
+                        for ((path, was), (_, now)) in before.iter().zip(after.iter()) {
+                            if was == now {
+                                continue;
+                            }
+                            said = true;
+                            let label = params::describe(path).map_or(path.as_str(), |f| f.label);
+                            ui.small(format!("    {label}:  {was} → {now}"));
+                        }
+                        if !said {
+                            ui.small("    (no parameter differed)");
+                        }
+                        previous = step.biology.clone();
+                    }
+                });
+        });
+    view.interventions = open;
 }
 
 /// The legend: what the colours on the slide mean, and what they are scaled against.
