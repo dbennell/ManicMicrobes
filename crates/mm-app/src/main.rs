@@ -742,7 +742,12 @@ fn collect_simulation(mut sim: ResMut<SlideRes>, mut view: ResMut<View>) {
     // asked to advance. Pausing provably does not change a world (`engine.rs`), so a breakpoint
     // cannot either — and there is no stop-in-the-middle-of-a-tick, because a tick is the
     // simulation's atom.
-    if sim.breakpoints.tripped().is_none() {
+    //
+    // `is_empty` first, and it is not a micro-optimisation. Checking a breakpoint needs the
+    // world, and asking for the world makes the simulation thread stand aside for as long as
+    // the answer takes. Doing that every frame for a set that is empty in every session where
+    // nobody has opened the debugger would tax the simulation for nothing.
+    if !sim.breakpoints.is_empty() && sim.breakpoints.tripped().is_none() {
         // The breakpoint set is taken out for the duration so that checking it — which needs
         // `&mut` for the tripped marker — can hold `&World` at the same time. Both live in the
         // same resource; neither can reach the other.

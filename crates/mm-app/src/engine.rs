@@ -168,6 +168,25 @@ struct Shared {
     /// Ticks actually achieved in the last second. The readout, and the simulation half of the
     /// working target.
     measured: AtomicU32,
+    /// The world's tick count, published lock-free so that watching the clock does not mean
+    /// competing for the world.
+    ticks: AtomicU64,
+    /// How many front-end callers want the world, or have it.
+    ///
+    /// The simulation thread will not take the world's lock while this is above zero, and this
+    /// is not an optimisation — it is the difference between an application and a hung one.
+    ///
+    /// `std::sync::Mutex` is not fair. The simulation thread releases the world and asks for it
+    /// again immediately, and on Linux a thread re-acquiring a futex beats one that has been
+    /// put to sleep waiting for it, essentially every time. While the world is small the
+    /// simulation thread idles between ticks and the front end slips into the gap. Once a tick
+    /// costs enough that there is no gap — about twenty thousand cells on this machine — the
+    /// front end never gets in at all. Measured at **84 seconds and still waiting**, which is
+    /// not contention, it is a hang, and it is what it looked like.
+    ///
+    /// So priority is explicit and it goes to the front end: the simulation is the thing with
+    /// work to do later, and the person is the thing waiting now.
+    priority: AtomicU32,
 
     // --- presentation: set by the renderer, applied by the simulation thread ---
     //
@@ -181,6 +200,10 @@ struct Shared {
     overlays: AtomicU32,
     optics: AtomicBool,
 }
+
+/// How long the simulation thread waits before checking again whether the front end has
+/// finished with the world.
+const GIVE_WAY: Duration = Duration::from_micros(100);
 
 /// Lock without letting one thread's panic wedge the other.
 ///
@@ -203,11 +226,60 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 pub struct Handle(Arc<Shared>);
 
 impl Handle {
-    /// Reach the world. Blocks the simulation thread for as long as the guard is held, so hold
-    /// it for the length of a panel and not the length of a frame.
-    pub fn slide(&self) -> MutexGuard<'_, Slide> {
-        lock(&self.0.slide)
+    /// Reach the world.
+    ///
+    /// Announces itself first, so the simulation thread stands aside rather than barging the
+    /// lock — see [`Shared::priority`]. Blocks the simulation for as long as the guard is held,
+    /// so hold it for the length of a panel and not the length of a frame.
+    pub fn slide(&self) -> World<'_> {
+        // Raised *before* asking, so the simulation thread cannot slip a tick in between the
+        // question and the queue.
+        self.0.priority.fetch_add(1, Ordering::AcqRel);
+        World {
+            priority: &self.0.priority,
+            guard: lock(&self.0.slide),
+        }
     }
+}
+
+/// The world, held by the front end.
+///
+/// A guard around the guard: dropping it tells the simulation thread it may carry on. Without
+/// the counter this wraps, the simulation would take the lock back the instant it was released
+/// and the front end would never be scheduled again.
+pub struct World<'a> {
+    priority: &'a AtomicU32,
+    guard: MutexGuard<'a, Slide>,
+}
+
+impl std::ops::Deref for World<'_> {
+    type Target = Slide;
+    fn deref(&self) -> &Slide {
+        &self.guard
+    }
+}
+
+impl std::ops::DerefMut for World<'_> {
+    fn deref_mut(&mut self) -> &mut Slide {
+        &mut self.guard
+    }
+}
+
+impl Drop for World<'_> {
+    fn drop(&mut self) {
+        self.priority.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Take the world on the simulation thread's behalf, standing aside for the front end first.
+///
+/// Every acquisition on the simulation thread goes through here. One that did not would be a
+/// hole in the priority scheme big enough to hang the application through.
+fn take<'a>(shared: &'a Shared) -> MutexGuard<'a, Slide> {
+    while shared.priority.load(Ordering::Acquire) > 0 && !shared.stop.load(Ordering::Relaxed) {
+        thread::sleep(GIVE_WAY);
+    }
+    lock(&shared.slide)
 }
 
 /// The simulation thread, and the controls for it.
@@ -233,6 +305,8 @@ impl Engine {
             steps: AtomicU64::new(0),
             stop: AtomicBool::new(false),
             measured: AtomicU32::new(0),
+            ticks: AtomicU64::new(0),
+            priority: AtomicU32::new(0),
             zoom: AtomicU32::new(1.0f32.to_bits()),
             overlays: AtomicU32::new(overlays),
             optics: AtomicBool::new(optics),
@@ -308,6 +382,12 @@ impl Engine {
         self.shared.steps.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// The world's tick count, read without competing for the world.
+    #[must_use]
+    pub fn tick_count(&self) -> u64 {
+        self.shared.ticks.load(Ordering::Relaxed)
+    }
+
     /// Ticks achieved per second, measured. The simulation half of the working target, and the
     /// number that used to be indistinguishable from the frame rate.
     #[must_use]
@@ -331,7 +411,7 @@ impl Engine {
     pub fn wait_for_tick(&self, tick: u64, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         loop {
-            if self.handle().slide().world().tick_count() >= tick {
+            if self.tick_count() >= tick {
                 return true;
             }
             if Instant::now() >= deadline {
@@ -379,9 +459,14 @@ fn run(shared: &Shared) {
 
         let mut done = 0u64;
         while done < want && !shared.stop.load(Ordering::Relaxed) {
-            // One tick per lock. The front end waits at most one tick to reach the world, and
-            // the lock itself does not show up next to the cost of a tick.
-            lock(&shared.slide).advance(1);
+            // One tick per lock, through `take` so the front end is never barged. The lock
+            // itself does not show up next to the cost of a tick.
+            let ticks = {
+                let mut slide = take(shared);
+                slide.advance(1);
+                slide.world().tick_count()
+            };
+            shared.ticks.store(ticks, Ordering::Relaxed);
             done += 1;
         }
         since_sample += done;
@@ -392,7 +477,7 @@ fn run(shared: &Shared) {
         if lock(&shared.posted).is_none() {
             let selected = *lock(&shared.selected);
             let published = {
-                let mut slide = lock(&shared.slide);
+                let mut slide = take(shared);
                 // The renderer's presentation choices, applied under the lock that is being
                 // taken anyway, so setting them never had to wait for a tick.
                 slide.set_zoom(f32::from_bits(shared.zoom.load(Ordering::Relaxed)));
@@ -543,6 +628,64 @@ mod tests {
             "a presentation control reached the world"
         );
         assert_eq!(held.slide().world().tick_count(), 1);
+    }
+
+    #[test]
+    fn the_front_end_is_never_starved_of_the_world() {
+        // The hang. `std::sync::Mutex` is not fair: the simulation thread releases the world and
+        // asks for it again immediately, and a re-acquiring thread beats a sleeping waiter
+        // essentially every time. Measured before the fix at **84 seconds and still waiting** —
+        // the application had stopped responding, at about twenty thousand cells, which was
+        // simply the population at which a tick took long enough that the thread never idled.
+        //
+        // A small world cannot reproduce the original by sheer tick cost, so the pressure is
+        // made the same way instead: run flat out, so the thread never sleeps and every release
+        // is followed at once by another request. That is the condition that starves a waiter,
+        // and it is the condition this asserts against.
+        let engine = Engine::start(Slide::new(scenario()).unwrap(), Rate::Unlimited);
+        let held = engine.handle();
+        // Let it get properly into its stride first.
+        assert!(engine.wait_for_tick(200, PATIENCE));
+
+        let mut worst = Duration::ZERO;
+        for _ in 0..200 {
+            let asked = Instant::now();
+            let tick = held.slide().world().tick_count();
+            worst = worst.max(asked.elapsed());
+            assert!(tick > 0);
+            // No sleep. The front end asking again straight away is the hardest case, and it is
+            // what a render loop does.
+        }
+
+        // Generous by three orders of magnitude against what was measured. The point is not the
+        // exact number; it is that the wait is bounded by a tick rather than unbounded.
+        assert!(
+            worst < Duration::from_millis(500),
+            "the front end waited {worst:?} for the world"
+        );
+    }
+
+    #[test]
+    fn the_simulation_carries_on_once_the_front_end_lets_go() {
+        // The other direction: standing aside must not mean stopping. A priority scheme that
+        // could be left raised would trade a hung front end for a stopped world.
+        let engine = Engine::start(Slide::new(scenario()).unwrap(), Rate::Unlimited);
+        let held = engine.handle();
+        {
+            let _world = held.slide();
+            let before = engine.tick_count();
+            thread::sleep(Duration::from_millis(60));
+            assert_eq!(
+                engine.tick_count(),
+                before,
+                "the simulation ticked while the front end held the world"
+            );
+        }
+        let resumed = engine.tick_count();
+        assert!(
+            engine.wait_for_tick(resumed + 20, PATIENCE),
+            "the simulation did not resume after the world was let go"
+        );
     }
 
     #[test]
