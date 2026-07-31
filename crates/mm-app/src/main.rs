@@ -75,7 +75,7 @@
 //! by convolution. A real separable blur belongs in the post-process pass this leaves room
 //! for.
 
-use bevy::asset::load_internal_asset;
+use bevy::asset::{load_internal_asset, weak_handle};
 use bevy::diagnostic::{Diagnostic, DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::image::ImageSampler;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
@@ -90,7 +90,7 @@ use bevy::render::render_resource::{
 use bevy::render::view::NoFrustumCulling;
 use bevy::sprite::{Material2d, Material2dKey, Material2dPlugin, MeshMaterial2d};
 use bevy::window::PrimaryWindow;
-use bevy_egui::{egui, EguiContexts, EguiPlugin};
+use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 
 use mm_app::art;
 use mm_app::cellmesh;
@@ -182,9 +182,9 @@ fn main() {
     // `AssetPlugin` is what puts that resource in the world. Before it, this is a panic on the
     // first line of `main` with a message about a missing resource rather than about a shader.
     load_internal_asset!(app, CELL_SHADER, "cell.wgsl", Shader::from_wgsl);
-    app.add_plugins(FrameTimeDiagnosticsPlugin)
+    app.add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(Material2dPlugin::<CellMaterial>::default())
-        .add_plugins(EguiPlugin)
+        .add_plugins(EguiPlugin::default())
         .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.03)))
         .insert_resource(SlideRes::new())
         .insert_resource(View::default())
@@ -198,10 +198,19 @@ fn main() {
                 // rather than one caught halfway through being computed.
                 collect_simulation,
                 redraw,
-                panels,
             )
                 .chain(),
         )
+        // The interface lives in its own schedule since bevy_egui 0.34, because multi-pass mode
+        // may run it more than once a frame — a `Grid` needs the widths of columns it has not
+        // laid out yet, and gets them by being asked twice. Drawing egui from `Update` instead
+        // panics with "no fonts available until first call to Context::run", which is a true
+        // statement about a pass that has not begun and says nothing about fonts.
+        //
+        // It runs after `Update`, so `panels` still sees the frame `collect_simulation`
+        // published, and `view.viewport` is still read a frame later by `handle_input`, which
+        // it always was.
+        .add_systems(EguiPrimaryContextPass, panels)
         .run();
 }
 
@@ -586,8 +595,7 @@ const ATTRIBUTE_SHAPE: MeshVertexAttribute =
 
 /// Embedded at compile time rather than loaded from an `assets/` directory, so the binary runs
 /// from anywhere. The same thing `bevy_sprite` does for its own shaders.
-const CELL_SHADER: Handle<Shader> =
-    Handle::weak_from_u128(0x006D_6D5F_6365_6C6C_5F73_6861_6465_7201);
+const CELL_SHADER: Handle<Shader> = weak_handle!("6d6d5f63-656c-6c5f-7368-616465720001");
 
 /// The whole population, drawn by one material with one shader (M10.5).
 ///
@@ -771,15 +779,17 @@ fn handle_input(
     // scrollbar, say — and the second is "the pointer is over something egui drew". A drag
     // that leaves a slider still belongs to the slider, and a pointer resting on a panel
     // belongs to the panel even though nothing is being dragged.
-    let (wants_pointer, wants_keyboard) = {
-        let ctx = contexts.ctx_mut();
-        (
-            ctx.wants_pointer_input() || ctx.is_pointer_over_area(),
-            ctx.wants_keyboard_input(),
-        )
+    // Fallible since 0.16: the context belongs to a window entity, and a system can run
+    // before there is one. Nothing to route on a frame with no window, so nothing happens.
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
     };
+    let (wants_pointer, wants_keyboard) = (
+        ctx.wants_pointer_input() || ctx.is_pointer_over_area(),
+        ctx.wants_keyboard_input(),
+    );
     let pointer = window
-        .get_single()
+        .single()
         .ok()
         .and_then(Window::cursor_position)
         .map(|p| (p.x, p.y));
@@ -1131,7 +1141,7 @@ fn redraw(
     let frame = &sim.latest.frame;
     let optics = &sim.latest.optics;
     let scale = BASE_SCALE * view.zoom;
-    let Ok(window) = window.get_single() else {
+    let Ok(window) = window.single() else {
         return;
     };
     let size = window.size();
@@ -1194,8 +1204,11 @@ fn redraw(
                 .iter()
                 .map(|l| (l.field.as_slice(), l.rgb))
                 .collect();
+            let Some(pixels) = image.data.as_mut() else {
+                return;
+            };
             art::paint_field(
-                &mut image.data,
+                pixels,
                 frame.width as usize,
                 frame.height as usize,
                 &frame.light,
@@ -1389,7 +1402,9 @@ fn panels(
     mut exit: EventWriter<AppExit>,
     diagnostics: Res<DiagnosticsStore>,
 ) {
-    let ctx = contexts.ctx_mut();
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
+    };
     let frame = sim.latest.frame.clone();
 
     // Order is layout: egui hands space out from the outside in, so the menu takes the top, the
@@ -1441,7 +1456,7 @@ fn panels(
     view.viewport = Rect::new(rect.min.x, rect.min.y, rect.max.x, rect.max.y);
 
     if quit {
-        exit.send(AppExit::Success);
+        exit.write(AppExit::Success);
     }
 }
 
@@ -1464,7 +1479,7 @@ fn menu_bar(ctx: &egui::Context, sim: &mut SlideRes, view: &mut View, quit: &mut
     const LATER: &str = "M10.2 — configuration and slide files";
 
     egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
-        egui::menu::bar(ui, |ui| {
+        egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
                 soon(ui, "New slide…", "Ctrl+N", LATER);
                 soon(ui, "Open slide…", "Ctrl+O", LATER);
@@ -1475,7 +1490,7 @@ fn menu_bar(ctx: &egui::Context, sim: &mut SlideRes, view: &mut View, quit: &mut
                 ui.separator();
                 if ui.button("Quit").clicked() {
                     *quit = true;
-                    ui.close_menu();
+                    ui.close();
                 }
             });
 
@@ -1492,7 +1507,7 @@ fn menu_bar(ctx: &egui::Context, sim: &mut SlideRes, view: &mut View, quit: &mut
                     .clicked()
                 {
                     view.parameters = !view.parameters;
-                    ui.close_menu();
+                    ui.close();
                 }
                 soon(ui, "Save parameters as…", "", LATER);
                 ui.separator();
@@ -1502,7 +1517,7 @@ fn menu_bar(ctx: &egui::Context, sim: &mut SlideRes, view: &mut View, quit: &mut
                     .clicked()
                 {
                     sim.reseed();
-                    ui.close_menu();
+                    ui.close();
                 }
             });
 
@@ -1521,7 +1536,7 @@ fn menu_bar(ctx: &egui::Context, sim: &mut SlideRes, view: &mut View, quit: &mut
                         Rate::times(1)
                     });
                     view.paused = running;
-                    ui.close_menu();
+                    ui.close();
                 }
                 if ui
                     .add(egui::Button::new("Step one tick").shortcut_text("."))
@@ -1543,7 +1558,7 @@ fn menu_bar(ctx: &egui::Context, sim: &mut SlideRes, view: &mut View, quit: &mut
                         {
                             sim.engine.set_rate(rate);
                             view.paused = rate == Rate::Paused;
-                            ui.close_menu();
+                            ui.close();
                         }
                     }
                 });
@@ -1562,7 +1577,7 @@ fn menu_bar(ctx: &egui::Context, sim: &mut SlideRes, view: &mut View, quit: &mut
                     .clicked()
                 {
                     view.interventions = !view.interventions;
-                    ui.close_menu();
+                    ui.close();
                 }
             });
 
@@ -1643,7 +1658,7 @@ fn menu_bar(ctx: &egui::Context, sim: &mut SlideRes, view: &mut View, quit: &mut
                         sim.latest.frame.height as f32 / 2.0,
                     );
                     view.zoom = 1.0;
-                    ui.close_menu();
+                    ui.close();
                 }
             });
 
@@ -1664,7 +1679,7 @@ fn menu_bar(ctx: &egui::Context, sim: &mut SlideRes, view: &mut View, quit: &mut
                         .clicked()
                     {
                         view.tool = tool;
-                        ui.close_menu();
+                        ui.close();
                     }
                 }
             });
@@ -2374,7 +2389,7 @@ fn pointer_on_slide(
     view: &View,
     scale: f32,
 ) -> Option<(f32, f32)> {
-    let w = window.get_single().ok()?;
+    let w = window.single().ok()?;
     let cursor = w.cursor_position()?;
     let (cx, cy) = view.viewport.centre();
     Some((
@@ -2477,33 +2492,33 @@ fn cell_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
             .is_some_and(|h| h.distance(at) <= p.radius * r)
         {
             let slot = c.slots[p.slot];
-            egui::show_tooltip_at_pointer(
-                ui.ctx(),
+            egui::Tooltip::always_open(
+                ui.ctx().clone(),
                 ui.layer_id(),
                 egui::Id::new("organelle"),
-                |ui| {
-                    ui.label(format!("slot {}: {}", slot.index, slot.kind.name()));
-                    ui.label(format!("param {}", slot.param));
-                    ui.label(format!("control {:?}", slot.control));
-                    // Which reaction it runs (M10.3). Only the three organelles that run one:
-                    // on anything else `control[1]` means something else or nothing, and
-                    // labelling it a pathway would be a confident lie.
-                    if matches!(
-                        slot.kind,
-                        OrganelleType::Mitochondrion
-                            | OrganelleType::Chloroplast
-                            | OrganelleType::Lysosome
-                    ) {
-                        let n =
-                            mm_core::organelle::MetabolicChemistry::pathway_index(slot.control[1]);
-                        ui.label(format!("pathway {n}"))
-                            .on_hover_text("which metabolic reaction this one runs");
-                    }
-                    if let Some(n) = slot.remaining_build {
-                        ui.weak(format!("building, {n} to go"));
-                    }
-                },
-            );
+                egui::PopupAnchor::Pointer,
+            )
+            .show(|ui| {
+                ui.label(format!("slot {}: {}", slot.index, slot.kind.name()));
+                ui.label(format!("param {}", slot.param));
+                ui.label(format!("control {:?}", slot.control));
+                // Which reaction it runs (M10.3). Only the three organelles that run one:
+                // on anything else `control[1]` means something else or nothing, and
+                // labelling it a pathway would be a confident lie.
+                if matches!(
+                    slot.kind,
+                    OrganelleType::Mitochondrion
+                        | OrganelleType::Chloroplast
+                        | OrganelleType::Lysosome
+                ) {
+                    let n = mm_core::organelle::MetabolicChemistry::pathway_index(slot.control[1]);
+                    ui.label(format!("pathway {n}"))
+                        .on_hover_text("which metabolic reaction this one runs");
+                }
+                if let Some(n) = slot.remaining_build {
+                    ui.weak(format!("building, {n} to go"));
+                }
+            });
         }
     }
     if placed.is_empty() {
@@ -2820,23 +2835,24 @@ fn tree_view(ui: &mut egui::Ui, sim: &SlideRes, view: &mut View) {
                 if response.clicked() {
                     view.species = Some(node.id);
                 }
-                egui::show_tooltip_at_pointer(
-                    ui.ctx(),
+                egui::Tooltip::always_open(
+                    ui.ctx().clone(),
                     ui.layer_id(),
                     egui::Id::new("branch"),
-                    |ui| {
-                        ui.label(egui::RichText::new(&node.name).strong());
-                        ui.small(node.guild.label());
-                        ui.small(format!(
-                            "founded {}  ·  peak {}",
-                            node.founded_tick, node.peak_population
-                        ));
-                        match node.extinct_tick {
-                            Some(t) => ui.small(format!("extinct at {t}")),
-                            None => ui.small(format!("{} alive now", node.population)),
-                        };
-                    },
-                );
+                    egui::PopupAnchor::Pointer,
+                )
+                .show(|ui| {
+                    ui.label(egui::RichText::new(&node.name).strong());
+                    ui.small(node.guild.label());
+                    ui.small(format!(
+                        "founded {}  ·  peak {}",
+                        node.founded_tick, node.peak_population
+                    ));
+                    match node.extinct_tick {
+                        Some(t) => ui.small(format!("extinct at {t}")),
+                        None => ui.small(format!("{} alive now", node.population)),
+                    };
+                });
             }
         });
 }
