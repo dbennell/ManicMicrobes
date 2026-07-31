@@ -15,6 +15,40 @@ milestone from M2 onward must remain visually inspectable.
 
 ---
 
+## The current working target
+
+**50,000 cells at 30fps, interactive, in `mm-app`.** One number, end to end: the slide open,
+the panels drawn, the world running at 1×.
+
+This **supersedes every per-milestone performance gate below** until it is met and reviewed.
+The gates are not deleted — they are the ship targets and they stay written down — but a
+milestone is not held open on one while the working target is in force. They are marked
+*(ship target, suspended)* where that applies.
+
+Why one number instead of seven: the gates were written per-milestone and measure different
+things on different axes — headless ticks/second here, rendered frames/second there — and the
+figure a person actually feels is neither of them. It is whether the window responds while
+fifty thousand cells are alive in it. Tuning to seven abstractions while the thing in front of
+you stutters is how a benchmark suite ends up green on a program nobody can use.
+
+The working target decomposes into two halves that must be measured separately, because they
+are owned by different milestones and they fail differently:
+
+| half | requirement at 50,000 cells | owner |
+| --- | --- | --- |
+| simulation | ≥ 30 ticks/second, headless, 8 cores | M9 |
+| render | ≥ 30 frames/second at whole-slide zoom | M10 |
+
+They can only be measured separately once the simulation is off the render thread, which it is
+not: `advance_simulation` and `redraw` are chained in the same `Update` schedule, so at 1× the
+tick rate *is* the frame rate and a slow tick is indistinguishable from a slow frame. Splitting
+them is the first deliverable of M10 and is a prerequisite for believing any figure here.
+
+Review this section when both halves are met, or when the shape of the work changes enough
+that one number stops being the honest summary.
+
+---
+
 ## M0 — Core VM and toolchain
 
 **Goal:** a total, deterministic virtual machine and the assembler to write for it. No
@@ -112,7 +146,8 @@ indefinitely.
    fast. (Directional test, not a fixed threshold.)
 5. **Determinism with life.** Identical state hash at 500,000 ticks across thread counts.
 
-**Performance gate:** 50,000 cells at ≥ 60 ticks/second headless on 8 cores.
+**Performance gate:** 50,000 cells at ≥ 60 ticks/second headless on 8 cores. *(Ship target,
+suspended — see the working target above, which asks for 30.)*
 
 ---
 
@@ -138,6 +173,7 @@ evolutionary result.
    nothing beyond the configured drag budget.
 
 **Performance gate:** 50,000 cells with sensors and cilia at ≥ 45 ticks/second on 8 cores.
+*(Ship target, suspended — see the working target above, which asks for 30.)*
 
 ---
 
@@ -163,7 +199,8 @@ graphics chore.
 1. **Rendering cannot affect simulation.** State hash at 100,000 ticks is identical whether
    run through `mm-app` at 60fps or `mm-cli` headless.
 2. **Frame budget.** 100,000 visible cells render at ≥ 60fps at whole-slide zoom on a
-   mid-range discrete GPU.
+   mid-range discrete GPU. *(Ship target, suspended — the working target asks for 50,000 at
+   30fps, and M10 owns reaching it.)*
 3. **Decoupling.** Dropping the render to 5fps does not change tick output or ordering.
 4. **Zero Bevy in core.** CI check: `mm-core` builds with Bevy absent from the dependency
    graph.
@@ -267,6 +304,7 @@ the parameters here to need the most tuning.
    the failure is diagnostic, not a blocker — record which parameter starved it.
 
 **Performance gate:** 150,000 cells with 50,000 junctions at ≥ 30 ticks/second on 8 cores.
+*(Ship target, suspended — the working target asks for 30 ticks/second at 50,000.)*
 
 ---
 
@@ -312,13 +350,65 @@ the parameters here to need the most tuning.
 - Criterion benchmarks in CI with regression thresholds.
 
 **Acceptance tests**
-1. **Target scale.** 200,000 cells at ≥ 30 ticks/second headless on 8 cores.
+1. **Target scale.** 200,000 cells at ≥ 30 ticks/second headless on 8 cores. *(Ship target.
+   The working target's simulation half — 50,000 cells at ≥ 30 ticks/second — is the interim
+   figure and is the one M9 is held to first.)*
 2. **Memory.** < 200MB resident for the cell arena at 200,000 cells.
 3. **Soak.** 100,000,000 ticks without leak, drift, archive bloat or conservation violation.
 4. **GPU parity.** If the GPU fluid path is enabled, its state hash matches the CPU path
    exactly. If exact parity is unachievable, the GPU path ships disabled by default and is
    excluded from any run whose results are recorded.
 5. **No regression.** Every acceptance test from M0–M8 still passes.
+
+---
+
+## M10 — The instrument
+
+**Goal:** the application around the microscope. A shell you can drive, parameters you can
+author, a genome you can read, a tree of life you can look at, and cells that look like cells.
+
+Designed in full in `docs/UI.md`, which is normative for this milestone the way `SPEC.md` is
+for the simulation.
+
+**Ordering:** M10 comes *before* M9, despite the number. Two reasons. The working target's
+render half is entirely M10's, and its simulation half cannot be measured at all until M10.1
+puts the simulation on its own thread — profiling M9 against a figure that is currently the
+frame rate in disguise would tune the wrong thing. And the balancing work the simulation needs
+is done by watching, which is what this milestone is for.
+
+**Deliverables**
+- **M10.1 — shell and input.** Menu bar; docked layout with a known central viewport rect;
+  pointer and keyboard routed by which region owns them. Simulation moved onto its own thread
+  with a double-buffered frame handoff.
+- **M10.2 — configuration.** `BiologyConfig`, `MetabolicRates`, `EcologyConfig` and
+  `JunctionConfig` hoisted into `Scenario`, so every parameter is authorable and persistent.
+  Parameter editor; scenario open/save; slide open/save wired to `mm-core::snapshot`;
+  view-only settings kept in a separate file. Mid-run parameter changes recorded as
+  timestamped interventions in world state, so a slide still replays exactly.
+- **M10.3 — the genome view.** Source and reading modes. Template operands resolved to what
+  they mean: immediates in decimal, jumps and calls to their target offset, promoters to their
+  gene. The `%` form remains the only thing the editor round-trips.
+- **M10.4 — the ecology pane.** The phylogenetic tree drawn as a tree; the food web drawn as a
+  graph; the timeline full width and scrubbable.
+- **M10.5 — the look.** Chemical fields as one uploaded texture rather than a quarter of a
+  million sprites. Cells as a single instanced draw with a signed-distance shader: rounded
+  shading, per-cell irregularity, membrane ring, in-shader depth of field.
+
+**Acceptance tests**
+1. **Input goes where it is pointed.** `ui::route` is a pure function of pointer position and
+   layout; a pointer inside any panel rect never returns the slide. Tested without a graphics
+   stack, as `slide.rs` is.
+2. **Configuration round-trips.** Every field of `Scenario` survives RON write→read and
+   snapshot write→read. A run with recorded interventions replays to the same state hash as
+   the run that produced them.
+3. **The reading view is not the source view.** The text the editor hands back still
+   reassembles to the original bytes, for every genome in `genomes/` and for random byte
+   strings. M0's round-trip test, extended to whatever the genome pane emits.
+4. **Frame budget.** 50,000 cells at ≥ 30fps at whole-slide zoom.
+5. **Decoupling, for real this time.** The tick rate is unchanged whether the render runs at
+   60fps or 5fps, and the state hash at 100,000 ticks matches `mm-cli`. M4 tests 1 and 3,
+   which could not fail while the two shared a thread.
+6. **No regression.** Every acceptance test from M0–M8 still passes.
 
 ---
 
