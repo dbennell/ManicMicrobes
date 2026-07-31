@@ -500,9 +500,6 @@ impl Tool {
 }
 
 #[derive(Component)]
-struct OverlaySquare(usize);
-
-#[derive(Component)]
 struct CellSprite(usize);
 
 #[derive(Component)]
@@ -526,7 +523,21 @@ struct JunctionSprite(usize);
 struct CellArt {
     image: Handle<Image>,
     layout: Handle<TextureAtlasLayout>,
+    /// The chemical field and the light, as one texture rewritten each frame (M10.5).
+    ///
+    /// This replaced a sprite entity per grid square — 262,144 of them at 512×512, each showing
+    /// a single texel, every one extracted and prepared by the renderer every frame. It was the
+    /// largest cost in the renderer by a wide margin and it bought nothing that a texture does
+    /// not.
+    field: Handle<Image>,
+    /// What the field texture is currently sized for, so a scenario with a different grid
+    /// reallocates rather than painting into the wrong shape.
+    field_size: (u32, u32),
 }
+
+/// The single quad the chemical field is drawn on.
+#[derive(Component)]
+struct FieldQuad;
 
 fn setup(
     mut commands: Commands,
@@ -554,6 +565,39 @@ fn setup(
     // edge rather than a staircase. The whole point of the exercise is the edge.
     image.sampler = ImageSampler::linear();
 
+    // One texel, until the first frame says how big the grid is.
+    let mut field = Image::new(
+        Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        vec![0, 0, 0, 255],
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    // Linear, deliberately. A diffusion field is a continuous quantity sampled on a grid, so
+    // interpolating between two measured squares is a more faithful picture of it than hard
+    // blocks are — the blockiness was an artefact of how it was drawn, not a property of the
+    // data. Nothing is invented: the legend still reports the true peak, and no texel is shown
+    // a value that was not measured somewhere adjacent.
+    field.sampler = ImageSampler::linear();
+
+    let field = images.add(field);
+    commands.spawn((
+        FieldQuad,
+        SpriteBundle {
+            sprite: Sprite {
+                color: Color::NONE,
+                custom_size: Some(Vec2::splat(1.0)),
+                ..default()
+            },
+            texture: field.clone(),
+            ..default()
+        },
+    ));
+
     commands.insert_resource(CellArt {
         image: images.add(image),
         layout: layouts.add(TextureAtlasLayout::from_grid(
@@ -563,6 +607,8 @@ fn setup(
             None,
             None,
         )),
+        field,
+        field_size: (1, 1),
     });
 }
 
@@ -921,20 +967,23 @@ fn redraw(
     mut commands: Commands,
     sim: Res<SlideRes>,
     view: Res<View>,
-    art_handles: Res<CellArt>,
     window: Query<&Window, With<PrimaryWindow>>,
-    mut squares: Query<
-        (&OverlaySquare, &mut Sprite, &mut Transform),
+    mut images: ResMut<Assets<Image>>,
+    mut art_handles: ResMut<CellArt>,
+    mut field_quad: Query<
+        (&mut Sprite, &mut Transform),
         (
+            With<FieldQuad>,
             Without<CellSprite>,
             Without<OrganelleSprite>,
             Without<MoteSprite>,
+            Without<JunctionSprite>,
         ),
     >,
     mut cells: Query<
         (&CellSprite, &mut Sprite, &mut Transform, &mut TextureAtlas),
         (
-            Without<OverlaySquare>,
+            Without<FieldQuad>,
             Without<OrganelleSprite>,
             Without<MoteSprite>,
         ),
@@ -946,16 +995,12 @@ fn redraw(
             &mut Transform,
             &mut TextureAtlas,
         ),
-        (
-            Without<OverlaySquare>,
-            Without<CellSprite>,
-            Without<MoteSprite>,
-        ),
+        (Without<FieldQuad>, Without<CellSprite>, Without<MoteSprite>),
     >,
     mut motes: Query<
         (&MoteSprite, &mut Sprite, &mut Transform),
         (
-            Without<OverlaySquare>,
+            Without<FieldQuad>,
             Without<CellSprite>,
             Without<OrganelleSprite>,
             Without<JunctionSprite>,
@@ -964,7 +1009,7 @@ fn redraw(
     mut junctions: Query<
         (&JunctionSprite, &mut Sprite, &mut Transform),
         (
-            Without<OverlaySquare>,
+            Without<FieldQuad>,
             Without<CellSprite>,
             Without<OrganelleSprite>,
             Without<MoteSprite>,
@@ -1011,54 +1056,52 @@ fn redraw(
 
     let plane = frame.width as usize * frame.height as usize;
 
-    // The chemical fields and the light, as one square each. Spawned once and then updated,
-    // because respawning a quarter of a million sprites a frame is not a rendering strategy.
-    if squares.is_empty() && plane > 0 {
-        for i in 0..plane {
-            commands.spawn((
-                OverlaySquare(i),
-                SpriteBundle {
-                    sprite: Sprite {
-                        color: Color::NONE,
-                        custom_size: Some(Vec2::splat(1.0)),
-                        ..default()
-                    },
-                    ..default()
-                },
-            ));
+    // The chemical fields and the light, as one texture on one quad (M10.5).
+    //
+    // This was a sprite entity per grid square: 262,144 of them at 512×512, each showing a
+    // single texel, each with a `Transform` the renderer extracted and prepared every frame. It
+    // was the largest single cost in the renderer. The arithmetic per square is unchanged and
+    // now lives in `art::paint_field`, where it is tested; what has gone is the entities.
+    if plane > 0 {
+        let size = (frame.width.max(1), frame.height.max(1));
+        if art_handles.field_size != size {
+            // A scenario with a different grid. Reallocated rather than painted into the wrong
+            // shape, which would smear the world diagonally and look like a physics bug.
+            if let Some(image) = images.get_mut(&art_handles.field) {
+                image.resize(Extent3d {
+                    width: size.0,
+                    height: size.1,
+                    depth_or_array_layers: 1,
+                });
+            }
+            art_handles.field_size = size;
+        }
+        if let Some(image) = images.get_mut(&art_handles.field) {
+            let layers: Vec<(&[f32], [f32; 3])> = frame
+                .overlays
+                .iter()
+                .map(|l| (l.field.as_slice(), l.rgb))
+                .collect();
+            art::paint_field(
+                &mut image.data,
+                frame.width as usize,
+                frame.height as usize,
+                &frame.light,
+                &layers,
+                // The vignette, which used to be applied per sprite and now has to be painted
+                // in. Asked per square, in square coordinates, because where a square lands on
+                // screen is the camera's business and not the painter's.
+                &|x, y| optics.vignette(field_radius(to_screen(x, y))),
+            );
         }
     }
-    for (sq, mut sprite, mut transform) in &mut squares {
-        let i = sq.0;
-        let Some(l) = frame.light.get(i) else {
-            continue;
-        };
-        let x = (i % frame.width.max(1) as usize) as f32;
-        let y = (i / frame.width.max(1) as usize) as f32;
-        // Light as a warm luminance under the chemical layers (SPEC §14).
-        let warm = 0.10 * l;
-        let mut rgb = [warm, warm * 0.92, warm * 0.75];
-        // Layers add, so overlapping chemicals mix rather than one winning. Two overlays on
-        // at once should look like two overlays on at once.
-        let layers = (frame.overlays.len() as f32).max(1.0);
-        for layer in &frame.overlays {
-            if let Some(c) = layer.field.get(i) {
-                // Square root, not the raw fraction. A field is normalised against its own
-                // peak, and in a diffused world almost every square sits far below that peak —
-                // so linear mapping renders the whole slide black except wherever the maximum
-                // happens to be. The curve is presentation only; `layer.field` stays linear
-                // and the legend still reports the peak the eye is being lied to about.
-                let shade = c.max(0.0).sqrt();
-                for (channel, tint) in rgb.iter_mut().zip(layer.rgb) {
-                    *channel += tint * shade / layers;
-                }
-            }
-        }
-        let at = to_screen(x + 0.5, y + 0.5);
-        let dim = optics.vignette(field_radius(at));
-        sprite.color = Color::srgb(rgb[0] * dim, rgb[1] * dim, rgb[2] * dim);
-        sprite.custom_size = Some(Vec2::splat(scale));
-        transform.translation = at;
+    for (mut sprite, mut transform) in &mut field_quad {
+        // Stretched over the whole grid, so a texel covers exactly the square it describes.
+        let a = to_screen(0.0, 0.0);
+        let b = to_screen(frame.width as f32, frame.height as f32);
+        sprite.color = if plane > 0 { Color::WHITE } else { Color::NONE };
+        sprite.custom_size = Some(Vec2::new((b.x - a.x).abs(), (a.y - b.y).abs()));
+        transform.translation = ((a + b) / 2.0).with_z(0.0);
     }
 
     // Cells. Kept at a fixed pool size and hidden when unused, for the same reason.

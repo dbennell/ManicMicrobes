@@ -106,6 +106,65 @@ pub fn variant_of(id: u64) -> usize {
     (id.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 59) as usize % VARIANTS
 }
 
+/// Paint the chemical overlays and the light into an RGBA buffer (M10.5).
+///
+/// # Why this exists
+///
+/// The substrate was drawn as **one sprite entity per grid square** — 262,144 of them at
+/// 512×512, every one carrying a `Transform` and a `Sprite`, extracted and prepared by the
+/// renderer every frame, to show a single texel each. It was by a wide margin the largest cost
+/// in the renderer and it bought nothing: a grid of coloured squares is a texture.
+///
+/// The arithmetic per square is unchanged — the same layers, the same square-root curve, the
+/// same vignette. What goes is the quarter of a million entities.
+///
+/// `dim` is asked for the vignette at a square, in square coordinates, because where a square
+/// lands on screen depends on the camera and this function has no business knowing about one.
+/// Tests pass a closure that returns 1.
+pub fn paint_field(
+    into: &mut [u8],
+    width: usize,
+    height: usize,
+    light: &[f32],
+    layers: &[(&[f32], [f32; 3])],
+    dim: &dyn Fn(f32, f32) -> f32,
+) {
+    // Layers add rather than one winning, so two overlays on at once look like two overlays on
+    // at once — divided by the count so the sum stays inside the channel.
+    let share = (layers.len() as f32).max(1.0);
+    for y in 0..height {
+        for x in 0..width {
+            let i = y * width + x;
+            // Light as a warm luminance under the chemical layers (SPEC §14).
+            let warm = 0.10 * light.get(i).copied().unwrap_or(0.0);
+            let mut rgb = [warm, warm * 0.92, warm * 0.75];
+            for (field, tint) in layers {
+                let Some(c) = field.get(i) else {
+                    continue;
+                };
+                // Square root, not the raw fraction. A field is normalised against its own
+                // peak, and in a diffused world almost every square sits far below that peak —
+                // so linear mapping renders the whole slide black except wherever the maximum
+                // happens to be. The curve is presentation only; the field stays linear and the
+                // legend still reports the peak the eye is being lied to about.
+                let shade = c.max(0.0).sqrt();
+                for (channel, t) in rgb.iter_mut().zip(tint) {
+                    *channel += t * shade / share;
+                }
+            }
+            let d = dim(x as f32 + 0.5, y as f32 + 0.5);
+            let at = i * 4;
+            let Some(px) = into.get_mut(at..at + 4) else {
+                continue;
+            };
+            for k in 0..3 {
+                px[k] = ((rgb[k] * d).clamp(0.0, 1.0) * 255.0) as u8;
+            }
+            px[3] = 255;
+        }
+    }
+}
+
 /// Cheap deterministic noise in `0..1`, for the grain and the per-variant phases.
 fn hash01(mut x: u64) -> f32 {
     x ^= x >> 33;
@@ -226,6 +285,94 @@ mod tests {
     fn pixel(pixels: &[u8], variant: usize, x: usize, y: usize) -> [u8; 4] {
         let at = ((y * atlas_width()) + variant * TILE + x) * 4;
         [pixels[at], pixels[at + 1], pixels[at + 2], pixels[at + 3]]
+    }
+
+    #[test]
+    fn painting_a_field_writes_every_texel_opaque() {
+        // A texel left untouched is a black square in the middle of the slide, and a texel left
+        // transparent shows the window's clear colour through the water.
+        let (w, h) = (7usize, 5usize);
+        let mut buf = vec![7u8; w * h * 4];
+        let light = vec![0.0f32; w * h];
+        paint_field(&mut buf, w, h, &light, &[], &|_, _| 1.0);
+        for i in 0..w * h {
+            assert_eq!(buf[i * 4 + 3], 255, "texel {i} is not opaque");
+        }
+    }
+
+    #[test]
+    fn a_layer_shows_up_where_it_is_and_not_where_it_is_not() {
+        let (w, h) = (4usize, 1usize);
+        let mut buf = vec![0u8; w * h * 4];
+        let light = vec![0.0f32; w * h];
+        let field = vec![0.0f32, 1.0, 0.0, 0.0];
+        paint_field(
+            &mut buf,
+            w,
+            h,
+            &light,
+            &[(&field, [1.0, 0.0, 0.0])],
+            &|_, _| 1.0,
+        );
+        assert!(
+            buf[4] > 200,
+            "the square holding the chemical is not red"
+        );
+        assert_eq!(buf[0], 0, "a square holding nothing was painted anyway");
+        assert_eq!(buf[3 * 4], 0);
+    }
+
+    #[test]
+    fn two_layers_mix_rather_than_one_winning() {
+        let (w, h) = (1usize, 1usize);
+        let mut buf = vec![0u8; 4];
+        let light = vec![0.0f32];
+        let red = vec![1.0f32];
+        let blue = vec![1.0f32];
+        paint_field(
+            &mut buf,
+            w,
+            h,
+            &light,
+            &[(&red, [1.0, 0.0, 0.0]), (&blue, [0.0, 0.0, 1.0])],
+            &|_, _| 1.0,
+        );
+        assert!(buf[0] > 0 && buf[2] > 0, "one layer swallowed the other");
+    }
+
+    #[test]
+    fn the_vignette_reaches_the_field() {
+        // The field is drawn as one quad now, so the vignette has to be painted into it — the
+        // per-sprite dimming that used to do it went with the sprites.
+        let (w, h) = (2usize, 1usize);
+        let mut buf = vec![0u8; w * 4];
+        let light = vec![1.0f32; w];
+        paint_field(&mut buf, w, h, &light, &[], &|x, _| {
+            if x < 1.0 {
+                1.0
+            } else {
+                0.0
+            }
+        });
+        assert!(buf[0] > 0, "the lit square came out black");
+        assert_eq!(buf[4], 0, "the vignetted square was not dimmed");
+    }
+
+    #[test]
+    fn a_short_buffer_or_a_short_field_is_survivable() {
+        // The grid changes size when a scenario is loaded, and for a frame the buffer and the
+        // frame can disagree. Painting past the end of either is not an option.
+        let mut buf = vec![0u8; 4];
+        let light = vec![1.0f32; 100];
+        let field = vec![0.5f32; 2];
+        paint_field(
+            &mut buf,
+            10,
+            10,
+            &light,
+            &[(&field, [1.0, 1.0, 1.0])],
+            &|_, _| 1.0,
+        );
     }
 
     #[test]
