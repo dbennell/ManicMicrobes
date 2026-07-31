@@ -17,7 +17,8 @@
 //! - [`engine`] — the simulation thread, and the only place wall-clock time is allowed to
 //!   decide anything.
 //! - [`optics`] — the microscope's look, as parameters rather than as a shader.
-//! - [`art`] — the baked cell atlas: what a cell looks like up close.
+//! - [`art`] — the baked cell atlas, and the chemical field's pixels.
+//! - [`cellmesh`] — the whole population as one mesh, for the per-pixel cell shader.
 //! - [`inspector`] — a read-only transcript of one cell.
 //! - [`editor`] — a `.mm` source buffer, its diagnostics and its exports.
 //! - [`debugger`] — breakpoints over the live world, instruction stepping in a sandbox.
@@ -30,6 +31,7 @@
 //! only file that knows Bevy exists, and it is behind the `render` feature.
 
 pub mod art;
+pub mod cellmesh;
 pub mod debugger;
 pub mod editor;
 pub mod engine;

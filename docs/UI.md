@@ -433,10 +433,17 @@ each frame and drawn as one quad under everything. A megabyte of upload per fram
 normalised, per-layer `rgb` and `peak` — so this is a change of destination, not of content.
 The `sqrt` presentation curve moves into the shader where it belongs.
 
-**Cells become one instanced draw.** One quad mesh, one draw call, an instance buffer of
-50,000 records. Bevy's own `shader_instancing` example is the reference implementation for
-this shape of thing on 0.14 (custom `RenderCommand`, `SpecializedMeshPipeline`, per-instance
-vertex buffer) and following it is the low-risk path.
+**Cells become one draw call.** *Built at M10.5, and not as instancing.* A custom instanced
+pipeline means a `SpecializedMeshPipeline`, a custom `RenderCommand`, and your own extract,
+prepare and queue systems — the part of Bevy with the least documentation and the most churn.
+The same result comes out of `Material2d` with **custom vertex attributes**: one mesh carrying
+the whole population, four vertices per cell, one draw call, no entities, and a supported
+stable API. It costs bandwidth rather than boilerplate — about 7 MB a frame at fifty thousand
+cells, a fifth of what the field texture already costs and nobody noticed.
+
+Organelles went into the same mesh. Left as atlas sprites they were the one soft thing in a
+sharp picture: a 64-pixel tile magnified to a cell at 1400× is visibly blurred while the SDF
+beside it is not.
 
 32 bytes per instance, so 50,000 cells is a 1.6 MB buffer:
 

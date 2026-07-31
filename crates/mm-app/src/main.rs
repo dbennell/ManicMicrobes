@@ -75,16 +75,26 @@
 //! by convolution. A real separable blur belongs in the post-process pass this leaves room
 //! for.
 
+use bevy::asset::load_internal_asset;
 use bevy::diagnostic::{Diagnostic, DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::prelude::*;
+use bevy::render::mesh::{Indices, MeshVertexAttribute, MeshVertexBufferLayoutRef};
 use bevy::render::render_asset::RenderAssetUsages;
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy::render::render_resource::{
+    AsBindGroup, Extent3d, PrimitiveTopology, RenderPipelineDescriptor, ShaderRef,
+    SpecializedMeshPipelineError, TextureDimension, TextureFormat, VertexFormat,
+};
 use bevy::render::texture::ImageSampler;
+use bevy::render::view::NoFrustumCulling;
+use bevy::sprite::{
+    Material2d, Material2dKey, Material2dPlugin, MaterialMesh2dBundle, Mesh2dHandle,
+};
 use bevy::window::PrimaryWindow;
 use bevy_egui::{egui, EguiContexts, EguiPlugin};
 
 use mm_app::art;
+use mm_app::cellmesh;
 use mm_app::debugger::{Breakpoint, Breakpoints, Sandbox};
 use mm_app::editor::Editor;
 use mm_app::engine::{Engine, Published, Rate};
@@ -101,19 +111,75 @@ use mm_core::light::CurrentField;
 use mm_core::metrics::Sample;
 use mm_core::{CellId, LightRegime, MutationRates, Organelle, OrganelleType, Scenario, Seeding};
 
+/// Render one frame to a PNG and carry on, when asked by the environment.
+///
+/// The only way a change to the renderer can be checked at all. Everything else in this crate
+/// is tested without a graphics stack — that is the point of the wall in `slide.rs` — which
+/// leaves the actual pixels verified by looking, and looking needs something to look at. A
+/// desktop capture is no good under Wayland and asks for a permission nobody wants to grant to
+/// a simulation; this asks the renderer that drew the frame.
+///
+/// ```text
+/// MM_SHOT=/tmp/slide.png MM_SHOT_AFTER=900 MM_SHOT_ZOOM=14 cargo run -p mm-app --features render --release
+/// ```
+///
+/// `MM_SHOT_AFTER` is in frames, so there is a world to photograph rather than sixteen
+/// ancestors; `MM_SHOT_ZOOM` and `MM_SHOT_FLAT` set the camera and the cell style up front,
+/// because a run that exits after one photograph has nobody to drive it.
+fn screenshot(
+    mut manager: ResMut<bevy::render::view::screenshot::ScreenshotManager>,
+    windows: Query<Entity, With<PrimaryWindow>>,
+    mut view: ResMut<View>,
+    mut frames: Local<u32>,
+    mut done: Local<bool>,
+) {
+    *frames += 1;
+    if *frames == 1 {
+        if let Ok(zoom) = std::env::var("MM_SHOT_ZOOM") {
+            view.zoom = zoom.parse().unwrap_or(view.zoom);
+        }
+        if std::env::var("MM_SHOT_FLAT").is_ok() {
+            view.rounded = false;
+        }
+    }
+    let Ok(path) = std::env::var("MM_SHOT") else {
+        return;
+    };
+    let after: u32 = std::env::var("MM_SHOT_AFTER")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(600);
+    if *done || *frames < after {
+        return;
+    }
+    if let Ok(window) = windows.get_single() {
+        // Failure is reported and ignored: a missing directory should not take down a run that
+        // is otherwise doing its job.
+        if let Err(e) = manager.save_screenshot_to_disk(window, &path) {
+            eprintln!("cannot write {path}: {e}");
+        }
+        *done = true;
+    }
+}
+
 /// Pixels per substrate square at zoom 1.
 const BASE_SCALE: f32 = 8.0;
 
 fn main() {
-    App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "Manic Microbes".to_string(),
-                ..default()
-            }),
+    let mut app = App::new();
+    app.add_plugins(DefaultPlugins.set(WindowPlugin {
+        primary_window: Some(Window {
+            title: "Manic Microbes".to_string(),
             ..default()
-        }))
-        .add_plugins(FrameTimeDiagnosticsPlugin)
+        }),
+        ..default()
+    }));
+    // After `DefaultPlugins`, not before: the macro writes straight into `Assets<Shader>`, and
+    // `AssetPlugin` is what puts that resource in the world. Before it, this is a panic on the
+    // first line of `main` with a message about a missing resource rather than about a shader.
+    load_internal_asset!(app, CELL_SHADER, "cell.wgsl", Shader::from_wgsl);
+    app.add_plugins(FrameTimeDiagnosticsPlugin)
+        .add_plugins(Material2dPlugin::<CellMaterial>::default())
         .add_plugins(EguiPlugin)
         .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.03)))
         .insert_resource(SlideRes::new())
@@ -123,6 +189,7 @@ fn main() {
             Update,
             (
                 handle_input,
+                screenshot,
                 // Ordered so that a frame always shows the tick that has just finished,
                 // rather than one caught halfway through being computed.
                 collect_simulation,
@@ -500,20 +567,63 @@ impl Tool {
 }
 
 #[derive(Component)]
-struct CellSprite(usize);
-
-#[derive(Component)]
-struct OrganelleSprite {
-    cell: usize,
-    nth: usize,
-}
-
-#[derive(Component)]
 struct MoteSprite(usize);
 
 /// A junction, drawn as a thin sprite stretched between two cells (M7).
 #[derive(Component)]
 struct JunctionSprite(usize);
+
+/// The per-cell data the shader reads, beyond position, corner and colour.
+///
+/// The id is arbitrary but must be stable and must not collide with Bevy's own attributes,
+/// which is what the large number is for.
+const ATTRIBUTE_SHAPE: MeshVertexAttribute =
+    MeshVertexAttribute::new("CellShape", 0x6D_6D_5F_63_65_6C_6C, VertexFormat::Float32x4);
+
+/// Embedded at compile time rather than loaded from an `assets/` directory, so the binary runs
+/// from anywhere. The same thing `bevy_sprite` does for its own shaders.
+const CELL_SHADER: Handle<Shader> =
+    Handle::weak_from_u128(0x006D_6D5F_6365_6C6C_5F73_6861_6465_7201);
+
+/// The whole population, drawn by one material with one shader (M10.5).
+///
+/// No bindings: everything that varies rides in the vertex attributes, because it varies *per
+/// cell* and a material's uniforms are per draw call — and the entire point is that there is one
+/// draw call. See `cellmesh.rs` for why a mesh rather than instancing, and `cell.wgsl` for the
+/// field itself.
+#[derive(Asset, TypePath, AsBindGroup, Clone, Default)]
+struct CellMaterial {}
+
+impl Material2d for CellMaterial {
+    fn vertex_shader() -> ShaderRef {
+        ShaderRef::Handle(CELL_SHADER)
+    }
+
+    fn fragment_shader() -> ShaderRef {
+        ShaderRef::Handle(CELL_SHADER)
+    }
+
+    fn specialize(
+        descriptor: &mut RenderPipelineDescriptor,
+        layout: &MeshVertexBufferLayoutRef,
+        _key: Material2dKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        // The locations here are the locations in `cell.wgsl`, and the two have to agree
+        // exactly — a mismatch is a validation failure at draw time with nothing to say which
+        // end is wrong.
+        descriptor.vertex.buffers = vec![layout.0.get_layout(&[
+            Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
+            Mesh::ATTRIBUTE_UV_0.at_shader_location(1),
+            Mesh::ATTRIBUTE_COLOR.at_shader_location(2),
+            ATTRIBUTE_SHAPE.at_shader_location(3),
+        ])?];
+        Ok(())
+    }
+}
+
+/// The one entity the whole population is drawn as.
+#[derive(Component)]
+struct CellMesh;
 
 /// The baked cell atlas, uploaded once (M10.5).
 ///
@@ -533,6 +643,8 @@ struct CellArt {
     /// What the field texture is currently sized for, so a scenario with a different grid
     /// reallocates rather than painting into the wrong shape.
     field_size: (u32, u32),
+    /// The population's vertex buffers, reused every frame so a steady world allocates nothing.
+    cells: cellmesh::Buffers,
 }
 
 /// The single quad the chemical field is drawn on.
@@ -543,6 +655,8 @@ fn setup(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
     mut layouts: ResMut<Assets<TextureAtlasLayout>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut cell_materials: ResMut<Assets<CellMaterial>>,
 ) {
     commands.spawn(Camera2dBundle::default());
 
@@ -584,6 +698,32 @@ fn setup(
     // a value that was not measured somewhere adjacent.
     field.sampler = ImageSampler::linear();
 
+    // One mesh for the whole population, rewritten each frame. Spawned empty; `redraw` fills it.
+    let mut cells = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
+    );
+    cells.insert_attribute(Mesh::ATTRIBUTE_POSITION, Vec::<[f32; 3]>::new());
+    cells.insert_attribute(Mesh::ATTRIBUTE_UV_0, Vec::<[f32; 2]>::new());
+    cells.insert_attribute(Mesh::ATTRIBUTE_COLOR, Vec::<[f32; 4]>::new());
+    cells.insert_attribute(ATTRIBUTE_SHAPE, Vec::<[f32; 4]>::new());
+    cells.insert_indices(Indices::U32(Vec::new()));
+    commands.spawn((
+        CellMesh,
+        // The vertices are rewritten every frame in screen space, so the bounding box Bevy
+        // computes once from the first frame's positions is wrong by the second. Left to itself
+        // the whole population would be frustum-culled the moment the camera moved, which looks
+        // exactly like every cell dying at once.
+        NoFrustumCulling,
+        MaterialMesh2dBundle {
+            mesh: Mesh2dHandle(meshes.add(cells)),
+            material: cell_materials.add(CellMaterial {}),
+            // Above the chemical field, below the organelles.
+            transform: Transform::from_xyz(0.0, 0.0, 1.0),
+            ..default()
+        },
+    ));
+
     let field = images.add(field);
     commands.spawn((
         FieldQuad,
@@ -609,6 +749,7 @@ fn setup(
         )),
         field,
         field_size: (1, 1),
+        cells: cellmesh::Buffers::default(),
     });
 }
 
@@ -974,46 +1115,19 @@ fn redraw(
         (&mut Sprite, &mut Transform),
         (
             With<FieldQuad>,
-            Without<CellSprite>,
-            Without<OrganelleSprite>,
             Without<MoteSprite>,
             Without<JunctionSprite>,
         ),
     >,
-    mut cells: Query<
-        (&CellSprite, &mut Sprite, &mut Transform, &mut TextureAtlas),
-        (
-            Without<FieldQuad>,
-            Without<OrganelleSprite>,
-            Without<MoteSprite>,
-        ),
-    >,
-    mut organelles: Query<
-        (
-            &OrganelleSprite,
-            &mut Sprite,
-            &mut Transform,
-            &mut TextureAtlas,
-        ),
-        (Without<FieldQuad>, Without<CellSprite>, Without<MoteSprite>),
-    >,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut cell_mesh: Query<(&Mesh2dHandle, &mut Visibility), With<CellMesh>>,
     mut motes: Query<
         (&MoteSprite, &mut Sprite, &mut Transform),
-        (
-            Without<FieldQuad>,
-            Without<CellSprite>,
-            Without<OrganelleSprite>,
-            Without<JunctionSprite>,
-        ),
+        (Without<FieldQuad>, Without<JunctionSprite>),
     >,
     mut junctions: Query<
         (&JunctionSprite, &mut Sprite, &mut Transform),
-        (
-            Without<FieldQuad>,
-            Without<CellSprite>,
-            Without<OrganelleSprite>,
-            Without<MoteSprite>,
-        ),
+        (Without<FieldQuad>, Without<MoteSprite>),
     >,
 ) {
     let frame = &sim.latest.frame;
@@ -1104,120 +1218,94 @@ fn redraw(
         transform.translation = ((a + b) / 2.0).with_z(0.0);
     }
 
-    // Cells. Kept at a fixed pool size and hidden when unused, for the same reason.
-    let wanted = frame.cells.len();
-    let have = cells.iter().count();
-    for i in have..wanted {
-        commands.spawn((
-            CellSprite(i),
-            SpriteBundle {
-                sprite: Sprite {
-                    custom_size: Some(Vec2::splat(1.0)),
-                    ..default()
-                },
-                texture: art_handles.image.clone_weak(),
-                ..default()
-            },
-            TextureAtlas {
-                layout: art_handles.layout.clone_weak(),
-                index: art::FLAT,
-            },
-        ));
-    }
-    for (marker, mut sprite, mut transform, mut atlas) in &mut cells {
-        let Some(dot) = frame.cells.get(marker.0) else {
-            sprite.color = Color::NONE;
-            continue;
-        };
-        let at = to_screen(dot.x, dot.y).with_z(1.0);
-        let r = field_radius(at);
-        let dim = optics.vignette(r);
-        // Depth of field, approximated: a defocused cell is bigger and fainter rather than
-        // convolved. See the module docs.
+    // Cells: the whole population as one mesh, one material, one draw call (M10.5).
+    //
+    // This was a sprite entity per cell — fifty thousand `Transform`s and `Sprite`s at the
+    // target scale, extracted and prepared every frame to draw quads that differ only in where
+    // they are and what colour they are. What it buys beyond the entities is the shape: the
+    // fragment shader evaluates a signed-distance field per pixel per cell, so every cell has
+    // its own outline, it stays crisp at any magnification, and a failing membrane roughens it.
+    // The baked atlas could do none of that; it is still what organelles and dust wear.
+    cellmesh::build(&mut art_handles.cells, &frame.cells, |dot| {
+        let at = to_screen(dot.x, dot.y);
+        let dim = optics.vignette(field_radius(at));
+        // Depth of field. The size-and-alpha approximation is still here, but the *edge* is
+        // genuinely softer now — `softness` widens the smoothstep in the shader, which is the
+        // one part of the microscope look a texture could not fake.
         let blur = optics.blur(dot.depth);
-        let softness = 1.0 - (blur / optics.max_blur.max(f32::EPSILON)).clamp(0.0, 0.75);
-        // Which silhouette this cell wears — from its identity, so it keeps the same one for
-        // life, and `FLAT` when the effect is switched off.
-        atlas.index = if view.rounded {
-            art::variant_of(dot.id.ordering_key())
-        } else {
-            art::FLAT
-        };
+        let focus = 1.0 - (blur / optics.max_blur.max(f32::EPSILON)).clamp(0.0, 0.75);
         let selected = sim.selected == Some(dot.id);
-        let [cr, cg, cb] = dot.rgb;
-        let tint = if selected { 1.0 } else { dim * softness };
-        sprite.color = Color::srgba(cr * tint, cg * tint, cb * tint, softness.max(0.25));
+        let [r, g, b] = dot.rgb;
+        let tint = if selected { 1.0 } else { dim * focus };
         let body = (dot.radius * 2.0 * scale + blur).max(if selected { 4.0 } else { 1.5 });
-        // Grossed up by the tile's transparent margin when a blob is being drawn, so the cell
-        // is the size the simulation says rather than the size the texture happens to fill.
-        sprite.custom_size = Some(Vec2::splat(if view.rounded {
-            body / art::FILL
-        } else {
-            body
-        }));
-        transform.translation = at;
-    }
-
-    // Organelles, only at the tiers that resolve them. At `Lod::Dots` every organelle sprite
-    // is hidden and the loop above is the whole of the drawing.
-    const MAX_SLOTS: usize = 16;
-    let detailed = frame.lod.resolves_organelles();
-    let organelle_pool = organelles.iter().count();
-    if detailed && organelle_pool < wanted * MAX_SLOTS {
-        for i in organelle_pool..(wanted * MAX_SLOTS) {
-            commands.spawn((
-                OrganelleSprite {
-                    cell: i / MAX_SLOTS,
-                    nth: i % MAX_SLOTS,
-                },
-                SpriteBundle {
-                    sprite: Sprite {
-                        color: Color::NONE,
-                        custom_size: Some(Vec2::splat(1.0)),
-                        ..default()
+        Some(cellmesh::Placed {
+            x: at.x,
+            y: at.y,
+            half: body / 2.0,
+            rgba: [r * tint, g * tint, b * tint, focus.max(0.25)],
+            shape: cellmesh::Shape {
+                seed: cellmesh::seed_of(dot.id.ordering_key()),
+                // In the field's own units, where 1 is the cell's radius — so a defocused cell
+                // is soft by the same *fraction* however big it is drawn.
+                softness: (blur / body.max(1.0)).clamp(0.0, 0.6),
+                integrity: 1.0,
+                rounded: if view.rounded { 1.0 } else { 0.0 },
+            },
+        })
+    });
+    // Organelles, into the same buffers and therefore the same draw call, at the tiers that
+    // resolve them. They were sprites wearing the baked atlas, which at high magnification made
+    // them the one soft thing in a sharp picture — the tile is 64 pixels and a cell at 1400×
+    // is not.
+    if frame.lod.resolves_organelles() {
+        for dot in &frame.cells {
+            let dim = optics.vignette(field_radius(to_screen(dot.x, dot.y)));
+            for (nth, o) in dot.organelles.iter().enumerate() {
+                let at = to_screen(dot.x + o.dx, dot.y + o.dy);
+                let sep = optics.separation(field_radius(at));
+                let size = (o.radius * 2.0 * scale).max(1.0) + sep;
+                let [r, g, b] = o.rgb;
+                let tint = dim * o.built;
+                art_handles.cells.push(cellmesh::Placed {
+                    x: at.x,
+                    y: at.y,
+                    half: size / 2.0,
+                    rgba: [r * tint, g * tint, b * tint, 1.0],
+                    shape: cellmesh::Shape {
+                        // Its own outline, from its slot and its cell — so the inside of a cell
+                        // is not four copies of one pebble, and two cells' nuclei differ.
+                        seed: cellmesh::seed_of(
+                            dot.id
+                                .ordering_key()
+                                .wrapping_mul(31)
+                                .wrapping_add(nth as u64 + 1),
+                        ),
+                        softness: 0.0,
+                        integrity: 1.0,
+                        rounded: if view.rounded { 1.0 } else { 0.0 },
                     },
-                    texture: art_handles.image.clone_weak(),
-                    ..default()
-                },
-                TextureAtlas {
-                    layout: art_handles.layout.clone_weak(),
-                    index: art::FLAT,
-                },
-            ));
+                });
+            }
         }
     }
-    for (marker, mut sprite, mut transform, mut atlas) in &mut organelles {
-        let found = detailed
-            .then(|| frame.cells.get(marker.cell))
-            .flatten()
-            .and_then(|dot| dot.organelles.get(marker.nth).map(|o| (dot, o)));
-        let Some((dot, o)) = found else {
-            sprite.color = Color::NONE;
+
+    for (mesh_handle, mut visibility) in &mut cell_mesh {
+        let Some(mesh) = meshes.get_mut(&mesh_handle.0) else {
             continue;
         };
-        let at = to_screen(dot.x + o.dx, dot.y + o.dy).with_z(2.0);
-        let dim = optics.vignette(field_radius(at)) * o.built;
-        // Chromatic aberration: the red and blue channels are drawn a hair apart at the edge
-        // of the field. Applied to the smallest things on screen, where it reads as an
-        // optical artefact rather than as a bug.
-        let sep = optics.separation(field_radius(at));
-        let [r, g, b] = o.rgb;
-        sprite.color = Color::srgb(r * dim, g * dim, b * dim);
-        // A different silhouette per slot, so the inside of a cell is not four copies of one
-        // pebble. Organelles are round in life and were squares here, which at organelle zoom
-        // is the most visible squareness on the slide.
-        atlas.index = if view.rounded {
-            art::variant_of(marker.nth as u64 + 1)
+        let buffers = &art_handles.cells;
+        *visibility = if buffers.cells() == 0 {
+            // An empty mesh is a validation error in some backends and a wasted draw in the
+            // rest. A slide with nothing alive on it simply does not draw the layer.
+            Visibility::Hidden
         } else {
-            art::FLAT
+            Visibility::Visible
         };
-        let size = (o.radius * 2.0 * scale).max(1.0) + sep;
-        sprite.custom_size = Some(Vec2::splat(if view.rounded {
-            size / art::FILL
-        } else {
-            size
-        }));
-        transform.translation = at;
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, buffers.positions.clone());
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, buffers.uvs.clone());
+        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, buffers.colours.clone());
+        mesh.insert_attribute(ATTRIBUTE_SHAPE, buffers.shapes.clone());
+        mesh.insert_indices(Indices::U32(buffers.indices.clone()));
     }
 
     // Junctions. A stretched, rotated sprite per link: hard ones solid because they are

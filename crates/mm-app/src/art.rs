@@ -314,10 +314,7 @@ mod tests {
             &[(&field, [1.0, 0.0, 0.0])],
             &|_, _| 1.0,
         );
-        assert!(
-            buf[4] > 200,
-            "the square holding the chemical is not red"
-        );
+        assert!(buf[4] > 200, "the square holding the chemical is not red");
         assert_eq!(buf[0], 0, "a square holding nothing was painted anyway");
         assert_eq!(buf[3 * 4], 0);
     }
