@@ -77,19 +77,18 @@
 
 use bevy::asset::load_internal_asset;
 use bevy::diagnostic::{Diagnostic, DiagnosticsStore, FrameTimeDiagnosticsPlugin};
+use bevy::image::ImageSampler;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::prelude::*;
+use bevy::render::mesh::Mesh2d;
 use bevy::render::mesh::{Indices, MeshVertexAttribute, MeshVertexBufferLayoutRef};
 use bevy::render::render_asset::RenderAssetUsages;
 use bevy::render::render_resource::{
     AsBindGroup, Extent3d, PrimitiveTopology, RenderPipelineDescriptor, ShaderRef,
     SpecializedMeshPipelineError, TextureDimension, TextureFormat, VertexFormat,
 };
-use bevy::render::texture::ImageSampler;
 use bevy::render::view::NoFrustumCulling;
-use bevy::sprite::{
-    Material2d, Material2dKey, Material2dPlugin, MaterialMesh2dBundle, Mesh2dHandle,
-};
+use bevy::sprite::{Material2d, Material2dKey, Material2dPlugin, MeshMaterial2d};
 use bevy::window::PrimaryWindow;
 use bevy_egui::{egui, EguiContexts, EguiPlugin};
 
@@ -126,13 +125,19 @@ use mm_core::{CellId, LightRegime, MutationRates, Organelle, OrganelleType, Scen
 /// `MM_SHOT_AFTER` is in frames, so there is a world to photograph rather than sixteen
 /// ancestors; `MM_SHOT_ZOOM` and `MM_SHOT_FLAT` set the camera and the cell style up front,
 /// because a run that exits after one photograph has nobody to drive it.
+///
+/// **It photographs the slide and not the panels.** Bevy 0.15 moved where the screenshot is
+/// taken relative to the egui pass, so what comes out is the render this crate is responsible
+/// for and none of the interface drawn over it. That is the half worth photographing anyway,
+/// and the panels prove themselves a different way: `ctx.available_rect()` shrinking to the
+/// viewport is the layout having happened.
 fn screenshot(
-    mut manager: ResMut<bevy::render::view::screenshot::ScreenshotManager>,
-    windows: Query<Entity, With<PrimaryWindow>>,
+    mut commands: Commands,
     mut view: ResMut<View>,
     mut frames: Local<u32>,
     mut done: Local<bool>,
 ) {
+    use bevy::render::view::screenshot::{save_to_disk, Screenshot};
     *frames += 1;
     if *frames == 1 {
         if let Ok(zoom) = std::env::var("MM_SHOT_ZOOM") {
@@ -152,14 +157,13 @@ fn screenshot(
     if *done || *frames < after {
         return;
     }
-    if let Ok(window) = windows.get_single() {
-        // Failure is reported and ignored: a missing directory should not take down a run that
-        // is otherwise doing its job.
-        if let Err(e) = manager.save_screenshot_to_disk(window, &path) {
-            eprintln!("cannot write {path}: {e}");
-        }
-        *done = true;
-    }
+    // An entity with an observer since 0.15, rather than a manager resource. Failure is the
+    // observer's problem and is reported by it: a missing directory should not take down a run
+    // that is otherwise doing its job.
+    commands
+        .spawn(Screenshot::primary_window())
+        .observe(save_to_disk(path));
+    *done = true;
 }
 
 /// Pixels per substrate square at zoom 1.
@@ -658,7 +662,7 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut cell_materials: ResMut<Assets<CellMaterial>>,
 ) {
-    commands.spawn(Camera2dBundle::default());
+    commands.spawn(Camera2d);
 
     // See `mm_app::art` for what is in it and why it is baked rather than shaded per pixel.
     let side = art::TILE as u32;
@@ -715,25 +719,19 @@ fn setup(
         // the whole population would be frustum-culled the moment the camera moved, which looks
         // exactly like every cell dying at once.
         NoFrustumCulling,
-        MaterialMesh2dBundle {
-            mesh: Mesh2dHandle(meshes.add(cells)),
-            material: cell_materials.add(CellMaterial {}),
-            // Above the chemical field, below the organelles.
-            transform: Transform::from_xyz(0.0, 0.0, 1.0),
-            ..default()
-        },
+        Mesh2d(meshes.add(cells)),
+        MeshMaterial2d(cell_materials.add(CellMaterial {})),
+        // Above the chemical field, below the organelles.
+        Transform::from_xyz(0.0, 0.0, 1.0),
     ));
 
     let field = images.add(field);
     commands.spawn((
         FieldQuad,
-        SpriteBundle {
-            sprite: Sprite {
-                color: Color::NONE,
-                custom_size: Some(Vec2::splat(1.0)),
-                ..default()
-            },
-            texture: field.clone(),
+        Sprite {
+            image: field.clone(),
+            color: Color::NONE,
+            custom_size: Some(Vec2::splat(1.0)),
             ..default()
         },
     ));
@@ -1120,7 +1118,7 @@ fn redraw(
         ),
     >,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut cell_mesh: Query<(&Mesh2dHandle, &mut Visibility), With<CellMesh>>,
+    mut cell_mesh: Query<(&Mesh2d, &mut Visibility), With<CellMesh>>,
     mut motes: Query<
         (&MoteSprite, &mut Sprite, &mut Transform),
         (Without<FieldQuad>, Without<JunctionSprite>),
@@ -1314,12 +1312,9 @@ fn redraw(
     for i in junction_pool..frame.junctions.len() {
         commands.spawn((
             JunctionSprite(i),
-            SpriteBundle {
-                sprite: Sprite {
-                    color: Color::NONE,
-                    custom_size: Some(Vec2::splat(1.0)),
-                    ..default()
-                },
+            Sprite {
+                color: Color::NONE,
+                custom_size: Some(Vec2::splat(1.0)),
                 ..default()
             },
         ));
@@ -1352,20 +1347,17 @@ fn redraw(
     for i in mote_pool..frame.motes.len() {
         commands.spawn((
             MoteSprite(i),
-            SpriteBundle {
-                sprite: Sprite {
-                    color: Color::NONE,
-                    custom_size: Some(Vec2::splat(1.0)),
-                    ..default()
-                },
-                texture: art_handles.image.clone_weak(),
+            Sprite {
+                image: art_handles.image.clone_weak(),
+                // Dust on the objective, and dust is not square. Fixed at one silhouette
+                // because a mote is a couple of pixels and nobody is going to count them.
+                texture_atlas: Some(TextureAtlas {
+                    layout: art_handles.layout.clone_weak(),
+                    index: 0,
+                }),
+                color: Color::NONE,
+                custom_size: Some(Vec2::splat(1.0)),
                 ..default()
-            },
-            // Dust on the objective, and dust is not square. Fixed at one silhouette because a
-            // mote is a couple of pixels and nobody is going to count them.
-            TextureAtlas {
-                layout: art_handles.layout.clone_weak(),
-                index: 0,
             },
         ));
     }
@@ -2725,7 +2717,7 @@ fn ecology_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
             egui::vec2(ui.available_width(), ui.available_height()),
             |ui| {
                 egui::ScrollArea::vertical()
-                    .id_source("species_page")
+                    .id_salt("species_page")
                     .auto_shrink([false, false])
                     .show(ui, |ui| species_page(ui, sim, view));
             },
@@ -2909,7 +2901,7 @@ fn timeline_view(ui: &mut egui::Ui, sim: &SlideRes, view: &mut View) {
 
     ui.separator();
     egui::ScrollArea::vertical()
-        .id_source("timeline_entries")
+        .id_salt("timeline_entries")
         .auto_shrink([false, false])
         .show(ui, |ui| {
             if timeline.entries.is_empty() && timeline.meddles.is_empty() {
@@ -3192,7 +3184,7 @@ fn editor_body(ui: &mut egui::Ui, sim: &mut SlideRes) {
     if !errors.is_empty() {
         egui::ScrollArea::vertical()
             .max_height(90.0)
-            .id_source("diagnostics")
+            .id_salt("diagnostics")
             .show(ui, |ui| {
                 for e in &errors {
                     ui.colored_label(egui::Color32::from_rgb(230, 120, 110), e);
@@ -3206,7 +3198,7 @@ fn editor_body(ui: &mut egui::Ui, sim: &mut SlideRes) {
     // widget and a plain one that silently dropped the colours would be worse.
     let mut source = sim.editor.source().to_string();
     egui::ScrollArea::vertical()
-        .id_source("source")
+        .id_salt("source")
         .show(ui, |ui| {
             let response = ui.add(
                 egui::TextEdit::multiline(&mut source)
@@ -3332,7 +3324,7 @@ fn debugger_body(ui: &mut egui::Ui, sim: &mut SlideRes) {
         let here = sandbox.vm.ip as u32;
         egui::ScrollArea::vertical()
             .max_height(180.0)
-            .id_source("disasm")
+            .id_salt("disasm")
             .show(ui, |ui| {
                 for line in &listing.lines {
                     let marker = if line.offset == here { "▶ " } else { "  " };
