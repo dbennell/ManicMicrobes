@@ -179,7 +179,9 @@ impl Flows {
     /// Fold one tick's report in.
     pub fn accumulate(&mut self, report: &TickReport) {
         self.ticks = self.ticks.saturating_add(1);
-        self.photosynthesised = self.photosynthesised.saturating_add(report.metabolism.fixed);
+        self.photosynthesised = self
+            .photosynthesised
+            .saturating_add(report.metabolism.fixed);
         self.respired = self.respired.saturating_add(report.metabolism.burned);
         self.to_carrion = self.to_carrion.saturating_add(report.biology.to_carrion);
         self.scavenged = self.scavenged.saturating_add(report.ecology.scavenged);
@@ -310,7 +312,12 @@ impl FoodWeb {
     /// and gets a surprise.
     #[must_use]
     pub fn peak(&self) -> i64 {
-        self.edges.iter().map(|e| e.weight).max().unwrap_or(0).max(1)
+        self.edges
+            .iter()
+            .map(|e| e.weight)
+            .max()
+            .unwrap_or(0)
+            .max(1)
     }
 
     /// A one-line reading of the web, for the panel's header.
@@ -329,7 +336,10 @@ impl FoodWeb {
         if self.mix.predators > 0 {
             levels += 1;
         }
-        let closed = self.edges.iter().any(|e| e.to == Node::Scavengers && e.weight > 0);
+        let closed = self
+            .edges
+            .iter()
+            .any(|e| e.to == Node::Scavengers && e.weight > 0);
         format!(
             "{} cells across {levels} trophic {}; the carrion loop is {}",
             self.mix.total,
@@ -380,14 +390,22 @@ mod tests {
             .iter()
             .filter(|e| e.to.level() <= e.from.level())
             .collect();
-        assert_eq!(downhill.len(), 1, "the web has {} back-edges", downhill.len());
+        assert_eq!(
+            downhill.len(),
+            1,
+            "the web has {} back-edges",
+            downhill.len()
+        );
         assert!(
             downhill[0].is_recycling(),
             "the one back-edge is {:?} -> {:?}, not the carrion loop",
             downhill[0].from,
             downhill[0].to
         );
-        assert!(w.edges.iter().all(|e| e.from != e.to), "an edge loops on itself");
+        assert!(
+            w.edges.iter().all(|e| e.from != e.to),
+            "an edge loops on itself"
+        );
     }
 
     #[test]
@@ -408,7 +426,13 @@ mod tests {
             total: 4,
         };
         let w = web(m, &flows);
-        let sum = |f: fn(&Edge) -> bool| w.edges.iter().filter(|e| f(e)).map(|e| e.weight).sum::<i64>();
+        let sum = |f: fn(&Edge) -> bool| {
+            w.edges
+                .iter()
+                .filter(|e| f(e))
+                .map(|e| e.weight)
+                .sum::<i64>()
+        };
         let respired: i64 = sum(|e| e.from == Node::Dissolved);
         let died: i64 = sum(|e| e.is_death() && e.basis == Basis::SharedByPopulation);
         // Integer division loses at most one unit per guild.
@@ -452,7 +476,11 @@ mod tests {
         };
         // Three cells across three guilds, so the split is a clean third each.
         let w = web(mix(1, 1, 1, 0), &flows);
-        let to = |n: Node| w.edges.iter().find(|e| e.to == n && e.from == Node::Dissolved);
+        let to = |n: Node| {
+            w.edges
+                .iter()
+                .find(|e| e.to == n && e.from == Node::Dissolved)
+        };
         assert_eq!(to(Node::Producers).map(|e| e.weight), Some(300));
         assert_eq!(to(Node::Osmotrophs).map(|e| e.weight), Some(300));
         assert_eq!(to(Node::Scavengers).map(|e| e.weight), Some(300));
@@ -506,7 +534,10 @@ mod tests {
         report.ecology.scavenged = 2;
         flows.accumulate(&report);
         flows.accumulate(&report);
-        assert_eq!((flows.ticks, flows.photosynthesised, flows.scavenged), (2, 10, 4));
+        assert_eq!(
+            (flows.ticks, flows.photosynthesised, flows.scavenged),
+            (2, 10, 4)
+        );
         flows.reset();
         assert_eq!(flows, Flows::default());
     }

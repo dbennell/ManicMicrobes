@@ -396,18 +396,14 @@ mod tests {
         let (mass, energy, organelles, ip_before) = {
             let i = world.cells().index(target).expect("alive");
             let c = world.cells();
-            (
-                c.mass[i],
-                c.energy[i],
-                c.slots(i).to_vec(),
-                c.vm[i].ip,
-            )
+            (c.mass[i], c.energy[i], c.slots(i).to_vec(), c.vm[i].ip)
         };
         assert!(ip_before > 0, "the fixture should have got somewhere first");
 
         // Same length, so the pointer is untouched and the cell really does carry on from
         // where it was rather than restarting.
-        let same_length = vec![0x2Eu8; world.cells().genome[world.cells().index(target).unwrap()].len()];
+        let same_length =
+            vec![0x2Eu8; world.cells().genome[world.cells().index(target).unwrap()].len()];
         rewrite_genome(&mut world, target, same_length);
 
         let i = world.cells().index(target).expect("alive");
@@ -418,7 +414,9 @@ mod tests {
 
         // And the world runs on without complaint.
         world.run(200);
-        world.check_invariants().expect("rewriting broke an invariant");
+        world
+            .check_invariants()
+            .expect("rewriting broke an invariant");
     }
 
     #[test]
@@ -461,7 +459,10 @@ mod tests {
         rewrite_genome(&mut world, target, vec![0x2Eu8; 40]);
         let i = world.cells().index(target).expect("alive");
         assert_eq!(world.cells().vm[i].ln, 0, "the copy counter survived");
-        assert!(world.cells().daughter[i].is_none(), "the daughter buffer survived");
+        assert!(
+            world.cells().daughter[i].is_none(),
+            "the daughter buffer survived"
+        );
         world.run(100);
         world.check_invariants().expect("invariant");
     }

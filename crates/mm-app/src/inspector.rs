@@ -227,7 +227,9 @@ fn label_for(genome: &mm_core::Genome, line: &mm_asm::Line) -> Option<String> {
     match line.op {
         mm_core::Op::Gene => {
             // Which declaration this is, by offset.
-            let nth = promoters.iter().position(|p| p.offset == line.offset as u16)?;
+            let nth = promoters
+                .iter()
+                .position(|p| p.offset == line.offset as u16)?;
             Some(gene_label(nth))
         }
         mm_core::Op::Express => {
@@ -423,7 +425,12 @@ mod tests {
         // Everything has to land inside the cell, or the diagram draws outside its own outline.
         for p in &placed {
             let reach = (p.dx * p.dx + p.dy * p.dy).sqrt() + p.radius;
-            assert!(reach <= 1.0, "{:?} at {} sticks out of the cell", p.kind, reach);
+            assert!(
+                reach <= 1.0,
+                "{:?} at {} sticks out of the cell",
+                p.kind,
+                reach
+            );
         }
     }
 
@@ -444,7 +451,10 @@ mod tests {
         slots[1].remaining_build = Some(8);
         let placed = placements(&slots);
         let of = |slot: usize| *placed.iter().find(|p| p.slot == slot).expect("placed");
-        assert!(of(1).built < of(2).built, "a half-built organelle is not faint");
+        assert!(
+            of(1).built < of(2).built,
+            "a half-built organelle is not faint"
+        );
         assert!(of(2).radius > of(1).radius, "param does not scale the blob");
     }
 
@@ -538,7 +548,10 @@ mod tests {
                 label.starts_with("→ gene "),
                 "{label:?} does not name the gene it binds"
             );
-            assert!(!label.contains("drift"), "{label:?} — the ancestor's are exact");
+            assert!(
+                !label.contains("drift"),
+                "{label:?} — the ancestor's are exact"
+            );
         }
         // Every gene the driver names is one that exists.
         for e in &expresses {
@@ -584,7 +597,11 @@ mod tests {
         let (world, id) = world_with_a_cell();
         let c = Inspection::of(&world, id).expect("alive");
 
-        assert_eq!(tracking(Some(&c), false, true), Track::Stay, "not following");
+        assert_eq!(
+            tracking(Some(&c), false, true),
+            Track::Stay,
+            "not following"
+        );
         match tracking(Some(&c), true, true) {
             Track::MoveTo(x, y) => {
                 assert!((x - 4.0).abs() < 0.01 && (y - 5.0).abs() < 0.01, "{x},{y}");

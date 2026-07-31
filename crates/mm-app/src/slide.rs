@@ -18,8 +18,8 @@
 //! what a frame is, and must not learn.
 
 use mm_core::chem::CHEM_COUNT;
-use mm_core::fixed::{pos_to_square, POS_ONE, Q10_ONE};
 use mm_core::ecology::TrophicMix;
+use mm_core::fixed::{pos_to_square, POS_ONE, Q10_ONE};
 use mm_core::metrics::Sample;
 use mm_core::{Scenario, World};
 
