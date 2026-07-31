@@ -12,6 +12,90 @@
 use mm_core::events::{Event, Occurrence};
 use mm_core::phylogeny::{Phylogeny, SpeciesId};
 
+/// How a species earns its living, as far as a colour can say.
+///
+/// Read off the founder's organelles, the same three questions [`mm_core::ecology::TrophicMix`]
+/// asks of a live population — and, like it, **not exclusive**. A cell carrying a chloroplast
+/// and a spike is both, a mixotroph is a real thing, and forcing every species into one box
+/// would be inventing the cell-type enum by the back door for the sake of a swatch. So this is
+/// a set, and the tree blends the colours of whatever is in it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Guild {
+    /// Carries a chloroplast: makes its own food.
+    pub producer: bool,
+    /// Carries a spike: the machinery of predation.
+    pub predator: bool,
+    /// Carries a lysosome: the machinery of scavenging.
+    pub scavenger: bool,
+}
+
+impl Guild {
+    /// Read the guilds off a founder's loadout.
+    #[must_use]
+    pub fn of(traits: &mm_core::names::Traits) -> Guild {
+        use mm_core::OrganelleType;
+        let has = |k: OrganelleType| traits.counts.get(k as usize).copied().unwrap_or(0) > 0;
+        Guild {
+            producer: has(OrganelleType::Chloroplast),
+            predator: has(OrganelleType::Spike),
+            scavenger: has(OrganelleType::Lysosome),
+        }
+    }
+
+    /// Nothing that names a way of making a living: it lives on what is dissolved in the water.
+    #[must_use]
+    pub fn is_osmotroph(&self) -> bool {
+        !self.producer && !self.predator && !self.scavenger
+    }
+
+    /// The colour to draw it in, `0..=1` per channel.
+    ///
+    /// The mean of whatever guilds it belongs to, so a producer that also hunts comes out
+    /// between green and red rather than being rounded to whichever the code checked first.
+    /// The same four colours the metrics and the food web use, so one glance transfers.
+    #[must_use]
+    pub fn rgb(&self) -> [f32; 3] {
+        let mut sum = [0.0f32; 3];
+        let mut n = 0.0f32;
+        for (member, rgb) in [
+            (self.producer, [0.42f32, 0.78, 0.42]),
+            (self.predator, [0.85, 0.38, 0.34]),
+            (self.scavenger, [0.90, 0.70, 0.30]),
+        ] {
+            if member {
+                for k in 0..3 {
+                    sum[k] += rgb[k];
+                }
+                n += 1.0;
+            }
+        }
+        if n == 0.0 {
+            // Osmotroph: living on what is dissolved, and drawn the colour of the water.
+            return [0.45, 0.62, 0.80];
+        }
+        [sum[0] / n, sum[1] / n, sum[2] / n]
+    }
+
+    /// What to call it in a tooltip.
+    #[must_use]
+    pub fn label(&self) -> String {
+        let mut parts = Vec::new();
+        if self.producer {
+            parts.push("producer");
+        }
+        if self.predator {
+            parts.push("predator");
+        }
+        if self.scavenger {
+            parts.push("scavenger");
+        }
+        if parts.is_empty() {
+            return "osmotroph".to_string();
+        }
+        parts.join(" + ")
+    }
+}
+
 /// One species, laid out for the tree view.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct TreeNode {
@@ -27,6 +111,8 @@ pub struct TreeNode {
     pub population: u32,
     pub peak_population: u32,
     pub alive: bool,
+    /// How it earns its living, for the branch's colour.
+    pub guild: Guild,
 }
 
 /// The phylogenetic tree, ready to draw.
@@ -74,6 +160,7 @@ pub fn layout(archive: &Phylogeny) -> Tree {
             population: s.population,
             peak_population: s.peak_population,
             alive: s.population > 0,
+            guild: Guild::of(&s.traits),
         });
         row += 1;
         // Reversed so that children come off the stack in ascending id order, which is
@@ -87,6 +174,113 @@ pub fn layout(archive: &Phylogeny) -> Tree {
         nodes,
         rows: row,
         max_depth,
+    }
+}
+
+/// One species drawn as a branch, in `0..=1` space (M10.4).
+///
+/// The tree was laid out as rows and depths since M5 and drawn as an indented text list, which
+/// is a footnote about a tree rather than a tree. This turns the layout into geometry so the
+/// renderer only has to paint it — and so the decisions in it, which are the part that can be
+/// wrong, are testable without a window.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Branch {
+    pub id: SpeciesId,
+    /// Where the lineage began and ended, across the pane. `x1` is the present for a species
+    /// still alive, so living branches all reach the right-hand edge and extinct ones stop
+    /// where they stopped.
+    pub x0: f32,
+    pub x1: f32,
+    /// Its row, down the pane.
+    pub y: f32,
+    /// `0..=1`, from peak population against the largest peak in the tree. The renderer turns
+    /// it into a stroke width; what it means is "how much of the world was ever this".
+    pub weight: f32,
+    pub alive: bool,
+}
+
+/// The line from a species to the parent it diverged from.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Fork {
+    /// The divergence: the child's founding tick, at the parent's row.
+    pub x: f32,
+    pub y_parent: f32,
+    pub y_child: f32,
+}
+
+/// The tree as something to paint.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct Plot {
+    pub branches: Vec<Branch>,
+    pub forks: Vec<Fork>,
+    /// How many rows the whole tree occupies, so the caller can size the scroll area.
+    pub rows: u32,
+}
+
+/// Turn a laid-out tree into coordinates.
+///
+/// `now` is the current tick, which is what a living branch runs to. `floor` drops species that
+/// never got anywhere: a long run makes thousands of them, most one cell that divided twice,
+/// and drawing every one turns the tree into a solid block.
+#[must_use]
+pub fn plot(tree: &Tree, now: u64, floor: u32) -> Plot {
+    let span = now.max(1) as f32;
+    let rows = tree.rows.max(1) as f32;
+    // Against the largest peak rather than against the population: a species that dominated the
+    // world for a million ticks and then died is the most important thing on the chart, and
+    // scaling by what is alive now would draw it as nothing.
+    let heaviest = tree
+        .nodes
+        .iter()
+        .map(|n| n.peak_population)
+        .max()
+        .unwrap_or(1)
+        .max(1) as f32;
+
+    let shown: Vec<&TreeNode> = tree
+        .nodes
+        .iter()
+        .filter(|n| n.peak_population >= floor)
+        .collect();
+
+    let branches: Vec<Branch> = shown
+        .iter()
+        .map(|n| Branch {
+            id: n.id,
+            x0: (n.founded_tick as f32 / span).clamp(0.0, 1.0),
+            x1: n
+                .extinct_tick
+                .map_or(1.0, |t| (t as f32 / span).clamp(0.0, 1.0)),
+            y: n.row as f32 / rows,
+            // Square root, not the raw fraction. Peak populations span four orders of
+            // magnitude in a long run, so linear width draws the winner and hairlines for
+            // everything else — and the everything else is the interesting part of a tree.
+            weight: (n.peak_population as f32 / heaviest).clamp(0.0, 1.0).sqrt(),
+            alive: n.alive,
+        })
+        .collect();
+
+    // A fork is only drawn when both ends are on the chart. Joining a visible child to a
+    // parent that was pruned would draw a line to a row holding something else.
+    let row_of: std::collections::BTreeMap<SpeciesId, u32> =
+        shown.iter().map(|n| (n.id, n.row)).collect();
+    let forks: Vec<Fork> = shown
+        .iter()
+        .filter_map(|n| {
+            let parent = n.parent?;
+            let parent_row = row_of.get(&parent)?;
+            Some(Fork {
+                x: (n.founded_tick as f32 / span).clamp(0.0, 1.0),
+                y_parent: *parent_row as f32 / rows,
+                y_child: n.row as f32 / rows,
+            })
+        })
+        .collect();
+
+    Plot {
+        branches,
+        forks,
+        rows: tree.rows,
     }
 }
 
@@ -179,18 +373,63 @@ pub struct TimelineEntry {
     pub at: u32,
 }
 
+/// A parameter change, on the same axis as everything the world did to itself (M10.4).
+///
+/// The hand reaching into the world is part of the world's history. "The population crashed"
+/// and "you tripled the repair cost ninety ticks earlier" belong on one axis or neither is
+/// legible.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Meddle {
+    pub tick: u64,
+    pub at: u32,
+    /// What changed, as a short phrase. Worked out by the caller, which is the only place that
+    /// knows what the parameters are called.
+    pub summary: String,
+}
+
 /// The annotated world timeline (SPEC §14).
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Timeline {
     pub entries: Vec<TimelineEntry>,
+    /// Parameter changes, kept apart from `entries` because they are a different kind of fact:
+    /// one is something that happened, the other is something somebody did.
+    pub meddles: Vec<Meddle>,
     pub span: u64,
+}
+
+impl Timeline {
+    /// The entry nearest a position along the axis, for scrubbing.
+    #[must_use]
+    pub fn nearest(&self, at: u32) -> Option<&TimelineEntry> {
+        self.entries.iter().min_by_key(|e| e.at.abs_diff(at))
+    }
 }
 
 /// Lay the event log out along a timeline running from tick zero to `now`.
 #[must_use]
 pub fn timeline(archive: &Phylogeny, events: &[Event], now: u64) -> Timeline {
+    timeline_with(archive, events, &[], now)
+}
+
+/// The same, with parameter changes on the axis too.
+#[must_use]
+pub fn timeline_with(
+    archive: &Phylogeny,
+    events: &[Event],
+    meddles: &[(u64, String)],
+    now: u64,
+) -> Timeline {
     let span = now.max(1);
+    let place = |tick: u64| ((tick.min(span) * 1000) / span) as u32;
     Timeline {
+        meddles: meddles
+            .iter()
+            .map(|(tick, summary)| Meddle {
+                tick: *tick,
+                at: place(*tick),
+                summary: summary.clone(),
+            })
+            .collect(),
         entries: events
             .iter()
             .map(|e| TimelineEntry {
@@ -201,7 +440,7 @@ pub fn timeline(archive: &Phylogeny, events: &[Event], now: u64) -> Timeline {
                     .get(e.species)
                     .map_or_else(|| format!("species {}", e.species), |s| s.name.full()),
                 what: e.what,
-                at: ((e.tick.min(span) * 1000) / span) as u32,
+                at: place(e.tick),
             })
             .collect(),
         span,
@@ -254,6 +493,209 @@ mod tests {
     }
 
     /// A root with two children and one grandchild.
+    #[test]
+    fn a_guild_is_read_off_the_loadout_and_a_mixotroph_is_both() {
+        use mm_core::names::Traits;
+        use mm_core::OrganelleType;
+        let with = |kinds: &[OrganelleType]| {
+            let mut t = Traits::default();
+            for k in kinds {
+                t.counts[*k as usize] = 1;
+            }
+            Guild::of(&t)
+        };
+
+        assert!(with(&[OrganelleType::Chloroplast]).producer);
+        assert!(with(&[OrganelleType::Spike]).predator);
+        assert!(with(&[OrganelleType::Lysosome]).scavenger);
+        assert!(with(&[OrganelleType::Mitochondrion]).is_osmotroph());
+
+        // The point of it being a set. A cell that photosynthesises *and* hunts is both, and
+        // rounding it to whichever the code checked first would be the cell-type enum arriving
+        // through the display layer.
+        let both = with(&[OrganelleType::Chloroplast, OrganelleType::Spike]);
+        assert!(both.producer && both.predator);
+        assert!(!both.is_osmotroph());
+        assert_eq!(both.label(), "producer + predator");
+    }
+
+    #[test]
+    fn a_mixotrophs_colour_sits_between_the_ones_it_mixes() {
+        let producer = Guild {
+            producer: true,
+            ..Guild::default()
+        };
+        let predator = Guild {
+            predator: true,
+            ..Guild::default()
+        };
+        let both = Guild {
+            producer: true,
+            predator: true,
+            ..Guild::default()
+        };
+        for k in 0..3 {
+            let (lo, hi) = (
+                producer.rgb()[k].min(predator.rgb()[k]),
+                producer.rgb()[k].max(predator.rgb()[k]),
+            );
+            assert!(
+                both.rgb()[k] >= lo && both.rgb()[k] <= hi,
+                "channel {k} of the blend is outside what it blends"
+            );
+        }
+        // And every guild is distinguishable from every other, or the colour says nothing.
+        let all = [producer, predator, both, Guild::default()];
+        for a in 0..all.len() {
+            for b in (a + 1)..all.len() {
+                assert_ne!(all[a].rgb(), all[b].rgb(), "{a} and {b} look the same");
+            }
+        }
+    }
+
+    #[test]
+    fn a_living_branch_reaches_the_present_and_an_extinct_one_stops() {
+        // `small_archive` ends on a census that omits `b`, so one species is already extinct
+        // at tick 400 and the others are alive — which is exactly the mix this needs.
+        let p = small_archive();
+        let plot = plot(&layout(&p), 1_000, 0);
+        assert!(plot.branches.iter().any(|b| b.alive));
+        assert!(
+            plot.branches.iter().any(|b| !b.alive),
+            "nothing in the fixture died, so this proves nothing"
+        );
+        for branch in &plot.branches {
+            if branch.alive {
+                assert!(
+                    (branch.x1 - 1.0).abs() < 1e-6,
+                    "a living species stopped short of the present"
+                );
+            } else {
+                assert!(
+                    branch.x1 < 1.0,
+                    "an extinct species ran to the right-hand edge"
+                );
+            }
+            assert!(branch.x0 <= branch.x1, "a species ended before it began");
+            assert!((0.0..=1.0).contains(&branch.y));
+        }
+    }
+
+    #[test]
+    fn every_fork_joins_two_rows_that_are_actually_drawn() {
+        // A fork to a pruned parent would draw a line to a row holding something else, which
+        // is worse than drawing nothing: it asserts a descent that is not there.
+        let p = small_archive();
+        let tree = layout(&p);
+        let rows: Vec<f32> = tree
+            .nodes
+            .iter()
+            .map(|n| n.row as f32 / tree.rows.max(1) as f32)
+            .collect();
+        for floor in [0u32, 1, 2, 100] {
+            let plot = plot(&tree, 1_000, floor);
+            for fork in &plot.forks {
+                assert!(
+                    rows.iter().any(|r| (r - fork.y_parent).abs() < 1e-6),
+                    "a fork at floor {floor} points at no row"
+                );
+                assert!(
+                    plot.branches
+                        .iter()
+                        .any(|b| (b.y - fork.y_child).abs() < 1e-6),
+                    "a fork at floor {floor} comes from a branch that was pruned"
+                );
+                assert!(
+                    plot.branches
+                        .iter()
+                        .any(|b| (b.y - fork.y_parent).abs() < 1e-6),
+                    "a fork at floor {floor} joins a parent that was pruned"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_floor_prunes_the_small_and_keeps_the_large() {
+        let p = small_archive();
+        let tree = layout(&p);
+        let all = plot(&tree, 1_000, 0).branches.len();
+        let pruned = plot(&tree, 1_000, u32::MAX).branches.len();
+        assert_eq!(all, tree.nodes.len());
+        assert_eq!(pruned, 0, "an infinite floor kept something");
+    }
+
+    #[test]
+    fn weight_favours_what_was_ever_large_rather_than_what_is_large_now() {
+        // A species that dominated the world for a long time and then died is the most
+        // important thing on the chart. Scaling by live population would draw it as nothing.
+        let mut p = small_archive();
+        let ids: Vec<SpeciesId> = p.iter().map(|s| s.id).collect();
+        let (giant, survivor) = (ids[0], ids[1]);
+
+        // It was enormous. Then it was gone and something small was all that was left.
+        p.census(&std::iter::once((giant, 5_000u32)).collect(), 500);
+        p.census(&std::iter::once((survivor, 10u32)).collect(), 600);
+
+        let plot = plot(&layout(&p), 1_000, 0);
+        let dead = plot
+            .branches
+            .iter()
+            .find(|b| b.id == giant)
+            .expect("the dead giant");
+        let alive = plot
+            .branches
+            .iter()
+            .find(|b| b.id == survivor)
+            .expect("the survivor");
+        assert!(!dead.alive && alive.alive);
+        assert!(
+            dead.weight > alive.weight,
+            "a former giant was drawn thinner than a survivor that was never large: \
+             {} against {}",
+            dead.weight,
+            alive.weight
+        );
+    }
+
+    #[test]
+    fn parameter_changes_land_on_the_same_axis_as_events() {
+        let p = small_archive();
+        let meddles = vec![
+            (250u64, "division energy: 20480 -> 61440".to_string()),
+            (750, "point: 64 -> 8".to_string()),
+        ];
+        let t = timeline_with(&p, &[], &meddles, 1_000);
+        assert_eq!(t.meddles.len(), 2);
+        assert_eq!(t.meddles[0].at, 250);
+        assert_eq!(t.meddles[1].at, 750);
+        // Kept apart from the events, because one is something that happened and the other is
+        // something somebody did, and the pane draws them differently for that reason.
+        assert!(t.entries.is_empty());
+    }
+
+    #[test]
+    fn scrubbing_finds_the_nearest_event_and_not_merely_the_first() {
+        let p = small_archive();
+        let species = p.iter().map(|s| s.id).next().expect("a species");
+        let at = |tick: u64| mm_core::events::Event {
+            tick,
+            what: mm_core::events::Occurrence::ALL[0],
+            species,
+            x: 0,
+            y: 0,
+        };
+        let t = timeline(&p, &[at(100), at(500), at(900)], 1_000);
+
+        assert_eq!(t.nearest(0).map(|e| e.tick), Some(100));
+        assert_eq!(t.nearest(480).map(|e| e.tick), Some(500));
+        assert_eq!(t.nearest(1_000).map(|e| e.tick), Some(900));
+
+        // With nothing on it there is nothing to find, which must be `None` rather than a
+        // panic — an empty world is the first thing anybody sees.
+        assert!(timeline(&p, &[], 1_000).nearest(500).is_none());
+    }
+
     fn small_archive() -> Phylogeny {
         let mut p = Phylogeny::new();
         let base = vec![7u8; 200];

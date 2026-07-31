@@ -22,7 +22,7 @@
 //!  │  cell      │        THE SLIDE           │  metrics             │
 //!  │            │                            │  legend              │
 //!  ├────────────┴────────────────────────────┴──────────────────────┤
-//!  │  genome │ wiki │ food web │ editor │ debugger                  │
+//!  │  genome │ ecology │ editor │ debugger                            │
 //!  ├─────────────────────────────────────────────────────────────────┤
 //!  │  Cryptous mixtus · tick 1 204 887 · 48 213 cells       102×     │
 //!  └─────────────────────────────────────────────────────────────────┘
@@ -39,7 +39,9 @@
 //! | `0` `-` `=` `backspace` | speed: paused, 1×, 8×, as fast as it will go |
 //! | `1`–`9` | toggle that chemical's overlay |
 //! | `i` `p` `l` | cell, metrics, legend |
-//! | `g` `w` `f` `e` `d` | drawer: genome, wiki, food web, editor, debugger |
+//! | `g` `w` `e` `d` | drawer: genome, ecology, editor, debugger |
+//! | `f` | the ecology pane, on the food web |
+//! | `c` | rounded cells |
 //! | `t` | track the selected cell |
 //! | `home` | reset the camera |
 //! | `F1`–`F5` | tool: select, move, remove, wall, erase |
@@ -90,7 +92,7 @@ use mm_app::inspector::Inspection;
 use mm_app::params;
 use mm_app::slide::{Frame, Lod, Slide};
 use mm_app::tools::{self, ToolEvent};
-use mm_app::ui::{self, Dock, Focus, Panel, Panels, Rect, Target};
+use mm_app::ui::{self, Dock, Ecology, Focus, Panel, Panels, Rect, Target};
 use mm_app::wiki;
 use mm_core::biology::BiologyConfig;
 use mm_core::cell::CellSeed;
@@ -165,12 +167,42 @@ struct SlideRes {
     /// Which cell the editor's buffer was loaded from, so "apply to this cell" cannot write a
     /// genome into a cell it was never taken from.
     editing: Option<CellId>,
+    /// The ecology pane's data, gathered under one lock and reused for a while (M10.4).
+    ///
+    /// The archive is far too large to publish with every frame, so this pane is one of the
+    /// few that reaches into the world — and since M10.1 reaching in makes the *simulation*
+    /// stand aside, so doing it once a frame with the pane left open would tax the world for
+    /// the whole time somebody is reading about it. A tree of what has already happened does
+    /// not need to be a frame old; a couple of seconds is imperceptible and costs the
+    /// simulation nothing measurable.
+    ecology: Option<EcologyView>,
     /// The parameter editor's working copy, and the two things it is compared against.
     ///
     /// Edits are applied on a button rather than on a keystroke, because every apply is an
     /// intervention that goes on the record and one per keystroke would be a useless record.
     draft: Option<Draft>,
 }
+
+/// The ecology pane's copy of the world's history.
+struct EcologyView {
+    /// The tick it was gathered at, so it can be refreshed when it is stale enough to matter.
+    at: u64,
+    /// Which species the page describes, so choosing another refreshes immediately rather
+    /// than in two seconds' time.
+    showing: Option<mm_core::phylogeny::SpeciesId>,
+    tree: mm_app::wiki::Tree,
+    timeline: mm_app::wiki::Timeline,
+    page: Option<mm_app::wiki::Page>,
+    species: usize,
+    living: usize,
+}
+
+/// How many ticks the ecology pane's data may be behind the world.
+///
+/// Two seconds at 1x. A chart of what has already happened does not become wrong because a
+/// hundred more ticks have passed, and the alternative is holding the world still while
+/// somebody reads it.
+const ECOLOGY_STALE_AFTER: u64 = 120;
 
 /// The parameter editor's state while it is open.
 struct Draft {
@@ -220,6 +252,7 @@ impl SlideRes {
             last_export: None,
             listing: mm_app::inspector::Listing::default(),
             editing: None,
+            ecology: None,
             draft: None,
         }
     }
@@ -407,6 +440,13 @@ struct View {
     tool: Tool,
     /// Which species page is open.
     species: Option<mm_core::phylogeny::SpeciesId>,
+    /// Which of the ecology pane's three views is showing (M10.4).
+    ecology: Ecology,
+    /// Hide species whose peak population never reached this. A long run makes thousands of
+    /// them, most one cell that divided twice.
+    tree_floor: u32,
+    /// Where the timeline's cursor is, in permille, or `None` when nobody has scrubbed.
+    scrub: Option<u32>,
 }
 
 impl Default for View {
@@ -427,6 +467,9 @@ impl Default for View {
             drag_distance: 0.0,
             tool: Tool::Select,
             species: None,
+            ecology: Ecology::Tree,
+            tree_floor: 2,
+            scrub: None,
         }
     }
 }
@@ -643,6 +686,12 @@ fn keyboard(keys: &ButtonInput<KeyCode>, view: &mut View, sim: &mut SlideRes) {
     if keys.just_pressed(KeyCode::KeyC) {
         view.rounded = !view.rounded;
     }
+    // `f` was the food web's own panel before M10.4 merged it into the ecology pane. Kept, and
+    // now meaning "the ecology pane, on that view", which is what it always meant.
+    if keys.just_pressed(KeyCode::KeyF) {
+        view.panels.set(Panel::Ecology, true);
+        view.ecology = Ecology::Web;
+    }
     if keys.just_pressed(KeyCode::KeyT) {
         view.follow = !view.follow;
     }
@@ -682,8 +731,7 @@ fn panel_key(panel: Panel) -> KeyCode {
         Panel::Metrics => KeyCode::KeyP,
         Panel::Legend => KeyCode::KeyL,
         Panel::Genome => KeyCode::KeyG,
-        Panel::Wiki => KeyCode::KeyW,
-        Panel::FoodWeb => KeyCode::KeyF,
+        Panel::Ecology => KeyCode::KeyW,
         Panel::Editor => KeyCode::KeyE,
         Panel::Debugger => KeyCode::KeyD,
     }
@@ -1656,8 +1704,7 @@ fn drawer(ctx: &egui::Context, sim: &mut SlideRes, view: &mut View) {
             ui.separator();
             match showing {
                 Panel::Genome => genome_body(ui, sim, view),
-                Panel::Wiki => wiki_body(ui, sim, view),
-                Panel::FoodWeb => foodweb_body(ui, sim),
+                Panel::Ecology => ecology_body(ui, sim, view),
                 Panel::Editor => editor_body(ui, sim),
                 Panel::Debugger => debugger_body(ui, sim),
                 // The rails' panels are never the drawer's tab; `Panels::set` will not put
@@ -2460,134 +2507,400 @@ fn bar(ui: &mut egui::Ui, label: &str, value: f32, full: f32, colour: egui::Colo
     );
 }
 
-/// The species wiki, the phylogenetic tree and the world timeline (M5, SPEC §10.5).
+/// Refresh the ecology pane's copy of the world's history, if it needs it.
 ///
-/// Reads the archive through [`mm_app::wiki`], which copies everything out — so this panel
-/// holds no borrow of the world and nothing in it can reach a tick.
-fn wiki_body(ui: &mut egui::Ui, sim: &SlideRes, view: &mut View) {
-    // One of the panels that does take the world's lock: the archive is far too large to
-    // publish every frame and the wiki is opened deliberately, to read. See
-    // `engine::Published` for which panels are exempt and why.
+/// The one place this pane reaches into the world. Everything the three views draw comes out of
+/// here, so the lock is taken once every couple of seconds rather than three times a frame.
+fn refresh_ecology(sim: &mut SlideRes, view: &View) {
+    let now = sim.latest.frame.tick;
+    let wanted = view.species;
+    let fresh = sim.ecology.as_ref().is_some_and(|e| {
+        e.showing == wanted && now.saturating_sub(e.at) < ECOLOGY_STALE_AFTER && now >= e.at
+    });
+    if fresh {
+        return;
+    }
+
+    let meddles = intervention_summaries(sim);
     let held = sim.engine.handle();
     let slide = held.slide();
     let world = slide.world();
     let archive = world.archive();
+    let showing = wanted.or_else(|| wiki::notable(archive, 1).first().copied());
+    let gathered = EcologyView {
+        at: now,
+        showing: wanted,
+        tree: wiki::layout(archive),
+        timeline: wiki::timeline_with(
+            archive,
+            world.events().events(),
+            &meddles,
+            world.tick_count(),
+        ),
+        page: showing.and_then(|id| wiki::page(archive, id)),
+        species: archive.len(),
+        living: archive.living(),
+    };
+    drop(slide);
+    sim.ecology = Some(gathered);
+}
 
-    if archive.is_empty() {
+/// The ecology pane: the tree of life, the food web and the timeline (M10.4).
+///
+/// One pane rather than two panels, sharing one selection. "Where did this come from" and "what
+/// is it eating" are one question, and answering them on opposite sides of the screen made it
+/// two.
+fn ecology_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
+    refresh_ecology(sim, view);
+    ui.horizontal(|ui| {
+        for which in Ecology::ALL {
+            if ui
+                .selectable_label(view.ecology == which, which.title())
+                .clicked()
+            {
+                view.ecology = which;
+            }
+        }
+        if view.ecology == Ecology::Tree {
+            ui.separator();
+            ui.add(
+                egui::Slider::new(&mut view.tree_floor, 0..=200)
+                    .text("hide peaks under")
+                    .logarithmic(true),
+            )
+            .on_hover_text(
+                "a long run makes thousands of species, most of them one cell that divided \
+                 twice. Drawing every one turns the tree into a solid block.",
+            );
+        }
+    });
+    ui.separator();
+
+    // The view on the left, the selected species on the right. The page is what makes the
+    // three views one pane rather than three.
+    let page_width = (ui.available_width() * 0.34).clamp(220.0, 420.0);
+    let view_width = (ui.available_width() - page_width - 12.0).max(160.0);
+    ui.horizontal_top(|ui| {
+        ui.allocate_ui(
+            egui::vec2(view_width, ui.available_height()),
+            |ui| match view.ecology {
+                Ecology::Tree => tree_view(ui, sim, view),
+                Ecology::Web => foodweb_body(ui, sim),
+                Ecology::Timeline => timeline_view(ui, sim, view),
+            },
+        );
+        ui.separator();
+        ui.allocate_ui(
+            egui::vec2(ui.available_width(), ui.available_height()),
+            |ui| {
+                egui::ScrollArea::vertical()
+                    .id_source("species_page")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| species_page(ui, sim, view));
+            },
+        );
+    });
+}
+
+/// The phylogenetic tree, painted.
+///
+/// Horizontal is time, so the shape of the chart means something: a burst of divergence is a
+/// fan, a long quiet lineage is a straight line, and a mass extinction is a wall of branches
+/// stopping at the same tick. It was an indented text list until M10.4 — the data was right and
+/// the presentation was a footnote.
+fn tree_view(ui: &mut egui::Ui, sim: &SlideRes, view: &mut View) {
+    let Some(eco) = sim.ecology.as_ref() else {
+        return;
+    };
+    if eco.tree.nodes.is_empty() {
         ui.weak("nothing has lived here yet");
         return;
     }
-    ui.label(format!(
-        "{} species, {} alive, {} pruned",
-        archive.len(),
-        archive.living(),
-        archive.pruned()
-    ));
-    ui.separator();
+    let (tree, now, total, living) = (&eco.tree, eco.at, eco.species, eco.living);
 
-    // --- the timeline ---
-    let timeline = wiki::timeline(archive, world.events().events(), world.tick_count());
-    ui.label("timeline");
-    let (rect, _) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.0), egui::Sense::hover());
-    let painter = ui.painter();
-    painter.rect_filled(rect, 2.0, egui::Color32::from_black_alpha(90));
+    let plot = wiki::plot(tree, now, view.tree_floor);
+    ui.small(format!(
+        "{total} species, {living} alive — {} drawn",
+        plot.branches.len()
+    ));
+
+    let by_id: std::collections::BTreeMap<_, _> = tree.nodes.iter().map(|n| (n.id, n)).collect();
+
+    egui::ScrollArea::both()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            // Tall enough that every drawn branch gets a few pixels of its own, so a thousand
+            // species scrolls rather than collapsing into one line.
+            let height = (plot.branches.len() as f32 * 9.0).clamp(80.0, 40_000.0);
+            let (rect, response) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width().max(120.0), height),
+                egui::Sense::click(),
+            );
+            let painter = ui.painter_at(rect);
+            painter.rect_filled(rect, 2.0, egui::Color32::from_black_alpha(110));
+
+            let inset = 8.0;
+            let at = |x: f32, y: f32| -> egui::Pos2 {
+                egui::pos2(
+                    rect.left() + inset + (rect.width() - inset * 2.0) * x,
+                    rect.top() + inset + (rect.height() - inset * 2.0) * y,
+                )
+            };
+
+            // Forks first, under the branches: a divergence is a joint, not a thing.
+            for fork in &plot.forks {
+                let a = at(fork.x, fork.y_parent);
+                let b = at(fork.x, fork.y_child);
+                painter.line_segment([a, b], egui::Stroke::new(1.0, egui::Color32::from_gray(80)));
+            }
+
+            let mut hovered: Option<&wiki::TreeNode> = None;
+            for branch in &plot.branches {
+                let Some(node) = by_id.get(&branch.id) else {
+                    continue;
+                };
+                let a = at(branch.x0, branch.y);
+                let b = at(branch.x1, branch.y);
+                let [r, g, bl] = node.guild.rgb();
+                // Extinct lineages fade. They still carry the shape of the tree, so they are
+                // drawn — but the eye should find what is alive first.
+                let dim = if branch.alive { 1.0 } else { 0.45 };
+                let selected = view.species == Some(branch.id);
+                let width = 1.0 + branch.weight * 5.0;
+                painter.line_segment(
+                    [a, b],
+                    egui::Stroke::new(
+                        if selected { width + 2.0 } else { width },
+                        egui::Color32::from_rgb(
+                            (r * 255.0 * dim) as u8,
+                            (g * 255.0 * dim) as u8,
+                            (bl * 255.0 * dim) as u8,
+                        ),
+                    ),
+                );
+                // A tick where it ended, so an extinction is a full stop rather than a line
+                // that happens to be short.
+                if !branch.alive {
+                    painter.line_segment(
+                        [b + egui::vec2(0.0, -3.0), b + egui::vec2(0.0, 3.0)],
+                        egui::Stroke::new(1.0, egui::Color32::from_gray(120)),
+                    );
+                }
+                if let Some(p) = response.hover_pos() {
+                    if (p.y - a.y).abs() <= 4.0 && p.x >= a.x - 4.0 && p.x <= b.x + 4.0 {
+                        hovered = Some(node);
+                    }
+                }
+            }
+
+            if let Some(node) = hovered {
+                if response.clicked() {
+                    view.species = Some(node.id);
+                }
+                egui::show_tooltip_at_pointer(
+                    ui.ctx(),
+                    ui.layer_id(),
+                    egui::Id::new("branch"),
+                    |ui| {
+                        ui.label(egui::RichText::new(&node.name).strong());
+                        ui.small(node.guild.label());
+                        ui.small(format!(
+                            "founded {}  ·  peak {}",
+                            node.founded_tick, node.peak_population
+                        ));
+                        match node.extinct_tick {
+                            Some(t) => ui.small(format!("extinct at {t}")),
+                            None => ui.small(format!("{} alive now", node.population)),
+                        };
+                    },
+                );
+            }
+        });
+}
+
+/// The timeline, full width and scrubbable (M10.4).
+///
+/// Was twenty-six pixels in the corner of the wiki. What it is for is comparing *when* things
+/// happened — including when somebody changed a parameter, which is why interventions are on
+/// the same axis and in their own colour.
+fn timeline_view(ui: &mut egui::Ui, sim: &SlideRes, view: &mut View) {
+    let Some(timeline) = sim.ecology.as_ref().map(|e| &e.timeline) else {
+        return;
+    };
+
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), 54.0),
+        egui::Sense::click_and_drag(),
+    );
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 2.0, egui::Color32::from_black_alpha(110));
+    let x_of = |at: u32| rect.left() + rect.width() * (at as f32 / 1000.0);
+
     for entry in &timeline.entries {
-        let x = rect.left() + rect.width() * (entry.at as f32 / 1000.0);
+        let x = x_of(entry.at);
         painter.line_segment(
-            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+            [
+                egui::pos2(x, rect.top() + 4.0),
+                egui::pos2(x, rect.bottom() - 14.0),
+            ],
             egui::Stroke::new(1.5, egui::Color32::from_rgb(220, 180, 110)),
         );
     }
-    for entry in timeline.entries.iter().rev().take(6) {
-        ui.small(format!(
-            "tick {} — {} ({})",
-            entry.tick, entry.headline, entry.species_name
-        ));
+    // Interventions in their own colour, below the events, because one is something that
+    // happened and the other is something somebody did.
+    for meddle in &timeline.meddles {
+        let x = x_of(meddle.at);
+        painter.line_segment(
+            [
+                egui::pos2(x, rect.bottom() - 16.0),
+                egui::pos2(x, rect.bottom() - 2.0),
+            ],
+            egui::Stroke::new(2.0, egui::Color32::from_rgb(120, 190, 240)),
+        );
     }
-    ui.separator();
 
-    // --- the tree ---
-    ui.label("tree");
+    // Scrubbing. The world cannot be rewound — nothing keeps past states — so this moves a
+    // cursor and selects what was happening there, which is the honest version of the gesture.
+    if let Some(p) = response.interact_pointer_pos() {
+        let at = (((p.x - rect.left()) / rect.width().max(1.0)) * 1000.0).clamp(0.0, 1000.0);
+        view.scrub = Some(at as u32);
+        if let Some(entry) = timeline.nearest(at as u32) {
+            view.species = Some(entry.species);
+        }
+    }
+    if let Some(at) = view.scrub {
+        let x = x_of(at);
+        painter.line_segment(
+            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+            egui::Stroke::new(1.0, egui::Color32::from_gray(230)),
+        );
+    }
+
+    ui.separator();
     egui::ScrollArea::vertical()
-        .max_height(140.0)
-        .id_source("tree")
+        .id_source("timeline_entries")
+        .auto_shrink([false, false])
         .show(ui, |ui| {
-            let tree = wiki::layout(archive);
-            for node in &tree.nodes {
-                // Indent by depth: the column is the number of speciation events
-                // between this species and the seeded founder.
-                let indent = "  ".repeat(node.depth.min(12) as usize);
-                let label = format!(
-                    "{indent}{} {} ({})",
-                    if node.alive { "●" } else { "○" },
-                    node.name,
-                    if node.alive {
-                        node.population.to_string()
-                    } else {
-                        format!("peak {}", node.peak_population)
+            if timeline.entries.is_empty() && timeline.meddles.is_empty() {
+                ui.weak("nothing has happened yet");
+                return;
+            }
+            // Nearest the cursor first when scrubbing, newest first otherwise.
+            let mut rows: Vec<(u64, String, Option<mm_core::phylogeny::SpeciesId>)> = timeline
+                .entries
+                .iter()
+                .map(|e| {
+                    (
+                        e.tick,
+                        format!("{} ({})", e.headline, e.species_name),
+                        Some(e.species),
+                    )
+                })
+                .chain(
+                    timeline
+                        .meddles
+                        .iter()
+                        .map(|m| (m.tick, format!("you changed {}", m.summary), None)),
+                )
+                .collect();
+            match view.scrub {
+                Some(at) => {
+                    let want = (at as u64 * timeline.span) / 1000;
+                    rows.sort_by_key(|(tick, _, _)| tick.abs_diff(want));
+                }
+                None => rows.sort_by(|a, b| b.0.cmp(&a.0)),
+            }
+            for (tick, text, species) in rows.into_iter().take(60) {
+                let label = format!("tick {tick:>9} — {text}");
+                if species.is_some() {
+                    if ui.selectable_label(false, label).clicked() {
+                        view.species = species;
                     }
-                );
-                if ui
-                    .selectable_label(view.species == Some(node.id), label)
-                    .clicked()
-                {
-                    view.species = Some(node.id);
+                } else {
+                    ui.small(
+                        egui::RichText::new(label).color(egui::Color32::from_rgb(120, 190, 240)),
+                    );
                 }
             }
         });
-    ui.separator();
+}
 
-    // --- the page ---
-    let showing = view
-        .species
-        .or_else(|| wiki::notable(archive, 1).first().copied());
-    let Some(page) = showing.and_then(|id| wiki::page(archive, id)) else {
-        ui.weak("select a species");
+/// What each intervention changed, in a phrase, for the timeline.
+fn intervention_summaries(sim: &SlideRes) -> Vec<(u64, String)> {
+    let mut out = Vec::new();
+    let mut previous = sim.latest.founding.clone();
+    for step in &sim.latest.interventions {
+        let before = mm_core::params::fields(&previous);
+        let after = mm_core::params::fields(&step.biology);
+        let changed: Vec<String> = before
+            .iter()
+            .zip(after.iter())
+            .filter(|((_, was), (_, now))| was != now)
+            .map(|((path, was), (_, now))| {
+                let label = params::describe(path).map_or(path.as_str(), |f| f.label);
+                format!("{label} {was} → {now}")
+            })
+            .collect();
+        out.push((
+            step.tick,
+            match changed.len() {
+                0 => "nothing".to_string(),
+                1 => changed[0].clone(),
+                n => format!("{} and {} more", changed[0], n - 1),
+            },
+        ));
+        previous = step.biology.clone();
+    }
+    out
+}
+
+/// One species, as the wiki tells it (M5, SPEC §10.5).
+///
+/// Reads the archive through [`mm_app::wiki`], which copies everything out — so this holds no
+/// borrow of the world and nothing in it can reach a tick.
+fn species_page(ui: &mut egui::Ui, sim: &SlideRes, view: &mut View) {
+    let Some(page) = sim.ecology.as_ref().and_then(|e| e.page.as_ref()) else {
+        ui.weak("nothing has lived here yet");
         return;
     };
-    egui::ScrollArea::vertical()
-        .id_source("page")
-        .show(ui, |ui| {
-            ui.heading(&page.name);
-            ui.label(&page.description);
-            ui.separator();
-            ui.label(format!(
-                "founded {}  ·  {} births  ·  {} deaths  ·  {} generations deep",
-                page.founded_tick, page.births, page.deaths, page.depth
-            ));
-            if let Some((id, name)) = &page.parent {
-                if ui.link(format!("diverged from {name}")).clicked() {
-                    view.species = Some(*id);
-                }
+
+    ui.heading(&page.name);
+    ui.label(&page.description);
+    ui.separator();
+    ui.label(format!(
+        "founded {}  ·  {} births  ·  {} deaths  ·  {} generations deep",
+        page.founded_tick, page.births, page.deaths, page.depth
+    ));
+    if let Some((id, name)) = &page.parent {
+        if ui.link(format!("diverged from {name}")).clicked() {
+            view.species = Some(*id);
+        }
+    }
+    if !page.children.is_empty() {
+        ui.label(format!("{} descendant species:", page.children.len()));
+        for (id, name) in page.children.iter().take(8) {
+            if ui.link(format!("  {name}")).clicked() {
+                view.species = Some(*id);
             }
-            if !page.children.is_empty() {
-                ui.label(format!("{} descendant species:", page.children.len()));
-                for (id, name) in page.children.iter().take(8) {
-                    if ui.link(format!("  {name}")).clicked() {
-                        view.species = Some(*id);
-                    }
-                }
-            }
-            ui.separator();
-            ui.label(format!("population — peak {}", page.curve_peak));
-            let values: Vec<f32> = page.curve.iter().map(|(_, v)| *v).collect();
-            sparkline(ui, &values);
-            ui.separator();
-            ui.small(format!(
-                "founder genome, {} bytes, fingerprint {:016x}",
-                page.founder_genome.len(),
-                page.fingerprint
-            ));
-            // Loading it into an editor is M6. Showing it is not.
-            let hex: String = page
-                .founder_genome
-                .iter()
-                .take(64)
-                .map(|b| format!("{b:02x}"))
-                .collect();
-            ui.small(egui::RichText::new(hex).monospace());
-        });
+        }
+    }
+    ui.separator();
+    ui.label(format!("population — peak {}", page.curve_peak));
+    let values: Vec<f32> = page.curve.iter().map(|(_, v)| *v).collect();
+    sparkline(ui, &values);
+    ui.separator();
+    ui.small(format!(
+        "founder genome, {} bytes, fingerprint {:016x}",
+        page.founder_genome.len(),
+        page.fingerprint
+    ));
+    let hex: String = page
+        .founder_genome
+        .iter()
+        .take(64)
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    ui.small(egui::RichText::new(hex).monospace());
 }
 
 /// The food web (M8).

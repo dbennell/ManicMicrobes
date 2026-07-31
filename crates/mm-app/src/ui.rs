@@ -179,10 +179,41 @@ pub enum Panel {
     Metrics,
     Legend,
     Genome,
-    Wiki,
-    FoodWeb,
+    /// The tree of life, the food web and the timeline, sharing one selection (M10.4).
+    ///
+    /// Was two panels, `Wiki` and `FoodWeb`, which put the tree and the web on opposite sides
+    /// of the screen when the question they answer — who is eating whom, and where did they
+    /// come from — is one question.
+    Ecology,
     Editor,
     Debugger,
+}
+
+/// Which view the ecology pane is showing.
+///
+/// They share a selection: click a species in the tree and its page follows, click a guild in
+/// the web and the tree highlights it. Separate panels could not do that.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Ecology {
+    /// The phylogenetic tree, drawn as a tree.
+    Tree,
+    /// Who eats whom, as a layered graph.
+    Web,
+    /// What happened, and when, and what you changed.
+    Timeline,
+}
+
+impl Ecology {
+    pub const ALL: [Ecology; 3] = [Ecology::Tree, Ecology::Web, Ecology::Timeline];
+
+    #[must_use]
+    pub fn title(self) -> &'static str {
+        match self {
+            Ecology::Tree => "tree of life",
+            Ecology::Web => "food web",
+            Ecology::Timeline => "timeline",
+        }
+    }
 }
 
 /// Where a panel sits when it is docked.
@@ -197,13 +228,12 @@ pub enum Dock {
 }
 
 impl Panel {
-    pub const ALL: [Panel; 8] = [
+    pub const ALL: [Panel; 7] = [
         Panel::Cell,
         Panel::Metrics,
         Panel::Legend,
         Panel::Genome,
-        Panel::Wiki,
-        Panel::FoodWeb,
+        Panel::Ecology,
         Panel::Editor,
         Panel::Debugger,
     ];
@@ -215,8 +245,7 @@ impl Panel {
             Panel::Metrics => "metrics",
             Panel::Legend => "legend",
             Panel::Genome => "genome",
-            Panel::Wiki => "wiki",
-            Panel::FoodWeb => "food web",
+            Panel::Ecology => "ecology",
             Panel::Editor => "editor",
             Panel::Debugger => "debugger",
         }
@@ -230,8 +259,7 @@ impl Panel {
             Panel::Metrics => "P",
             Panel::Legend => "L",
             Panel::Genome => "G",
-            Panel::Wiki => "W",
-            Panel::FoodWeb => "F",
+            Panel::Ecology => "W",
             Panel::Editor => "E",
             Panel::Debugger => "D",
         }
@@ -242,9 +270,7 @@ impl Panel {
         match self {
             Panel::Cell => Dock::Left,
             Panel::Metrics | Panel::Legend => Dock::Right,
-            Panel::Genome | Panel::Wiki | Panel::FoodWeb | Panel::Editor | Panel::Debugger => {
-                Dock::Drawer
-            }
+            Panel::Genome | Panel::Ecology | Panel::Editor | Panel::Debugger => Dock::Drawer,
         }
     }
 }

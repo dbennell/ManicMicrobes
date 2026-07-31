@@ -357,6 +357,15 @@ extinction tick rather than running to the right edge. Living ones reach the pre
 for the name and the population; click for the species page. A "prune below *n* individuals"
 slider, because a long run has thousands of species and most of them are noise.
 
+*Built at M10.4, with one correction to the above:* a guild is **not** exclusive.
+`TrophicMix` deliberately counts a cell in more than one column, because a mixotroph is a real
+thing and forcing every cell into one box would be inventing the cell-type enum by the back
+door. So `wiki::Guild` is a set and a branch's colour is the mean of whatever is in it — a
+producer that also hunts comes out between green and red rather than being rounded to whichever
+the code checked first. Branch weight is the **square root** of peak against the largest peak:
+peaks span four orders of magnitude in a long run, and linear width draws the winner and
+hairlines for everything else, which is the interesting part of a tree.
+
 **Food web.** `foodweb::web()` already returns nodes with trophic levels and edges with
 measured flows, and `Edge::is_death`/`is_recycling` already distinguish the loop. Draw it as a
 layered graph, level on the vertical, edge width from flow, the recycling back-edge dashed.
@@ -367,6 +376,17 @@ the numbers are useful and a graph hides them.
 Scrubbable, first-occurrence events as flags, mass extinctions as bands, **and interventions
 from §4 in a distinct colour**, because "the population crashed" and "you tripled the repair
 cost ninety ticks earlier" belong on the same axis.
+
+*Built at M10.4.* "Scrubbable" needed pinning down: nothing keeps past world states, so the
+cursor cannot rewind anything. It moves along the axis, selects the nearest event, and reorders
+the list by distance from it — which is the honest version of the gesture rather than a promise
+the engine cannot keep.
+
+One thing this pane costs that the others do not: it is the only one that reaches into the
+world, because the archive is far too large to publish every frame. Since M10.1 reaching in
+makes the *simulation* stand aside, so the pane gathers everything under one lock and reuses it
+for a couple of seconds. A chart of what has already happened does not become wrong because a
+hundred more ticks have passed.
 
 ---
 
