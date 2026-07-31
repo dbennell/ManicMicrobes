@@ -425,6 +425,7 @@ fn a_spike_and_a_lysosome_can_be_read_as_well_as_written() {
             slot,
             idx,
             w.biology().ecology.spike_damage,
+            w.biology().metabolism.catalogue.metabolism,
         )
     };
 

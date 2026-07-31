@@ -385,7 +385,12 @@ is done by watching, which is what this milestone is for.
   Parameter editor; scenario open/save; slide open/save wired to `mm-core::snapshot`;
   view-only settings kept in a separate file. Mid-run parameter changes recorded as
   timestamped interventions in world state, so a slide still replays exactly.
-- **M10.3 — the genome view.** Source and reading modes. Template operands resolved to what
+- **M10.3 — several ways to make a living.** *(Taken out of order, ahead of the genome view,
+  because it is an ISA change and the ISA bump was free while no saved run carried a stamp.)*
+  `MetabolicChemistry` becomes a set of pathways rather than one reaction; an organelle picks
+  which it runs by its `control[1]`. Investigated and designed in `docs/CHEMISTRY.md`,
+  normative in SPEC §7.2. ISA version 1 → 2.
+- **M10.3b — the genome view.** Source and reading modes. Template operands resolved to what
   they mean: immediates in decimal, jumps and calls to their target offset, promoters to their
   gene. The `%` form remains the only thing the editor round-trips.
 - **M10.4 — the ecology pane.** The phylogenetic tree drawn as a tree; the food web drawn as a

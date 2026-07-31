@@ -3,7 +3,7 @@
 //! ISA version 1. Any change to this file is an ISA version bump (hard rule 8).
 
 /// ISA version stamped into save files, scenarios and archived genomes (SPEC §16).
-pub const ISA_VERSION: u16 = 1;
+pub const ISA_VERSION: u16 = 2;
 
 /// Number of opcodes. The opcode of a byte is `byte % OPCODE_COUNT` (SPEC §4.2), so four
 /// distinct byte values map to each opcode and most point mutations are synonymous.

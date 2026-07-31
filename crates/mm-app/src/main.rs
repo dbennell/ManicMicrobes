@@ -1636,8 +1636,19 @@ fn parameter_window(ctx: &egui::Context, sim: &mut SlideRes, view: &mut View) {
                                     });
                             });
                     }
-                    // The catalogue is a hundred and twelve numbers, which is a table rather
-                    // than a form.
+                    // Both of these are tables rather than forms: four reactions of four
+                    // chemicals, and sixteen catalogue entries of seven costs.
+                    egui::CollapsingHeader::new("metabolic pathways")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            ui.small(
+                                "Which reactions this world offers. An organelle picks one \
+                                 with its second control word, so a mitochondrion can only \
+                                 burn what it is set to burn — and a lineage must either make \
+                                 that substrate itself or eat something that does.",
+                            );
+                            pathway_grid(ui, &mut draft, &sim.chem_names);
+                        });
                     egui::CollapsingHeader::new("organelle catalogue")
                         .default_open(false)
                         .show(ui, |ui| {
@@ -1723,6 +1734,53 @@ fn parameter_row(
             draft.editing = next;
         }
     }
+}
+
+/// The metabolic pathways: one row per reaction, read left to right as the reaction itself.
+fn pathway_grid(ui: &mut egui::Ui, draft: &mut Draft, chemicals: &[String]) {
+    use mm_core::params::Value;
+
+    egui::Grid::new("pathways")
+        .num_columns(params::PATHWAY_COLUMNS.len() * 2 + 1)
+        .striped(true)
+        .show(ui, |ui| {
+            ui.label("");
+            for (_, heading) in params::PATHWAY_COLUMNS {
+                ui.label(egui::RichText::new(heading).small().strong());
+                ui.label("");
+            }
+            ui.end_row();
+
+            for n in 0..mm_core::organelle::PATHWAY_COUNT {
+                ui.label(format!("pathway {n}"));
+                for (suffix, _) in params::PATHWAY_COLUMNS {
+                    let path = format!("{}{n}.{suffix}", params::PATHWAY_PREFIX);
+                    let Some(value) = mm_core::params::get(&draft.editing, &path) else {
+                        ui.label("-");
+                        ui.label("");
+                        continue;
+                    };
+                    let mut v = value.as_int();
+                    if ui.add(egui::DragValue::new(&mut v).speed(0.1)).changed() {
+                        if let Some(next) =
+                            mm_core::params::set(&draft.editing, &path, Value::Int(v))
+                        {
+                            draft.editing = next;
+                        }
+                    }
+                    // The chemical's name beside its index. A table of bare numbers is a
+                    // table nobody can read a reaction out of.
+                    match usize::try_from(value.as_int())
+                        .ok()
+                        .and_then(|i| chemicals.get(i))
+                    {
+                        Some(name) => ui.weak(name),
+                        None => ui.weak("?"),
+                    };
+                }
+                ui.end_row();
+            }
+        });
 }
 
 /// The organelle catalogue: one row per slot type, one column per cost.
@@ -2137,6 +2195,20 @@ fn cell_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
                     ui.label(format!("slot {}: {}", slot.index, slot.kind.name()));
                     ui.label(format!("param {}", slot.param));
                     ui.label(format!("control {:?}", slot.control));
+                    // Which reaction it runs (M10.3). Only the three organelles that run one:
+                    // on anything else `control[1]` means something else or nothing, and
+                    // labelling it a pathway would be a confident lie.
+                    if matches!(
+                        slot.kind,
+                        OrganelleType::Mitochondrion
+                            | OrganelleType::Chloroplast
+                            | OrganelleType::Lysosome
+                    ) {
+                        let n =
+                            mm_core::organelle::MetabolicChemistry::pathway_index(slot.control[1]);
+                        ui.label(format!("pathway {n}"))
+                            .on_hover_text("which metabolic reaction this one runs");
+                    }
                     if let Some(n) = slot.remaining_build {
                         ui.weak(format!("building, {n} to go"));
                     }

@@ -43,7 +43,7 @@ use crate::cell::CellArena;
 use crate::chem::{ChemTable, CHEM_COUNT};
 use crate::fixed::{q10, q10_scale, Q10_ONE};
 use crate::ledger::Ledger;
-use crate::organelle::{MetabolicChemistry, OrganelleCatalogue, OrganelleType};
+use crate::organelle::{MetabolicChemistry, OrganelleCatalogue, OrganelleType, PATHWAY_COUNT};
 use crate::substrate::Substrate;
 
 /// How much of what it catches each conversion keeps, `Q10`.
@@ -215,17 +215,22 @@ pub struct MetabolicReport {
 }
 
 impl Metabolism {
-    /// The latent energy of a quantity of substrate chemical.
+    /// The latent energy of a quantity of one chemical.
     #[inline]
     #[must_use]
-    pub fn latent(&self, chem: &ChemTable, m: &MetabolicChemistry, quantity: i64) -> i64 {
-        let per = self.per_unit_latent(chem, m) as i64;
+    pub fn latent(&self, chem: &ChemTable, chemical: usize, quantity: i64) -> i64 {
+        let per = self.latent_of(chem, chemical) as i64;
         (quantity * per) / Q10_ONE as i64
     }
 
     #[inline]
-    fn per_unit_latent(&self, chem: &ChemTable, m: &MetabolicChemistry) -> i32 {
-        let from_table = chem.get(m.substrate).energy_yield;
+    /// Latent energy per unit of one chemical.
+    ///
+    /// Per chemical rather than per world since M10.3: with several pathways there are several
+    /// substrates, and lipid at 1536 is worth more than sugar at 1024 — which is the whole
+    /// point of there being a choice.
+    fn latent_of(&self, chem: &ChemTable, chemical: usize) -> i32 {
+        let from_table = chem.get(chemical).energy_yield;
         if from_table > 0 {
             from_table
         } else {
@@ -247,7 +252,6 @@ impl Metabolism {
         starving: &mut Vec<crate::cell::CellId>,
     ) -> MetabolicReport {
         let m = self.catalogue.metabolism;
-        let latent_per_unit = self.per_unit_latent(chem, &m);
         let mut report = MetabolicReport::default();
 
         for i in 0..cells.capacity() {
@@ -267,7 +271,11 @@ impl Metabolism {
                 }
             }
 
-            // --- photosynthesis: waste + light -> substrate + oxidant ---
+            // --- photosynthesis: 2 waste + light -> substrate + oxidant ---
+            //
+            // Once per pathway that this cell has a chloroplast on. A cell with two
+            // chloroplasts set to different reactions runs both, which is what makes a
+            // generalist possible and expensive at the same time.
             let light = {
                 let sq = substrate.index(
                     cells.x[i] >> crate::fixed::POS_BITS,
@@ -276,92 +284,106 @@ impl Metabolism {
                 substrate.light().get(sq).copied().unwrap_or(0)
             };
             if light > 0 {
-                let capacity = self.conversion_capacity(cells, i, OrganelleType::Chloroplast);
-                if capacity > 0 {
+                let by_pathway = self.capacity_by_pathway(cells, i, OrganelleType::Chloroplast);
+                for (n, &capacity) in by_pathway.iter().enumerate() {
+                    if capacity <= 0 {
+                        continue;
+                    }
+                    let Some(p) = m.pathways.get(n) else {
+                        continue;
+                    };
+                    let latent_per_unit = self.latent_of(chem, p.substrate);
                     // Bounded by machinery, by the waste on hand, and by the light falling on
                     // it. Two units of waste make one of substrate and one of oxidant.
-                    let waste_available = cells.interior(i)[m.waste];
+                    let waste_available = cells.interior(i)[p.waste];
                     let by_light = q10_scale(capacity, light);
                     let pairs = by_light.min(waste_available / 2).max(0);
-                    if pairs > 0 {
-                        let gained_latent =
-                            (pairs as i64 * latent_per_unit as i64) / Q10_ONE as i64;
-                        // The light it took to bank that much, plus what was lost as heat.
-                        let absorbed = if self.rates.photosynthesis_efficiency > 0 {
-                            (gained_latent * Q10_ONE as i64)
-                                / self.rates.photosynthesis_efficiency as i64
-                        } else {
-                            gained_latent
-                        };
-                        let interior = cells.interior_mut(i);
-                        interior[m.waste] = interior[m.waste].saturating_sub(pairs * 2);
-                        interior[m.substrate] = interior[m.substrate].saturating_add(pairs);
-                        interior[m.oxidant] = interior[m.oxidant].saturating_add(pairs);
-                        // Two units of waste became one of substrate and one of oxidant.
-                        // Reported rather than done silently: an unaccounted transmutation is
-                        // indistinguishable from a conservation bug (I4).
-                        ledger.convert(m.waste, m.substrate, pairs as i64);
-                        ledger.convert(m.waste, m.oxidant, pairs as i64);
-
-                        ledger.absorb(absorbed);
-                        let waste_heat = absorbed.saturating_sub(gained_latent);
-                        report.dissipated += ledger.dissipate(waste_heat);
-                        report.absorbed += absorbed;
-                        report.fixed += pairs as i64;
+                    if pairs <= 0 {
+                        continue;
                     }
+                    let gained_latent = (pairs as i64 * latent_per_unit as i64) / Q10_ONE as i64;
+                    // The light it took to bank that much, plus what was lost as heat.
+                    let absorbed = if self.rates.photosynthesis_efficiency > 0 {
+                        (gained_latent * Q10_ONE as i64)
+                            / self.rates.photosynthesis_efficiency as i64
+                    } else {
+                        gained_latent
+                    };
+                    let interior = cells.interior_mut(i);
+                    interior[p.waste] = interior[p.waste].saturating_sub(pairs * 2);
+                    interior[p.substrate] = interior[p.substrate].saturating_add(pairs);
+                    interior[p.oxidant] = interior[p.oxidant].saturating_add(pairs);
+                    // Two units of waste became one of substrate and one of oxidant. Reported
+                    // rather than done silently: an unaccounted transmutation is
+                    // indistinguishable from a conservation bug (I4).
+                    ledger.convert(p.waste, p.substrate, pairs as i64);
+                    ledger.convert(p.waste, p.oxidant, pairs as i64);
+
+                    ledger.absorb(absorbed);
+                    let waste_heat = absorbed.saturating_sub(gained_latent);
+                    report.dissipated += ledger.dissipate(waste_heat);
+                    report.absorbed += absorbed;
+                    report.fixed += pairs as i64;
                 }
             }
 
             // --- respiration: substrate + oxidant -> waste + energy ---
-            let capacity = self.conversion_capacity(cells, i, OrganelleType::Mitochondrion);
-            if capacity > 0 {
+            let by_pathway = self.capacity_by_pathway(cells, i, OrganelleType::Mitochondrion);
+            for (n, &capacity) in by_pathway.iter().enumerate() {
+                if capacity <= 0 {
+                    continue;
+                }
+                let Some(p) = m.pathways.get(n) else {
+                    continue;
+                };
+                let latent_per_unit = self.latent_of(chem, p.substrate);
                 let (sub, ox) = {
                     let interior = cells.interior(i);
-                    (interior[m.substrate], interior[m.oxidant])
+                    (interior[p.substrate], interior[p.oxidant])
                 };
                 let burn = capacity.min(sub).min(ox).max(0);
-                if burn > 0 {
-                    let released = (burn as i64 * latent_per_unit as i64) / Q10_ONE as i64;
-                    let recovered =
-                        (released * self.rates.respiration_efficiency as i64) / Q10_ONE as i64;
-                    // Two units come out for the two that went in, but not all of it is
-                    // inert: a share is reactive, and that share is what ages the cell.
-                    let exhaust = burn.saturating_mul(2);
-                    let reactive = q10_scale(exhaust, self.rates.reactive_fraction).min(exhaust);
-                    let inert = exhaust.saturating_sub(reactive);
-
-                    let interior = cells.interior_mut(i);
-                    interior[m.substrate] = interior[m.substrate].saturating_sub(burn);
-                    interior[m.oxidant] = interior[m.oxidant].saturating_sub(burn);
-                    interior[m.waste] = interior[m.waste].saturating_add(inert);
-                    interior[m.reactive] = interior[m.reactive].saturating_add(reactive);
-
-                    // Reported as two balanced reactions, so the per-species claim stays
-                    // exact and an unaccounted transmutation still shows up as drift.
-                    let from_substrate = burn.min(inert);
-                    ledger.convert(m.substrate, m.waste, from_substrate as i64);
-                    ledger.convert(
-                        m.substrate,
-                        m.reactive,
-                        burn.saturating_sub(from_substrate) as i64,
-                    );
-                    let oxidant_inert = inert.saturating_sub(from_substrate);
-                    ledger.convert(m.oxidant, m.waste, oxidant_inert as i64);
-                    ledger.convert(
-                        m.oxidant,
-                        m.reactive,
-                        burn.saturating_sub(oxidant_inert) as i64,
-                    );
-                    report.reactive += reactive as i64;
-
-                    cells.energy[i] =
-                        cells.energy[i].saturating_add(crate::fixed::sat_i32(recovered));
-                    // The latent energy left the substrate; part became cell energy and the
-                    // rest became heat. Stored is unchanged by the first and reduced by the
-                    // second, which is exactly what dissipating the difference says.
-                    report.dissipated += ledger.dissipate(released - recovered);
-                    report.burned += burn as i64;
+                if burn <= 0 {
+                    continue;
                 }
+                let released = (burn as i64 * latent_per_unit as i64) / Q10_ONE as i64;
+                let recovered =
+                    (released * self.rates.respiration_efficiency as i64) / Q10_ONE as i64;
+                // Two units come out for the two that went in, but not all of it is inert: a
+                // share is reactive, and that share is what ages the cell.
+                let exhaust = burn.saturating_mul(2);
+                let reactive = q10_scale(exhaust, self.rates.reactive_fraction).min(exhaust);
+                let inert = exhaust.saturating_sub(reactive);
+
+                let interior = cells.interior_mut(i);
+                interior[p.substrate] = interior[p.substrate].saturating_sub(burn);
+                interior[p.oxidant] = interior[p.oxidant].saturating_sub(burn);
+                interior[p.waste] = interior[p.waste].saturating_add(inert);
+                interior[p.reactive] = interior[p.reactive].saturating_add(reactive);
+
+                // Reported as two balanced reactions, so the per-species claim stays exact and
+                // an unaccounted transmutation still shows up as drift.
+                let from_substrate = burn.min(inert);
+                ledger.convert(p.substrate, p.waste, from_substrate as i64);
+                ledger.convert(
+                    p.substrate,
+                    p.reactive,
+                    burn.saturating_sub(from_substrate) as i64,
+                );
+                let oxidant_inert = inert.saturating_sub(from_substrate);
+                ledger.convert(p.oxidant, p.waste, oxidant_inert as i64);
+                ledger.convert(
+                    p.oxidant,
+                    p.reactive,
+                    burn.saturating_sub(oxidant_inert) as i64,
+                );
+                report.reactive += reactive as i64;
+
+                cells.energy[i] = cells.energy[i].saturating_add(crate::fixed::sat_i32(recovered));
+                // The latent energy left the substrate; part became cell energy and the rest
+                // became heat. Stored is unchanged by the first and reduced by the second,
+                // which is exactly what dissipating the difference says.
+                report.dissipated += ledger.dissipate(released - recovered);
+                report.burned += burn as i64;
             }
 
             // --- growth: cytoplasm becoming body ---
@@ -487,8 +509,18 @@ impl Metabolism {
     ///
     /// Only finished organelles count: a half-built chloroplast is matter the cell is
     /// carrying, not machinery it can use (SPEC §6.2).
-    fn conversion_capacity(&self, cells: &CellArena, i: usize, kind: OrganelleType) -> i32 {
-        let mut total = 0i32;
+    /// Conversion capacity per pathway, for one organelle type, in one pass.
+    ///
+    /// One walk of the sixteen slots rather than one per pathway. The old shape scanned the
+    /// slots once per organelle type; this scans them once per type and bins by pathway, so
+    /// four reactions cost *less* slot-walking than the single one did, not four times more.
+    fn capacity_by_pathway(
+        &self,
+        cells: &CellArena,
+        i: usize,
+        kind: OrganelleType,
+    ) -> [i32; PATHWAY_COUNT] {
+        let mut total = [0i32; PATHWAY_COUNT];
         for o in cells.slots(i) {
             if o.kind != kind || !o.is_active() {
                 continue;
@@ -497,7 +529,10 @@ impl Metabolism {
                 .rates
                 .throughput_per_param
                 .saturating_mul(o.param as i32);
-            total = total.saturating_add(q10_scale(size, o.throttle()));
+            let n = MetabolicChemistry::pathway_index(o.control[1]);
+            if let Some(slot) = total.get_mut(n) {
+                *slot = slot.saturating_add(q10_scale(size, o.throttle()));
+            }
         }
         total
     }
@@ -516,14 +551,24 @@ pub fn recompute_stored(
     metabolism: &Metabolism,
 ) -> i64 {
     let m = metabolism.catalogue.metabolism;
-    let per_unit = metabolism.per_unit_latent(chem, &m) as i64;
+    let in_cells = cells.total_interior();
+    let in_fluid = substrate.total_chem();
 
-    let cell_energy = cells.total_energy();
-    let substrate_in_cells = cells.total_interior()[m.substrate % CHEM_COUNT];
-    let substrate_in_fluid = substrate.total_chem()[m.substrate % CHEM_COUNT];
-    let latent = ((substrate_in_cells + substrate_in_fluid) * per_unit) / Q10_ONE as i64;
+    // Every *distinct* substrate, each at its own yield. Distinct because two pathways may
+    // share one — the default set runs three of the four on brine as oxidant and two of them
+    // on sugar — and counting a shared substrate twice would inflate the world's stored energy
+    // by exactly the amount that makes I5 fail.
+    let latent: i64 = m
+        .substrates()
+        .into_iter()
+        .map(|c| {
+            let c = c % CHEM_COUNT;
+            let quantity = in_cells[c] + in_fluid[c];
+            (quantity * metabolism.latent_of(chem, c) as i64) / Q10_ONE as i64
+        })
+        .sum();
 
-    cell_energy + latent
+    cells.total_energy() + latent
 }
 
 #[cfg(test)]
@@ -707,8 +752,8 @@ mod tests {
         let i = spawn(&mut cells, &pool);
         cells.slots_mut(i)[2] = Organelle::finished(OrganelleType::Mitochondrion, 200);
         let m = met.catalogue.metabolism;
-        cells.interior_mut(i)[m.substrate] = q10(50);
-        cells.interior_mut(i)[m.oxidant] = q10(50);
+        cells.interior_mut(i)[m.primary().substrate] = q10(50);
+        cells.interior_mut(i)[m.primary().oxidant] = q10(50);
 
         ledger.set_baseline(total_matter(&cells, &sub));
         let before_total = grand_total(&cells, &sub);
@@ -746,7 +791,7 @@ mod tests {
         let i = spawn(&mut cells, &pool);
         cells.slots_mut(i)[3] = Organelle::finished(OrganelleType::Chloroplast, 200);
         let m = met.catalogue.metabolism;
-        cells.interior_mut(i)[m.waste] = q10(100);
+        cells.interior_mut(i)[m.primary().waste] = q10(100);
 
         ledger.set_baseline(total_matter(&cells, &sub));
         let before = grand_total(&cells, &sub);
@@ -755,7 +800,7 @@ mod tests {
 
         assert!(report.fixed > 0, "nothing was photosynthesised");
         assert!(report.absorbed > 0, "light was free");
-        assert!(cells.interior(i)[m.substrate] > 0);
+        assert!(cells.interior(i)[m.primary().substrate] > 0);
         assert_eq!(
             grand_total(&cells, &sub),
             before,
@@ -764,6 +809,134 @@ mod tests {
         ledger
             .check_matter(&total_matter(&cells, &sub))
             .expect("photosynthesis did not account for what it transmuted");
+    }
+
+    #[test]
+    fn a_mitochondrion_burns_only_the_substrate_it_is_set_to() {
+        // The whole point of M10.3. Before it, a mitochondrion burned *the* substrate and
+        // `lipid` was a food with an energy yield that nothing in the engine could eat.
+        let (mut cells, sub, chem, mut ledger, met, pool) = world();
+        let m = met.catalogue.metabolism;
+        let one = m.pathway(1);
+        assert_ne!(
+            one.substrate,
+            m.primary().substrate,
+            "the default set offers no alternative to test against"
+        );
+
+        let i = spawn(&mut cells, &pool);
+        let mut mito = Organelle::finished(OrganelleType::Mitochondrion, 200);
+        mito.control[1] = 1;
+        cells.slots_mut(i)[2] = mito;
+
+        // Fed the *primary* pathway's substrate, which this mitochondrion cannot touch.
+        cells.interior_mut(i)[m.primary().substrate] = q10(50);
+        cells.interior_mut(i)[m.primary().oxidant] = q10(50);
+        let mut starving = Vec::new();
+        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+        assert_eq!(report.burned, 0, "it burned a substrate it was not set to");
+        assert_eq!(cells.interior(i)[m.primary().substrate], q10(50));
+
+        // Fed its own, it eats.
+        cells.interior_mut(i)[one.substrate] = q10(50);
+        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+        assert!(report.burned > 0, "it would not burn its own substrate");
+    }
+
+    #[test]
+    fn a_richer_substrate_yields_more_energy() {
+        // Lipid is worth 1536 against sugar's 1024 in the default table, and has been since
+        // M2 — with nothing able to collect the difference. Now the choice is worth making.
+        let m = MetabolicChemistry::default();
+        let chem = ChemTable::spec_default();
+        let (rich, plain) = (m.pathway(1).substrate, m.primary().substrate);
+        assert!(
+            chem.get(rich).energy_yield > chem.get(plain).energy_yield,
+            "the alternative pathway is not actually richer, so this proves nothing"
+        );
+
+        let gain = |pathway: i16| {
+            let (mut cells, sub, chem, mut ledger, met, pool) = world();
+            let i = spawn(&mut cells, &pool);
+            let mut mito = Organelle::finished(OrganelleType::Mitochondrion, 200);
+            mito.control[1] = pathway;
+            cells.slots_mut(i)[2] = mito;
+            let p = *met.catalogue.metabolism.pathway(pathway);
+            cells.interior_mut(i)[p.substrate] = q10(50);
+            cells.interior_mut(i)[p.oxidant] = q10(50);
+            let before = cells.energy[i];
+            let mut starving = Vec::new();
+            met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+            cells.energy[i] - before
+        };
+        assert!(
+            gain(1) > gain(0),
+            "burning the richer substrate paid no better"
+        );
+    }
+
+    #[test]
+    fn two_pathways_in_one_cell_both_run_and_still_conserve_matter() {
+        // A generalist: one chloroplast making sugar, one mitochondrion burning lipid. It
+        // should photosynthesise and starve at the same time, which is exactly the trap that
+        // makes pathway choice a real decision — and whatever it does, matter must balance.
+        let (mut cells, mut sub, chem, mut ledger, met, pool) = world();
+        for y in 0..8 {
+            for x in 0..8 {
+                let idx = sub.index(x, y);
+                sub.light_mut()[idx] = Q10_ONE;
+            }
+        }
+        let i = spawn(&mut cells, &pool);
+        let m = met.catalogue.metabolism;
+
+        let mut chloro = Organelle::finished(OrganelleType::Chloroplast, 200);
+        chloro.control[1] = 0;
+        cells.slots_mut(i)[3] = chloro;
+        let mut mito = Organelle::finished(OrganelleType::Mitochondrion, 200);
+        mito.control[1] = 1;
+        cells.slots_mut(i)[2] = mito;
+
+        cells.interior_mut(i)[m.primary().waste] = q10(100);
+        cells.interior_mut(i)[m.pathway(1).substrate] = q10(30);
+        cells.interior_mut(i)[m.pathway(1).oxidant] = q10(30);
+
+        ledger.set_baseline(total_matter(&cells, &sub));
+        let before = grand_total(&cells, &sub);
+        let mut starving = Vec::new();
+        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+
+        assert!(report.fixed > 0, "the chloroplast did nothing");
+        assert!(report.burned > 0, "the mitochondrion did nothing");
+        assert_eq!(
+            grand_total(&cells, &sub),
+            before,
+            "running two pathways created or destroyed matter"
+        );
+        ledger
+            .check_matter(&total_matter(&cells, &sub))
+            .expect("two pathways did not account for what they transmuted");
+    }
+
+    #[test]
+    fn an_organelle_that_was_never_configured_runs_the_world_it_always_ran() {
+        // Backwards compatibility, asserted rather than assumed. Every genome written before
+        // M10.3 leaves `control[1]` at zero, and pathway zero is the reaction M2 through M9
+        // ran on — so those genomes must behave exactly as they did.
+        let (mut cells, sub, chem, mut ledger, met, pool) = world();
+        let i = spawn(&mut cells, &pool);
+        let mito = Organelle::finished(OrganelleType::Mitochondrion, 200);
+        assert_eq!(mito.control[1], 0, "a fresh organelle is not on pathway 0");
+        cells.slots_mut(i)[2] = mito;
+        let m = met.catalogue.metabolism;
+        cells.interior_mut(i)[m.primary().substrate] = q10(50);
+        cells.interior_mut(i)[m.primary().oxidant] = q10(50);
+        let mut starving = Vec::new();
+        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+        assert!(
+            report.burned > 0,
+            "an unconfigured mitochondrion did nothing"
+        );
     }
 
     #[test]
@@ -781,9 +954,9 @@ mod tests {
         cells.slots_mut(i)[2] = Organelle::finished(OrganelleType::Mitochondrion, 120);
         cells.slots_mut(i)[3] = Organelle::finished(OrganelleType::Chloroplast, 120);
         let m = met.catalogue.metabolism;
-        cells.interior_mut(i)[m.substrate] = q10(200);
-        cells.interior_mut(i)[m.oxidant] = q10(200);
-        cells.interior_mut(i)[m.waste] = q10(200);
+        cells.interior_mut(i)[m.primary().substrate] = q10(200);
+        cells.interior_mut(i)[m.primary().oxidant] = q10(200);
+        cells.interior_mut(i)[m.primary().waste] = q10(200);
         cells.energy[i] = q10(10_000);
 
         ledger.set_baseline(total_matter(&cells, &sub));
@@ -819,9 +992,9 @@ mod tests {
         cells.slots_mut(i)[2] = Organelle::finished(OrganelleType::Mitochondrion, 90);
         cells.slots_mut(i)[3] = Organelle::finished(OrganelleType::Chloroplast, 90);
         let m = met.catalogue.metabolism;
-        cells.interior_mut(i)[m.substrate] = q10(100);
-        cells.interior_mut(i)[m.oxidant] = q10(100);
-        cells.interior_mut(i)[m.waste] = q10(100);
+        cells.interior_mut(i)[m.primary().substrate] = q10(100);
+        cells.interior_mut(i)[m.primary().oxidant] = q10(100);
+        cells.interior_mut(i)[m.primary().waste] = q10(100);
 
         // Adopt the world's starting energy as the baseline, the way World::new does for
         // matter: what was there at the start was not "absorbed".
@@ -974,8 +1147,8 @@ mod tests {
             ..Organelle::finished(OrganelleType::Mitochondrion, 200)
         };
         let m = met.catalogue.metabolism;
-        cells.interior_mut(i)[m.substrate] = q10(50);
-        cells.interior_mut(i)[m.oxidant] = q10(50);
+        cells.interior_mut(i)[m.primary().substrate] = q10(50);
+        cells.interior_mut(i)[m.primary().oxidant] = q10(50);
 
         let mut starving = Vec::new();
         let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
@@ -995,8 +1168,8 @@ mod tests {
             let mut organelle = Organelle::finished(OrganelleType::Mitochondrion, 200);
             organelle.control[0] = throttle as i16;
             cells.slots_mut(i)[2] = organelle;
-            cells.interior_mut(i)[m.substrate] = q10(50);
-            cells.interior_mut(i)[m.oxidant] = q10(50);
+            cells.interior_mut(i)[m.primary().substrate] = q10(50);
+            cells.interior_mut(i)[m.primary().oxidant] = q10(50);
             let mut starving = Vec::new();
             let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
             burned.push(report.burned);

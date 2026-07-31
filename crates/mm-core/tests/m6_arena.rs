@@ -209,7 +209,17 @@ fn acceptance_a_foreign_isa_genome_is_refused_with_a_clear_message() {
         "an exported genome does not carry its ISA version"
     );
 
-    for foreign in [0u16, 2, 99, u16::MAX] {
+    // Filtered against the current version rather than written out, because a literal here
+    // silently becomes the *current* version the next time the ISA changes — which is what
+    // happened at version 2, where this started asserting that a perfectly good genome was
+    // refused. The same trap caught `a_foreign_format_version_is_refused` one milestone ago.
+    let foreigns: Vec<u16> = [0u16, 99, 1_000, u16::MAX]
+        .into_iter()
+        .chain([ISA_VERSION.wrapping_add(1)])
+        .filter(|v| *v != ISA_VERSION)
+        .collect();
+    assert!(!foreigns.is_empty());
+    for foreign in foreigns {
         let altered = text.replace(&format!("isa {ISA_VERSION}"), &format!("isa {foreign}"));
         match GenomeFile::from_text(&altered) {
             Err(GenomeFileError::IsaMismatch { found, expected }) => {

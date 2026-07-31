@@ -284,47 +284,12 @@ pub const FIELDS: &[Field] = &[
     },
     // --- chemistry ---
     Field {
-        path: "metabolism.catalogue.metabolism.substrate",
-        label: "substrate",
-        group: Group::Chemistry,
-        unit: Unit::Chemical,
-        note: "burned by a mitochondrion for energy",
-    },
-    Field {
-        path: "metabolism.catalogue.metabolism.oxidant",
-        label: "oxidant",
-        group: Group::Chemistry,
-        unit: Unit::Chemical,
-        note: "consumed alongside the substrate",
-    },
-    Field {
-        path: "metabolism.catalogue.metabolism.waste",
-        label: "waste",
-        group: Group::Chemistry,
-        unit: Unit::Chemical,
-        note: "produced by burning. A chloroplast turns this back into substrate — the loop \
-               has to close or the world ends as an all-waste equilibrium",
-    },
-    Field {
-        path: "metabolism.catalogue.metabolism.byproduct",
-        label: "byproduct",
-        group: Group::Chemistry,
-        unit: Unit::Chemical,
-        note: "produced alongside the substrate by photosynthesis",
-    },
-    Field {
         path: "metabolism.catalogue.metabolism.structural",
         label: "structural",
         group: Group::Chemistry,
         unit: Unit::Chemical,
-        note: "what a body is built out of",
-    },
-    Field {
-        path: "metabolism.catalogue.metabolism.reactive",
-        label: "reactive",
-        group: Group::Chemistry,
-        unit: Unit::Chemical,
-        note: "respiration's toxic byproduct — reactive oxygen, in the real thing",
+        note: "what a body is built out of. Shared across pathways: a cell is one body \
+               whatever it eats",
     },
     // --- junctions ---
     Field {
@@ -433,6 +398,24 @@ pub const FIELDS: &[Field] = &[
     },
 ];
 
+/// The prefix the metabolic pathways live under (M10.3).
+///
+/// A grid rather than rows, for the same reason as the catalogue: four reactions of four
+/// chemicals each reads as a table of what turns into what, and as sixteen unrelated dropdowns
+/// in a form.
+pub const PATHWAY_PREFIX: &str = "metabolism.catalogue.metabolism.pathways.";
+
+/// The four chemicals each pathway names, as (suffix, column heading).
+///
+/// In reaction order rather than declaration order, because that is how it reads:
+/// `substrate + oxidant -> waste`, with the reactive share coming off the waste.
+pub const PATHWAY_COLUMNS: [(&str, &str); 4] = [
+    ("substrate", "burns"),
+    ("oxidant", "with"),
+    ("waste", "into"),
+    ("reactive", "and poison"),
+];
+
 /// The prefix the organelle catalogue's per-entry costs live under.
 ///
 /// Drawn as a grid rather than as rows in a tab — sixteen entries of seven numbers each is a
@@ -478,6 +461,7 @@ mod tests {
             .into_iter()
             .map(|(path, _)| path)
             .filter(|path| !path.starts_with(CATALOGUE_PREFIX))
+            .filter(|path| !path.starts_with(PATHWAY_PREFIX))
             .filter(|path| describe(path).is_none())
             .collect();
         assert!(
@@ -524,6 +508,28 @@ mod tests {
             catalogue.len(),
             mm_core::organelle::SLOT_COUNT * CATALOGUE_COLUMNS.len(),
             "the catalogue has fields no column covers"
+        );
+    }
+
+    #[test]
+    fn every_pathway_column_exists_and_the_grid_covers_the_lot() {
+        let config = BiologyConfig::default();
+        let real: Vec<String> = mm_core::params::fields(&config)
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect();
+        for (suffix, _) in PATHWAY_COLUMNS {
+            let path = format!("{PATHWAY_PREFIX}0.{suffix}");
+            assert!(real.contains(&path), "`{path}` does not exist");
+        }
+        let covered: Vec<&String> = real
+            .iter()
+            .filter(|p| p.starts_with(PATHWAY_PREFIX))
+            .collect();
+        assert_eq!(
+            covered.len(),
+            mm_core::organelle::PATHWAY_COUNT * PATHWAY_COLUMNS.len(),
+            "a pathway has fields no column covers"
         );
     }
 

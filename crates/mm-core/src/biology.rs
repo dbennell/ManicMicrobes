@@ -107,6 +107,9 @@ pub struct CellHost<'a> {
     /// deal rather than how many cells are in front of it. Copied in rather than reached for
     /// through a config reference, because a host holds only what one cell may read.
     spike_damage: i32,
+    /// Which reactions this world offers, so a mitochondrion's reading can be about the
+    /// substrate *it* burns rather than about chemical 8 (M10.3).
+    chemistry: crate::organelle::MetabolicChemistry,
 }
 
 /// Read an organelle's output the way `OGET` does, from outside the VM.
@@ -116,6 +119,7 @@ pub struct CellHost<'a> {
 /// running one, so "the spike reports contact" is checkable rather than inferable from
 /// behaviour three phases later.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn read_organelle(
     cells: &CellArena,
     substrate: &Substrate,
@@ -124,6 +128,7 @@ pub fn read_organelle(
     slot: usize,
     idx: i16,
     spike_damage: i32,
+    chemistry: crate::organelle::MetabolicChemistry,
 ) -> i16 {
     // A throwaway intent buffer: reading an organelle pushes nothing, but the host holds a
     // slot's worth either way.
@@ -132,12 +137,22 @@ pub fn read_organelle(
     let Some(intents) = buffer.slots_mut().nth(cell) else {
         return 0;
     };
-    let mut host = CellHost::new(cell, cells, substrate, neighbours, intents, 0, spike_damage);
+    let mut host = CellHost::new(
+        cell,
+        cells,
+        substrate,
+        neighbours,
+        intents,
+        0,
+        spike_damage,
+        chemistry,
+    );
     Host::oget(&mut host, idx, slot as i16)
 }
 
 impl<'a> CellHost<'a> {
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         slot: usize,
         cells: &'a CellArena,
@@ -146,6 +161,7 @@ impl<'a> CellHost<'a> {
         intents: SlotIntents<'a>,
         tick: u64,
         spike_damage: i32,
+        chemistry: crate::organelle::MetabolicChemistry,
     ) -> CellHost<'a> {
         let square = substrate.index(pos_to_square(cells.x[slot]), pos_to_square(cells.y[slot]));
         CellHost {
@@ -158,6 +174,7 @@ impl<'a> CellHost<'a> {
             claimed: [0; CHEM_COUNT],
             tick,
             spike_damage,
+            chemistry,
         }
     }
 
@@ -289,15 +306,19 @@ impl Host for CellHost<'_> {
                         * 64,
                 ),
             },
-            OrganelleType::Mitochondrion => {
-                let m = OrganelleType::Mitochondrion;
-                let _ = m;
-                match (idx as u16) % 2 {
-                    0 => sat_i16(o.param as i32),
-                    // Substrate available, so a cell can tell starvation from idleness.
-                    _ => q10_to_visible(self.cells.interior(self.slot)[8 % CHEM_COUNT]),
+            OrganelleType::Mitochondrion => match (idx as u16) % 2 {
+                0 => sat_i16(o.param as i32),
+                // Substrate available, so a cell can tell starvation from idleness — and
+                // specifically *its* substrate, the one this mitochondrion is set to burn.
+                //
+                // This read chemical 8 outright until M10.3, which was already a lie in any
+                // scenario posing a different metabolic loop and became a much louder one when
+                // a mitochondrion could be set to burn lipid and still be told about sugar.
+                _ => {
+                    let c = self.chemistry.pathway(o.control[1]).substrate % CHEM_COUNT;
+                    q10_to_visible(self.cells.interior(self.slot)[c])
                 }
-            }
+            },
             OrganelleType::Vacuole => match (idx as u16) % 2 {
                 0 => q10_to_visible(interior_capacity(self.cells, self.slot)),
                 _ => q10_to_visible(self.cells.interior(self.slot).iter().copied().sum::<i32>()),
@@ -592,12 +613,16 @@ impl crate::state_hash::StateHash for BiologyConfig {
 
         let c = &self.metabolism.catalogue;
         let chem = c.metabolism;
-        h.u64(chem.substrate as u64);
-        h.u64(chem.oxidant as u64);
-        h.u64(chem.waste as u64);
-        h.u64(chem.byproduct as u64);
         h.u64(chem.structural as u64);
-        h.u64(chem.reactive as u64);
+        // Every pathway, in order. A world offering a different set of ways to make a living
+        // is a different world, and one that offered them in a different order would assign
+        // different reactions to the same control word.
+        for p in &chem.pathways {
+            h.u64(p.substrate as u64);
+            h.u64(p.oxidant as u64);
+            h.u64(p.waste as u64);
+            h.u64(p.reactive as u64);
+        }
         for spec in c.specs() {
             h.i32(spec.build_matter);
             h.i32(spec.build_matter_per_param);
@@ -1454,9 +1479,10 @@ pub fn execute(
     tick: u64,
     seed: u64,
     // What a unit of spike extension deals, so a spike can report what it is about to do.
-    // Passed in rather than taking the whole `BiologyConfig`, because this is the only thing a
-    // cell reads from it during execution.
+    // Passed in rather than taking the whole `BiologyConfig`, because these are the only things
+    // a cell reads from it during execution.
     spike_damage: i32,
+    chemistry: crate::organelle::MetabolicChemistry,
 ) {
     let mut vms = std::mem::take(&mut cells.vm);
     let arena: &CellArena = cells;
@@ -1466,7 +1492,16 @@ pub fn execute(
         }
         let genome: Arc<Genome> = Arc::clone(&arena.genome[i]);
         let ctx = RandCtx::new(seed, tick, arena.id_at(i).ordering_key());
-        let mut host = CellHost::new(i, arena, substrate, neighbours, slot, tick, spike_damage);
+        let mut host = CellHost::new(
+            i,
+            arena,
+            substrate,
+            neighbours,
+            slot,
+            tick,
+            spike_damage,
+            chemistry,
+        );
         vm.tick(&genome, cfg, &ctx, &mut host);
         host.intents.dropped()
     };
@@ -2166,6 +2201,7 @@ mod tests {
             0,
             1,
             f.config.ecology.spike_damage,
+            f.config.metabolism.catalogue.metabolism,
         );
         assert_eq!(
             f.substrate.chem_at(5, 8, 8),
@@ -2199,6 +2235,7 @@ mod tests {
             slot,
             0,
             f.config.ecology.spike_damage,
+            f.config.metabolism.catalogue.metabolism,
         );
         assert_eq!(host.oget(1, 0), 1234, "energy");
         assert_eq!(host.oget(0, 0), 20, "mass");
@@ -2223,6 +2260,7 @@ mod tests {
             slot,
             0,
             f.config.ecology.spike_damage,
+            f.config.metabolism.catalogue.metabolism,
         );
         assert_eq!(host.eat(10, 5), 10);
         assert_eq!(host.eat(10, 5), 0, "the square was already spoken for");

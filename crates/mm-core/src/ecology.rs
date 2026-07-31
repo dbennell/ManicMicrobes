@@ -112,11 +112,29 @@ pub fn spike_extension(cells: &CellArena, i: usize) -> i32 {
 /// A cell's total lysosome capacity, `0..`.
 #[must_use]
 pub fn digestive_capacity(cells: &CellArena, i: usize) -> i32 {
-    let mut total = 0i32;
+    digestive_capacity_by_pathway(cells, i).iter().sum()
+}
+
+/// Digestive capacity, split by which substrate each lysosome turns carrion into.
+///
+/// A lysosome's `control[1]` chooses its pathway, the same word a mitochondrion and a
+/// chloroplast use (M10.3). Which matters ecologically rather than cosmetically: a scavenger
+/// that digests carrion into lipid is feeding a different guild from one that digests it into
+/// sugar, and neither of them can eat what it produces unless it also carries a mitochondrion
+/// set to the same reaction.
+#[must_use]
+pub fn digestive_capacity_by_pathway(
+    cells: &CellArena,
+    i: usize,
+) -> [i32; crate::organelle::PATHWAY_COUNT] {
+    let mut total = [0i32; crate::organelle::PATHWAY_COUNT];
     for o in cells.slots(i) {
         if o.kind == OrganelleType::Lysosome && o.is_active() {
             let throttle = (o.control[0] as i32).clamp(0, Q10_ONE);
-            total = total.saturating_add(q10_scale(crate::fixed::q10(o.param as i32), throttle));
+            let n = crate::organelle::MetabolicChemistry::pathway_index(o.control[1]);
+            if let Some(slot) = total.get_mut(n) {
+                *slot = slot.saturating_add(q10_scale(crate::fixed::q10(o.param as i32), throttle));
+            }
         }
     }
     total
@@ -188,59 +206,65 @@ pub fn step(
         }
 
         // --- lysosomes ---
-        let capacity = digestive_capacity(cells, i);
-        if capacity <= 0 {
-            continue;
-        }
-        let (sx, sy) = (
-            crate::fixed::pos_to_square(cells.x[i]),
-            crate::fixed::pos_to_square(cells.y[i]),
-        );
-        let available = substrate.chem_at(CARRION, sx, sy);
-        let taken = capacity.min(available).max(0);
-        if taken <= 0 {
-            continue;
-        }
-        let moved = -substrate.add_chem(CARRION, sx, sy, -taken);
-        if moved <= 0 {
-            continue;
-        }
-        // Carrion becomes substrate, lossily. Both are chemicals inside the conserved total,
-        // so this is a balanced reaction and goes through the ledger — an unaccounted
-        // transmutation is indistinguishable from a conservation bug (I4).
-        let recovered = q10_scale(moved, config.digestion_efficiency);
-        let wasted = moved.saturating_sub(recovered);
-        // From the scenario's chemistry, not written down here. A scenario can pose a
-        // different metabolic loop (SPEC §7.1), and digestion that always produced chemical 8
-        // would be quietly making the wrong substance in any world that did.
-        let substrate_chem = chemistry.substrate % CHEM_COUNT;
-        let waste_chem = chemistry.waste % CHEM_COUNT;
-
-        let room = crate::biology::interior_capacity(cells, i)
-            .saturating_sub(cells.interior(i)[substrate_chem])
-            .max(0);
-        let into_cell = recovered.min(room);
-        if into_cell > 0 {
-            cells.interior_mut(i)[substrate_chem] =
-                cells.interior(i)[substrate_chem].saturating_add(into_cell);
-            ledger.convert(CARRION, substrate_chem, into_cell as i64);
-        }
-        // Whatever the cell had no room for, plus the digestion loss, goes back to the water
-        // as waste rather than being destroyed.
-        let spilled = recovered.saturating_sub(into_cell).saturating_add(wasted);
-        if spilled > 0 {
-            let placed = substrate.add_chem(waste_chem, sx, sy, spilled);
-            ledger.convert(CARRION, waste_chem, placed as i64);
-            let lost = spilled.saturating_sub(placed);
-            if lost > 0 {
-                // Nowhere to put it. Written off explicitly, the way a walled-in corpse is.
-                let mut evicted = [0i32; CHEM_COUNT];
-                evicted[CARRION] = lost;
-                ledger.record_evicted(&evicted);
+        //
+        // One pass per pathway a lysosome is set to. Almost every cell has all its lysosomes on
+        // one, so this is one iteration doing work and three skipping immediately.
+        let by_pathway = digestive_capacity_by_pathway(cells, i);
+        for (n, &capacity) in by_pathway.iter().enumerate() {
+            if capacity <= 0 {
+                continue;
             }
+            let p = chemistry.pathway(n as i16);
+            let (sx, sy) = (
+                crate::fixed::pos_to_square(cells.x[i]),
+                crate::fixed::pos_to_square(cells.y[i]),
+            );
+            let available = substrate.chem_at(CARRION, sx, sy);
+            let taken = capacity.min(available).max(0);
+            if taken <= 0 {
+                continue;
+            }
+            let moved = -substrate.add_chem(CARRION, sx, sy, -taken);
+            if moved <= 0 {
+                continue;
+            }
+            // Carrion becomes substrate, lossily. Both are chemicals inside the conserved total,
+            // so this is a balanced reaction and goes through the ledger — an unaccounted
+            // transmutation is indistinguishable from a conservation bug (I4).
+            let recovered = q10_scale(moved, config.digestion_efficiency);
+            let wasted = moved.saturating_sub(recovered);
+            // From the scenario's chemistry, not written down here. A scenario can pose a
+            // different metabolic loop (SPEC §7.1), and digestion that always produced chemical 8
+            // would be quietly making the wrong substance in any world that did.
+            let substrate_chem = p.substrate % CHEM_COUNT;
+            let waste_chem = p.waste % CHEM_COUNT;
+
+            let room = crate::biology::interior_capacity(cells, i)
+                .saturating_sub(cells.interior(i)[substrate_chem])
+                .max(0);
+            let into_cell = recovered.min(room);
+            if into_cell > 0 {
+                cells.interior_mut(i)[substrate_chem] =
+                    cells.interior(i)[substrate_chem].saturating_add(into_cell);
+                ledger.convert(CARRION, substrate_chem, into_cell as i64);
+            }
+            // Whatever the cell had no room for, plus the digestion loss, goes back to the water
+            // as waste rather than being destroyed.
+            let spilled = recovered.saturating_sub(into_cell).saturating_add(wasted);
+            if spilled > 0 {
+                let placed = substrate.add_chem(waste_chem, sx, sy, spilled);
+                ledger.convert(CARRION, waste_chem, placed as i64);
+                let lost = spilled.saturating_sub(placed);
+                if lost > 0 {
+                    // Nowhere to put it. Written off explicitly, the way a walled-in corpse is.
+                    let mut evicted = [0i32; CHEM_COUNT];
+                    evicted[CARRION] = lost;
+                    ledger.record_evicted(&evicted);
+                }
+            }
+            report.digested += moved as i64;
+            report.scavenged += into_cell as i64;
         }
-        report.digested += moved as i64;
-        report.scavenged += into_cell as i64;
     }
 
     report

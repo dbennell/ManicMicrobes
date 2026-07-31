@@ -333,7 +333,7 @@ mod tests {
         s.biology.metabolism.rates.repair_energy_per_unit = 555;
         s.biology.metabolism.rates.background_damage = 13;
         s.biology.metabolism.rates.metabolic_floor = 21;
-        s.biology.metabolism.catalogue.metabolism.substrate = 3;
+        s.biology.metabolism.catalogue.metabolism.pathways[1].substrate = 3;
         s.biology.junctions.join_forced_penalty = 999;
         s.biology.junctions.probe_leaks_distance = true;
         s.biology.ecology.spike_damage = 246;

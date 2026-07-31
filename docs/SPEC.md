@@ -494,6 +494,24 @@ incidental — it is the entropy story the whole simulation exists to display. A
 dissipative structure: it maintains local order by consuming a gradient and exporting
 disorder.
 
+**A world offers several such pathways, not one** (added at M10.3; ISA version 2). Each names
+its own substrate, oxidant, waste and reactive byproduct, and each must close on its own. An
+organelle that runs a reaction — mitochondrion, chloroplast, lysosome — chooses which one by
+its **`control[1]`**, reduced modulo the number of pathways so that every value a genome can
+write names a real reaction.
+
+This is the difference between one way of making a living and several. A mitochondrion set to
+pathway 1 can burn only pathway 1's substrate, so a lineage must either pair its own
+chloroplast onto the same reaction or eat something that makes what it burns — which is
+cross-feeding, and the first mechanism here that turns one lineage's waste into another's food
+by evolution rather than by construction. Pathways share an oxidant and a waste in the default
+set, so they are alternatives competing for one pool rather than disjoint worlds.
+
+Pathway 0 is the reaction the engine ran on from M2 to M9, and a fresh organelle's `control[1]`
+is zero, so a genome that says nothing about pathways behaves exactly as it always did.
+
+The reasoning, and the measurements that produced it, are in `docs/CHEMISTRY.md`.
+
 Dead cells become corpses: their structural mass and internal chemicals persist as a
 localised deposit that lysosomes can digest and that decays into the fluid over time.
 

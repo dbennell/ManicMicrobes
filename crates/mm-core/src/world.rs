@@ -435,6 +435,7 @@ impl World {
                 tick,
                 seed,
                 self.biology.ecology.spike_damage,
+                self.biology.metabolism.catalogue.metabolism,
             );
 
             // 3. Resolve. Intents applied in slot order, which is cell-id order, so a

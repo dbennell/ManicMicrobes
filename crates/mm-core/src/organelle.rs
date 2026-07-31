@@ -299,25 +299,36 @@ pub struct OrganelleCatalogue {
     pub metabolism: MetabolicChemistry,
 }
 
-/// Which chemicals the metabolic loop of SPEC §7.2 runs on.
+/// How many ways there are to make a living in a world.
 ///
-/// The loop has to close: what a mitochondrion turns into waste, a chloroplast must be able to
+/// Four. A power of two so the selector is a mask, and enough that the default chemical table's
+/// three energy substrates each get a pathway with one spare. Raising it costs a slot in the
+/// per-cell capacity tally in `Metabolism::step` and nothing else.
+pub const PATHWAY_COUNT: usize = 4;
+
+/// One metabolic reaction, in both directions (SPEC §7.2).
+///
+/// ```text
+/// respiration     substrate + oxidant  ->  waste (+ reactive) + energy
+/// photosynthesis  2 waste + light      ->  substrate + oxidant
+/// ```
+///
+/// The pair has to close: what a mitochondrion turns into waste, a chloroplast must be able to
 /// turn back into substrate, or matter conservation guarantees the world ends as an all-waste
-/// equilibrium. Naming the four chemicals here rather than hard-coding them lets a scenario
-/// pose a different chemistry, and lets the closure be checked rather than assumed.
+/// equilibrium. Naming the chemicals rather than hard-coding them lets a scenario pose a
+/// different chemistry, and lets the closure be checked rather than assumed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
-pub struct MetabolicChemistry {
+pub struct Pathway {
     /// Burned by a mitochondrion for energy.
     pub substrate: usize,
-    /// Consumed alongside the substrate.
+    /// Consumed alongside the substrate, and produced alongside it by photosynthesis.
+    ///
+    /// This was two fields, `oxidant` and `byproduct`, and `closes()` required them to be
+    /// equal — the same chemical named twice because the reaction runs in both directions.
     pub oxidant: usize,
     /// Produced by burning. A chloroplast turns this back into substrate.
     pub waste: usize,
-    /// Produced alongside the substrate by photosynthesis.
-    pub byproduct: usize,
-    /// What a body is built out of.
-    pub structural: usize,
     /// Respiration's toxic byproduct — reactive oxygen, in the real thing.
     ///
     /// A fraction of what a mitochondrion exhales comes out as this rather than as ordinary
@@ -328,37 +339,158 @@ pub struct MetabolicChemistry {
     pub reactive: usize,
 }
 
-impl Default for MetabolicChemistry {
+impl Default for Pathway {
     fn default() -> Self {
         // Indices into `ChemTable::spec_default`: sugar, an inert filler standing in for
-        // dissolved oxygen, carbon dioxide, and the same filler back again.
-        MetabolicChemistry {
+        // dissolved oxygen, carbon dioxide, and peroxide.
+        Pathway {
             substrate: 8,
             oxidant: 14,
             waste: 11,
-            byproduct: 14,
-            structural: 4,
             reactive: 13,
         }
     }
 }
 
+impl Pathway {
+    /// Whether this reaction closes and names real chemicals.
+    #[must_use]
+    pub fn closes(&self) -> bool {
+        self.substrate < CHEM_COUNT
+            && self.oxidant < CHEM_COUNT
+            && self.waste < CHEM_COUNT
+            && self.reactive < CHEM_COUNT
+            && self.substrate != self.waste
+    }
+}
+
+/// Every way of making a living that a world offers, and what bodies are built from.
+///
+/// # Why there is more than one
+///
+/// Until M10.3 this was a single reaction, so there was exactly one way to make a living and
+/// every cell in every scenario made it the same way. The chemical table already described a
+/// richer world than the engine implemented — `lipid` and `sulphide` carried energy yields
+/// that nothing could burn, because a mitochondrion burned *the* substrate, one index.
+///
+/// With several, an organelle chooses which reaction it runs, by its `control[1]`. A
+/// mitochondrion on pathway 1 can burn only pathway 1's substrate, so a lineage must either
+/// pair its own chloroplast and mitochondrion onto the same pathway or **eat something that
+/// makes what it burns**. That is cross-feeding, and it is the first mechanism here that turns
+/// one lineage's waste into another's food by evolution rather than by construction.
+///
+/// See `docs/CHEMISTRY.md` for the measurements this came out of.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct MetabolicChemistry {
+    /// The reactions on offer. Selected by an organelle's `control[1]`, modulo this length, so
+    /// every value a genome can write names a real pathway (hard rule 4).
+    pub pathways: [Pathway; PATHWAY_COUNT],
+    /// What a body is built out of.
+    ///
+    /// Shared across pathways rather than per-pathway: a cell is one body whatever it eats, and
+    /// a world where what you are made of depends on what you had for lunch is a different and
+    /// much stranger design than this one.
+    pub structural: usize,
+}
+
+impl Default for MetabolicChemistry {
+    fn default() -> Self {
+        // Pathway 0 is the world M2 through M9 ran on, unchanged, so a scenario that says
+        // nothing about chemistry behaves exactly as it did.
+        //
+        // The other three are the substrates the default table has always carried yields for
+        // and nothing could ever eat: lipid at 1536, sulphide at 768. All four share brine as
+        // the oxidant and carbon dioxide as the waste, which is what makes them *alternatives*
+        // rather than four disjoint worlds — they compete for one pool of oxidant and feed one
+        // pool of waste, so which substrate a lineage runs on is a choice with consequences
+        // for everybody else.
+        //
+        // The fourth is sugar again, deliberately: a duplicate is the cheapest thing for an
+        // unlucky mutation to land on, and it costs nothing to make one of the four slots
+        // harmless rather than leaving it to alias a pathway by accident.
+        MetabolicChemistry {
+            pathways: [
+                Pathway {
+                    substrate: 8,
+                    oxidant: 14,
+                    waste: 11,
+                    reactive: 13,
+                },
+                Pathway {
+                    substrate: 9,
+                    oxidant: 14,
+                    waste: 11,
+                    reactive: 13,
+                },
+                Pathway {
+                    substrate: 10,
+                    oxidant: 14,
+                    waste: 11,
+                    reactive: 13,
+                },
+                Pathway {
+                    substrate: 8,
+                    oxidant: 14,
+                    waste: 11,
+                    reactive: 13,
+                },
+            ],
+            structural: 4,
+        }
+    }
+}
+
 impl MetabolicChemistry {
-    /// Whether the loop closes: everything a mitochondrion consumes must be something a
+    /// Pathway zero: the one an organelle runs when its genome has never said otherwise.
+    ///
+    /// The default set makes this the reaction M2 through M9 ran on, unchanged, so a world
+    /// that says nothing about chemistry behaves exactly as it always did.
+    #[must_use]
+    pub fn primary(&self) -> &Pathway {
+        &self.pathways[0]
+    }
+
+    /// The pathway an organelle's control word selects.
+    ///
+    /// Reduced modulo the count, so every value a genome can write names a real reaction and
+    /// none of them is an error (hard rule 4: addressing wraps). The cast through `u16` is what
+    /// makes a negative control word wrap rather than saturate at zero — the same treatment a
+    /// cilium's mount angle gets in `sensing.rs`.
+    #[must_use]
+    pub fn pathway(&self, control: i16) -> &Pathway {
+        let n = (control as u16 as usize) % PATHWAY_COUNT;
+        // `PATHWAY_COUNT` is the array's length, so this cannot miss; the fallback is here
+        // because indexing that *could* panic has no business on a path a genome reaches.
+        self.pathways.get(n).unwrap_or(&self.pathways[0])
+    }
+
+    /// Which pathway index a control word selects.
+    #[must_use]
+    pub fn pathway_index(control: i16) -> usize {
+        (control as u16 as usize) % PATHWAY_COUNT
+    }
+
+    /// Whether every loop closes: everything a mitochondrion consumes must be something a
     /// chloroplast can produce, and vice versa.
     ///
     /// If this is false the world runs down and dies, however good the cells are. It is worth
     /// asserting rather than discovering after a million ticks.
     #[must_use]
     pub fn closes(&self) -> bool {
-        self.substrate < CHEM_COUNT
-            && self.oxidant < CHEM_COUNT
-            && self.waste < CHEM_COUNT
-            && self.byproduct < CHEM_COUNT
-            && self.reactive < CHEM_COUNT
-            && self.structural < CHEM_COUNT
-            && self.substrate != self.waste
-            && self.oxidant == self.byproduct
+        self.structural < CHEM_COUNT && self.pathways.iter().all(Pathway::closes)
+    }
+
+    /// Every distinct substrate, once each.
+    ///
+    /// For the energy accounting of I5: latent energy is held by the chemicals a mitochondrion
+    /// could release it from, and two pathways sharing a substrate must not count it twice.
+    #[must_use]
+    pub fn substrates(&self) -> Vec<usize> {
+        let mut out: Vec<usize> = self.pathways.iter().map(|p| p.substrate).collect();
+        out.sort_unstable();
+        out.dedup();
+        out
     }
 }
 
@@ -677,19 +809,72 @@ mod tests {
     }
 
     #[test]
-    fn the_metabolic_loop_closes() {
-        // If it does not, matter conservation guarantees the world ends as an all-waste
+    fn every_metabolic_loop_closes() {
+        // If one does not, matter conservation guarantees the world ends as an all-waste
         // equilibrium however good the cells are.
         assert!(MetabolicChemistry::default().closes());
-        assert!(!MetabolicChemistry {
-            substrate: 8,
-            oxidant: 14,
-            waste: 8,
-            byproduct: 14,
-            structural: 4,
-            reactive: 13,
+
+        // A pathway that burns its own waste is a perpetual motion machine. It must be
+        // refused wherever it sits in the set, not only in the first slot — an unclosed
+        // reaction three pathways down is exactly as fatal and much harder to notice.
+        for slot in 0..PATHWAY_COUNT {
+            let mut chemistry = MetabolicChemistry::default();
+            chemistry.pathways[slot].waste = chemistry.pathways[slot].substrate;
+            assert!(
+                !chemistry.closes(),
+                "an unclosed loop in pathway {slot} was accepted"
+            );
         }
-        .closes());
+
+        let mut out_of_range = MetabolicChemistry::default();
+        out_of_range.pathways[2].reactive = CHEM_COUNT + 1;
+        assert!(!out_of_range.closes());
+    }
+
+    #[test]
+    fn a_control_word_always_names_a_real_pathway() {
+        // Hard rule 4: addressing wraps. A genome can write any `i16` into `control[1]`, and
+        // every one of them has to select a reaction rather than fail.
+        let chemistry = MetabolicChemistry::default();
+        for control in [0i16, 1, 3, 4, 255, -1, -4, i16::MIN, i16::MAX] {
+            let n = MetabolicChemistry::pathway_index(control);
+            assert!(n < PATHWAY_COUNT, "{control} selected pathway {n}");
+            assert_eq!(chemistry.pathway(control), &chemistry.pathways[n]);
+        }
+        // Zero is the primary, so an organelle whose control was never written runs the
+        // reaction the world has always run.
+        assert_eq!(chemistry.pathway(0), chemistry.primary());
+    }
+
+    #[test]
+    fn the_default_set_offers_more_than_one_way_to_make_a_living() {
+        // The point of M10.3. If every pathway named the same substrate there would be a
+        // choice in the type system and none in the world.
+        let chemistry = MetabolicChemistry::default();
+        assert!(
+            chemistry.substrates().len() >= 3,
+            "only {} distinct substrates: {:?}",
+            chemistry.substrates().len(),
+            chemistry.substrates()
+        );
+        // And they share an oxidant and a waste, which is what makes them alternatives
+        // competing for one pool rather than four worlds that never meet.
+        let first = chemistry.primary();
+        for p in &chemistry.pathways {
+            assert_eq!(p.oxidant, first.oxidant);
+            assert_eq!(p.waste, first.waste);
+        }
+    }
+
+    #[test]
+    fn distinct_substrates_are_counted_once() {
+        // What `recompute_stored` relies on for I5: two pathways sharing a substrate must not
+        // let the world claim its latent energy twice.
+        let mut chemistry = MetabolicChemistry::default();
+        for p in chemistry.pathways.iter_mut() {
+            p.substrate = 8;
+        }
+        assert_eq!(chemistry.substrates(), vec![8]);
     }
 
     #[test]
