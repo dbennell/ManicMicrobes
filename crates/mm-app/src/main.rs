@@ -10,28 +10,46 @@
 //! overlays in each chemical's own colour, light as a warm luminance layer, cells as points
 //! that resolve into organelles as you zoom in, a circular vignette and dust on the objective.
 //!
+//! # The shell (M10.1, `docs/UI.md`)
+//!
+//! A menu bar across the top, a rail either side, a tabbed drawer along the bottom, and the
+//! slide in whatever is left. Every shortcut below also appears against its menu item; there
+//! is deliberately no binding that cannot be discovered from the menus.
+//!
+//! ```text
+//!   File  Slide  Simulation  View  Tools  Help        ⏸ ▶ 1× 8× 256× ⏭
+//!  ┌────────────┬────────────────────────────┬──────────────────────┐
+//!  │  cell      │        THE SLIDE           │  metrics             │
+//!  │            │                            │  legend              │
+//!  ├────────────┴────────────────────────────┴──────────────────────┤
+//!  │  genome │ wiki │ food web │ editor │ debugger                  │
+//!  ├─────────────────────────────────────────────────────────────────┤
+//!  │  Cryptous mixtus · tick 1 204 887 · 48 213 cells       102×     │
+//!  └─────────────────────────────────────────────────────────────────┘
+//! ```
+//!
 //! | | |
 //! |---|---|
-//! | drag | pan |
-//! | wheel | zoom, whole-slide to single cell |
-//! | left click | select a cell for the inspector |
+//! | drag | pan the slide |
+//! | wheel | zoom about the pointer, whole-slide to single cell |
+//! | left click | select a cell |
 //! | right click | apply the current tool |
 //! | `space` | pause / resume |
 //! | `.` | step one tick |
 //! | `0` `-` `=` `backspace` | speed: paused, 1×, 8×, as fast as it will go |
 //! | `1`–`9` | toggle that chemical's overlay |
-//! | `l` | legend |
-//! | `p` | plots |
-//! | `i` | inspector |
-//! | `w` | species wiki, tree and timeline |
-//! | `e` | genome editor |
-//! | `d` | debugger |
-//! | `f` | food web |
+//! | `i` `p` `l` | cell, metrics, legend |
+//! | `g` `w` `f` `e` `d` | drawer: genome, wiki, food web, editor, debugger |
 //! | `t` | track the selected cell |
-//! | `g` | the selected cell's genome, live |
+//! | `home` | reset the camera |
 //! | `F1`–`F5` | tool: select, move, remove, wall, erase |
 //! | `o` | optics on/off |
 //! | `r` | wipe and reseed the slide |
+//!
+//! Which of those the pointer and the keyboard reach is decided in [`mm_app::ui`], once a
+//! frame, rather than by each reader of the mouse asking egui separately — which is what let a
+//! scroll on the genome listing zoom the microscope, and what let typing `p` into the editor
+//! open the metrics rail.
 //!
 //! # What it is not allowed to be
 //!
@@ -43,10 +61,10 @@
 //!
 //! # Status
 //!
-//! **Unverified visually.** This was written on a headless machine: it compiles, and
-//! everything it draws is derived from data that is tested (`optics.rs`, `inspector.rs`,
-//! `slide.rs`), but nobody has yet seen it draw a pixel. Treat the layout constants here as
-//! first guesses.
+//! Everything drawn here is derived from data that is tested without a graphics stack
+//! (`optics.rs`, `inspector.rs`, `slide.rs`, `ui.rs`), which is where the guarantees live. The
+//! layout constants are not tested and are not meant to be; they are first guesses adjusted by
+//! looking.
 //!
 //! The vignette, depth-of-field and chromatic aberration are applied per-sprite from the
 //! parameters in [`mm_app::optics`] rather than as a full-screen post-process pass. That is a
@@ -65,6 +83,7 @@ use mm_app::editor::Editor;
 use mm_app::inspector::Inspection;
 use mm_app::slide::{Frame, Lod, Slide};
 use mm_app::tools::{self, ToolEvent};
+use mm_app::ui::{self, Dock, Focus, Panel, Panels, Rect, Target};
 use mm_app::wiki;
 use mm_core::biology::BiologyConfig;
 use mm_core::cell::CellSeed;
@@ -274,20 +293,18 @@ struct View {
     centre: Vec2,
     zoom: f32,
     paused: bool,
-    legend: bool,
-    plots: bool,
-    inspector: bool,
-    /// The species wiki, the tree and the timeline (M5).
-    wiki: bool,
-    /// The genome editor and the debugger (M6).
-    editor: bool,
-    debugger: bool,
-    /// The food web (M8).
-    foodweb: bool,
+    /// Which panels are showing. One place rather than eight booleans, so the View menu and
+    /// the keyboard are generated from the same list and cannot drift apart.
+    panels: Panels,
+    /// The rectangle the slide is drawn into: whatever egui left over after the rails, the
+    /// drawer and the bars. Recorded at the end of `panels` and used by `handle_input` on the
+    /// next frame — one frame stale, which is invisible for a rectangle that only changes when
+    /// a panel is resized, and much simpler than running the layout twice.
+    viewport: Rect,
+    /// Who owns the pointer for the duration of the current drag.
+    focus: Focus,
     /// Keep the camera centred on the selected cell.
     follow: bool,
-    /// The genome listing, in its own window (M9 QoL).
-    genome: bool,
     /// Keep the listing scrolled to the instruction pointer.
     genome_follow_ip: bool,
     /// The last `ip` the listing was scrolled to, so it scrolls when the pointer *moves*
@@ -311,15 +328,10 @@ impl Default for View {
             centre: Vec2::new(48.0, 48.0),
             zoom: 1.0,
             paused: false,
-            legend: true,
-            plots: true,
-            inspector: false,
-            wiki: false,
-            editor: false,
-            debugger: false,
-            foodweb: false,
+            panels: Panels::default(),
+            viewport: Rect::default(),
+            focus: Focus::default(),
             follow: false,
-            genome: false,
             genome_follow_ip: true,
             genome_scrolled_to: None,
             drag_distance: 0.0,
@@ -377,6 +389,7 @@ fn setup(mut commands: Commands) {
     commands.spawn(Camera2dBundle::default());
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_input(
     keys: Res<ButtonInput<KeyCode>>,
     buttons: Res<ButtonInput<MouseButton>>,
@@ -387,10 +400,58 @@ fn handle_input(
     window: Query<&Window, With<PrimaryWindow>>,
     mut contexts: EguiContexts,
 ) {
-    // Whether the pointer is over a panel. Without this, clicking a button in the inspector
-    // would also select whatever cell happened to be underneath it.
-    let over_ui = contexts.ctx_mut().is_pointer_over_area();
+    // Who owns the pointer and the keyboard this frame, decided once (M10.1). This used to be
+    // a single `is_pointer_over_area` consulted by one of the four things that read the mouse,
+    // which is why scrolling the genome listing zoomed the microscope.
+    //
+    // `wants_pointer_input` and `is_pointer_over_area` are both asked because they answer
+    // different questions: the first is "egui is using the pointer right now" — mid-drag on a
+    // scrollbar, say — and the second is "the pointer is over something egui drew". A drag
+    // that leaves a slider still belongs to the slider, and a pointer resting on a panel
+    // belongs to the panel even though nothing is being dragged.
+    let (wants_pointer, wants_keyboard) = {
+        let ctx = contexts.ctx_mut();
+        (
+            ctx.wants_pointer_input() || ctx.is_pointer_over_area(),
+            ctx.wants_keyboard_input(),
+        )
+    };
+    let pointer = window
+        .get_single()
+        .ok()
+        .and_then(Window::cursor_position)
+        .map(|p| (p.x, p.y));
+    let live = ui::route(pointer, view.viewport, wants_pointer);
 
+    // The left button latches its owner for the duration of the drag, so a pan that wanders
+    // over a rail does not drop the plate halfway through.
+    if buttons.just_pressed(MouseButton::Left) {
+        view.drag_distance = 0.0;
+        view.focus.press(live);
+    }
+    let target = view.focus.resolve(live);
+
+    // Typing in the editor must not toggle panels. `p` opened the metrics rail from inside a
+    // source buffer and `2` toggled a chemical overlay, which made the editor unusable for the
+    // one thing it is for.
+    if !wants_keyboard {
+        keyboard(&keys, &mut view, &mut sim);
+    }
+
+    handle_mouse(
+        &buttons,
+        &mut motion,
+        &mut wheel,
+        &mut view,
+        &mut sim,
+        &window,
+        target,
+        pointer,
+    );
+}
+
+/// Everything bound to a key, once it is established that the keyboard is ours.
+fn keyboard(keys: &ButtonInput<KeyCode>, view: &mut View, sim: &mut SlideRes) {
     if keys.just_pressed(KeyCode::Space) {
         view.paused = !view.paused;
         let speed = if view.paused { 0 } else { 1 };
@@ -433,35 +494,21 @@ fn handle_input(
             sim.slide.toggle_overlay(i);
         }
     }
-    if keys.just_pressed(KeyCode::KeyL) {
-        view.legend = !view.legend;
-    }
-    if keys.just_pressed(KeyCode::KeyP) {
-        view.plots = !view.plots;
-    }
-    if keys.just_pressed(KeyCode::KeyI) {
-        view.inspector = !view.inspector;
+    // Panels, from the one list the View menu is also built from.
+    for panel in Panel::ALL {
+        if keys.just_pressed(panel_key(panel)) {
+            view.panels.toggle(panel);
+        }
     }
     if keys.just_pressed(KeyCode::KeyO) {
         sim.slide.optics.enabled = !sim.slide.optics.enabled;
     }
-    if keys.just_pressed(KeyCode::KeyW) {
-        view.wiki = !view.wiki;
-    }
-    if keys.just_pressed(KeyCode::KeyE) {
-        view.editor = !view.editor;
-    }
-    if keys.just_pressed(KeyCode::KeyD) {
-        view.debugger = !view.debugger;
-    }
-    if keys.just_pressed(KeyCode::KeyF) {
-        view.foodweb = !view.foodweb;
-    }
     if keys.just_pressed(KeyCode::KeyT) {
         view.follow = !view.follow;
     }
-    if keys.just_pressed(KeyCode::KeyG) {
-        view.genome = !view.genome;
+    if keys.just_pressed(KeyCode::Home) {
+        view.centre = Vec2::new(sim.frame.width as f32 / 2.0, sim.frame.height as f32 / 2.0);
+        view.zoom = 1.0;
     }
     for (key, tool) in [
         (KeyCode::F1, Tool::Select),
@@ -479,17 +526,66 @@ fn handle_input(
         // until M6 brings tweezers and slide loading.
         sim.reseed();
     }
+}
 
+/// The Bevy key that toggles each panel.
+///
+/// Must agree with [`Panel::key`], which is the same binding as the string the menu prints.
+/// Two matches rather than one because `KeyCode` is a Bevy type and `ui.rs` is deliberately
+/// free of Bevy; `ui`'s own test asserts the letters are at least unique.
+fn panel_key(panel: Panel) -> KeyCode {
+    match panel {
+        Panel::Cell => KeyCode::KeyI,
+        Panel::Metrics => KeyCode::KeyP,
+        Panel::Legend => KeyCode::KeyL,
+        Panel::Genome => KeyCode::KeyG,
+        Panel::Wiki => KeyCode::KeyW,
+        Panel::FoodWeb => KeyCode::KeyF,
+        Panel::Editor => KeyCode::KeyE,
+        Panel::Debugger => KeyCode::KeyD,
+    }
+}
+
+/// Everything bound to the mouse, once it is established which region owns it.
+#[allow(clippy::too_many_arguments)]
+fn handle_mouse(
+    buttons: &ButtonInput<MouseButton>,
+    motion: &mut EventReader<MouseMotion>,
+    wheel: &mut EventReader<MouseWheel>,
+    view: &mut View,
+    sim: &mut SlideRes,
+    window: &Query<&Window, With<PrimaryWindow>>,
+    target: Target,
+    pointer: Option<(f32, f32)>,
+) {
+    // The events are drained whoever owns them — an unread `EventReader` accumulates, and a
+    // wheel event ignored this frame must not arrive next frame as a jump.
     for ev in wheel.read() {
+        if target != Target::Slide {
+            continue;
+        }
+        let before = BASE_SCALE * view.zoom;
         view.zoom = (view.zoom * (1.0 + ev.y * 0.1)).clamp(0.15, 40.0);
+        let after = BASE_SCALE * view.zoom;
+        // Zoom about the pointer, not about the middle of the viewport: what is under the
+        // cursor stays under the cursor, which is the difference between zooming a microscope
+        // and operating a slider. Possible for the first time now that the slide has a
+        // rectangle of its own to measure the offset from.
+        if let Some((px, py)) = pointer {
+            let (cx, cy) = view.viewport.centre();
+            let moved = ui::zoom_about(
+                (view.centre.x, view.centre.y),
+                (px - cx, py - cy),
+                before,
+                after,
+            );
+            view.centre = Vec2::new(moved.0, moved.1);
+        }
     }
     let scale = BASE_SCALE * view.zoom;
     sim.slide.set_zoom(scale);
 
-    if buttons.just_pressed(MouseButton::Left) {
-        view.drag_distance = 0.0;
-    }
-    if buttons.pressed(MouseButton::Left) {
+    if buttons.pressed(MouseButton::Left) && target == Target::Slide {
         for ev in motion.read() {
             // Both axes drag the slide with the pointer: push the mouse down and the slide
             // comes down with it, as though you had a finger on the plate. The vertical used
@@ -512,28 +608,32 @@ fn handle_input(
     // Selection used to be on the right button, where the header table had been claiming the
     // left one since M4. Anybody following the documentation got a pan and concluded there was
     // no inspector.
-    if buttons.just_released(MouseButton::Left) && view.drag_distance < 4.0 && !over_ui {
-        if let Some((slide_x, slide_y)) = pointer_on_slide(&window, &view, scale) {
-            let hit = sim.slide.cell_at(slide_x, slide_y, 3.0);
-            if hit.is_some() {
-                sim.selected = hit;
-                view.inspector = true;
-                // A new selection invalidates the sandbox: it was a copy of a different cell
-                // and showing it under a new name would be a lie.
-                sim.sandbox = None;
+    if buttons.just_released(MouseButton::Left) {
+        if target == Target::Slide && view.drag_distance < 4.0 {
+            if let Some((slide_x, slide_y)) = pointer_on_slide(window, view, scale) {
+                let hit = sim.slide.cell_at(slide_x, slide_y, 3.0);
+                if hit.is_some() {
+                    sim.selected = hit;
+                    view.panels.set(Panel::Cell, true);
+                    // A new selection invalidates the sandbox: it was a copy of a different
+                    // cell and showing it under a new name would be a lie.
+                    sim.sandbox = None;
+                }
             }
         }
+        // Whoever the drag belonged to, it is over.
+        view.focus.release();
     }
 
     // Right-click applies the current tool. `Select` is the default and is the only one that
     // cannot change the world; the rest write, which is why the tool is chosen explicitly.
-    if buttons.just_pressed(MouseButton::Right) {
-        if let Some((slide_x, slide_y)) = pointer_on_slide(&window, &view, scale) {
+    if buttons.just_pressed(MouseButton::Right) && target == Target::Slide {
+        if let Some((slide_x, slide_y)) = pointer_on_slide(window, view, scale) {
             let square = (slide_x.floor() as i32, slide_y.floor() as i32);
             match view.tool {
                 Tool::Select => {
                     sim.selected = sim.slide.cell_at(slide_x, slide_y, 3.0);
-                    view.inspector = sim.selected.is_some();
+                    view.panels.set(Panel::Cell, sim.selected.is_some());
                     // A new selection invalidates the sandbox: it was a copy of a different
                     // cell and showing it under a new name would be a lie.
                     sim.sandbox = None;
@@ -597,11 +697,8 @@ fn advance_simulation(mut sim: ResMut<SlideRes>, mut view: ResMut<View>) {
     sim.inspection = sim.selected.and_then(|id| sim.slide.inspect(id));
     // The decision itself is in `inspector::tracking`, where it can be tested without a
     // graphics stack. This applies it and nothing more.
-    match mm_app::inspector::tracking(
-        sim.inspection.as_ref(),
-        view.follow,
-        sim.selected.is_some(),
-    ) {
+    match mm_app::inspector::tracking(sim.inspection.as_ref(), view.follow, sim.selected.is_some())
+    {
         // Set rather than eased: the camera has to be exactly on the cell or a fast one
         // outruns the lerp and drifts to the edge of the view, and a microscope stage does not
         // have momentum anyway.
@@ -670,19 +767,36 @@ fn redraw(
         return;
     };
     let size = window.size();
-    // Half-diagonal, for the field radius the vignette and the aberration are measured in.
-    let half_diagonal = (size.x * size.x + size.y * size.y).sqrt() / 2.0;
+
+    // The slide is centred on the viewport, not on the window. With a rail open those are not
+    // the same place, and without this the plate sits visibly off to one side and zooming about
+    // the pointer walks it further off with every scroll.
+    //
+    // Bevy's world origin is the middle of the window with y up; the viewport rectangle is in
+    // cursor pixels with y down. This is the one conversion between them.
+    let viewport = if view.viewport.is_empty() {
+        Rect::new(0.0, 0.0, size.x, size.y)
+    } else {
+        view.viewport
+    };
+    let (vx, vy) = viewport.centre();
+    let origin = Vec2::new(vx - size.x / 2.0, size.y / 2.0 - vy);
+    // Half-diagonal of the *viewport*, for the field radius the vignette and the aberration are
+    // measured in — so the circular field is centred on the slide rather than on the window.
+    let half_diagonal = (viewport.width().powi(2) + viewport.height().powi(2)).sqrt() / 2.0;
 
     let to_screen = |x: f32, y: f32| -> Vec3 {
         Vec3::new(
-            (x - view.centre.x) * scale,
+            (x - view.centre.x) * scale + origin.x,
             // Screen y is up, slide y is down.
-            -(y - view.centre.y) * scale,
+            -(y - view.centre.y) * scale + origin.y,
             0.0,
         )
     };
     // How far off the centre of the field a point is, as a fraction of the half-diagonal.
-    let field_radius = |p: Vec3| -> f32 { (p.truncate().length() / half_diagonal).clamp(0.0, 1.0) };
+    let field_radius = |p: Vec3| -> f32 {
+        ((p.truncate() - origin).length() / half_diagonal.max(1.0)).clamp(0.0, 1.0)
+    };
 
     let plane = frame.width as usize * frame.height as usize;
 
@@ -724,8 +838,8 @@ fn redraw(
                 // happens to be. The curve is presentation only; `layer.field` stays linear
                 // and the legend still reports the peak the eye is being lied to about.
                 let shade = c.max(0.0).sqrt();
-                for k in 0..3 {
-                    rgb[k] += layer.rgb[k] * shade / layers;
+                for (channel, tint) in rgb.iter_mut().zip(layer.rgb) {
+                    *channel += tint * shade / layers;
                 }
             }
         }
@@ -882,142 +996,463 @@ fn redraw(
     }
 }
 
-/// The legend, the plots and the inspector.
+/// Everything egui draws, and the one place the layout is decided (M10.1).
 ///
-/// Reads `sim` immutably except for the speed control, which is the one thing on screen that
-/// is *supposed* to reach the simulation — and it reaches it by setting a tick count, not by
-/// touching a world.
-fn panels(mut contexts: EguiContexts, mut sim: ResMut<SlideRes>, mut view: ResMut<View>) {
+/// Docked panels rather than floating windows. The visible reason is that a rail cannot be
+/// dragged over the thing you are looking at. The load-bearing one is that whatever egui does
+/// *not* claim is, by definition, the slide — so the slide finally has a rectangle of its own,
+/// which is what [`ui::route`] needs and what the whole scroll-wheel complaint came down to.
+///
+/// No `CentralPanel` is added, deliberately. The slide is drawn by Bevy underneath egui, so
+/// the middle has to stay unclaimed: a central panel would paint over it, and egui would then
+/// report an area there for the pointer to be "over".
+fn panels(
+    mut contexts: EguiContexts,
+    mut sim: ResMut<SlideRes>,
+    mut view: ResMut<View>,
+    mut exit: EventWriter<AppExit>,
+) {
     let ctx = contexts.ctx_mut();
     let frame = sim.frame.clone();
 
-    if view.legend {
-        egui::Window::new("legend")
-            .anchor(egui::Align2::LEFT_TOP, [8.0, 8.0])
-            .resizable(false)
+    // Order is layout: egui hands space out from the outside in, so the menu takes the top, the
+    // status bar the very bottom, the drawer the strip above it, and the rails what is left
+    // between them.
+    let mut quit = false;
+    menu_bar(ctx, &mut sim, &mut view, &mut quit);
+    status_bar(ctx, &sim, &view, &frame);
+    drawer(ctx, &mut sim, &mut view);
+
+    if view.panels.cell {
+        egui::SidePanel::left("rail_left")
+            .default_width(270.0)
+            .width_range(210.0..=460.0)
             .show(ctx, |ui| {
-                ui.label(format!("tick {}", frame.tick));
-                ui.label(format!("{} cells", frame.population));
-                if frame.largest_cluster > 1 {
-                    ui.label(format!("largest organism: {} cells", frame.largest_cluster));
-                }
-                ui.label(match frame.lod {
-                    Lod::Dots => "detail: points",
-                    Lod::Organelles => "detail: organelles",
-                    Lod::Full => "detail: full",
-                });
-                ui.separator();
-                if frame.overlays.is_empty() {
-                    ui.weak("no overlays — press 1-9");
-                }
-                for layer in &frame.overlays {
-                    ui.horizontal(|ui| {
-                        let [r, g, b] = layer.rgb;
-                        let (rect, _) =
-                            ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-                        ui.painter().rect_filled(
-                            rect,
-                            2.0,
-                            egui::Color32::from_rgb(
-                                (r * 255.0) as u8,
-                                (g * 255.0) as u8,
-                                (b * 255.0) as u8,
-                            ),
-                        );
-                        // The peak matters: each layer is normalised against its own maximum,
-                        // so without this the colours are legible but meaningless.
-                        ui.label(format!(
-                            "{}  peak {:.1}",
-                            layer.name,
-                            layer.peak as f32 / mm_core::Q10_ONE as f32
-                        ));
-                    });
-                }
-                ui.separator();
-                ui.label(format!("tool: {}  (F1-F5)", view.tool.name()));
-                if let Some(event) = &sim.last_tool {
-                    ui.small(format!("{event:?}"));
-                }
-                ui.horizontal(|ui| {
-                    for (label, speed) in [("||", 0u32), ("1x", 1), ("8x", 8), ("fast", 256)] {
-                        if ui.button(label).clicked() {
-                            sim.slide.set_speed(speed);
-                            view.paused = speed == 0;
-                        }
-                    }
-                    if ui.button("step").clicked() {
-                        sim.slide.request_step();
-                    }
-                });
+                egui::ScrollArea::vertical().show(ui, |ui| cell_body(ui, &mut sim, &mut view));
             });
     }
-
-    if view.plots {
-        egui::Window::new("metrics")
-            .anchor(egui::Align2::RIGHT_TOP, [-8.0, 8.0])
+    if view.panels.metrics || view.panels.legend {
+        egui::SidePanel::right("rail_right")
             .default_width(260.0)
+            .width_range(210.0..=460.0)
             .show(ctx, |ui| {
-                let history = sim.slide.history();
-                if history.is_empty() {
-                    ui.weak("no samples yet");
-                    return;
-                }
-                let series: [(&str, Box<dyn Fn(&Sample) -> i64>); 4] = [
-                    ("population", Box::new(|s: &Sample| s.population as i64)),
-                    ("dissipation", Box::new(|s: &Sample| s.dissipation)),
-                    ("light income ‰", Box::new(|s: &Sample| s.trophic_light)),
-                    (
-                        "distinct genomes",
-                        Box::new(|s: &Sample| s.distinct_genomes as i64),
-                    ),
-                ];
-                for (name, pick) in series {
-                    let s = history.series(pick);
-                    ui.label(format!("{name}  {}", s.values.last().copied().unwrap_or(0)));
-                    sparkline(ui, &s.normalised());
-                }
-                if let Some(latest) = history.latest() {
-                    ui.separator();
-                    ui.label(format!(
-                        "fidelity {:.2}",
-                        latest.mean_fidelity as f32 / mm_core::Q10_ONE as f32
-                    ));
-                    ui.label(format!("loadouts {}", latest.distinct_loadouts));
-                    ui.label(format!("matter {}", latest.total_matter));
-                }
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    if view.panels.metrics {
+                        metrics_body(ui, &sim);
+                    }
+                    if view.panels.metrics && view.panels.legend {
+                        ui.separator();
+                    }
+                    if view.panels.legend {
+                        legend_body(ui, &sim, &view, &frame);
+                    }
+                });
             });
     }
 
-    if view.wiki {
-        wiki_panel(ctx, &sim, &mut view);
-    }
+    // Whatever is left over is the slide. Recorded here for `handle_input` to route against on
+    // the next frame — one frame stale, which is invisible for a rectangle that only moves when
+    // a panel is opened or dragged, and much cheaper than laying the UI out twice.
+    let rect = ctx.available_rect();
+    view.viewport = Rect::new(rect.min.x, rect.min.y, rect.max.x, rect.max.y);
 
-    if view.editor {
-        editor_panel(ctx, &mut sim);
-    }
-    if view.debugger {
-        debugger_panel(ctx, &mut sim);
-    }
-    if view.foodweb {
-        foodweb_panel(ctx, &sim);
-    }
-
-    if view.inspector {
-        cell_panel(ctx, &mut sim, &mut view);
-    }
-    if view.genome {
-        genome_panel(ctx, &mut sim, &mut view);
+    if quit {
+        exit.send(AppExit::Success);
     }
 }
 
-/// The genome of the selected cell, live, in its own window (`g`).
+/// A menu item that is designed but not built yet.
+///
+/// Shown disabled rather than hidden. The shape of the application is worth seeing even where
+/// it is hollow, and a greyed item that says which milestone owns it is honest in a way that
+/// an item which silently does nothing is not.
+fn soon(ui: &mut egui::Ui, label: &str, shortcut: &str, why: &str) {
+    ui.add_enabled(false, egui::Button::new(label).shortcut_text(shortcut))
+        .on_disabled_hover_text(why);
+}
+
+/// The menu bar, and the transport controls at its right-hand end.
+///
+/// Every keyboard shortcut in `keyboard` appears against its menu item, and no shortcut exists
+/// that is not in a menu. The previous build had fourteen single-key bindings and no way at all
+/// to discover any of them.
+fn menu_bar(ctx: &egui::Context, sim: &mut SlideRes, view: &mut View, quit: &mut bool) {
+    const LATER: &str = "M10.2 — configuration and slide files";
+
+    egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+        egui::menu::bar(ui, |ui| {
+            ui.menu_button("File", |ui| {
+                soon(ui, "New slide…", "Ctrl+N", LATER);
+                soon(ui, "Open slide…", "Ctrl+O", LATER);
+                soon(ui, "Save slide", "Ctrl+S", LATER);
+                soon(ui, "Save slide as…", "", LATER);
+                ui.separator();
+                soon(ui, "Export…", "", LATER);
+                ui.separator();
+                if ui.button("Quit").clicked() {
+                    *quit = true;
+                    ui.close_menu();
+                }
+            });
+
+            ui.menu_button("Slide", |ui| {
+                soon(ui, "Scenario library", "", LATER);
+                soon(ui, "Open scenario…", "", LATER);
+                soon(ui, "Parameters…", "Ctrl+,", LATER);
+                soon(ui, "Save parameters as…", "", LATER);
+                ui.separator();
+                if ui
+                    .add(egui::Button::new("Reseed").shortcut_text("R"))
+                    .on_hover_text("wipe the slide and start the ancestor over")
+                    .clicked()
+                {
+                    sim.reseed();
+                    ui.close_menu();
+                }
+            });
+
+            ui.menu_button("Simulation", |ui| {
+                let running = sim.slide.speed() > 0;
+                if ui
+                    .add(
+                        egui::Button::new(if running { "Pause" } else { "Run" })
+                            .shortcut_text("Space"),
+                    )
+                    .clicked()
+                {
+                    let speed = if running { 0 } else { 1 };
+                    sim.slide.set_speed(speed);
+                    view.paused = speed == 0;
+                    ui.close_menu();
+                }
+                if ui
+                    .add(egui::Button::new("Step one tick").shortcut_text("."))
+                    .clicked()
+                {
+                    sim.slide.request_step();
+                }
+                ui.menu_button("Speed", |ui| {
+                    for (label, key, speed) in [
+                        ("paused", "0", 0u32),
+                        ("1×", "-", 1),
+                        ("8×", "=", 8),
+                        ("as fast as it will go", "backspace", 256),
+                    ] {
+                        let now = sim.slide.speed() == speed;
+                        if ui
+                            .add(egui::Button::new(label).shortcut_text(key).selected(now))
+                            .clicked()
+                        {
+                            sim.slide.set_speed(speed);
+                            view.paused = speed == 0;
+                            ui.close_menu();
+                        }
+                    }
+                });
+                ui.separator();
+                soon(ui, "Interventions…", "", LATER);
+            });
+
+            ui.menu_button("View", |ui| {
+                for panel in Panel::ALL {
+                    let mut open = view.panels.is_open(panel);
+                    if ui
+                        .add(
+                            egui::Button::new(panel.title())
+                                .shortcut_text(panel.key())
+                                .selected(open),
+                        )
+                        .clicked()
+                    {
+                        open = !open;
+                        view.panels.set(panel, open);
+                    }
+                }
+                ui.separator();
+                ui.menu_button("Overlays", |ui| {
+                    for (i, name) in sim.slide.chemical_names().into_iter().enumerate() {
+                        let on = sim.slide.overlay_enabled(i);
+                        let key = if i < 9 {
+                            (i + 1).to_string()
+                        } else {
+                            String::new()
+                        };
+                        if ui
+                            .add(egui::Button::new(name).shortcut_text(key).selected(on))
+                            .clicked()
+                        {
+                            sim.slide.toggle_overlay(i);
+                        }
+                    }
+                });
+                if ui
+                    .add(
+                        egui::Button::new("Optics")
+                            .shortcut_text("O")
+                            .selected(sim.slide.optics.enabled),
+                    )
+                    .on_hover_text("vignette, defocus and dust on the objective")
+                    .clicked()
+                {
+                    sim.slide.optics.enabled = !sim.slide.optics.enabled;
+                }
+                ui.separator();
+                if ui
+                    .add(
+                        egui::Button::new("Follow selection")
+                            .shortcut_text("T")
+                            .selected(view.follow),
+                    )
+                    .clicked()
+                {
+                    view.follow = !view.follow;
+                }
+                if ui
+                    .add(egui::Button::new("Reset camera").shortcut_text("Home"))
+                    .clicked()
+                {
+                    view.centre =
+                        Vec2::new(sim.frame.width as f32 / 2.0, sim.frame.height as f32 / 2.0);
+                    view.zoom = 1.0;
+                    ui.close_menu();
+                }
+            });
+
+            ui.menu_button("Tools", |ui| {
+                for (tool, key) in [
+                    (Tool::Select, "F1"),
+                    (Tool::Move, "F2"),
+                    (Tool::Remove, "F3"),
+                    (Tool::DrawBarrier, "F4"),
+                    (Tool::EraseBarrier, "F5"),
+                ] {
+                    if ui
+                        .add(
+                            egui::Button::new(tool.name())
+                                .shortcut_text(key)
+                                .selected(view.tool == tool),
+                        )
+                        .clicked()
+                    {
+                        view.tool = tool;
+                        ui.close_menu();
+                    }
+                }
+            });
+
+            ui.menu_button("Help", |ui| {
+                ui.label("keys");
+                ui.separator();
+                for (key, what) in [
+                    ("space", "run / pause"),
+                    (".", "step one tick"),
+                    ("0 - = ⌫", "speed"),
+                    ("1–9", "chemical overlays"),
+                    ("F1–F5", "tools"),
+                    ("drag", "pan the slide"),
+                    ("wheel", "zoom about the pointer"),
+                    ("click", "select a cell"),
+                ] {
+                    ui.small(format!("{key:<10} {what}"));
+                }
+            });
+
+            // The transport, at the right-hand end, mirroring the keys rather than replacing
+            // them. `right_to_left` so it stays pinned to the edge as the window resizes.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("⏭").on_hover_text("step one tick  (.)").clicked() {
+                    sim.slide.request_step();
+                }
+                for (label, speed) in [("256×", 256u32), ("8×", 8), ("1×", 1)] {
+                    if ui
+                        .add(egui::Button::new(label).selected(sim.slide.speed() == speed))
+                        .clicked()
+                    {
+                        sim.slide.set_speed(speed);
+                        view.paused = false;
+                    }
+                }
+                let running = sim.slide.speed() > 0;
+                if ui
+                    .button(if running { "⏸" } else { "▶" })
+                    .on_hover_text("run / pause  (space)")
+                    .clicked()
+                {
+                    let speed = if running { 0 } else { 1 };
+                    sim.slide.set_speed(speed);
+                    view.paused = speed == 0;
+                }
+            });
+        });
+    });
+}
+
+/// One line along the bottom: what is selected, what the world is doing, and the scale bar.
+///
+/// The scale bar is the microscope's, not a debug readout — it is the thing in the corner of
+/// every frame of the footage this is modelled on, and it is the only honest way to say how
+/// big anything on the slide is.
+fn status_bar(ctx: &egui::Context, sim: &SlideRes, view: &View, frame: &Frame) {
+    egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+        ui.horizontal(|ui| {
+            if let Some(c) = &sim.inspection {
+                ui.label(
+                    egui::RichText::new(sim.slide.species_name(c.species))
+                        .italics()
+                        .strong(),
+                );
+                ui.separator();
+            }
+            ui.label(format!("tick {}", frame.tick));
+            ui.separator();
+            ui.label(format!("{} cells", frame.population));
+            if frame.largest_cluster > 1 {
+                ui.separator();
+                ui.label(format!("largest organism {}", frame.largest_cluster));
+            }
+            ui.separator();
+            ui.label(format!("tool: {}", view.tool.name()));
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Magnification is reported the way the objective would: relative to the base
+                // scale, so "1×" is one substrate square to eight pixels.
+                ui.label(format!("{:.0}×", view.zoom * 100.0));
+                ui.separator();
+                ui.label(match frame.lod {
+                    Lod::Dots => "points",
+                    Lod::Organelles => "organelles",
+                    Lod::Full => "full",
+                });
+            });
+        });
+    });
+}
+
+/// The bottom drawer: one tab at a time, for everything that wants width rather than height.
+///
+/// A listing, a source buffer, a tree and a food web are all wide and short. Putting them in a
+/// side rail is how a genome listing ends up forty characters across with the operand column
+/// wrapped off the end.
+fn drawer(ctx: &egui::Context, sim: &mut SlideRes, view: &mut View) {
+    let Some(showing) = view.panels.drawer else {
+        return;
+    };
+    egui::TopBottomPanel::bottom("drawer")
+        .resizable(true)
+        .default_height(300.0)
+        .height_range(120.0..=760.0)
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                for panel in Panel::ALL.into_iter().filter(|p| p.dock() == Dock::Drawer) {
+                    if ui
+                        .add(
+                            egui::Button::new(panel.title())
+                                .shortcut_text(panel.key())
+                                .selected(panel == showing),
+                        )
+                        .clicked()
+                    {
+                        view.panels.drawer = Some(panel);
+                    }
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .button("▼")
+                        .on_hover_text("collapse the drawer")
+                        .clicked()
+                    {
+                        view.panels.drawer = None;
+                    }
+                });
+            });
+            ui.separator();
+            match showing {
+                Panel::Genome => genome_body(ui, sim, view),
+                Panel::Wiki => wiki_body(ui, sim, view),
+                Panel::FoodWeb => foodweb_body(ui, sim),
+                Panel::Editor => editor_body(ui, sim),
+                Panel::Debugger => debugger_body(ui, sim),
+                // The rails' panels are never the drawer's tab; `Panels::set` will not put
+                // one there.
+                Panel::Cell | Panel::Metrics | Panel::Legend => {}
+            }
+        });
+}
+
+/// The legend: what the colours on the slide mean, and what they are scaled against.
+fn legend_body(ui: &mut egui::Ui, sim: &SlideRes, view: &View, frame: &Frame) {
+    ui.label(egui::RichText::new("legend").strong());
+    if frame.overlays.is_empty() {
+        ui.weak("no overlays — press 1–9");
+    }
+    for layer in &frame.overlays {
+        ui.horizontal(|ui| {
+            let [r, g, b] = layer.rgb;
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+            ui.painter().rect_filled(
+                rect,
+                2.0,
+                egui::Color32::from_rgb((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8),
+            );
+            // The peak matters: each layer is normalised against its own maximum, so without
+            // this the colours are legible but meaningless.
+            ui.label(format!(
+                "{}  peak {:.1}",
+                layer.name,
+                layer.peak as f32 / mm_core::Q10_ONE as f32
+            ));
+        });
+    }
+    if let Some(event) = &sim.last_tool {
+        ui.separator();
+        ui.small(format!("{} — {event:?}", view.tool.name()));
+    }
+}
+
+/// The live metric plots.
+fn metrics_body(ui: &mut egui::Ui, sim: &SlideRes) {
+    ui.label(egui::RichText::new("metrics").strong());
+    let history = sim.slide.history();
+    if history.is_empty() {
+        ui.weak("no samples yet");
+        return;
+    }
+    // One plotted series: its label, and how to get its value out of a sample.
+    type Series<'a> = (&'a str, Box<dyn Fn(&Sample) -> i64>);
+    let series: [Series; 4] = [
+        ("population", Box::new(|s: &Sample| s.population as i64)),
+        ("dissipation", Box::new(|s: &Sample| s.dissipation)),
+        ("light income ‰", Box::new(|s: &Sample| s.trophic_light)),
+        (
+            "distinct genomes",
+            Box::new(|s: &Sample| s.distinct_genomes as i64),
+        ),
+    ];
+    for (name, pick) in series {
+        let s = history.series(pick);
+        ui.label(format!("{name}  {}", s.values.last().copied().unwrap_or(0)));
+        sparkline(ui, &s.normalised());
+    }
+    if let Some(latest) = history.latest() {
+        ui.separator();
+        ui.label(format!(
+            "fidelity {:.2}",
+            latest.mean_fidelity as f32 / mm_core::Q10_ONE as f32
+        ));
+        ui.label(format!("loadouts {}", latest.distinct_loadouts));
+        ui.label(format!("matter {}", latest.total_matter));
+    }
+}
+
+/// The genome of the selected cell, live (`g`).
 ///
 /// Read-only by default and running: the highlighted line is where the cell's own instruction
 /// pointer is right now, and it moves while you watch. "edit" hands the disassembly to the
 /// editor, and applying it writes the new bytes back into the same living cell without
 /// stopping the world — see [`tools::rewrite_genome`] for what happens to the machine.
-fn genome_panel(ctx: &egui::Context, sim: &mut SlideRes, view: &mut View) {
+fn genome_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
     let Some(c) = sim.inspection.clone() else {
+        ui.weak("no cell selected — click one on the slide");
         return;
     };
 
@@ -1028,115 +1463,105 @@ fn genome_panel(ctx: &egui::Context, sim: &mut SlideRes, view: &mut View) {
     let over_nucleus = c.nucleus_capacity > 0 && c.genome_len > c.nucleus_capacity;
     let mut apply: Option<Vec<u8>> = None;
 
-    egui::Window::new("genome")
-        .default_width(420.0)
-        .default_height(520.0)
-        .open(&mut view.genome)
-        .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(sim.slide.species_name(c.species))
-                        .strong(),
-                );
-                ui.weak(format!("{:016x}", c.genome_hash));
-            });
-            ui.horizontal(|ui| {
-                ui.label(format!("{} bytes / nucleus {}", c.genome_len, c.nucleus_capacity));
-                if over_nucleus {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(230, 130, 90),
-                        "⚠ truncated at division",
-                    )
-                    .on_hover_text(
-                        "SPEC §4.1: a genome longer than its nucleus is cut short in every \
-                         daughter. The lineage stops without an error.",
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(sim.slide.species_name(c.species)).strong());
+        ui.weak(format!("{:016x}", c.genome_hash));
+        ui.separator();
+        ui.label(format!(
+            "{} bytes / nucleus {}",
+            c.genome_len, c.nucleus_capacity
+        ));
+        if over_nucleus {
+            ui.colored_label(
+                egui::Color32::from_rgb(230, 130, 90),
+                "⚠ truncated at division",
+            )
+            .on_hover_text(
+                "SPEC §4.1: a genome longer than its nucleus is cut short in every \
+                 daughter. The lineage stops without an error.",
+            );
+        }
+    });
+
+    ui.horizontal(|ui| {
+        if ui
+            .button("edit")
+            .on_hover_text("load this genome into the editor")
+            .clicked()
+        {
+            sim.editor
+                .load_bytes(c.genome.bytes(), sim.slide.species_name(c.species));
+            sim.editing = Some(c.id);
+            view.panels.set(Panel::Editor, true);
+        }
+        ui.separator();
+        ui.checkbox(&mut view.genome_follow_ip, "follow ip")
+            .on_hover_text("scroll to the pointer when it moves");
+        if sim.editing == Some(c.id) {
+            let built = sim.editor.build().bytes().map(|b| b.to_vec());
+            let ready = built.is_some() && !sim.editor.is_dirty();
+            if ui
+                .add_enabled(ready, egui::Button::new("apply to this cell"))
+                .on_hover_text(
+                    "replace this cell's genome and let it carry on running. Its body, \
+                     chemistry and position are untouched; a division in progress is \
+                     abandoned.",
+                )
+                .clicked()
+            {
+                apply = built;
+            }
+            if !ready {
+                ui.weak("assemble in the editor first");
+            }
+        }
+    });
+
+    // Scroll when the pointer has moved to a line we have not already followed it to — not on
+    // every frame it is on screen.
+    let chase = view.genome_follow_ip && view.genome_scrolled_to != Some(c.ip);
+
+    ui.separator();
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            for (n, line) in sim.listing.lines().iter().enumerate() {
+                let current = here == Some(n);
+                ui.horizontal(|ui| {
+                    // The pointer, in the margin, so the eye has one column to follow rather
+                    // than hunting for a highlight.
+                    ui.label(
+                        egui::RichText::new(if current { "▶" } else { " " })
+                            .monospace()
+                            .color(egui::Color32::from_rgb(140, 230, 140)),
                     );
-                }
-            });
-
-            ui.separator();
-            ui.horizontal(|ui| {
-                if ui
-                    .button("edit")
-                    .on_hover_text("load this genome into the editor")
-                    .clicked()
-                {
-                    sim.editor.load_bytes(
-                        c.genome.bytes(),
-                        sim.slide.species_name(c.species),
-                    );
-                    sim.editing = Some(c.id);
-                    view.editor = true;
-                }
-                ui.separator();
-                ui.checkbox(&mut view.genome_follow_ip, "follow ip")
-                    .on_hover_text("scroll to the pointer when it moves");
-                if sim.editing == Some(c.id) {
-                    let built = sim.editor.build().bytes().map(|b| b.to_vec());
-                    let ready = built.is_some() && !sim.editor.is_dirty();
-                    if ui
-                        .add_enabled(ready, egui::Button::new("apply to this cell"))
-                        .on_hover_text(
-                            "replace this cell's genome and let it carry on running. Its body, \
-                             chemistry and position are untouched; a division in progress is \
-                             abandoned.",
-                        )
-                        .clicked()
-                    {
-                        apply = built;
-                    }
-                    if !ready {
-                        ui.weak("assemble in the editor first");
-                    }
-                }
-            });
-
-            // Scroll when the pointer has moved to a line we have not already followed it
-            // to — not on every frame it is on screen.
-            let chase = view.genome_follow_ip && view.genome_scrolled_to != Some(c.ip);
-
-            ui.separator();
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                for (n, line) in sim.listing.lines().iter().enumerate() {
-                    let current = here == Some(n);
-                    ui.horizontal(|ui| {
-                        // The pointer, in the margin, so the eye has one column to follow
-                        // rather than hunting for a highlight.
-                        ui.label(
-                            egui::RichText::new(if current { "▶" } else { " " })
-                                .monospace()
-                                .color(egui::Color32::from_rgb(140, 230, 140)),
-                        );
-                        let body = egui::RichText::new(format!(
-                            "{:>4}  {:<22}",
-                            line.offset, line.text
-                        ))
-                        .monospace()
-                        .size(11.0);
-                        ui.label(if current {
-                            body.background_color(egui::Color32::from_rgb(45, 70, 45))
-                                .color(egui::Color32::from_rgb(210, 255, 210))
-                        } else {
-                            body.color(egui::Color32::from_gray(175))
-                        });
-                        if let Some(label) = &line.label {
-                            ui.label(
-                                egui::RichText::new(label)
-                                    .monospace()
-                                    .size(11.0)
-                                    .color(egui::Color32::from_rgb(150, 175, 215)),
-                            );
-                        }
+                    let body =
+                        egui::RichText::new(format!("{:>4}  {:<22}", line.offset, line.text))
+                            .monospace()
+                            .size(11.0);
+                    ui.label(if current {
+                        body.background_color(egui::Color32::from_rgb(45, 70, 45))
+                            .color(egui::Color32::from_rgb(210, 255, 210))
+                    } else {
+                        body.color(egui::Color32::from_gray(175))
                     });
-                    if current && chase {
-                        ui.scroll_to_cursor(Some(egui::Align::Center));
+                    if let Some(label) = &line.label {
+                        ui.label(
+                            egui::RichText::new(label)
+                                .monospace()
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(150, 175, 215)),
+                        );
                     }
+                });
+                if current && chase {
+                    ui.scroll_to_cursor(Some(egui::Align::Center));
                 }
-            });
-            if chase {
-                view.genome_scrolled_to = Some(c.ip);
             }
         });
+    if chase {
+        view.genome_scrolled_to = Some(c.ip);
+    }
 
     if let Some(bytes) = apply {
         let event = tools::rewrite_genome(sim.slide.world_mut(), c.id, bytes);
@@ -1145,6 +1570,10 @@ fn genome_panel(ctx: &egui::Context, sim: &mut SlideRes, view: &mut View) {
 }
 
 /// Where the pointer is, in substrate squares. `None` if there is no window or no cursor.
+///
+/// Measured from the centre of the *viewport*, not of the window. With a rail open those are
+/// not the same place, and using the window's centre would put every click a rail's-width
+/// off — worse the wider the panel.
 fn pointer_on_slide(
     window: &Query<&Window, With<PrimaryWindow>>,
     view: &View,
@@ -1152,10 +1581,10 @@ fn pointer_on_slide(
 ) -> Option<(f32, f32)> {
     let w = window.get_single().ok()?;
     let cursor = w.cursor_position()?;
-    let from_centre = cursor - w.size() / 2.0;
+    let (cx, cy) = view.viewport.centre();
     Some((
-        view.centre.x + from_centre.x / scale,
-        view.centre.y + from_centre.y / scale,
+        view.centre.x + (cursor.x - cx) / scale,
+        view.centre.y + (cursor.y - cy) / scale,
     ))
 }
 
@@ -1163,201 +1592,211 @@ fn pointer_on_slide(
 ///
 /// Everything drawn here comes from an [`Inspection`], which is a copy — the panel holds no
 /// borrow of the world and there is no path from a click in it back to a tick.
-fn cell_panel(ctx: &egui::Context, sim: &mut SlideRes, view: &mut View) {
+fn cell_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
     let Some(c) = sim.inspection.clone() else {
-        egui::Window::new("cell")
-            .anchor(egui::Align2::LEFT_BOTTOM, [8.0, -8.0])
-            .default_width(340.0)
-            .show(ctx, |ui| {
-                ui.weak("click a cell to inspect it");
-            });
+        ui.weak("click a cell to inspect it");
         return;
     };
 
     let q10 = |v: i32| v as f32 / mm_core::Q10_ONE as f32;
     let chem_names = sim.slide.chemical_names();
 
-    egui::Window::new("cell")
-        .anchor(egui::Align2::LEFT_BOTTOM, [8.0, -8.0])
-        .default_width(340.0)
-        .default_height(560.0)
-        .show(ctx, |ui| {
-            // --- who and where ---
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(sim.slide.species_name(c.species))
-                        .strong()
-                        .size(14.0),
-                );
-                if ui
-                    .selectable_label(view.follow, "track")
-                    .on_hover_text("keep the camera centred on this cell (t)")
-                    .clicked()
-                {
-                    view.follow = !view.follow;
-                }
-            });
-            ui.weak(format!(
-                "age {}  born tick {}  at ({:.1}, {:.1})",
-                c.age,
-                c.birth_tick,
-                c.x as f32 / mm_core::fixed::POS_ONE as f32,
-                c.y as f32 / mm_core::fixed::POS_ONE as f32
+    // --- who and where ---
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(sim.slide.species_name(c.species))
+                .strong()
+                .size(14.0),
+        );
+        if ui
+            .selectable_label(view.follow, "track")
+            .on_hover_text("keep the camera centred on this cell (t)")
+            .clicked()
+        {
+            view.follow = !view.follow;
+        }
+    });
+    ui.weak(format!(
+        "age {}  born tick {}  at ({:.1}, {:.1})",
+        c.age,
+        c.birth_tick,
+        c.x as f32 / mm_core::fixed::POS_ONE as f32,
+        c.y as f32 / mm_core::fixed::POS_ONE as f32
+    ));
+
+    // --- the bars that say whether it is doing well ---
+    ui.add_space(4.0);
+    bar(
+        ui,
+        "energy",
+        q10(c.energy),
+        400.0,
+        egui::Color32::from_rgb(230, 200, 90),
+    );
+    bar(
+        ui,
+        "mass",
+        q10(c.mass),
+        120.0,
+        egui::Color32::from_rgb(140, 190, 230),
+    );
+    if c.damage > 0 {
+        bar(
+            ui,
+            "damage",
+            q10(c.damage),
+            40.0,
+            egui::Color32::from_rgb(220, 110, 110),
+        );
+    }
+
+    ui.separator();
+
+    // --- the schematic ---
+    let placed = mm_app::inspector::placements(&c.slots);
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), 150.0),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter();
+    let centre = rect.center();
+    let r = (rect.height() / 2.0 - 8.0).max(8.0);
+    // The membrane: the circle everything else lives inside.
+    painter.circle_stroke(
+        centre,
+        r,
+        egui::Stroke::new(2.0, egui::Color32::from_rgb(150, 160, 170)),
+    );
+    for p in &placed {
+        let at = centre + egui::vec2(p.dx * r, p.dy * r);
+        let rgb = mm_app::slide::organelle_rgb(p.kind);
+        let colour = egui::Color32::from_rgba_unmultiplied(
+            (rgb[0] * 255.0) as u8,
+            (rgb[1] * 255.0) as u8,
+            (rgb[2] * 255.0) as u8,
+            (255.0 * p.built) as u8,
+        );
+        painter.circle_filled(at, p.radius * r, colour);
+        if response
+            .hover_pos()
+            .is_some_and(|h| h.distance(at) <= p.radius * r)
+        {
+            let slot = c.slots[p.slot];
+            egui::show_tooltip_at_pointer(
+                ui.ctx(),
+                ui.layer_id(),
+                egui::Id::new("organelle"),
+                |ui| {
+                    ui.label(format!("slot {}: {}", slot.index, slot.kind.name()));
+                    ui.label(format!("param {}", slot.param));
+                    ui.label(format!("control {:?}", slot.control));
+                    if let Some(n) = slot.remaining_build {
+                        ui.weak(format!("building, {n} to go"));
+                    }
+                },
+            );
+        }
+    }
+    if placed.is_empty() {
+        painter.text(
+            centre,
+            egui::Align2::CENTER_CENTER,
+            "bare membrane",
+            egui::FontId::proportional(11.0),
+            egui::Color32::from_gray(130),
+        );
+    }
+
+    ui.separator();
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        // --- the genome, with the cell's own instruction pointer in it ---
+        let over = c.nucleus_capacity > 0 && c.genome_len > c.nucleus_capacity;
+        ui.horizontal(|ui| {
+            ui.label(format!(
+                "genome {} bytes / nucleus {}",
+                c.genome_len, c.nucleus_capacity
             ));
-
-            // --- the bars that say whether it is doing well ---
-            ui.add_space(4.0);
-            bar(ui, "energy", q10(c.energy), 400.0, egui::Color32::from_rgb(230, 200, 90));
-            bar(ui, "mass", q10(c.mass), 120.0, egui::Color32::from_rgb(140, 190, 230));
-            if c.damage > 0 {
-                bar(ui, "damage", q10(c.damage), 40.0, egui::Color32::from_rgb(220, 110, 110));
-            }
-
-            ui.separator();
-
-            // --- the schematic ---
-            let placed = mm_app::inspector::placements(&c.slots);
-            let (rect, response) = ui.allocate_exact_size(
-                egui::vec2(ui.available_width(), 150.0),
-                egui::Sense::hover(),
-            );
-            let painter = ui.painter();
-            let centre = rect.center();
-            let r = (rect.height() / 2.0 - 8.0).max(8.0);
-            // The membrane: the circle everything else lives inside.
-            painter.circle_stroke(
-                centre,
-                r,
-                egui::Stroke::new(2.0, egui::Color32::from_rgb(150, 160, 170)),
-            );
-            for p in &placed {
-                let at = centre + egui::vec2(p.dx * r, p.dy * r);
-                let rgb = mm_app::slide::organelle_rgb(p.kind);
-                let colour = egui::Color32::from_rgba_unmultiplied(
-                    (rgb[0] * 255.0) as u8,
-                    (rgb[1] * 255.0) as u8,
-                    (rgb[2] * 255.0) as u8,
-                    (255.0 * p.built) as u8,
-                );
-                painter.circle_filled(at, p.radius * r, colour);
-                if response.hover_pos().is_some_and(|h| h.distance(at) <= p.radius * r) {
-                    let slot = c.slots[p.slot];
-                    egui::show_tooltip_at_pointer(
-                        ui.ctx(),
-                        ui.layer_id(),
-                        egui::Id::new("organelle"),
-                        |ui| {
-                            ui.label(format!("slot {}: {}", slot.index, slot.kind.name()));
-                            ui.label(format!("param {}", slot.param));
-                            ui.label(format!("control {:?}", slot.control));
-                            if let Some(n) = slot.remaining_build {
-                                ui.weak(format!("building, {n} to go"));
-                            }
-                        },
-                    );
-                }
-            }
-            if placed.is_empty() {
-                painter.text(
-                    centre,
-                    egui::Align2::CENTER_CENTER,
-                    "bare membrane",
-                    egui::FontId::proportional(11.0),
-                    egui::Color32::from_gray(130),
-                );
-            }
-
-            ui.separator();
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                // --- the genome, with the cell's own instruction pointer in it ---
-                let over = c.nucleus_capacity > 0 && c.genome_len > c.nucleus_capacity;
-                ui.horizontal(|ui| {
-                    ui.label(format!(
-                        "genome {} bytes / nucleus {}",
-                        c.genome_len, c.nucleus_capacity
-                    ));
-                    if over {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(230, 130, 90),
-                            "⚠ truncated at division",
-                        )
-                        .on_hover_text(
-                            "SPEC §4.1: a genome longer than its nucleus is cut short in every \
+            if over {
+                ui.colored_label(
+                    egui::Color32::from_rgb(230, 130, 90),
+                    "⚠ truncated at division",
+                )
+                .on_hover_text(
+                    "SPEC §4.1: a genome longer than its nucleus is cut short in every \
                              daughter. The lineage will stop without an error.",
-                        );
-                    }
-                });
-                ui.horizontal(|ui| {
-                    match c.fidelity {
-                        Some(f) => ui.weak(format!("fidelity {:.2}", q10(f))),
-                        // Not "fidelity 0.00". A cell with no nucleus has no fidelity, cannot
-                        // copy its genome and cannot divide — which is a different and much
-                        // louder fact than copying badly.
-                        None => ui.colored_label(
-                            egui::Color32::from_rgb(230, 130, 90),
-                            "no nucleus — cannot divide",
-                        ),
-                    };
-                    ui.weak(format!(
-                        "{}   ip {}",
-                        if c.halted { "halted" } else { "running" },
-                        c.ip
-                    ));
-                });
+                );
+            }
+        });
+        ui.horizontal(|ui| {
+            match c.fidelity {
+                Some(f) => ui.weak(format!("fidelity {:.2}", q10(f))),
+                // Not "fidelity 0.00". A cell with no nucleus has no fidelity, cannot
+                // copy its genome and cannot divide — which is a different and much
+                // louder fact than copying badly.
+                None => ui.colored_label(
+                    egui::Color32::from_rgb(230, 130, 90),
+                    "no nucleus — cannot divide",
+                ),
+            };
+            ui.weak(format!(
+                "{}   ip {}",
+                if c.halted { "halted" } else { "running" },
+                c.ip
+            ));
+        });
 
-                if ui
-                    .button("open genome ▸")
-                    .on_hover_text("the disassembly, live, in its own window (g)")
-                    .clicked()
-                {
-                    view.genome = true;
+        if ui
+            .button("open genome ▸")
+            .on_hover_text("the disassembly, live, in the drawer (g)")
+            .clicked()
+        {
+            view.panels.set(Panel::Genome, true);
+        }
+
+        // --- what it is holding ---
+        ui.collapsing("chemistry", |ui| {
+            for (i, v) in c.interior.iter().enumerate() {
+                if *v != 0 {
+                    ui.label(format!("{:<16} {:.2}", chem_names[i], q10(*v)));
                 }
+            }
+        });
 
-                // --- what it is holding ---
-                ui.collapsing("chemistry", |ui| {
-                    for (i, v) in c.interior.iter().enumerate() {
-                        if *v != 0 {
-                            ui.label(format!("{:<16} {:.2}", chem_names[i], q10(*v)));
-                        }
-                    }
-                });
-
-                ui.collapsing("machine", |ui| {
-                    ui.label(format!("stack {:?}", c.stack));
-                    ui.label(format!("calls {:?}", c.call_stack));
-                    if c.ln > 0 {
-                        ui.label(format!(
-                            "copying: {} bytes to go, from {} to {}",
-                            c.ln, c.pa, c.pb
-                        ));
-                    }
-                    let live: Vec<String> = c
-                        .registers
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, v)| **v != 0)
-                        .map(|(n, v)| format!("r{n}={v}"))
-                        .collect();
-                    ui.label(if live.is_empty() {
-                        "registers all zero".to_string()
-                    } else {
-                        live.join("  ")
-                    });
-                    let ram: Vec<String> = c
-                        .ram
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, v)| **v != 0)
-                        .map(|(n, v)| format!("[{n}]={v}"))
-                        .collect();
-                    ui.label(if ram.is_empty() {
-                        "ram all zero".to_string()
-                    } else {
-                        ram.join("  ")
-                    });
-                });
+        ui.collapsing("machine", |ui| {
+            ui.label(format!("stack {:?}", c.stack));
+            ui.label(format!("calls {:?}", c.call_stack));
+            if c.ln > 0 {
+                ui.label(format!(
+                    "copying: {} bytes to go, from {} to {}",
+                    c.ln, c.pa, c.pb
+                ));
+            }
+            let live: Vec<String> = c
+                .registers
+                .iter()
+                .enumerate()
+                .filter(|(_, v)| **v != 0)
+                .map(|(n, v)| format!("r{n}={v}"))
+                .collect();
+            ui.label(if live.is_empty() {
+                "registers all zero".to_string()
+            } else {
+                live.join("  ")
+            });
+            let ram: Vec<String> = c
+                .ram
+                .iter()
+                .enumerate()
+                .filter(|(_, v)| **v != 0)
+                .map(|(n, v)| format!("[{n}]={v}"))
+                .collect();
+            ui.label(if ram.is_empty() {
+                "ram all zero".to_string()
+            } else {
+                ram.join("  ")
             });
         });
+    });
 }
 
 /// A labelled bar, for the two or three numbers worth seeing at a glance rather than reading.
@@ -1386,130 +1825,124 @@ fn bar(ui: &mut egui::Ui, label: &str, value: f32, full: f32, colour: egui::Colo
 ///
 /// Reads the archive through [`mm_app::wiki`], which copies everything out — so this panel
 /// holds no borrow of the world and nothing in it can reach a tick.
-fn wiki_panel(ctx: &egui::Context, sim: &SlideRes, view: &mut View) {
+fn wiki_body(ui: &mut egui::Ui, sim: &SlideRes, view: &mut View) {
     let world = sim.slide.world();
     let archive = world.archive();
 
-    egui::Window::new("wiki")
-        .anchor(egui::Align2::RIGHT_BOTTOM, [-8.0, -8.0])
-        .default_width(420.0)
-        .default_height(460.0)
-        .show(ctx, |ui| {
-            if archive.is_empty() {
-                ui.weak("nothing has lived here yet");
-                return;
-            }
-            ui.label(format!(
-                "{} species, {} alive, {} pruned",
-                archive.len(),
-                archive.living(),
-                archive.pruned()
-            ));
-            ui.separator();
+    if archive.is_empty() {
+        ui.weak("nothing has lived here yet");
+        return;
+    }
+    ui.label(format!(
+        "{} species, {} alive, {} pruned",
+        archive.len(),
+        archive.living(),
+        archive.pruned()
+    ));
+    ui.separator();
 
-            // --- the timeline ---
-            let timeline = wiki::timeline(archive, world.events().events(), world.tick_count());
-            ui.label("timeline");
-            let (rect, _) = ui
-                .allocate_exact_size(egui::vec2(ui.available_width(), 26.0), egui::Sense::hover());
-            let painter = ui.painter();
-            painter.rect_filled(rect, 2.0, egui::Color32::from_black_alpha(90));
-            for entry in &timeline.entries {
-                let x = rect.left() + rect.width() * (entry.at as f32 / 1000.0);
-                painter.line_segment(
-                    [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-                    egui::Stroke::new(1.5, egui::Color32::from_rgb(220, 180, 110)),
+    // --- the timeline ---
+    let timeline = wiki::timeline(archive, world.events().events(), world.tick_count());
+    ui.label("timeline");
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.0), egui::Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 2.0, egui::Color32::from_black_alpha(90));
+    for entry in &timeline.entries {
+        let x = rect.left() + rect.width() * (entry.at as f32 / 1000.0);
+        painter.line_segment(
+            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+            egui::Stroke::new(1.5, egui::Color32::from_rgb(220, 180, 110)),
+        );
+    }
+    for entry in timeline.entries.iter().rev().take(6) {
+        ui.small(format!(
+            "tick {} — {} ({})",
+            entry.tick, entry.headline, entry.species_name
+        ));
+    }
+    ui.separator();
+
+    // --- the tree ---
+    ui.label("tree");
+    egui::ScrollArea::vertical()
+        .max_height(140.0)
+        .id_source("tree")
+        .show(ui, |ui| {
+            let tree = wiki::layout(archive);
+            for node in &tree.nodes {
+                // Indent by depth: the column is the number of speciation events
+                // between this species and the seeded founder.
+                let indent = "  ".repeat(node.depth.min(12) as usize);
+                let label = format!(
+                    "{indent}{} {} ({})",
+                    if node.alive { "●" } else { "○" },
+                    node.name,
+                    if node.alive {
+                        node.population.to_string()
+                    } else {
+                        format!("peak {}", node.peak_population)
+                    }
                 );
+                if ui
+                    .selectable_label(view.species == Some(node.id), label)
+                    .clicked()
+                {
+                    view.species = Some(node.id);
+                }
             }
-            for entry in timeline.entries.iter().rev().take(6) {
-                ui.small(format!(
-                    "tick {} — {} ({})",
-                    entry.tick, entry.headline, entry.species_name
-                ));
+        });
+    ui.separator();
+
+    // --- the page ---
+    let showing = view
+        .species
+        .or_else(|| wiki::notable(archive, 1).first().copied());
+    let Some(page) = showing.and_then(|id| wiki::page(archive, id)) else {
+        ui.weak("select a species");
+        return;
+    };
+    egui::ScrollArea::vertical()
+        .id_source("page")
+        .show(ui, |ui| {
+            ui.heading(&page.name);
+            ui.label(&page.description);
+            ui.separator();
+            ui.label(format!(
+                "founded {}  ·  {} births  ·  {} deaths  ·  {} generations deep",
+                page.founded_tick, page.births, page.deaths, page.depth
+            ));
+            if let Some((id, name)) = &page.parent {
+                if ui.link(format!("diverged from {name}")).clicked() {
+                    view.species = Some(*id);
+                }
+            }
+            if !page.children.is_empty() {
+                ui.label(format!("{} descendant species:", page.children.len()));
+                for (id, name) in page.children.iter().take(8) {
+                    if ui.link(format!("  {name}")).clicked() {
+                        view.species = Some(*id);
+                    }
+                }
             }
             ui.separator();
-
-            // --- the tree ---
-            ui.label("tree");
-            egui::ScrollArea::vertical()
-                .max_height(140.0)
-                .id_source("tree")
-                .show(ui, |ui| {
-                    let tree = wiki::layout(archive);
-                    for node in &tree.nodes {
-                        // Indent by depth: the column is the number of speciation events
-                        // between this species and the seeded founder.
-                        let indent = "  ".repeat(node.depth.min(12) as usize);
-                        let label = format!(
-                            "{indent}{} {} ({})",
-                            if node.alive { "●" } else { "○" },
-                            node.name,
-                            if node.alive {
-                                node.population.to_string()
-                            } else {
-                                format!("peak {}", node.peak_population)
-                            }
-                        );
-                        if ui
-                            .selectable_label(view.species == Some(node.id), label)
-                            .clicked()
-                        {
-                            view.species = Some(node.id);
-                        }
-                    }
-                });
+            ui.label(format!("population — peak {}", page.curve_peak));
+            let values: Vec<f32> = page.curve.iter().map(|(_, v)| *v).collect();
+            sparkline(ui, &values);
             ui.separator();
-
-            // --- the page ---
-            let showing = view
-                .species
-                .or_else(|| wiki::notable(archive, 1).first().copied());
-            let Some(page) = showing.and_then(|id| wiki::page(archive, id)) else {
-                ui.weak("select a species");
-                return;
-            };
-            egui::ScrollArea::vertical()
-                .id_source("page")
-                .show(ui, |ui| {
-                    ui.heading(&page.name);
-                    ui.label(&page.description);
-                    ui.separator();
-                    ui.label(format!(
-                        "founded {}  ·  {} births  ·  {} deaths  ·  {} generations deep",
-                        page.founded_tick, page.births, page.deaths, page.depth
-                    ));
-                    if let Some((id, name)) = &page.parent {
-                        if ui.link(format!("diverged from {name}")).clicked() {
-                            view.species = Some(*id);
-                        }
-                    }
-                    if !page.children.is_empty() {
-                        ui.label(format!("{} descendant species:", page.children.len()));
-                        for (id, name) in page.children.iter().take(8) {
-                            if ui.link(format!("  {name}")).clicked() {
-                                view.species = Some(*id);
-                            }
-                        }
-                    }
-                    ui.separator();
-                    ui.label(format!("population — peak {}", page.curve_peak));
-                    let values: Vec<f32> = page.curve.iter().map(|(_, v)| *v).collect();
-                    sparkline(ui, &values);
-                    ui.separator();
-                    ui.small(format!(
-                        "founder genome, {} bytes, fingerprint {:016x}",
-                        page.founder_genome.len(),
-                        page.fingerprint
-                    ));
-                    // Loading it into an editor is M6. Showing it is not.
-                    let hex: String = page
-                        .founder_genome
-                        .iter()
-                        .take(64)
-                        .map(|b| format!("{b:02x}"))
-                        .collect();
-                    ui.small(egui::RichText::new(hex).monospace());
-                });
+            ui.small(format!(
+                "founder genome, {} bytes, fingerprint {:016x}",
+                page.founder_genome.len(),
+                page.fingerprint
+            ));
+            // Loading it into an editor is M6. Showing it is not.
+            let hex: String = page
+                .founder_genome
+                .iter()
+                .take(64)
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            ui.small(egui::RichText::new(hex).monospace());
         });
 }
 
@@ -1519,116 +1952,116 @@ fn wiki_panel(ctx: &egui::Context, sim: &SlideRes, view: &mut View) {
 /// that actually went along them over the last window. Edges the engine measured exactly are
 /// solid; edges whose total is known but whose attribution is not are dashed, so the panel
 /// never presents arithmetic as observation.
-fn foodweb_panel(ctx: &egui::Context, sim: &SlideRes) {
+fn foodweb_body(ui: &mut egui::Ui, sim: &SlideRes) {
     use mm_app::foodweb::{Basis, Node};
 
     let web = sim.slide.food_web();
     let peak = web.peak() as f32;
 
-    egui::Window::new("food web")
-        .anchor(egui::Align2::RIGHT_TOP, [-8.0, 8.0])
-        .default_width(360.0)
-        .show(ctx, |ui| {
-            ui.label(web.summary());
-            ui.weak(format!("averaged over {} ticks", web.window_ticks));
-            ui.separator();
+    ui.label(web.summary());
+    ui.weak(format!("averaged over {} ticks", web.window_ticks));
+    ui.separator();
 
-            let (rect, _) = ui
-                .allocate_exact_size(egui::vec2(ui.available_width(), 220.0), egui::Sense::hover());
-            let painter = ui.painter();
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), 220.0),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter();
 
-            // Levels run 0..=3 with carrion on top; put level 0 at the bottom of the rect so
-            // the picture reads the way a food pyramid does.
-            let place = |node: Node| -> egui::Pos2 {
-                let across = match node {
-                    Node::Light | Node::Producers | Node::Scavengers => 0.25,
-                    Node::Dissolved | Node::Osmotrophs | Node::Predators => 0.75,
-                    Node::Carrion => 0.5,
-                };
-                let up = node.level() as f32 / 3.0;
-                egui::pos2(
-                    rect.left() + rect.width() * across,
-                    rect.bottom() - 12.0 - (rect.height() - 32.0) * up,
-                )
-            };
+    // Levels run 0..=3 with carrion on top; put level 0 at the bottom of the rect so
+    // the picture reads the way a food pyramid does.
+    let place = |node: Node| -> egui::Pos2 {
+        let across = match node {
+            Node::Light | Node::Producers | Node::Scavengers => 0.25,
+            Node::Dissolved | Node::Osmotrophs | Node::Predators => 0.75,
+            Node::Carrion => 0.5,
+        };
+        let up = node.level() as f32 / 3.0;
+        egui::pos2(
+            rect.left() + rect.width() * across,
+            rect.bottom() - 12.0 - (rect.height() - 32.0) * up,
+        )
+    };
 
+    for edge in &web.edges {
+        if edge.weight <= 0 {
+            continue;
+        }
+        let (a, b) = (place(edge.from), place(edge.to));
+        let width = 1.0 + 5.0 * (edge.weight as f32 / peak).clamp(0.0, 1.0);
+        let colour = if edge.is_recycling() {
+            egui::Color32::from_rgb(150, 200, 120)
+        } else if edge.is_death() {
+            egui::Color32::from_rgb(140, 110, 110)
+        } else {
+            egui::Color32::from_rgb(110, 150, 190)
+        };
+        if edge.basis == Basis::Measured {
+            painter.line_segment([a, b], egui::Stroke::new(width, colour));
+        } else {
+            // Dashed, because the total is measured but who it belongs to is not.
+            let steps = 9;
+            for k in 0..steps {
+                if k % 2 == 1 {
+                    continue;
+                }
+                let t0 = k as f32 / steps as f32;
+                let t1 = (k + 1) as f32 / steps as f32;
+                painter.line_segment(
+                    [a.lerp(b, t0), a.lerp(b, t1)],
+                    egui::Stroke::new(width, colour),
+                );
+            }
+        }
+    }
+
+    for occ in &web.nodes {
+        let at = place(occ.node);
+        let text = if occ.node.is_source() {
+            occ.node.label().to_string()
+        } else {
+            format!("{} {}", occ.node.label(), occ.count)
+        };
+        let fill = if occ.node.is_source() {
+            egui::Color32::from_black_alpha(200)
+        } else {
+            egui::Color32::from_rgb(30, 45, 40)
+        };
+        let galley = painter.layout_no_wrap(
+            text,
+            egui::FontId::proportional(11.0),
+            egui::Color32::from_gray(220),
+        );
+        let box_rect = egui::Rect::from_center_size(at, galley.size() + egui::vec2(10.0, 6.0));
+        painter.rect_filled(box_rect, 3.0, fill);
+        painter.galley(
+            box_rect.center() - galley.size() / 2.0,
+            galley,
+            egui::Color32::WHITE,
+        );
+    }
+
+    ui.separator();
+    egui::ScrollArea::vertical()
+        .max_height(120.0)
+        .show(ui, |ui| {
             for edge in &web.edges {
                 if edge.weight <= 0 {
                     continue;
                 }
-                let (a, b) = (place(edge.from), place(edge.to));
-                let width = 1.0 + 5.0 * (edge.weight as f32 / peak).clamp(0.0, 1.0);
-                let colour = if edge.is_recycling() {
-                    egui::Color32::from_rgb(150, 200, 120)
-                } else if edge.is_death() {
-                    egui::Color32::from_rgb(140, 110, 110)
-                } else {
-                    egui::Color32::from_rgb(110, 150, 190)
-                };
-                if edge.basis == Basis::Measured {
-                    painter.line_segment([a, b], egui::Stroke::new(width, colour));
-                } else {
-                    // Dashed, because the total is measured but who it belongs to is not.
-                    let steps = 9;
-                    for k in 0..steps {
-                        if k % 2 == 1 {
-                            continue;
-                        }
-                        let t0 = k as f32 / steps as f32;
-                        let t1 = (k + 1) as f32 / steps as f32;
-                        painter.line_segment(
-                            [a.lerp(b, t0), a.lerp(b, t1)],
-                            egui::Stroke::new(width, colour),
-                        );
+                ui.small(format!(
+                    "{} → {}: {}{}",
+                    edge.from.label(),
+                    edge.to.label(),
+                    edge.weight / mm_core::Q10_ONE as i64,
+                    if edge.basis == Basis::Measured {
+                        ""
+                    } else {
+                        " (shared out)"
                     }
-                }
+                ))
+                .on_hover_text(edge.note);
             }
-
-            for occ in &web.nodes {
-                let at = place(occ.node);
-                let text = if occ.node.is_source() {
-                    occ.node.label().to_string()
-                } else {
-                    format!("{} {}", occ.node.label(), occ.count)
-                };
-                let fill = if occ.node.is_source() {
-                    egui::Color32::from_black_alpha(200)
-                } else {
-                    egui::Color32::from_rgb(30, 45, 40)
-                };
-                let galley = painter.layout_no_wrap(
-                    text,
-                    egui::FontId::proportional(11.0),
-                    egui::Color32::from_gray(220),
-                );
-                let box_rect =
-                    egui::Rect::from_center_size(at, galley.size() + egui::vec2(10.0, 6.0));
-                painter.rect_filled(box_rect, 3.0, fill);
-                painter.galley(box_rect.center() - galley.size() / 2.0, galley, egui::Color32::WHITE);
-            }
-
-            ui.separator();
-            egui::ScrollArea::vertical()
-                .max_height(120.0)
-                .show(ui, |ui| {
-                    for edge in &web.edges {
-                        if edge.weight <= 0 {
-                            continue;
-                        }
-                        ui.small(format!(
-                            "{} → {}: {}{}",
-                            edge.from.label(),
-                            edge.to.label(),
-                            edge.weight / mm_core::Q10_ONE as i64,
-                            if edge.basis == Basis::Measured {
-                                ""
-                            } else {
-                                " (shared out)"
-                            }
-                        ))
-                        .on_hover_text(edge.note);
-                    }
-                });
         });
 }
 
@@ -1637,203 +2070,192 @@ fn foodweb_panel(ctx: &egui::Context, sim: &SlideRes) {
 /// Syntax highlighting comes from `mm_asm::highlight`, which classifies against the real
 /// opcode table, and diagnostics come from actually assembling — so neither can drift from the
 /// language the way a second, approximate definition in the front-end would.
-fn editor_panel(ctx: &egui::Context, sim: &mut SlideRes) {
-    egui::Window::new("editor")
-        .anchor(egui::Align2::LEFT_TOP, [8.0, 220.0])
-        .default_width(520.0)
-        .default_height(420.0)
-        .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("name:");
-                ui.text_edit_singleline(&mut sim.editor.name);
-                if ui.button("assemble").clicked() {
-                    sim.editor.assemble();
+fn editor_body(ui: &mut egui::Ui, sim: &mut SlideRes) {
+    ui.horizontal(|ui| {
+        ui.label("name:");
+        ui.text_edit_singleline(&mut sim.editor.name);
+        if ui.button("assemble").clicked() {
+            sim.editor.assemble();
+        }
+        if ui.button("export").clicked() {
+            sim.last_export = sim.editor.export().map(|f| f.to_text());
+        }
+        if ui.button("from selected cell").clicked() {
+            if let Some(cell) = sim.selected {
+                if let Some(file) = tools::copy_genome(sim.slide.world(), cell) {
+                    sim.editor.load_bytes(&file.bytes, file.name);
                 }
-                if ui.button("export").clicked() {
-                    sim.last_export = sim.editor.export().map(|f| f.to_text());
-                }
-                if ui.button("from selected cell").clicked() {
-                    if let Some(cell) = sim.selected {
-                        if let Some(file) = tools::copy_genome(sim.slide.world(), cell) {
-                            sim.editor.load_bytes(&file.bytes, file.name);
-                        }
-                    }
+            }
+        }
+    });
+    ui.label(sim.editor.status());
+    ui.separator();
+
+    // Diagnostics first: they are why anyone opened this panel.
+    let errors: Vec<String> = sim
+        .editor
+        .build()
+        .errors()
+        .iter()
+        .map(|e| format!("{}:{}: {}", e.line, e.col, e.message))
+        .collect();
+    if !errors.is_empty() {
+        egui::ScrollArea::vertical()
+            .max_height(90.0)
+            .id_source("diagnostics")
+            .show(ui, |ui| {
+                for e in &errors {
+                    ui.colored_label(egui::Color32::from_rgb(230, 120, 110), e);
                 }
             });
-            ui.label(sim.editor.status());
-            ui.separator();
+        ui.separator();
+    }
 
-            // Diagnostics first: they are why anyone opened this panel.
-            let errors: Vec<String> = sim
-                .editor
-                .build()
-                .errors()
-                .iter()
-                .map(|e| format!("{}:{}: {}", e.line, e.col, e.message))
-                .collect();
-            if !errors.is_empty() {
-                egui::ScrollArea::vertical()
-                    .max_height(90.0)
-                    .id_source("diagnostics")
-                    .show(ui, |ui| {
-                        for e in &errors {
-                            ui.colored_label(egui::Color32::from_rgb(230, 120, 110), e);
-                        }
-                    });
-                ui.separator();
-            }
-
-            // The source, highlighted line by line. Drawn read-only alongside an editable
-            // buffer rather than as a rich text editor, because egui has no styled-input
-            // widget and a plain one that silently dropped the colours would be worse.
-            let mut source = sim.editor.source().to_string();
-            egui::ScrollArea::vertical()
-                .id_source("source")
-                .show(ui, |ui| {
-                    let response = ui.add(
-                        egui::TextEdit::multiline(&mut source)
-                            .code_editor()
-                            .desired_width(f32::INFINITY)
-                            .desired_rows(18),
-                    );
-                    if response.changed() {
-                        sim.editor.set_source(source.clone());
-                    }
-                });
-
-            if let Some(text) = &sim.last_export {
-                ui.separator();
-                ui.label("exported — copy this:");
-                let mut shown = text.clone();
-                ui.add(
-                    egui::TextEdit::multiline(&mut shown)
-                        .code_editor()
-                        .desired_rows(4),
-                );
+    // The source, highlighted line by line. Drawn read-only alongside an editable
+    // buffer rather than as a rich text editor, because egui has no styled-input
+    // widget and a plain one that silently dropped the colours would be worse.
+    let mut source = sim.editor.source().to_string();
+    egui::ScrollArea::vertical()
+        .id_source("source")
+        .show(ui, |ui| {
+            let response = ui.add(
+                egui::TextEdit::multiline(&mut source)
+                    .code_editor()
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(18),
+            );
+            if response.changed() {
+                sim.editor.set_source(source.clone());
             }
         });
+
+    if let Some(text) = &sim.last_export {
+        ui.separator();
+        ui.label("exported — copy this:");
+        let mut shown = text.clone();
+        ui.add(
+            egui::TextEdit::multiline(&mut shown)
+                .code_editor()
+                .desired_rows(4),
+        );
+    }
 }
 
 /// The debugger (M6).
 ///
 /// Breakpoints act on the viewer; instruction stepping acts on a sandbox. Neither can reach
 /// the simulation — see `debugger.rs` for why that is structural rather than careful.
-fn debugger_panel(ctx: &egui::Context, sim: &mut SlideRes) {
-    egui::Window::new("debugger")
-        .anchor(egui::Align2::RIGHT_TOP, [-8.0, 300.0])
-        .default_width(360.0)
-        .show(ctx, |ui| {
-            // --- breakpoints, over the live world ---
-            ui.label("breakpoints");
-            if let Some(tripped) = sim.breakpoints.tripped() {
-                ui.colored_label(
-                    egui::Color32::from_rgb(240, 200, 120),
-                    format!("stopped: {}", tripped.describe()),
-                );
-                if ui.button("continue").clicked() {
-                    sim.breakpoints.rearm();
-                    sim.slide.set_speed(1);
-                }
+fn debugger_body(ui: &mut egui::Ui, sim: &mut SlideRes) {
+    // --- breakpoints, over the live world ---
+    ui.label("breakpoints");
+    if let Some(tripped) = sim.breakpoints.tripped() {
+        ui.colored_label(
+            egui::Color32::from_rgb(240, 200, 120),
+            format!("stopped: {}", tripped.describe()),
+        );
+        if ui.button("continue").clicked() {
+            sim.breakpoints.rearm();
+            sim.slide.set_speed(1);
+        }
+    }
+    let tick = sim.slide.world().tick_count();
+    ui.horizontal(|ui| {
+        if ui.button("+1,000 ticks").clicked() {
+            sim.breakpoints.add(Breakpoint::AtTick(tick + 1_000));
+        }
+        if ui.button("on death").clicked() {
+            if let Some(cell) = sim.selected {
+                sim.breakpoints.add(Breakpoint::CellDies(cell));
             }
-            let tick = sim.slide.world().tick_count();
-            ui.horizontal(|ui| {
-                if ui.button("+1,000 ticks").clicked() {
-                    sim.breakpoints.add(Breakpoint::AtTick(tick + 1_000));
-                }
-                if ui.button("on death").clicked() {
-                    if let Some(cell) = sim.selected {
-                        sim.breakpoints.add(Breakpoint::CellDies(cell));
-                    }
-                }
-                if ui.button("clear").clicked() {
-                    sim.breakpoints.clear();
-                }
-            });
-            let listed: Vec<String> = sim
-                .breakpoints
-                .iter()
-                .map(|(p, on)| format!("{} {}", if on { "●" } else { "○" }, p.describe()))
-                .collect();
-            for text in listed {
-                ui.small(text);
-            }
-            ui.separator();
+        }
+        if ui.button("clear").clicked() {
+            sim.breakpoints.clear();
+        }
+    });
+    let listed: Vec<String> = sim
+        .breakpoints
+        .iter()
+        .map(|(p, on)| format!("{} {}", if on { "●" } else { "○" }, p.describe()))
+        .collect();
+    for text in listed {
+        ui.small(text);
+    }
+    ui.separator();
 
-            // --- the sandbox, for instruction stepping ---
-            ui.label("sandbox");
-            let world_tick = sim.slide.world().tick_count();
-            if ui.button("take from selected cell").clicked() {
-                sim.sandbox = sim
-                    .selected
-                    .and_then(|cell| Sandbox::of(sim.slide.world(), cell));
+    // --- the sandbox, for instruction stepping ---
+    ui.label("sandbox");
+    let world_tick = sim.slide.world().tick_count();
+    if ui.button("take from selected cell").clicked() {
+        sim.sandbox = sim
+            .selected
+            .and_then(|cell| Sandbox::of(sim.slide.world(), cell));
+    }
+    let Some(sandbox) = sim.sandbox.as_mut() else {
+        ui.weak("select a cell and take a copy");
+        return;
+    };
+    let behind = world_tick.saturating_sub(sandbox.taken_at_tick);
+    if behind > 0 {
+        // Said plainly, so nobody reads a sandbox as the live cell.
+        ui.colored_label(
+            egui::Color32::from_rgb(200, 180, 120),
+            format!("a copy, taken {behind} ticks ago — the live cell has moved on"),
+        );
+    }
+    ui.horizontal(|ui| {
+        if ui.button("step").clicked() {
+            sandbox.step();
+        }
+        if ui.button("step tick").clicked() {
+            sandbox.step_tick();
+        }
+        if ui.button("×16").clicked() {
+            for _ in 0..16 {
+                sandbox.step();
             }
-            let Some(sandbox) = sim.sandbox.as_mut() else {
-                ui.weak("select a cell and take a copy");
-                return;
-            };
-            let behind = world_tick.saturating_sub(sandbox.taken_at_tick);
-            if behind > 0 {
-                // Said plainly, so nobody reads a sandbox as the live cell.
-                ui.colored_label(
-                    egui::Color32::from_rgb(200, 180, 120),
-                    format!("a copy, taken {behind} ticks ago — the live cell has moved on"),
-                );
-            }
-            ui.horizontal(|ui| {
-                if ui.button("step").clicked() {
-                    sandbox.step();
+        }
+    });
+    ui.label(format!(
+        "ip {}  next {}  ran {} ({}/{} this tick){}",
+        sandbox.vm.ip,
+        sandbox
+            .next_op()
+            .map_or("-".to_string(), |op| op.name().to_string()),
+        sandbox.executed,
+        sandbox.in_tick,
+        sandbox.budget(),
+        if sandbox.vm.halted { "  HALTED" } else { "" }
+    ));
+    ui.separator();
+    ui.label("stack (top last)");
+    ui.small(format!("{:?}", unwound(&sandbox.vm)));
+    ui.collapsing("registers", |ui| {
+        ui.small(format!("{:?}", sandbox.vm.regs));
+    });
+    ui.collapsing("ram", |ui| {
+        ui.small(format!("{:?}", sandbox.vm.ram));
+    });
+    ui.collapsing("disassembly", |ui| {
+        let listing = mm_asm::disassemble(sandbox.genome.bytes());
+        let here = sandbox.vm.ip as u32;
+        egui::ScrollArea::vertical()
+            .max_height(180.0)
+            .id_source("disasm")
+            .show(ui, |ui| {
+                for line in &listing.lines {
+                    let marker = if line.offset == here { "▶ " } else { "  " };
+                    ui.small(
+                        egui::RichText::new(format!(
+                            "{marker}{:>5}  {}",
+                            line.offset,
+                            line.to_source()
+                        ))
+                        .monospace(),
+                    );
                 }
-                if ui.button("step tick").clicked() {
-                    sandbox.step_tick();
-                }
-                if ui.button("×16").clicked() {
-                    for _ in 0..16 {
-                        sandbox.step();
-                    }
-                }
             });
-            ui.label(format!(
-                "ip {}  next {}  ran {} ({}/{} this tick){}",
-                sandbox.vm.ip,
-                sandbox
-                    .next_op()
-                    .map_or("-".to_string(), |op| op.name().to_string()),
-                sandbox.executed,
-                sandbox.in_tick,
-                sandbox.budget(),
-                if sandbox.vm.halted { "  HALTED" } else { "" }
-            ));
-            ui.separator();
-            ui.label("stack (top last)");
-            ui.small(format!("{:?}", unwound(&sandbox.vm)));
-            ui.collapsing("registers", |ui| {
-                ui.small(format!("{:?}", sandbox.vm.regs));
-            });
-            ui.collapsing("ram", |ui| {
-                ui.small(format!("{:?}", sandbox.vm.ram));
-            });
-            ui.collapsing("disassembly", |ui| {
-                let listing = mm_asm::disassemble(sandbox.genome.bytes());
-                let here = sandbox.vm.ip as u32;
-                egui::ScrollArea::vertical()
-                    .max_height(180.0)
-                    .id_source("disasm")
-                    .show(ui, |ui| {
-                        for line in &listing.lines {
-                            let marker = if line.offset == here { "▶ " } else { "  " };
-                            ui.small(
-                                egui::RichText::new(format!(
-                                    "{marker}{:>5}  {}",
-                                    line.offset,
-                                    line.to_source()
-                                ))
-                                .monospace(),
-                            );
-                        }
-                    });
-            });
-            ui.small("world-facing reads return zero in a sandbox: there is nothing to eat.");
-        });
+    });
+    ui.small("world-facing reads return zero in a sandbox: there is nothing to eat.");
 }
 
 /// The data stack in push order, top last — the same unwinding the inspector does.

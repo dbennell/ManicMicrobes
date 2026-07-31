@@ -20,9 +20,10 @@
 //! - [`debugger`] — breakpoints over the live world, instruction stepping in a sandbox.
 //! - [`wiki`] — the species wiki, the phylogenetic tree and the world timeline.
 //! - [`tools`] — tweezers and barriers: the one place that is *meant* to touch the world.
+//! - [`ui`] — the shell: pointer routing, panel state, camera arithmetic.
 //!
-//! All three are testable without a graphics stack, which is the point. `main.rs` is the only
-//! file that knows Bevy exists, and it is behind the `render` feature.
+//! All of them are testable without a graphics stack, which is the point. `main.rs` is the
+//! only file that knows Bevy exists, and it is behind the `render` feature.
 
 pub mod debugger;
 pub mod editor;
@@ -31,9 +32,11 @@ pub mod inspector;
 pub mod optics;
 pub mod slide;
 pub mod tools;
+pub mod ui;
 pub mod wiki;
 
 pub use inspector::Inspection;
 pub use optics::{Mote, Optics};
 pub use slide::{CellDot, Frame, Lod, MetricHistory, OverlayLayer, Slide};
+pub use ui::{Focus, Panel, Panels, Target};
 pub use wiki::{Page, Timeline, Tree};
