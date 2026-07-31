@@ -17,6 +17,7 @@
 //! - [`engine`] — the simulation thread, and the only place wall-clock time is allowed to
 //!   decide anything.
 //! - [`optics`] — the microscope's look, as parameters rather than as a shader.
+//! - [`art`] — the baked cell atlas: what a cell looks like up close.
 //! - [`inspector`] — a read-only transcript of one cell.
 //! - [`editor`] — a `.mm` source buffer, its diagnostics and its exports.
 //! - [`debugger`] — breakpoints over the live world, instruction stepping in a sandbox.
@@ -28,6 +29,7 @@
 //! All of them are testable without a graphics stack, which is the point. `main.rs` is the
 //! only file that knows Bevy exists, and it is behind the `render` feature.
 
+pub mod art;
 pub mod debugger;
 pub mod editor;
 pub mod engine;

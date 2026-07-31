@@ -76,9 +76,13 @@
 use bevy::diagnostic::{Diagnostic, DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::prelude::*;
+use bevy::render::render_asset::RenderAssetUsages;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy::render::texture::ImageSampler;
 use bevy::window::PrimaryWindow;
 use bevy_egui::{egui, EguiContexts, EguiPlugin};
 
+use mm_app::art;
 use mm_app::debugger::{Breakpoint, Breakpoints, Sandbox};
 use mm_app::editor::Editor;
 use mm_app::engine::{Engine, Published, Rate};
@@ -375,6 +379,12 @@ struct View {
     focus: Focus,
     /// Keep the camera centred on the selected cell.
     follow: bool,
+    /// Draw cells as shaded, irregular blobs rather than as flat squares (M10.5).
+    ///
+    /// Presentation only, like everything else in this struct — it changes which tile of a
+    /// baked atlas each sprite samples and nothing else. Off is the M2 look, which is still the
+    /// right one for a screenshot meant to show data.
+    rounded: bool,
     /// The parameter editor, and the log of what has been changed in this world (M10.2).
     ///
     /// Floating windows rather than docked panels: both are things you open to do a job and
@@ -411,6 +421,7 @@ impl Default for View {
             viewport: Rect::default(),
             focus: Focus::default(),
             follow: false,
+            rounded: true,
             genome_follow_ip: true,
             genome_scrolled_to: None,
             drag_distance: 0.0,
@@ -464,8 +475,52 @@ struct MoteSprite(usize);
 #[derive(Component)]
 struct JunctionSprite(usize);
 
-fn setup(mut commands: Commands) {
+/// The baked cell atlas, uploaded once (M10.5).
+///
+/// Held rather than looked up because every cell sprite needs both handles every frame, and an
+/// asset lookup per sprite per frame at fifty thousand cells is not a lookup, it is a workload.
+#[derive(Resource)]
+struct CellArt {
+    image: Handle<Image>,
+    layout: Handle<TextureAtlasLayout>,
+}
+
+fn setup(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    mut layouts: ResMut<Assets<TextureAtlasLayout>>,
+) {
     commands.spawn(Camera2dBundle::default());
+
+    // See `mm_app::art` for what is in it and why it is baked rather than shaded per pixel.
+    let side = art::TILE as u32;
+    let mut image = Image::new(
+        Extent3d {
+            width: art::atlas_width() as u32,
+            height: side,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        art::atlas(),
+        // Srgb, because the luminance ramp was baked in the space a person looks at. Linear
+        // would render every cell noticeably darker for no reason anybody could name.
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    // Linear, so a blob drawn forty pixels across from a sixty-four pixel tile has a smooth
+    // edge rather than a staircase. The whole point of the exercise is the edge.
+    image.sampler = ImageSampler::linear();
+
+    commands.insert_resource(CellArt {
+        image: images.add(image),
+        layout: layouts.add(TextureAtlasLayout::from_grid(
+            UVec2::splat(side),
+            art::TILES as u32,
+            1,
+            None,
+            None,
+        )),
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -584,6 +639,9 @@ fn keyboard(keys: &ButtonInput<KeyCode>, view: &mut View, sim: &mut SlideRes) {
     }
     if keys.just_pressed(KeyCode::KeyO) {
         sim.engine.set_optics(!sim.engine.optics_enabled());
+    }
+    if keys.just_pressed(KeyCode::KeyC) {
+        view.rounded = !view.rounded;
     }
     if keys.just_pressed(KeyCode::KeyT) {
         view.follow = !view.follow;
@@ -815,6 +873,7 @@ fn redraw(
     mut commands: Commands,
     sim: Res<SlideRes>,
     view: Res<View>,
+    art_handles: Res<CellArt>,
     window: Query<&Window, With<PrimaryWindow>>,
     mut squares: Query<
         (&OverlaySquare, &mut Sprite, &mut Transform),
@@ -825,7 +884,7 @@ fn redraw(
         ),
     >,
     mut cells: Query<
-        (&CellSprite, &mut Sprite, &mut Transform),
+        (&CellSprite, &mut Sprite, &mut Transform, &mut TextureAtlas),
         (
             Without<OverlaySquare>,
             Without<OrganelleSprite>,
@@ -833,7 +892,12 @@ fn redraw(
         ),
     >,
     mut organelles: Query<
-        (&OrganelleSprite, &mut Sprite, &mut Transform),
+        (
+            &OrganelleSprite,
+            &mut Sprite,
+            &mut Transform,
+            &mut TextureAtlas,
+        ),
         (
             Without<OverlaySquare>,
             Without<CellSprite>,
@@ -960,11 +1024,16 @@ fn redraw(
                     custom_size: Some(Vec2::splat(1.0)),
                     ..default()
                 },
+                texture: art_handles.image.clone_weak(),
                 ..default()
+            },
+            TextureAtlas {
+                layout: art_handles.layout.clone_weak(),
+                index: art::FLAT,
             },
         ));
     }
-    for (marker, mut sprite, mut transform) in &mut cells {
+    for (marker, mut sprite, mut transform, mut atlas) in &mut cells {
         let Some(dot) = frame.cells.get(marker.0) else {
             sprite.color = Color::NONE;
             continue;
@@ -976,13 +1045,25 @@ fn redraw(
         // convolved. See the module docs.
         let blur = optics.blur(dot.depth);
         let softness = 1.0 - (blur / optics.max_blur.max(f32::EPSILON)).clamp(0.0, 0.75);
+        // Which silhouette this cell wears — from its identity, so it keeps the same one for
+        // life, and `FLAT` when the effect is switched off.
+        atlas.index = if view.rounded {
+            art::variant_of(dot.id.ordering_key())
+        } else {
+            art::FLAT
+        };
         let selected = sim.selected == Some(dot.id);
         let [cr, cg, cb] = dot.rgb;
         let tint = if selected { 1.0 } else { dim * softness };
         sprite.color = Color::srgba(cr * tint, cg * tint, cb * tint, softness.max(0.25));
-        sprite.custom_size = Some(Vec2::splat(
-            (dot.radius * 2.0 * scale + blur).max(if selected { 4.0 } else { 1.5 }),
-        ));
+        let body = (dot.radius * 2.0 * scale + blur).max(if selected { 4.0 } else { 1.5 });
+        // Grossed up by the tile's transparent margin when a blob is being drawn, so the cell
+        // is the size the simulation says rather than the size the texture happens to fill.
+        sprite.custom_size = Some(Vec2::splat(if view.rounded {
+            body / art::FILL
+        } else {
+            body
+        }));
         transform.translation = at;
     }
 
@@ -1004,12 +1085,17 @@ fn redraw(
                         custom_size: Some(Vec2::splat(1.0)),
                         ..default()
                     },
+                    texture: art_handles.image.clone_weak(),
                     ..default()
+                },
+                TextureAtlas {
+                    layout: art_handles.layout.clone_weak(),
+                    index: art::FLAT,
                 },
             ));
         }
     }
-    for (marker, mut sprite, mut transform) in &mut organelles {
+    for (marker, mut sprite, mut transform, mut atlas) in &mut organelles {
         let found = detailed
             .then(|| frame.cells.get(marker.cell))
             .flatten()
@@ -1026,7 +1112,20 @@ fn redraw(
         let sep = optics.separation(field_radius(at));
         let [r, g, b] = o.rgb;
         sprite.color = Color::srgb(r * dim, g * dim, b * dim);
-        sprite.custom_size = Some(Vec2::splat((o.radius * 2.0 * scale).max(1.0) + sep));
+        // A different silhouette per slot, so the inside of a cell is not four copies of one
+        // pebble. Organelles are round in life and were squares here, which at organelle zoom
+        // is the most visible squareness on the slide.
+        atlas.index = if view.rounded {
+            art::variant_of(marker.nth as u64 + 1)
+        } else {
+            art::FLAT
+        };
+        let size = (o.radius * 2.0 * scale).max(1.0) + sep;
+        sprite.custom_size = Some(Vec2::splat(if view.rounded {
+            size / art::FILL
+        } else {
+            size
+        }));
         transform.translation = at;
     }
 
@@ -1080,7 +1179,14 @@ fn redraw(
                     custom_size: Some(Vec2::splat(1.0)),
                     ..default()
                 },
+                texture: art_handles.image.clone_weak(),
                 ..default()
+            },
+            // Dust on the objective, and dust is not square. Fixed at one silhouette because a
+            // mote is a couple of pixels and nobody is going to count them.
+            TextureAtlas {
+                layout: art_handles.layout.clone_weak(),
+                index: 0,
             },
         ));
     }
@@ -1321,6 +1427,20 @@ fn menu_bar(ctx: &egui::Context, sim: &mut SlideRes, view: &mut View, quit: &mut
                         }
                     }
                 });
+                if ui
+                    .add(
+                        egui::Button::new("Rounded cells")
+                            .shortcut_text("C")
+                            .selected(view.rounded),
+                    )
+                    .on_hover_text(
+                        "shaded, irregular cells rather than flat squares. Presentation only \
+                         — it changes which tile of a baked atlas each sprite samples",
+                    )
+                    .clicked()
+                {
+                    view.rounded = !view.rounded;
+                }
                 if ui
                     .add(
                         egui::Button::new("Optics")
