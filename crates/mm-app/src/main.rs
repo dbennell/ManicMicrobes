@@ -672,7 +672,16 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut cell_materials: ResMut<Assets<CellMaterial>>,
 ) {
-    commands.spawn(Camera2d);
+    // Order -1 so the slide is composited *before* anything egui draws. bevy_egui attaches its
+    // context to a camera, and with both at the default order the tie-break is spawn order —
+    // which put the interface under the slide and drew cells through the parameter window.
+    commands.spawn((
+        Camera2d,
+        Camera {
+            order: -1,
+            ..default()
+        },
+    ));
 
     // See `mm_app::art` for what is in it and why it is baked rather than shaded per pixel.
     let side = art::TILE as u32;
