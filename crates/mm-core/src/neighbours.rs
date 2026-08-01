@@ -517,7 +517,7 @@ pub fn resolve_collisions(
 
     budget.clear();
     for i in 0..cells.capacity() {
-        budget.push(radii.get(i).copied().unwrap_or(0) / 8);
+        budget.push(radii.get(i).copied().unwrap_or(0) / 4);
     }
 
     for i in 0..cells.capacity() {

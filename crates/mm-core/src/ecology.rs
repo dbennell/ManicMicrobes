@@ -77,6 +77,20 @@ pub struct EcologyConfig {
     /// Cells joined by junctions are exempt. Tissue is *supposed* to be packed, and charging
     /// an organism for holding itself together would make being multicellular a way to die.
     pub crowding_damage: i32,
+    /// Ticks after birth during which a cell is not charged for being crowded.
+    ///
+    /// Because dividing *is* being crowded. A daughter is placed within half a square of its
+    /// mother, so the two are deeply overlapped from the instant the second one exists — there
+    /// is nowhere else to put it. Charged from birth, the price of reproducing is a wound to
+    /// both parties, and `predator.mm` stopped at two cells where it used to reach a colony: it
+    /// divided once, mother and daughter hurt each other, and that was the lineage.
+    ///
+    /// What crowding is meant to punish is being *stuck* in a crowd, not the moment of contact.
+    /// A new pair is overlapped and separating, and separation clears an eighth of a radius a
+    /// tick, so a dozen ticks settles an ordinary birth; this is that with room to spare. A
+    /// cell born somewhere genuinely full is still overlapped when the grace runs out, and pays
+    /// from then on.
+    pub crowding_grace: u32,
 }
 
 impl Default for EcologyConfig {
@@ -94,6 +108,7 @@ impl Default for EcologyConfig {
             // die if it never repairs, so crowding is a pressure to be answered — by moving,
             // by dividing less, by joining what is crushing you — rather than a wall.
             crowding_damage: Q10_ONE / 64,
+            crowding_grace: 64,
         }
     }
 }
@@ -203,7 +218,7 @@ pub fn step(
         // cell's own radius, because being pressed a tenth of a millimetre into a neighbour
         // means something quite different to a large cell and a small one.
         let pressed = crowding.get(i).copied().unwrap_or(0);
-        if pressed > 0 && config.crowding_damage > 0 {
+        if pressed > 0 && config.crowding_damage > 0 && cells.age[i] >= config.crowding_grace {
             let radius = crate::fixed::q10_to_pos(crate::biology::radius(cells, i)).max(1);
             let depth = ((pressed as i64 * Q10_ONE as i64) / radius as i64).min(i32::MAX as i64);
             let hurt = q10_scale(config.crowding_damage, depth as i32);

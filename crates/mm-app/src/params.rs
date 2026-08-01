@@ -407,6 +407,15 @@ pub const FIELDS: &[Field] = &[
                population that divides faster than it can be pushed apart just interpenetrates \
                for ever. Cells joined by junctions are exempt — tissue is meant to be packed",
     },
+    Field {
+        path: "ecology.crowding_grace",
+        label: "crowding grace",
+        group: Group::Ecology,
+        unit: Unit::Count,
+        note: "ticks after birth before a cell is charged for being crowded. Dividing is being \
+               crowded — a daughter has nowhere to go but on top of its mother — so without \
+               this the price of reproducing is a wound to both of them",
+    },
 ];
 
 /// The prefix the metabolic pathways live under (M10.3).
