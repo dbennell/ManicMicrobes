@@ -59,6 +59,48 @@ fn cells_resting_at_contact_still_close_the_gap() {
     );
 }
 
+/// The seam one cell computes, with the two rigidities taken into account.
+fn firm_seam(radius: f32, other: f32, distance: f32, mine: f32, theirs: f32) -> f32 {
+    let plain = seam(radius, other, distance);
+    let overlap = (radius + other - distance).max(0.0);
+    plain + 0.5 * overlap * ((mine - theirs) / (mine + theirs).max(1.0))
+}
+
+#[test]
+fn a_firm_cell_dents_a_soft_one_and_they_still_meet() {
+    // Rigidity moves the seam towards whichever cell gives way more easily. It must move it
+    // and no more: both cells still have to arrive at the same line from their own side, or
+    // the gap the whole thing exists to close comes back.
+    let (r, d) = (1.0f32, 1.6);
+    let (firm, soft) = (200.0f32, 20.0);
+
+    let from_firm = firm_seam(r, r, d, firm, soft);
+    let from_soft = firm_seam(r, r, d, soft, firm);
+    assert!(
+        (from_firm + from_soft - d).abs() < 1e-4,
+        "the two sides disagree: {from_firm} + {from_soft} != {d}"
+    );
+    // The firm one keeps more than half.
+    assert!(from_firm > d / 2.0, "the firm cell gave way: {from_firm}");
+    assert!(from_soft < d / 2.0, "the soft cell did not: {from_soft}");
+    // And the seam stays inside the overlap either way — a rigidity difference dents a
+    // neighbour, it does not pass through it.
+    let overlap = (2.0 * r - d).max(0.0);
+    assert!(
+        (from_firm - d / 2.0) <= overlap / 2.0 + 1e-5,
+        "the seam left the overlap"
+    );
+}
+
+#[test]
+fn cells_of_the_same_build_still_meet_in_the_middle() {
+    let (r, d) = (1.0f32, 1.5);
+    for k in [1.0f32, 24.0, 255.0] {
+        let face = firm_seam(r, r, d, k, k);
+        assert!((face - d / 2.0).abs() < 1e-5, "rigidity {k} moved the seam");
+    }
+}
+
 #[test]
 fn equal_cells_meet_half_way() {
     let d = 1.5f32;

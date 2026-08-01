@@ -229,6 +229,7 @@ fn arrange(spec: &str, sim: &mut SlideRes, view: &mut View) {
                 view.panels.metrics = false;
                 view.panels.legend = false;
             }
+            "nocells" => view.organelles = false,
             other => eprintln!("MM_SHOT_VIEW: no such panel `{other}`"),
         }
     }
@@ -566,6 +567,12 @@ struct View {
     /// baked atlas each sprite samples and nothing else. Off is the M2 look, which is still the
     /// right one for a screenshot meant to show data.
     rounded: bool,
+    /// Draw the organelles inside each cell.
+    ///
+    /// On, because they are most of what a cell *is*. Off is for looking at the cells
+    /// themselves: at any density a crowd is mostly organelles by area, and the shape of the
+    /// crowd — who is squashed against whom, and how hard — is entirely underneath them.
+    organelles: bool,
     /// Show the genome with its templates resolved rather than as `%` bits (M10.3b).
     ///
     /// On by default. The `%` form is not a mistake — it is the source, and it is the only
@@ -607,6 +614,7 @@ impl Default for View {
             focus: Focus::default(),
             follow: false,
             rounded: true,
+            organelles: true,
             genome_reading: true,
             genome_follow_ip: true,
             genome_scrolled_to: None,
@@ -673,6 +681,17 @@ const ATTRIBUTE_SQUASH_FACE: MeshVertexAttribute = MeshVertexAttribute::new(
     VertexFormat::Float32x4,
 );
 
+/// The last two seams, direction and distance together: `(dir4, dir5, face4, face5)`.
+///
+/// Six of them fit in three `vec4`s because the pair left over from each of the other two
+/// exactly fills this one. A fourth attribute would be about 3 MB a frame at fifty thousand
+/// cells to carry two floats.
+const ATTRIBUTE_SQUASH_TAIL: MeshVertexAttribute = MeshVertexAttribute::new(
+    "CellSquashTail",
+    0x6D_6D_5F_63_65_6C_6F,
+    VertexFormat::Float32x4,
+);
+
 /// Embedded at compile time rather than loaded from an `assets/` directory, so the binary runs
 /// from anywhere. The same thing `bevy_sprite` does for its own shaders.
 const CELL_SHADER: Handle<Shader> = uuid_handle!("6d6d5f63-656c-6c5f-7368-616465720001");
@@ -710,6 +729,7 @@ impl Material2d for CellMaterial {
             ATTRIBUTE_SHAPE.at_shader_location(3),
             ATTRIBUTE_SQUASH_DIR.at_shader_location(4),
             ATTRIBUTE_SQUASH_FACE.at_shader_location(5),
+            ATTRIBUTE_SQUASH_TAIL.at_shader_location(6),
         ])?];
         Ok(())
     }
@@ -817,6 +837,7 @@ fn setup(
     cells.insert_attribute(ATTRIBUTE_SHAPE, Vec::<[f32; 4]>::new());
     cells.insert_attribute(ATTRIBUTE_SQUASH_DIR, Vec::<[f32; 4]>::new());
     cells.insert_attribute(ATTRIBUTE_SQUASH_FACE, Vec::<[f32; 4]>::new());
+    cells.insert_attribute(ATTRIBUTE_SQUASH_TAIL, Vec::<[f32; 4]>::new());
     cells.insert_indices(Indices::U32(Vec::new()));
     commands.spawn((
         CellMesh,
@@ -978,6 +999,9 @@ fn keyboard(keys: &ButtonInput<KeyCode>, view: &mut View, sim: &mut SlideRes) {
     }
     if keys.just_pressed(KeyCode::KeyC) {
         view.rounded = !view.rounded;
+    }
+    if keys.just_pressed(KeyCode::KeyN) {
+        view.organelles = !view.organelles;
     }
     // `f` was the food web's own panel before M10.4 merged it into the ecology pane. Kept, and
     // now meaning "the ecology pane, on that view", which is what it always meant.
@@ -1401,7 +1425,7 @@ fn redraw(
     // resolve them. They were sprites wearing the baked atlas, which at high magnification made
     // them the one soft thing in a sharp picture — the tile is 64 pixels and a cell at 1400×
     // is not.
-    if frame.lod.resolves_organelles() {
+    if frame.lod.resolves_organelles() && view.organelles {
         for dot in &frame.cells {
             let dim = optics.vignette(field_radius(to_screen(dot.x, dot.y)));
             for (nth, o) in dot.organelles.iter().enumerate() {
@@ -1455,6 +1479,7 @@ fn redraw(
         mesh.insert_attribute(ATTRIBUTE_SHAPE, buffers.shapes.clone());
         mesh.insert_attribute(ATTRIBUTE_SQUASH_DIR, buffers.squash_dirs.clone());
         mesh.insert_attribute(ATTRIBUTE_SQUASH_FACE, buffers.squash_faces.clone());
+        mesh.insert_attribute(ATTRIBUTE_SQUASH_TAIL, buffers.squash_tail.clone());
         mesh.insert_indices(Indices::U32(buffers.indices.clone()));
     }
 
@@ -1787,6 +1812,21 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                     .clicked()
                 {
                     view.rounded = !view.rounded;
+                }
+                if ui
+                    .add(
+                        egui::Button::new("Organelles")
+                            .shortcut_text("N")
+                            .selected(view.organelles),
+                    )
+                    .on_hover_text(
+                        "the blobs inside each cell. Off is how you look at the cells \
+                         themselves — a crowd of them is mostly organelles by area, and the \
+                         shape of the crowd is underneath",
+                    )
+                    .clicked()
+                {
+                    view.organelles = !view.organelles;
                 }
                 if ui
                     .add(

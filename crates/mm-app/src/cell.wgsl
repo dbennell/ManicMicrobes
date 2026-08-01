@@ -30,6 +30,8 @@ struct Vertex {
     // Unused slots carry a distance nothing can reach, so there is no count to branch on.
     @location(4) squash_dir: vec4<f32>,
     @location(5) squash_face: vec4<f32>,
+    // The last two seams, both halves in one attribute: `(dir4, dir5, face4, face5)`.
+    @location(6) squash_tail: vec4<f32>,
 };
 
 struct Output {
@@ -39,6 +41,7 @@ struct Output {
     @location(2) shape: vec4<f32>,
     @location(3) squash_dir: vec4<f32>,
     @location(4) squash_face: vec4<f32>,
+    @location(5) squash_tail: vec4<f32>,
 };
 
 @vertex
@@ -55,6 +58,7 @@ fn vertex(vertex: Vertex) -> Output {
     out.shape = vertex.shape;
     out.squash_dir = vertex.squash_dir;
     out.squash_face = vertex.squash_face;
+    out.squash_tail = vertex.squash_tail;
     return out;
 }
 
@@ -105,7 +109,11 @@ fn fragment(in: Output) -> @location(0) vec4<f32> {
     // Read off the nearest seam: 0 when nothing is cutting into the cell, approaching 1 as a
     // seam closes on its centre. Free, because the seams are already here.
     let faces = in.squash_face * 0.65;
-    let nearest_face = min(min(faces.x, faces.y), min(faces.z, faces.w));
+    let tail_faces = in.squash_tail.zw * 0.65;
+    let nearest_face = min(
+        min(min(faces.x, faces.y), min(faces.z, faces.w)),
+        min(tail_faces.x, tail_faces.y),
+    );
     let pressure = clamp(1.0 - nearest_face / 0.65, 0.0, 1.0);
 
     // --- the outline ---
@@ -179,6 +187,12 @@ fn fragment(in: Output) -> @location(0) vec4<f32> {
     field = smax(field, dot(p, d1) - faces.y, shoulder);
     field = smax(field, dot(p, d2) - faces.z, shoulder);
     field = smax(field, dot(p, d3) - faces.w, shoulder);
+    // The last two, which is what a cell needs to be hexagonal: six sides is how tightly a
+    // monolayer of similar cells packs, and four could only ever flatten two thirds of one.
+    let d4 = unpack2x16snorm(bitcast<u32>(in.squash_tail.x));
+    let d5 = unpack2x16snorm(bitcast<u32>(in.squash_tail.y));
+    field = smax(field, dot(p, d4) - tail_faces.x, shoulder);
+    field = smax(field, dot(p, d5) - tail_faces.y, shoulder);
 
     let alpha = 1.0 - smoothstep(-edge, edge, field);
     if (alpha <= 0.001) {

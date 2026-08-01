@@ -107,6 +107,12 @@ fn squash_of(world: &World, i: usize, radius: f32) -> Vec<Squash> {
         return Vec::new();
     }
     let scale = 1.0 / POS_ONE as f32;
+    // How firmly this cell holds its own shape. See `Contact::rigidity`.
+    let rigidity = world
+        .cells()
+        .slots(i)
+        .first()
+        .map_or(0.0, |m| m.param as f32);
     world
         .neighbours()
         .contacts(world.cells(), i, PACKING_PERMILLE)
@@ -126,6 +132,21 @@ fn squash_of(world: &World, i: usize, radius: f32) -> Vec<Squash> {
             // Both cells get the same seam from their own side, because swapping r and other
             // and measuring from the far centre gives d minus this.
             let face = (d * d + radius * radius - other * other) / (2.0 * d);
+            // Then moved towards whichever of the two is softer.
+            //
+            // The plane on its own says two cells give way equally, and they do not: a cell
+            // that has paid for a thick membrane holds its shape and one that has not gives
+            // in. So the seam slides along the overlap in proportion to the difference,
+            // bounded by half of it — a firm cell pressed against a soft one stays round and
+            // dents the other, and two cells of the same build still meet in the middle.
+            //
+            // Both sides compute the same seam: the shift is antisymmetric in the two
+            // rigidities, so the softer cell arrives at the same line from its own side and
+            // they still meet with no gap.
+            let overlap = (radius + other - d).max(0.0);
+            let (mine, theirs) = (rigidity, c.rigidity as f32);
+            let firmness = (mine - theirs) / (mine + theirs).max(1.0);
+            let face = face + 0.5 * overlap * firmness;
             Some(Squash {
                 nx: dx / d,
                 ny: dy / d,

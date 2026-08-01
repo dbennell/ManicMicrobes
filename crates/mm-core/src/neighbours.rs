@@ -274,6 +274,7 @@ impl NeighbourIndex {
                 dy: cells.y[j].saturating_sub(cells.y[i]),
                 radius: rj,
                 overlap,
+                rigidity: cells.slots(j).first().map_or(0, |m| m.param as i32),
             });
         }
         out
@@ -291,9 +292,11 @@ impl NeighbourIndex {
 
 /// How many neighbours a cell is reported as pressed against.
 ///
-/// Four, like junctions. A cell with more than four neighbours deep enough to change its
-/// outline has them behind one another, and the fifth stops making a visible difference.
-pub const CONTACTS_PER_CELL: usize = 4;
+/// Six, which is how many a cell has when a monolayer packs as tightly as it can — the
+/// hexagonal arrangement circles of a similar size fall into under pressure. Four could not
+/// express that shape at all: it could flatten a cell on four sides and left the other two
+/// bulging through whatever was there.
+pub const CONTACTS_PER_CELL: usize = 6;
 
 /// A neighbour a cell is overlapping, for whoever draws it.
 ///
@@ -310,6 +313,14 @@ pub struct Contact {
     /// How far inside each other's reach the two are, `POS`. Always positive, and measured
     /// against whatever reach the caller asked for rather than against bare radii.
     pub overlap: i32,
+    /// What the neighbour has invested in its membrane — slot zero's `param`.
+    ///
+    /// Reported because it is the nearest thing a cell has to a turgor: a cell that paid for a
+    /// thick membrane holds its shape, and one that did not gives way. It already decides how
+    /// much damage the cell can take before it fails, so it is a trait under selection rather
+    /// than a number invented for the renderer, and letting it decide which of two cells
+    /// deforms costs nothing new to evolve.
+    pub rigidity: i32,
 }
 
 /// The neighbours pressing on one cell, deepest first.

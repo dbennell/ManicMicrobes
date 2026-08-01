@@ -48,7 +48,7 @@ pub struct Shape {
 }
 
 /// How many flattened sides a cell can be drawn with. Matches `mm_core::CONTACTS_PER_CELL`.
-pub const SQUASH_PER_CELL: usize = 4;
+pub const SQUASH_PER_CELL: usize = 6;
 
 /// A seam far enough out that nothing is ever cut by it.
 ///
@@ -100,10 +100,15 @@ pub struct Buffers {
     pub uvs: Vec<[f32; 2]>,
     pub colours: Vec<[f32; 4]>,
     pub shapes: Vec<[f32; 4]>,
-    /// The four seam directions, packed one per component. See [`pack_normal`].
+    /// Seam directions 0..3, packed one per component. See [`pack_normal`].
     pub squash_dirs: Vec<[f32; 4]>,
-    /// How far along each of those the seam sits.
+    /// How far along seams 0..3 they sit.
     pub squash_faces: Vec<[f32; 4]>,
+    /// The last two of each, sharing one attribute: `(dir4, dir5, face4, face5)`.
+    ///
+    /// Six seams in three `vec4`s rather than four, because the pair left over from each of the
+    /// other two fits exactly. At fifty thousand cells a wasted attribute is about 3 MB a frame.
+    pub squash_tail: Vec<[f32; 4]>,
     pub indices: Vec<u32>,
 }
 
@@ -147,6 +152,12 @@ impl Buffers {
             p.squash[2].face,
             p.squash[3].face,
         ];
+        let tail = [
+            pack_normal(p.squash[4].nx, p.squash[4].ny),
+            pack_normal(p.squash[5].nx, p.squash[5].ny),
+            p.squash[4].face,
+            p.squash[5].face,
+        ];
         // Anticlockwise from the top left, matching the corners in `uv` — the corner is what
         // the whole signed-distance field is evaluated against, so it has to be exact.
         for (dx, dy) in [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
@@ -162,6 +173,7 @@ impl Buffers {
             ]);
             self.squash_dirs.push(dirs);
             self.squash_faces.push(faces);
+            self.squash_tail.push(tail);
         }
         self.indices
             .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
@@ -174,6 +186,7 @@ impl Buffers {
         self.shapes.clear();
         self.squash_dirs.clear();
         self.squash_faces.clear();
+        self.squash_tail.clear();
         self.indices.clear();
     }
 }

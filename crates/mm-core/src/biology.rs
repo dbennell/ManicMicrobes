@@ -602,6 +602,7 @@ impl crate::state_hash::StateHash for BiologyConfig {
         h.i32(e.carrion_fraction);
         h.i32(e.digestion_rate);
         h.i32(e.digestion_efficiency);
+        h.i32(e.crowding_damage);
 
         let r = &self.metabolism.rates;
         h.i32(r.photosynthesis_efficiency);
