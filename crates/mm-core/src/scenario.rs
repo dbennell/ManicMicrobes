@@ -100,6 +100,22 @@ pub struct Scenario {
     /// swim — which matters, because a chemotaxis experiment has to be able to tell swimming
     /// apart from drifting.
     pub jitter: i32,
+    /// A steady pull towards the middle of the slide, `Q10` of a square per tick per tick.
+    ///
+    /// A body force, deliberately, and not a current. `CurrentField::Convergent` will also
+    /// gather a population, but the fluid adds its drift straight to the position step without
+    /// ever touching velocity — so drag cannot damp it and neither can the contact solver, and
+    /// a crowd that has nowhere left to go is shoved inward and pushed back out on every tick
+    /// for as long as the current runs. Measured on the packing bench at a sixteenth of a square
+    /// per cell per tick while `vx` and `vy` read exactly zero, which is a picture that never
+    /// stops trembling and a metric that says everything is fine.
+    ///
+    /// This goes in with thrust and Brownian jitter instead, so it is subject to drag on the way
+    /// in and to velocity reconciliation on the way out. A cell pressed against neighbours it
+    /// cannot move loses the part of its motion that was driving it into them, and the pack
+    /// settles.
+    #[serde(default)]
+    pub gravity: i32,
 
     pub seeding: Vec<Seeding>,
     pub barriers: Vec<Barrier>,
@@ -134,6 +150,7 @@ impl Default for Scenario {
             fluid_interval: 1,
             impulse_retain: Q10_ONE * 15 / 16,
             jitter: 24,
+            gravity: 0,
             seeding: Vec::new(),
             barriers: Vec::new(),
             vm: VmConfig::DEFAULT,
@@ -286,6 +303,7 @@ impl StateHash for Scenario {
         h.u32(self.fluid_interval);
         h.i32(self.impulse_retain);
         h.i32(self.jitter);
+        h.i32(self.gravity);
         h.u16(self.vm.instr_per_tick);
         h.u16(self.vm.template_search_range);
         h.u16(self.vm.promoter_bind_threshold);

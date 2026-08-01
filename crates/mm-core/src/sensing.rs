@@ -285,7 +285,21 @@ pub fn cilium_direction(o: &Organelle) -> (i32, i32) {
     (COS[angle], COS[quarter])
 }
 
-/// One tick of physics for the population: thrust, jitter, drag, and integration.
+/// What acts on every cell whatever it is doing, as opposed to what a cell does to itself.
+///
+/// Grouped because they arrive together from the scenario and because neither of them is a
+/// thing a cell chooses — which is also the distinction that decides whether the water feels a
+/// reaction. Cilium thrust is the cell pushing on the world and the world pushes back; these are
+/// the world pushing on the cell, and it does not.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct BodyForces {
+    /// Brownian jitter, `Q10` of a square per tick.
+    pub jitter: i32,
+    /// Pull towards the middle of the slide, `Q10` of a square per tick per tick.
+    pub gravity: i32,
+}
+
+/// One tick of physics for the population: thrust, jitter, gravity, drag, and integration.
 ///
 /// Sequential and in slot order, like resolve — this is where cells push on a shared fluid,
 /// so it is not a place for scheduling to be observable.
@@ -294,10 +308,11 @@ pub fn step_physics(
     substrate: &Substrate,
     impulse_x: &mut [i32],
     impulse_y: &mut [i32],
-    jitter: i32,
+    forces: BodyForces,
     tick: u64,
     seed: u64,
 ) -> PhysicsReport {
+    let BodyForces { jitter, gravity } = forces;
     let mut report = PhysicsReport::default();
     let w = substrate.width() as i32;
     let h = substrate.height() as i32;
@@ -333,6 +348,26 @@ pub fn step_physics(
                 fy = ((fy as i64 * paid as i64) / spent as i64) as i32;
             }
             report.energy_spent += paid as i64;
+        }
+
+        // Cilium thrust alone, kept before anything else is added to `fx`, because it is the
+        // only part of a cell's motion the water is entitled to feel. See the reaction below.
+        let (thrust_x, thrust_y) = (fx, fy);
+
+        // --- gravity, towards the middle of the slide ---
+        //
+        // A force, so it is damped by drag and undone by contact reconciliation. See
+        // `Scenario::gravity` for why this is not a current.
+        if gravity > 0 {
+            let cx = (w as i64 * POS_ONE as i64) / 2;
+            let cy = (h as i64 * POS_ONE as i64) / 2;
+            let dx = cx - cells.x[i] as i64;
+            let dy = cy - cells.y[i] as i64;
+            let d = (dx * dx + dy * dy).isqrt();
+            if d > 0 {
+                fx = fx.saturating_add((gravity as i64 * dx / d) as i32);
+                fy = fy.saturating_add((gravity as i64 * dy / d) as i32);
+            }
         }
 
         // --- Brownian jitter ---
@@ -380,12 +415,26 @@ pub fn step_physics(
         // Equal and opposite into the water, so a cell rowing is stirring. The impulse decays,
         // so this is not a claim that momentum is conserved; it is a claim that a cilium
         // cannot push on nothing.
-        if fx != 0 || fy != 0 {
+        //
+        // **Thrust only.** This used to react to the whole of `fx`, which was harmless while
+        // thrust was the only thing in it and became badly wrong the moment it was not. A
+        // cilium is self-propulsion and owes the water a reaction; gravity and Brownian jitter
+        // are external, and a cell falling does not shove the water the other way any more than
+        // a stone does.
+        //
+        // Found by adding `Scenario::gravity` and watching a crowd under an inward force
+        // evacuate the middle and pile against the walls. Every cell pulled inward was pushing
+        // water outward, the impulse retains fifteen sixteenths of itself per fluid step so it
+        // accumulated, and the outward current it built measured about 0.05 squares per tick
+        // against gravity's terminal 0.008 — so the water won by roughly eight to one and
+        // carried the whole population out with it. Gravity was never backwards; it was
+        // fighting a current it had itself created.
+        if thrust_x != 0 || thrust_y != 0 {
             if let Some(slot) = impulse_x.get_mut(sq) {
-                *slot = slot.saturating_sub(fx).clamp(-Q10_ONE, Q10_ONE);
+                *slot = slot.saturating_sub(thrust_x).clamp(-Q10_ONE, Q10_ONE);
             }
             if let Some(slot) = impulse_y.get_mut(sq) {
-                *slot = slot.saturating_sub(fy).clamp(-Q10_ONE, Q10_ONE);
+                *slot = slot.saturating_sub(thrust_y).clamp(-Q10_ONE, Q10_ONE);
             }
         }
     }
@@ -584,7 +633,7 @@ mod tests {
 
         let before_x = cells.x[0];
         let before_energy = cells.energy[0];
-        let report = step_physics(&mut cells, &substrate, &mut ix, &mut iy, 0, 0, 1);
+        let report = step_physics(&mut cells, &substrate, &mut ix, &mut iy, BodyForces { jitter: 0, gravity: 0 }, 0, 1);
 
         assert!(cells.x[0] > before_x, "the cell did not move");
         assert!(cells.energy[0] < before_energy, "swimming was free");
@@ -606,7 +655,7 @@ mod tests {
         let mut iy = vec![0i32; substrate.len()];
         let (x, y) = (cells.x[0], cells.y[0]);
         for tick in 0..100 {
-            step_physics(&mut cells, &substrate, &mut ix, &mut iy, 0, tick, 1);
+            step_physics(&mut cells, &substrate, &mut ix, &mut iy, BodyForces { jitter: 0, gravity: 0 }, tick, 1);
         }
         assert_eq!((cells.x[0], cells.y[0]), (x, y));
     }
@@ -623,13 +672,13 @@ mod tests {
         let mut iy = vec![0i32; substrate.len()];
 
         let mut rich = one_cell(&pool, &[(6, cilium)]);
-        step_physics(&mut rich, &substrate, &mut ix, &mut iy, 0, 0, 1);
+        step_physics(&mut rich, &substrate, &mut ix, &mut iy, BodyForces { jitter: 0, gravity: 0 }, 0, 1);
 
         let mut poor = one_cell(&pool, &[(6, cilium)]);
         poor.energy[0] = 1;
         let mut ix2 = vec![0i32; substrate.len()];
         let mut iy2 = vec![0i32; substrate.len()];
-        step_physics(&mut poor, &substrate, &mut ix2, &mut iy2, 0, 0, 1);
+        step_physics(&mut poor, &substrate, &mut ix2, &mut iy2, BodyForces { jitter: 0, gravity: 0 }, 0, 1);
 
         assert!(
             poor.x[0] < rich.x[0],
@@ -647,7 +696,7 @@ mod tests {
         let mut ix = vec![0i32; substrate.len()];
         let mut iy = vec![0i32; substrate.len()];
         for tick in 0..20 {
-            step_physics(&mut cells, &substrate, &mut ix, &mut iy, 0, tick, 1);
+            step_physics(&mut cells, &substrate, &mut ix, &mut iy, BodyForces { jitter: 0, gravity: 0 }, tick, 1);
         }
         assert_eq!(cells.vx[0], 0, "the cell coasted");
     }
@@ -663,11 +712,32 @@ mod tests {
         let mut ix = vec![0i32; substrate.len()];
         let mut iy = vec![0i32; substrate.len()];
         for tick in 0..500 {
-            step_physics(&mut cells, &substrate, &mut ix, &mut iy, 0, tick, 1);
+            step_physics(&mut cells, &substrate, &mut ix, &mut iy, BodyForces { jitter: 0, gravity: 0 }, tick, 1);
             assert!(cells.x[0] >= 0, "left the slide at tick {tick}");
             assert!(cells.x[0] < 16 * POS_ONE);
         }
         assert_eq!(cells.x[0], 0, "it should be pressed against the wall");
+    }
+
+    #[test]
+    fn gravity_pulls_a_cell_towards_the_middle_of_the_slide() {
+        // Direction, asserted, because the packing bench could not tell me: a crowd that drifts
+        // apart under an inward force and a crowd that drifts apart under an outward one look
+        // identical for the first few hundred ticks unless you know where the middle was.
+        let pool = GenomePool::new();
+        let substrate = Substrate::new(48, 48).unwrap();
+        let mut cells = one_cell(&pool, &[]);
+        let (mut ix, mut iy) = (vec![0i32; substrate.len()], vec![0i32; substrate.len()]);
+        let before = (cells.x[0], cells.y[0]);
+        for tick in 0..64u64 {
+            step_physics(&mut cells, &substrate, &mut ix, &mut iy, BodyForces { jitter: 0, gravity: 64 }, tick, 1);
+        }
+        assert!(
+            cells.x[0] > before.0 && cells.y[0] > before.1,
+            "a cell at the top left should fall towards the middle, not away from it: \
+             {before:?} -> {:?}",
+            (cells.x[0], cells.y[0])
+        );
     }
 
     #[test]
@@ -682,7 +752,7 @@ mod tests {
             let mut ix = vec![0i32; substrate.len()];
             let mut iy = vec![0i32; substrate.len()];
             for tick in 0..200 {
-                step_physics(&mut cells, &substrate, &mut ix, &mut iy, 64, tick, seed);
+                step_physics(&mut cells, &substrate, &mut ix, &mut iy, BodyForces { jitter: 64, gravity: 0 }, tick, seed);
             }
             net_x += (cells.x[0] - pos(32)) as i64;
         }
@@ -702,7 +772,7 @@ mod tests {
             let mut ix = vec![0i32; substrate.len()];
             let mut iy = vec![0i32; substrate.len()];
             for tick in 0..200 {
-                step_physics(&mut cells, &substrate, &mut ix, &mut iy, 32, tick, 7);
+                step_physics(&mut cells, &substrate, &mut ix, &mut iy, BodyForces { jitter: 32, gravity: 0 }, tick, 7);
             }
             (cells.x[0], cells.y[0])
         };

@@ -469,7 +469,10 @@ impl World {
                 &self.substrate,
                 &mut self.impulse_x,
                 &mut self.impulse_y,
-                self.scenario.jitter,
+                crate::sensing::BodyForces {
+                    jitter: self.scenario.jitter,
+                    gravity: self.scenario.gravity,
+                },
                 tick,
                 seed,
             );
