@@ -375,6 +375,15 @@ impl Host for CellHost<'_> {
                 // is writing during execute.
                 let sx = pos_to_square(self.cells.x[self.slot]);
                 let sy = pos_to_square(self.cells.y[self.slot]);
+                // Only a touch sensor reads this, and it used to be built for all of them —
+                // so a chemosensor walked its cell's whole neighbourhood and then went and
+                // read a chemical. Asked for where it is used instead, and answered from the
+                // table the sense phase gathered.
+                let touch = if o.kind == OrganelleType::TouchSensor {
+                    self.neighbours.touch(self.cells, self.slot)
+                } else {
+                    crate::sensing::TouchReading::default()
+                };
                 crate::sensing::read_sensor(
                     &o,
                     idx,
@@ -384,11 +393,7 @@ impl Host for CellHost<'_> {
                         y: sy,
                         tick: self.tick,
                         cell_key: self.cells.id_at(self.slot).ordering_key(),
-                        touch: crate::neighbours::touch_reading(
-                            self.cells,
-                            self.neighbours,
-                            self.slot,
-                        ),
+                        touch,
                     },
                 )
                 // Built, paid for, and not yet implemented. A `RESERVED` organelle reads as

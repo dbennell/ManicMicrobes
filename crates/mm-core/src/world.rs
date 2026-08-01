@@ -422,6 +422,10 @@ impl World {
             //    answering that by walking the population would be quadratic.
             self.neighbours
                 .rebuild(&self.cells, self.substrate.width(), self.substrate.height());
+            //    And what each cell can feel, which is the same question asked once per cell
+            //    rather than once per sensor read. Nothing it depends on moves again until
+            //    execute is over — see `gather_touch`.
+            self.neighbours.gather_touch(&self.cells);
 
             // 2. Execute. Each cell runs its instruction budget and emits intents. No cell
             //    writes shared state, so no cell can observe another's turn.

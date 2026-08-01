@@ -24,6 +24,8 @@
 //! constraints at M7 are where a real solver goes, and SPEC §8.4 is explicit that even that
 //! one is two or three Gauss-Seidel iterations and no more.
 
+use rayon::prelude::*;
+
 use crate::cell::CellArena;
 use crate::fixed::{pos_to_square, POS_ONE};
 use crate::sensing::TouchReading;
@@ -44,6 +46,22 @@ pub struct NeighbourIndex {
     entries: Vec<u32>,
     width: i32,
     height: i32,
+    /// Each cell's touch reading, gathered once per tick by [`Self::gather_touch`].
+    ///
+    /// `None` for a cell that was not gathered — either because the table is not built at all,
+    /// or because the cell has no touch sensor to read it. [`Self::touch`] walks the
+    /// neighbourhood for those, so an ungathered answer is still the right answer.
+    ///
+    /// Cleared by [`Self::rebuild`], because a reading describes where cells *were*: the
+    /// physics phase rebuilds the index after moving everything, and a table left behind would
+    /// be a stale answer that looked fresh.
+    touch: Vec<Option<TouchReading>>,
+    /// Cell radii in `POS`, hoisted for the gather.
+    ///
+    /// [`crate::biology::radius`] is an integer square root and the inner loop below would
+    /// otherwise call it once per neighbour per cell. The same hoist `resolve_collisions`
+    /// makes, for the same reason.
+    radii: Vec<i32>,
 }
 
 impl NeighbourIndex {
@@ -56,6 +74,8 @@ impl NeighbourIndex {
         self.starts.clear();
         self.starts.resize(n + 1, 0);
         self.entries.clear();
+        // Whatever was gathered described the old positions. See the field's own note.
+        self.touch.clear();
 
         // Count.
         for i in cells.iter() {
@@ -107,16 +127,114 @@ impl NeighbourIndex {
             .flat_map(move |(dx, dy)| self.in_square(sx + dx, sy + dy))
             .map(|s| *s as usize)
     }
+
+    /// Gather every touch reading the execute phase could ask for, once.
+    ///
+    /// # Why this is a phase and not a lookup
+    ///
+    /// `touch_reading` used to be called from `OGET`, which means once per *sensor read* rather
+    /// than once per cell: a genome that looks at three organelles walked its neighbourhood
+    /// three times, and each walk took an integer square root per neighbour. Worse, the reading
+    /// was built eagerly for every sensor — a chemosensor paid for a neighbourhood walk and
+    /// then read a chemical.
+    ///
+    /// Memoising it inside the host is not available: the execute phase runs cells in parallel
+    /// and a shared cache filled on demand would make the result depend on which thread got
+    /// there first, which is exactly what I6 forbids. So it is gathered up front instead, where
+    /// each cell writes only its own slot and the order it happens in cannot be observed.
+    ///
+    /// # Why this is exact
+    ///
+    /// Between this call and the end of execute, nothing a reading depends on moves. Positions
+    /// change in the physics phase, mass and occupancy in the bookkeeping phase, and both are
+    /// after execute — genomes emit intents rather than writing the world. So a reading
+    /// gathered here is the one the walk would have produced at the moment it was asked for,
+    /// byte for byte, and the state hash proves it.
+    pub fn gather_touch(&mut self, cells: &CellArena) {
+        // Nothing on the slide can feel anything, which is the usual case — a touch sensor is
+        // one of sixteen organelle types and most lineages never evolve one. Answered before
+        // anything is allocated or sized, because sizing the two tables is a pair of memsets
+        // over the whole population and that is not free at fifty thousand cells. It cost 10%
+        // of the tick on a population that never reads the result.
+        //
+        // In parallel and short-circuiting, so the answer costs a scan of the organelle slots
+        // divided by the core count, and usually far less because it stops at the first hit.
+        let wanted = (0..cells.capacity())
+            .into_par_iter()
+            .any(|i| cells.occupied(i) && reads_touch(cells, i));
+        if !wanted {
+            self.touch.clear();
+            return;
+        }
+
+        let capacity = cells.capacity();
+        // Taken out so the parallel fill can hold `&*self` for `around`. The same borrow
+        // dance `execute` does with the VM array.
+        let mut touch = std::mem::take(&mut self.touch);
+        let mut radii = std::mem::take(&mut self.radii);
+
+        radii.clear();
+        radii.resize(capacity, 0);
+        for (i, r) in radii.iter_mut().enumerate() {
+            if cells.occupied(i) {
+                *r = crate::fixed::q10_to_pos(crate::biology::radius(cells, i));
+            }
+        }
+
+        touch.clear();
+        touch.resize(capacity, None);
+        let index: &NeighbourIndex = self;
+        let hoisted = &radii;
+        touch.par_iter_mut().enumerate().for_each(|(i, slot)| {
+            if cells.occupied(i) && reads_touch(cells, i) {
+                *slot = Some(feel(cells, index, i, |j| {
+                    hoisted.get(j).copied().unwrap_or(0)
+                }));
+            }
+        });
+
+        self.touch = touch;
+        self.radii = radii;
+    }
+
+    /// One cell's touch reading: from the gathered table when it is there, by walking when not.
+    #[must_use]
+    pub fn touch(&self, cells: &CellArena, i: usize) -> TouchReading {
+        match self.touch.get(i).copied().flatten() {
+            Some(reading) => reading,
+            None => touch_reading(cells, self, i),
+        }
+    }
 }
 
 /// What one cell can feel around it (SPEC §6.2's touch sensor).
+///
+/// Walks the neighbourhood. Prefer [`NeighbourIndex::touch`], which reads the gathered table
+/// when there is one; this is what that falls back to, and what fills the table.
 #[must_use]
 pub fn touch_reading(cells: &CellArena, index: &NeighbourIndex, i: usize) -> TouchReading {
+    feel(cells, index, i, |j| {
+        crate::fixed::q10_to_pos(crate::biology::radius(cells, j))
+    })
+}
+
+/// The touch rule itself, over whatever supplies the radii.
+///
+/// One definition, two callers: [`touch_reading`] computes each radius as it goes, and
+/// [`NeighbourIndex::gather_touch`] hands it a hoisted table. Written once because the two must
+/// agree exactly — this is what a genome reads, so a discrepancy is not a rendering artefact,
+/// it is a different simulation.
+#[inline]
+fn feel(
+    cells: &CellArena,
+    index: &NeighbourIndex,
+    i: usize,
+    radius_of: impl Fn(usize) -> i32,
+) -> TouchReading {
     let sx = pos_to_square(cells.x[i]);
     let sy = pos_to_square(cells.y[i]);
-    // Hoisted: `radius` is an integer square root, and the sensing cell's own radius does not
-    // change while it is looking around. Converted to `POS`, because `separation` is `POS`.
-    let ri = crate::fixed::q10_to_pos(crate::biology::radius(cells, i));
+    // The sensing cell's own radius does not change while it is looking around.
+    let ri = radius_of(i);
     let reach = ri.saturating_mul(2);
 
     let mut contacts = 0i32;
@@ -128,12 +246,12 @@ pub fn touch_reading(cells: &CellArena, index: &NeighbourIndex, i: usize) -> Tou
             continue;
         }
         let d = separation(cells, i, j);
-        let touching = crate::fixed::q10_to_pos(crate::biology::radius(cells, j))
-            .saturating_add(ri)
-            .saturating_add(reach);
+        let touching = radius_of(j).saturating_add(ri).saturating_add(reach);
         if d <= touching {
             contacts = contacts.saturating_add(1);
             mass = mass.saturating_add(cells.mass[j] as i64);
+            // Strictly less, so ties go to the earlier neighbour in `around`'s fixed order.
+            // That order is part of the result, not an accident of it (I1, I6).
             if d < nearest {
                 nearest = d;
                 nearest_slot = j as i32;
@@ -146,6 +264,20 @@ pub fn touch_reading(cells: &CellArena, index: &NeighbourIndex, i: usize) -> Tou
         nearest: crate::fixed::sat_i16(nearest_slot),
         contact_mass: crate::fixed::sat_i16((mass / crate::fixed::Q10_ONE as i64) as i32),
     }
+}
+
+/// Whether a cell has anything that would read a touch reading.
+///
+/// Only [`crate::OrganelleType::TouchSensor`] does — a chemosensor or a photosensor ignores
+/// it entirely — so gathering for a cell without one is a neighbourhood walk nobody collects.
+/// In a population that does not sense touch at all, which is most of them, this makes the
+/// gather free.
+#[inline]
+fn reads_touch(cells: &CellArena, i: usize) -> bool {
+    cells
+        .slots(i)
+        .iter()
+        .any(|o| o.kind == crate::organelle::OrganelleType::TouchSensor)
 }
 
 /// Distance between two cells, `POS` units.
