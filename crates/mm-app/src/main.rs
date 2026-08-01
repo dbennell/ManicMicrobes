@@ -135,6 +135,7 @@ use mm_core::{CellId, LightRegime, MutationRates, Organelle, OrganelleType, Scen
 /// viewport is the layout having happened.
 fn screenshot(
     mut commands: Commands,
+    mut sim: ResMut<SlideRes>,
     mut view: ResMut<View>,
     mut frames: Local<u32>,
     mut done: Local<bool>,
@@ -149,13 +150,20 @@ fn screenshot(
             view.rounded = false;
         }
     }
-    let Ok(path) = std::env::var("MM_SHOT") else {
-        return;
-    };
+    // Arranged one frame before the photograph rather than at startup, so a panel that needs a
+    // selection has a populated world to select from.
     let after: u32 = std::env::var("MM_SHOT_AFTER")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(600);
+    if *frames + 1 == after {
+        if let Ok(spec) = std::env::var("MM_SHOT_VIEW") {
+            arrange(&spec, &mut sim, &mut view);
+        }
+    }
+    let Ok(path) = std::env::var("MM_SHOT") else {
+        return;
+    };
     if *done || *frames < after {
         return;
     }
@@ -166,6 +174,51 @@ fn screenshot(
         .spawn(Screenshot::primary_window())
         .observe(save_to_disk(path));
     *done = true;
+}
+
+/// Put the interface into a named state, for a screenshot of it.
+///
+/// A comma-separated list of panels, so one run photographs one arrangement:
+/// `MM_SHOT_VIEW=cell,genome` or `MM_SHOT_VIEW=ecology:web`. Reviewing a layout means looking
+/// at it in each of the states it has, and a screenshot tool that can only photograph the
+/// state it starts in can photograph one of them.
+fn arrange(spec: &str, sim: &mut SlideRes, view: &mut View) {
+    // Something to inspect. The first cell on the slide is as good as any and is the one a
+    // person would click.
+    let first = sim.latest.frame.cells.first().map(|dot| dot.id);
+    for part in spec.split(',') {
+        let (name, sub) = part.split_once(':').unwrap_or((part, ""));
+        match name.trim() {
+            "cell" => {
+                sim.select(first);
+                view.panels.set(Panel::Cell, true);
+            }
+            "genome" => {
+                sim.select(first);
+                view.panels.set(Panel::Genome, true);
+            }
+            "ecology" => {
+                view.panels.set(Panel::Ecology, true);
+                view.ecology = match sub {
+                    "web" => Ecology::Web,
+                    "timeline" => Ecology::Timeline,
+                    _ => Ecology::Tree,
+                };
+            }
+            "editor" => view.panels.set(Panel::Editor, true),
+            "debugger" => view.panels.set(Panel::Debugger, true),
+            "params" => view.panels.set(Panel::Parameters, true),
+            "interventions" => {
+                view.panels.set(Panel::Ecology, true);
+                view.ecology = Ecology::Interventions;
+            }
+            "bare" => {
+                view.panels.metrics = false;
+                view.panels.legend = false;
+            }
+            other => eprintln!("MM_SHOT_VIEW: no such panel `{other}`"),
+        }
+    }
 }
 
 /// Pixels per substrate square at zoom 1.
