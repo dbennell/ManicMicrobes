@@ -75,20 +75,22 @@
 //! by convolution. A real separable blur belongs in the post-process pass this leaves room
 //! for.
 
-use bevy::asset::{load_internal_asset, weak_handle};
+use bevy::asset::{load_internal_asset, uuid_handle};
 use bevy::diagnostic::{Diagnostic, DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::image::ImageSampler;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::prelude::*;
-use bevy::render::mesh::Mesh2d;
-use bevy::render::mesh::{Indices, MeshVertexAttribute, MeshVertexBufferLayoutRef};
-use bevy::render::render_asset::RenderAssetUsages;
+// 0.17 split the renderer into `bevy_mesh`, `bevy_shader`, `bevy_camera` and
+// `bevy_sprite_render`. Nothing below changed but where it lives.
+use bevy::asset::RenderAssetUsages;
+use bevy::camera::visibility::NoFrustumCulling;
+use bevy::mesh::{Indices, Mesh2d, MeshVertexAttribute, MeshVertexBufferLayoutRef};
 use bevy::render::render_resource::{
-    AsBindGroup, Extent3d, PrimitiveTopology, RenderPipelineDescriptor, ShaderRef,
+    AsBindGroup, Extent3d, PrimitiveTopology, RenderPipelineDescriptor,
     SpecializedMeshPipelineError, TextureDimension, TextureFormat, VertexFormat,
 };
-use bevy::render::view::NoFrustumCulling;
-use bevy::sprite::{Material2d, Material2dKey, Material2dPlugin, MeshMaterial2d};
+use bevy::shader::ShaderRef;
+use bevy::sprite_render::{Material2d, Material2dKey, Material2dPlugin, MeshMaterial2d};
 use bevy::window::PrimaryWindow;
 use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 
@@ -595,7 +597,7 @@ const ATTRIBUTE_SHAPE: MeshVertexAttribute =
 
 /// Embedded at compile time rather than loaded from an `assets/` directory, so the binary runs
 /// from anywhere. The same thing `bevy_sprite` does for its own shaders.
-const CELL_SHADER: Handle<Shader> = weak_handle!("6d6d5f63-656c-6c5f-7368-616465720001");
+const CELL_SHADER: Handle<Shader> = uuid_handle!("6d6d5f63-656c-6c5f-7368-616465720001");
 
 /// The whole population, drawn by one material with one shader (M10.5).
 ///
@@ -763,8 +765,8 @@ fn setup(
 fn handle_input(
     keys: Res<ButtonInput<KeyCode>>,
     buttons: Res<ButtonInput<MouseButton>>,
-    mut motion: EventReader<MouseMotion>,
-    mut wheel: EventReader<MouseWheel>,
+    mut motion: MessageReader<MouseMotion>,
+    mut wheel: MessageReader<MouseWheel>,
     mut view: ResMut<View>,
     mut sim: ResMut<SlideRes>,
     window: Query<&Window, With<PrimaryWindow>>,
@@ -936,8 +938,8 @@ fn panel_key(panel: Panel) -> KeyCode {
 #[allow(clippy::too_many_arguments)]
 fn handle_mouse(
     buttons: &ButtonInput<MouseButton>,
-    motion: &mut EventReader<MouseMotion>,
-    wheel: &mut EventReader<MouseWheel>,
+    motion: &mut MessageReader<MouseMotion>,
+    wheel: &mut MessageReader<MouseWheel>,
     view: &mut View,
     sim: &mut SlideRes,
     window: &Query<&Window, With<PrimaryWindow>>,
@@ -1361,11 +1363,11 @@ fn redraw(
         commands.spawn((
             MoteSprite(i),
             Sprite {
-                image: art_handles.image.clone_weak(),
+                image: art_handles.image.clone(),
                 // Dust on the objective, and dust is not square. Fixed at one silhouette
                 // because a mote is a couple of pixels and nobody is going to count them.
                 texture_atlas: Some(TextureAtlas {
-                    layout: art_handles.layout.clone_weak(),
+                    layout: art_handles.layout.clone(),
                     index: 0,
                 }),
                 color: Color::NONE,
@@ -1399,7 +1401,7 @@ fn panels(
     mut contexts: EguiContexts,
     mut sim: ResMut<SlideRes>,
     mut view: ResMut<View>,
-    mut exit: EventWriter<AppExit>,
+    mut exit: MessageWriter<AppExit>,
     diagnostics: Res<DiagnosticsStore>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else {

@@ -19,15 +19,23 @@ mm-asm = { path = "../mm-asm" }
 # actually lives — compiles and is tested without a graphics stack. The guarantee M4 has to
 # make is that rendering cannot reach the simulation, and that is checkable on a machine with
 # no display at all.
-bevy = { version = "0.16", optional = true, default-features = false, features = [
+bevy = { version = "0.17", optional = true, default-features = false, features = [
     "bevy_winit",
     "bevy_render",
     "bevy_core_pipeline",
     "bevy_sprite",
+    # Split out of `bevy_sprite` at 0.17: the sprite *renderer*, which is what draws
+    # anything, including `Material2d`.
+    "bevy_sprite_render",
+    # Not for drawing text — egui does its own. `bevy_sprite`'s text2d systems ask for
+    # `Assets<Font>` unconditionally at 0.17, and a missing resource is a hard failure now
+    # rather than a skipped system.
+    "bevy_text",
+    "default_font",
     "x11",
     "multi_threaded",
 ] }
-bevy_egui = { version = "0.36", optional = true }
+bevy_egui = { version = "0.38", optional = true }
 
 [features]
 default = []
