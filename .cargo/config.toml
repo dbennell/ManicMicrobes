@@ -1,0 +1,46 @@
+# Test aliases.
+#
+# `cargo test --workspace` takes the better part of an hour, and almost all of it is four
+# binaries: the evolutionary acceptance runs of M2, M3, M5 and M8, which simulate hundreds of
+# thousands of ticks across ten seeds because that is what "chemotaxis evolves in at least N of
+# 10 seeds" means. They are the point of the project and they are not negotiable, but they are
+# also not something to sit through between two edits to a shader.
+#
+# Everything else — 401 tests, including every unit test, the totality fuzz, the hard-rule
+# guards and the determinism suite — runs in about sixteen seconds in release.
+#
+#   cargo fast    the inner loop, after every change
+#   cargo slow    the four long runs, before a commit
+#   cargo full    everything, as CI runs it
+#
+# Release, deliberately. These tests branch on `cfg!(debug_assertions)` to run shorter
+# simulations in debug, so a debug run is both less thorough *and* slower in wall-clock — the
+# worst of the trade rather than either side of it.
+
+[alias]
+fast = [
+    "test", "--release",
+    "-p", "mm-core", "-p", "mm-asm",
+    "--lib",
+    "--test", "determinism",
+    "--test", "hard_rules",
+    "--test", "vm_semantics",
+    "--test", "saturation",
+    "--test", "degenerate_encoding",
+    "--test", "totality_fuzz",
+    "--test", "m1_substrate",
+    "--test", "m5_fingerprint",
+    "--test", "m6_arena",
+    "--test", "m7_junctions",
+    "--test", "m10_pathways",
+]
+
+slow = [
+    "test", "--release", "-p", "mm-core",
+    "--test", "m2_life",
+    "--test", "m3_chemotaxis",
+    "--test", "m5_phylogeny",
+    "--test", "m8_ecology",
+]
+
+full = ["test", "--release", "--workspace"]
