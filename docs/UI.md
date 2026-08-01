@@ -503,15 +503,32 @@ entities, and a look that is a large step closer to the reference.
 
 ### Bevy version
 
-We are on 0.14.2. **Do the renderer on 0.14 and treat a Bevy upgrade as its own separate
-commit afterwards.** Doing both at once means every compile error is ambiguous between "my
-instancing is wrong" and "the API moved", and the instancing example we are following is the
-0.14 one. There is no feature we need that 0.14 lacks.
+*Done: 0.14.2 → 0.19, in five commits, one per version, each verified by rendering a frame.*
+
+The advice was to do the renderer first and upgrade afterwards, so that no compile error is
+ambiguous between "my rendering is wrong" and "the API moved". That held: `Material2d`,
+`MeshVertexAttribute` and `specialize` are the same API at 0.19 that they were at 0.14, so the
+SDF work ported for the cost of some import paths and a two-line spawn.
+
+What the upgrade actually cost, for the next time:
+
+| step | what broke |
+| --- | --- |
+| 0.15 | Bundles became required components. `SpriteBundle`→`Sprite`, with the image and atlas as *fields*; `Camera2dBundle`→`Camera2d`; `MaterialMesh2dBundle`→`Mesh2d`+`MeshMaterial2d`. Screenshots became an entity with an observer. |
+| 0.16 | `ctx_mut` fallible, `Image::data` an `Option`, and **egui moved to its own schedule** — `EguiPrimaryContextPass`, because multi-pass mode may run the interface twice a frame. |
+| 0.17 | The renderer split into `bevy_mesh`, `bevy_shader`, `bevy_camera`, `bevy_sprite_render`. Import paths only — plus two feature flags that compile and abort at startup. |
+| 0.18 | Nothing. |
+| 0.19 | egui replaced `SidePanel` and `TopBottomPanel` with one `Panel`, shown **inside a `Ui`** rather than against a `Context`. Needs `rustc` 1.95. |
+
+The whole migration was one file. `main.rs` is the only thing in the crate that knows Bevy
+exists, and all 154 `mm-app` library tests passed untouched through every step because none of
+them can see a renderer. That is the wall in `slide.rs` paying for itself, and it is the
+strongest argument for keeping it exactly where it is.
 
 ### Docking
 
-**Hand-rolled with egui's own `SidePanel` / `TopBottomPanel` / `CentralPanel`**, not
-`egui_dock`. The layout in §2 is exactly what those three constructs produce natively, it adds
+**Hand-rolled with egui's own panels** — `egui::Panel` since 0.35 unified `SidePanel` and
+`TopBottomPanel` — not `egui_dock`. The layout in §2 is exactly what those constructs produce natively, it adds
 no dependency and no version-compatibility surface against `bevy_egui 0.29`'s pinned egui, and
 it gives the central viewport rect that §3 needs. Rearrangeable tabs are worth revisiting once
 the layout has been lived with; they are not worth a dependency before then.

@@ -237,7 +237,7 @@ impl GenomeFile {
             });
         }
 
-        if body.len() % 2 != 0 {
+        if !body.len().is_multiple_of(2) {
             return Err(GenomeFileError::BadBody(format!(
                 "{} hex digits is an odd number",
                 body.len()

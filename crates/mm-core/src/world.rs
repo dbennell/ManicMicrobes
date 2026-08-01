@@ -514,7 +514,7 @@ impl World {
 
         // 5. Fluid, at fluid_hz.
         let interval = self.scenario.fluid_interval.max(1) as u64;
-        if self.tick % interval == 0 {
+        if self.tick.is_multiple_of(interval) {
             self.refresh_light();
             self.refresh_velocity();
             fluid::step(
@@ -848,7 +848,7 @@ impl World {
     /// `apply_births` and `apply_deaths`, so no birth is ever missed by a census that did not
     /// happen to fall on it.
     fn observe(&mut self, tick: u64) {
-        let due = tick % self.archive.sample_interval == 0;
+        let due = tick.is_multiple_of(self.archive.sample_interval);
         if !due {
             return;
         }

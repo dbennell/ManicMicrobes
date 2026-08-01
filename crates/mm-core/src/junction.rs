@@ -342,7 +342,7 @@ fn apply_constraint(cells: &mut CellArena, i: usize, j: usize, rest: i32, config
     if d == 0 {
         // Exactly coincident: no line to push along. Nudged apart deterministically by slot,
         // the same tie-break collision separation uses.
-        let push = if i % 2 == 0 {
+        let push = if i.is_multiple_of(2) {
             POS_ONE / 8
         } else {
             -POS_ONE / 8

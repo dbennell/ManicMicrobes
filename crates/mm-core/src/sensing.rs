@@ -373,7 +373,7 @@ pub fn step_physics(
         if ny != cells.y[i] as i64 {
             cells.vy[i] = 0;
         }
-        report.moved += (step_x.abs() + step_y.abs()) as i64;
+        report.moved += step_x.abs() + step_y.abs();
 
         // --- the reaction: what the cilia pushed against ---
         //

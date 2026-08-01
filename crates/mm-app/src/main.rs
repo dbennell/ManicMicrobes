@@ -792,8 +792,8 @@ fn handle_input(
         return;
     };
     let (wants_pointer, wants_keyboard) = (
-        ctx.wants_pointer_input() || ctx.is_pointer_over_area(),
-        ctx.wants_keyboard_input(),
+        ctx.egui_wants_pointer_input() || ctx.is_pointer_over_egui(),
+        ctx.egui_wants_keyboard_input(),
     );
     let pointer = window
         .single()
@@ -1196,7 +1196,7 @@ fn redraw(
         if art_handles.field_size != size {
             // A scenario with a different grid. Reallocated rather than painted into the wrong
             // shape, which would smear the world diagonally and look like a physics bug.
-            if let Some(image) = images.get_mut(&art_handles.field) {
+            if let Some(mut image) = images.get_mut(&art_handles.field) {
                 image.resize(Extent3d {
                     width: size.0,
                     height: size.1,
@@ -1205,7 +1205,7 @@ fn redraw(
             }
             art_handles.field_size = size;
         }
-        if let Some(image) = images.get_mut(&art_handles.field) {
+        if let Some(mut image) = images.get_mut(&art_handles.field) {
             let layers: Vec<(&[f32], [f32; 3])> = frame
                 .overlays
                 .iter()
@@ -1309,7 +1309,7 @@ fn redraw(
     }
 
     for (mesh_handle, mut visibility) in &mut cell_mesh {
-        let Some(mesh) = meshes.get_mut(&mesh_handle.0) else {
+        let Some(mut mesh) = meshes.get_mut(&mesh_handle.0) else {
             continue;
         };
         let buffers = &art_handles.cells;
@@ -1413,29 +1413,47 @@ fn panels(
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
+    let ctx = ctx.clone();
     let frame = sim.latest.frame.clone();
+
+    // egui 0.35 replaced `SidePanel` and `TopBottomPanel` with one `Panel`, and a panel is now
+    // shown *inside a `Ui`* rather than against a `Context`. So the whole viewport becomes a
+    // root `Ui` on the background layer and everything is laid out in that.
+    //
+    // This is a better model than the one it replaces — a panel was always a region of
+    // something, and now it says so — but it does mean the layout has an explicit root where
+    // it used to have an implicit one.
+    let mut root = egui::Ui::new(
+        ctx.clone(),
+        "viewport".into(),
+        egui::UiBuilder::new()
+            .layer_id(egui::LayerId::background())
+            .max_rect(ctx.viewport_rect()),
+    );
 
     // Order is layout: egui hands space out from the outside in, so the menu takes the top, the
     // status bar the very bottom, the drawer the strip above it, and the rails what is left
     // between them.
     let mut quit = false;
-    menu_bar(ctx, &mut sim, &mut view, &mut quit);
-    status_bar(ctx, &sim, &view, &frame, &diagnostics);
-    drawer(ctx, &mut sim, &mut view);
+    menu_bar(&mut root, &mut sim, &mut view, &mut quit);
+    status_bar(&mut root, &sim, &view, &frame, &diagnostics);
+    drawer(&mut root, &mut sim, &mut view);
 
     if view.panels.cell {
-        egui::SidePanel::left("rail_left")
-            .default_width(270.0)
-            .width_range(210.0..=460.0)
-            .show(ctx, |ui| {
+        egui::Panel::left("rail_left")
+            .resizable(true)
+            .default_size(270.0)
+            .size_range(210.0..=460.0)
+            .show(&mut root, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| cell_body(ui, &mut sim, &mut view));
             });
     }
     if view.panels.metrics || view.panels.legend {
-        egui::SidePanel::right("rail_right")
-            .default_width(260.0)
-            .width_range(210.0..=460.0)
-            .show(ctx, |ui| {
+        egui::Panel::right("rail_right")
+            .resizable(true)
+            .default_size(260.0)
+            .size_range(210.0..=460.0)
+            .show(&mut root, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     if view.panels.metrics {
                         metrics_body(ui, &sim);
@@ -1454,13 +1472,13 @@ fn panels(
     // the next frame — one frame stale, which is invisible for a rectangle that only moves when
     // a panel is opened or dragged, and much cheaper than laying the UI out twice.
     if view.parameters {
-        parameter_window(ctx, &mut sim, &mut view);
+        parameter_window(&ctx, &mut sim, &mut view);
     }
     if view.interventions {
-        intervention_window(ctx, &sim, &mut view);
+        intervention_window(&ctx, &sim, &mut view);
     }
 
-    let rect = ctx.available_rect();
+    let rect = root.available_rect_before_wrap();
     view.viewport = Rect::new(rect.min.x, rect.min.y, rect.max.x, rect.max.y);
 
     if quit {
@@ -1483,10 +1501,10 @@ fn soon(ui: &mut egui::Ui, label: &str, shortcut: &str, why: &str) {
 /// Every keyboard shortcut in `keyboard` appears against its menu item, and no shortcut exists
 /// that is not in a menu. The previous build had fourteen single-key bindings and no way at all
 /// to discover any of them.
-fn menu_bar(ctx: &egui::Context, sim: &mut SlideRes, view: &mut View, quit: &mut bool) {
+fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut bool) {
     const LATER: &str = "M10.2 — configuration and slide files";
 
-    egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+    egui::Panel::top("menu_bar").show(root, |ui| {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
                 soon(ui, "New slide…", "Ctrl+N", LATER);
@@ -1752,13 +1770,13 @@ fn menu_bar(ctx: &egui::Context, sim: &mut SlideRes, view: &mut View, quit: &mut
 /// every frame of the footage this is modelled on, and it is the only honest way to say how
 /// big anything on the slide is.
 fn status_bar(
-    ctx: &egui::Context,
+    root: &mut egui::Ui,
     sim: &SlideRes,
     view: &View,
     frame: &Frame,
     diagnostics: &DiagnosticsStore,
 ) {
-    egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+    egui::Panel::bottom("status_bar").show(root, |ui| {
         ui.horizontal(|ui| {
             if sim.reading().is_some() {
                 ui.label(egui::RichText::new(&sim.latest.species).italics().strong());
@@ -1815,15 +1833,15 @@ fn status_bar(
 /// A listing, a source buffer, a tree and a food web are all wide and short. Putting them in a
 /// side rail is how a genome listing ends up forty characters across with the operand column
 /// wrapped off the end.
-fn drawer(ctx: &egui::Context, sim: &mut SlideRes, view: &mut View) {
+fn drawer(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
     let Some(showing) = view.panels.drawer else {
         return;
     };
-    egui::TopBottomPanel::bottom("drawer")
+    egui::Panel::bottom("drawer")
         .resizable(true)
-        .default_height(300.0)
-        .height_range(120.0..=760.0)
-        .show(ctx, |ui| {
+        .default_size(300.0)
+        .size_range(120.0..=760.0)
+        .show(root, |ui| {
             ui.horizontal(|ui| {
                 for panel in Panel::ALL.into_iter().filter(|p| p.dock() == Dock::Drawer) {
                     if ui
