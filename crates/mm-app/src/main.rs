@@ -230,6 +230,12 @@ fn arrange(spec: &str, sim: &mut SlideRes, view: &mut View) {
                 view.panels.legend = false;
             }
             "nocells" => view.organelles = false,
+            // For asking whether the *picture* is stable: with the world stopped, two frames
+            // that differ differ because of the renderer and nothing else.
+            "pause" => {
+                sim.engine.set_rate(Rate::Paused);
+                view.paused = true;
+            }
             other => eprintln!("MM_SHOT_VIEW: no such panel `{other}`"),
         }
     }
