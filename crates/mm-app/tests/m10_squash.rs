@@ -108,6 +108,26 @@ fn equal_cells_meet_half_way() {
 }
 
 #[test]
+fn a_cell_keeps_a_core_however_hard_it_is_squeezed() {
+    // The seam marches inward as two cells interpenetrate, and for circles it is right to.
+    // Cells are not circles: they resist, and one pressed on from every side has to remain a
+    // cell rather than becoming a shard. Eight seams at the floor still leave a polygon with
+    // that inradius, so the core survives from all directions at once.
+    let floor = mm_app::slide::MIN_FACE;
+    assert!(floor > 0.0 && floor < 1.0, "a nonsense core: {floor}");
+
+    // A cell almost entirely inside a much larger one: the unclamped seam is behind its own
+    // centre, and the clamp is the only thing between it and nothing.
+    let (r, other, d) = (0.3f32, 3.0, 0.6);
+    let raw = seam(r, other, d) / r;
+    assert!(
+        raw < 0.0,
+        "expected the raw seam past the centre, got {raw}"
+    );
+    assert!(raw.max(floor) >= floor);
+}
+
+#[test]
 fn a_big_neighbour_cuts_past_the_centre() {
     // A cell wholly inside a much larger one has its seam behind its own centre, which is what
     // being engulfed looks like: the small one is cut away to nothing rather than drawn as a

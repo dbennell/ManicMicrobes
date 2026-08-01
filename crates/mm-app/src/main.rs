@@ -500,9 +500,11 @@ fn seed_packing(slide: &mut Slide) {
         light: LightRegime::Uniform {
             intensity: mm_core::Q10_ONE,
         },
-        // Everything drawn gently towards the middle, so the crowd stays a crowd without
-        // anything having to want it to.
-        current: mm_core::light::CurrentField::Convergent { strength: 220 },
+        // Everything drawn *gently* towards the middle, so the crowd stays a crowd without
+        // anything having to want it to. Gently is the operative word: strong enough and the
+        // bench stops being a packing and becomes a crush, which shows how the renderer fails
+        // rather than how it behaves.
+        current: mm_core::light::CurrentField::Convergent { strength: 45 },
         seeding: vec![],
         ..Scenario::default()
     };

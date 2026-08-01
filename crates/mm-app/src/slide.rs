@@ -100,6 +100,27 @@ pub const PACKING: f32 = 1.2;
 /// [`PACKING`] as the permille reach `mm_core::NeighbourIndex::contacts` wants.
 const PACKING_PERMILLE: i32 = 1200;
 
+/// The closest to its own centre a cell may be cut, as a fraction of its drawn radius.
+///
+/// A cell keeps a core, however hard it is squeezed. The plane through where two outlines
+/// cross is the right seam for two circles that overlap a little, and it goes on being the
+/// arithmetically right seam as they overlap a lot — the cut marches inward, past the centre
+/// if you let it, and a cell with eight neighbours all pressing gets cut by eight planes until
+/// there is nothing of it left. On the packing bench the outer ring tiles correctly and the
+/// middle collapses into wedges and slivers, which is that.
+///
+/// Correct for circles and wrong for cells. Two pressurised bodies do not pass through one
+/// another; they resist, and the contact facet stops advancing. This is that resistance, as
+/// the one number it takes to express: eight seams at this distance still leave a polygon with
+/// this inradius, so the core survives from every direction at once.
+///
+/// The cost is that a clamped pair no longer agrees exactly — the two faces stop summing to
+/// the distance between the centres, so cells that deep in each other overlap slightly rather
+/// than sharing a wall. That is the right way round. Past this depth something has to give,
+/// and a little overlap between two cells that should not be that close is a far smaller lie
+/// than shattering both of them.
+pub const MIN_FACE: f32 = 0.55;
+
 /// The seams a cell is flattened along, from the neighbours pressing on it.
 ///
 /// `radius` is the drawn radius, not the physical one — the seams have to be worked out at the
@@ -153,7 +174,8 @@ fn squash_of(world: &World, i: usize, radius: f32) -> Vec<Squash> {
             Some(Squash {
                 nx: dx / d,
                 ny: dy / d,
-                face: face / radius,
+                // Never closer in than the core. See `MIN_FACE`.
+                face: (face / radius).max(MIN_FACE),
             })
         })
         .collect()
