@@ -179,6 +179,8 @@ pub enum Panel {
     Metrics,
     Legend,
     Genome,
+    /// Every cost, rate and mutation the world runs on (M10.2).
+    Parameters,
     /// The tree of life, the food web and the timeline, sharing one selection (M10.4).
     ///
     /// Was two panels, `Wiki` and `FoodWeb`, which put the tree and the web on opposite sides
@@ -201,10 +203,17 @@ pub enum Ecology {
     Web,
     /// What happened, and when, and what you changed.
     Timeline,
+    /// The parameter changes on the timeline, field by field.
+    Interventions,
 }
 
 impl Ecology {
-    pub const ALL: [Ecology; 3] = [Ecology::Tree, Ecology::Web, Ecology::Timeline];
+    pub const ALL: [Ecology; 4] = [
+        Ecology::Tree,
+        Ecology::Web,
+        Ecology::Timeline,
+        Ecology::Interventions,
+    ];
 
     #[must_use]
     pub fn title(self) -> &'static str {
@@ -212,6 +221,7 @@ impl Ecology {
             Ecology::Tree => "tree of life",
             Ecology::Web => "food web",
             Ecology::Timeline => "timeline",
+            Ecology::Interventions => "interventions",
         }
     }
 }
@@ -228,12 +238,13 @@ pub enum Dock {
 }
 
 impl Panel {
-    pub const ALL: [Panel; 7] = [
+    pub const ALL: [Panel; 8] = [
         Panel::Cell,
         Panel::Metrics,
         Panel::Legend,
         Panel::Genome,
         Panel::Ecology,
+        Panel::Parameters,
         Panel::Editor,
         Panel::Debugger,
     ];
@@ -246,6 +257,7 @@ impl Panel {
             Panel::Legend => "legend",
             Panel::Genome => "genome",
             Panel::Ecology => "ecology",
+            Panel::Parameters => "parameters",
             Panel::Editor => "editor",
             Panel::Debugger => "debugger",
         }
@@ -260,6 +272,7 @@ impl Panel {
             Panel::Legend => "L",
             Panel::Genome => "G",
             Panel::Ecology => "W",
+            Panel::Parameters => ",",
             Panel::Editor => "E",
             Panel::Debugger => "D",
         }
@@ -270,7 +283,11 @@ impl Panel {
         match self {
             Panel::Cell => Dock::Left,
             Panel::Metrics | Panel::Legend => Dock::Right,
-            Panel::Genome | Panel::Ecology | Panel::Editor | Panel::Debugger => Dock::Drawer,
+            Panel::Genome
+            | Panel::Ecology
+            | Panel::Parameters
+            | Panel::Editor
+            | Panel::Debugger => Dock::Drawer,
         }
     }
 }

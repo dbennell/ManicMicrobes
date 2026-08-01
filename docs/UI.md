@@ -101,7 +101,7 @@ Slide     Scenario library        ▸           soup · photosynthesis or die ·
                                               predator introduction · archipelago ·
                                               archipelago control · seasons · the vent
           Open scenario…                      .ron
-          Parameters…             Ctrl+,      the editor described in §4
+          Parameters…             ,           the editor described in §4
           Save parameters as…                 the running world's config, back out as .ron
           ──
           Reseed                  R
@@ -112,9 +112,11 @@ Simulation  Run / Pause           Space
             Breakpoints…
             ──
             Interventions…                    what has been changed mid-run, and when
+                                              (opens the ecology pane on that view)
 
 View      Panels                  ▸           cell · metrics · legend · genome · ecology ·
-                                              editor · debugger        (each a checkbox)
+                                              parameters · editor · debugger
+                                                                       (each a checkbox)
           Overlays                ▸           one per chemical, 1–9
           Optics                  O           vignette, defocus, dust
           ──
@@ -272,7 +274,7 @@ hash identical to the uninterrupted run. It is M1's serialisation test with a ne
 
 ### The parameter editor
 
-One `Parameters…` window, tabbed by group (world · chemistry · light · VM · metabolism ·
+One `Parameters…` view, grouped (world · chemistry · light · VM · metabolism ·
 biology · ecology · junctions), each row a labelled numeric field with its unit, its default,
 and the doc comment from the struct as hover text — those comments are unusually good and
 throwing them away in favour of hand-written tooltips would be a waste. Fields that changed
@@ -280,6 +282,14 @@ from the scenario's value are marked, with a per-field revert.
 
 Applying is explicit — an `Apply` button, not live-on-keystroke — because each apply is an
 intervention that goes on the record, and one per keystroke would be a useless record.
+
+*Built as a drawer tab, not the floating window written above.* A window over the slide is one
+you have to drag aside to see what your change did, which is the one thing you opened it to
+look at. It is also the wrong shape: the groups are wide tables of label · value · reading, and
+the drawer is where everything wide already lives. The practical push was that egui's window
+frame draws no fill in this build, so over a lit slide the editor came out as ghost text with
+cells swimming through it; a docked panel paints its own background. `,` toggles it, in the
+same unmodified-key scheme as the other panels rather than the `Ctrl+,` above.
 
 ---
 
@@ -347,7 +357,10 @@ as an **indented text list inside a 140-pixel scroll area** in the corner of the
 presentation is a footnote.
 
 The ecology pane is a drawer tab with three views, sharing one selection — click a species
-anywhere and all three follow it.
+anywhere and all three follow it. *A fourth was added after M10.4: the intervention log from
+§4, which was a floating window and belongs beside the timeline — the timeline marks when a
+parameter was changed and the log says what the change was, and two windows to read one event
+is two windows.*
 
 **Tree of life.** Painted, not listed. Horizontal axis is founding tick so the shape means
 something; vertical is `TreeNode::row`. Branch thickness from peak population, colour from
