@@ -251,7 +251,10 @@ fn a_world_that_says_nothing_about_pathways_behaves_as_it_always_did() {
         fixed += world.report().metabolism.fixed;
         burned += world.report().metabolism.burned;
     }
-    assert!(fixed > 0, "an unconfigured chloroplast photosynthesised nothing");
+    assert!(
+        fixed > 0,
+        "an unconfigured chloroplast photosynthesised nothing"
+    );
     assert!(burned > 0, "an unconfigured mitochondrion respired nothing");
 }
 
@@ -288,7 +291,11 @@ fn which_pathway_an_organelle_runs_survives_a_snapshot() {
     };
     let before = pathways(&world);
     assert!(
-        before.iter().collect::<std::collections::BTreeSet<_>>().len() > 1,
+        before
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            > 1,
         "the world under test only used one pathway, so this proves nothing"
     );
     assert_eq!(before, pathways(&restored), "pathway choices were lost");
