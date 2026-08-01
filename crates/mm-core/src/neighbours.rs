@@ -526,6 +526,10 @@ pub fn resolve_collisions(
     // separation was shoving them apart.
     crowding.clear();
     crowding.resize(cells.capacity(), 0);
+    // How far separation may still move each cell this tick. An eighth of its own radius: far
+    // enough to resolve an ordinary overlap in a few ticks, not far enough to cross a
+    // neighbour in one.
+    let mut budget: Vec<i32> = Vec::with_capacity(cells.capacity());
     radii.clear();
     radii.reserve(cells.capacity());
     for i in 0..cells.capacity() {
@@ -534,6 +538,11 @@ pub fn resolve_collisions(
         } else {
             0
         });
+    }
+
+    budget.clear();
+    for i in 0..cells.capacity() {
+        budget.push(radii.get(i).copied().unwrap_or(0) / 8);
     }
 
     for i in 0..cells.capacity() {
@@ -590,9 +599,35 @@ pub fn resolve_collisions(
                     (dy as i64 * POS_ONE as i64 / scale as i64) as i32,
                 )
             };
+            // Bounded by what each of the two has left to give this tick.
+            //
+            // Every overlapping pair used to be shoved independently, so a cell wedged among
+            // eight neighbours took eight pushes in one tick and they added up: measured, the
+            // worst cells were travelling most of their own radius per tick, which is a cell
+            // passing its neighbour between one frame and the next. A crowd rearranged faster
+            // than it could be looked at, and no arrangement of contact seams can be stable
+            // through that because the neighbourhood genuinely is not.
+            //
+            // Water is viscous and cells are not projectiles: a budget per cell per tick is
+            // closer to what being in a crowd is like than an unbounded sum of pairwise
+            // impulses, and it makes separation converge on its answer over a few ticks
+            // instead of overshooting past it in one.
             let shove = overlap.saturating_mul(SEPARATION_STRENGTH) / 16 / 2;
-            let px = (ux as i64 * shove as i64 / POS_ONE as i64) as i32;
-            let py = (uy as i64 * shove as i64 / POS_ONE as i64) as i32;
+            let allowed = shove
+                .min(budget.get(i).copied().unwrap_or(0))
+                .min(budget.get(j).copied().unwrap_or(0))
+                .max(0);
+            if allowed <= 0 {
+                continue;
+            }
+            if let Some(b) = budget.get_mut(i) {
+                *b -= allowed;
+            }
+            if let Some(b) = budget.get_mut(j) {
+                *b -= allowed;
+            }
+            let px = (ux as i64 * allowed as i64 / POS_ONE as i64) as i32;
+            let py = (uy as i64 * allowed as i64 / POS_ONE as i64) as i32;
             let max_x = (width as i64 * POS_ONE as i64) - 1;
             let max_y = (height as i64 * POS_ONE as i64) - 1;
             cells.x[i] = ((cells.x[i] as i64) + px as i64).clamp(0, max_x) as i32;
