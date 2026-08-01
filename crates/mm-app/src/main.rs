@@ -144,6 +144,21 @@ fn screenshot(
     use bevy::render::view::screenshot::{save_to_disk, Screenshot};
     *frames += 1;
     if *frames == 1 {
+        // The bench replaces the world, so it has to happen before the run rather than one
+        // frame before the photograph like the panels do — the point of it is what the cells
+        // settle into, and at tick zero they have not settled into anything.
+        if std::env::var("MM_SHOT_BENCH").is_ok() {
+            sim.bench();
+            // From the world, not from `latest`: the engine publishes frames on its own
+            // schedule, so the newest one still describes the slide that was just replaced.
+            let (w, h) = {
+                let held = sim.engine.handle();
+                let slide = held.slide();
+                let s = slide.world().substrate();
+                (s.width(), s.height())
+            };
+            view.centre = Vec2::new(w as f32 / 2.0, h as f32 / 2.0);
+        }
         if let Ok(zoom) = std::env::var("MM_SHOT_ZOOM") {
             view.zoom = zoom.parse().unwrap_or(view.zoom);
         }
@@ -437,6 +452,18 @@ impl SlideRes {
     }
 
     /// Wipe the slide and start the ancestor over. Bound to `r`.
+    /// Swap the slide for the packing bench. See [`seed_packing`].
+    fn bench(&mut self) {
+        {
+            let held = self.engine.handle();
+            seed_packing(&mut held.slide());
+        }
+        self.selected = None;
+        self.engine.select(None);
+        self.sandbox = None;
+        self.breakpoints.rearm();
+    }
+
     fn reseed(&mut self) {
         let held = self.engine.handle();
         seed_ancestors(&mut held.slide());
@@ -445,6 +472,96 @@ impl SlideRes {
         self.sandbox = None;
         self.breakpoints.rearm();
     }
+}
+
+/// A bench for looking at nothing but how cell volumes behave.
+///
+/// Every question about how a crowd is drawn — do neighbours share a wall, does the packing
+/// hold still, does a seam land where the eye expects — is a question about geometry, and on a
+/// living slide it is impossible to ask. Cells are dividing, dying, changing size, poisoning
+/// each other and swimming, so anything you notice might be the renderer or might be the
+/// world, and the two cannot be told apart by looking.
+///
+/// So this is a slide with the biology switched off. No division, no upkeep, no ageing, no
+/// mutation, no metabolism: the cells cannot change and cannot go away. A convergent current
+/// holds them pressed into the middle at a steady pressure, which is the one thing the bench
+/// does want, and then nothing else happens at all. Whatever moves after that is volumes
+/// resolving against each other, and whatever the picture does is the renderer's doing.
+///
+/// Deliberately reachable from the menu rather than hidden behind a build flag. It is a
+/// measuring instrument, and an instrument you have to recompile to pick up is one nobody
+/// picks up.
+fn seed_packing(slide: &mut Slide) {
+    let scenario = Scenario {
+        name: "packing bench".to_string(),
+        seed: 7,
+        width: 48,
+        height: 48,
+        light: LightRegime::Uniform {
+            intensity: mm_core::Q10_ONE,
+        },
+        // Everything drawn gently towards the middle, so the crowd stays a crowd without
+        // anything having to want it to.
+        current: mm_core::light::CurrentField::Convergent { strength: 220 },
+        seeding: vec![],
+        ..Scenario::default()
+    };
+    *slide.world_mut() = mm_core::World::new(scenario).expect("packing scenario");
+
+    // Nothing lives, nothing dies, nothing grows. Every rate that could change a cell is zero,
+    // so the population is a constant and the only thing left in motion is geometry.
+    let mut biology = BiologyConfig {
+        mutation: MutationRates::none(),
+        ..BiologyConfig::default()
+    };
+    biology.metabolism.rates.background_damage = 0;
+    biology.metabolism.rates.metabolic_floor = 0;
+    biology.ecology.crowding_damage = 0;
+    biology.ecology.spike_damage = 0;
+    slide.world_mut().set_biology(biology);
+
+    let world = slide.world_mut();
+    // One `HALT`. Not the ancestor with its organelles left off — an actual genome that does
+    // nothing, so there is no chance of a cell here reaching into the world and no need to
+    // wonder whether it did.
+    let Ok(inert) = world
+        .genomes()
+        .intern(vec![mm_core::Op::Halt.canonical_byte()])
+    else {
+        return;
+    };
+    // A spread of sizes, because a packing of identical circles is a lattice and tells you
+    // nothing about the case that actually looks wrong.
+    for k in 0..220u32 {
+        let genome = std::sync::Arc::clone(&inert);
+        let across = 15;
+        let step = 3;
+        let x = 2 + (k % across) * step;
+        let y = 2 + (k / across) * step;
+        let size = 18 + (k * 7 % 26) as i32;
+        let id = world.spawn_cell(CellSeed {
+            x: pos(x as i32),
+            y: pos(y as i32),
+            mass: q10(size),
+            // Enough that nothing starves in the time anybody watches.
+            energy: q10(1_000_000),
+            membrane: 24,
+            key: 11,
+            species: 0,
+            parent: CellId::NONE,
+            birth_tick: 0,
+            genome,
+        });
+        if let Some(i) = world.cells_mut().index(id) {
+            // A membrane and nothing else. No nucleus, so it cannot divide; no chloroplast, so
+            // it has nothing to do; no spike, so it cannot touch anybody. A cell here is a
+            // volume and that is the whole of it.
+            let cells = world.cells_mut();
+            cells.slots_mut(i)[0] =
+                Organelle::finished(OrganelleType::Membrane, 24 + (k % 5) as u8 * 40);
+        }
+    }
+    world.adopt_current_contents_as_baseline();
 }
 
 /// Replace whatever is on the slide with a fresh petri dish and sixteen ancestors.
@@ -1729,6 +1846,19 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                     .clicked()
                 {
                     sim.reseed();
+                    ui.close();
+                }
+                if ui
+                    .button("Packing bench")
+                    .on_hover_text(
+                        "a slide with the biology switched off: cells that cannot divide, \
+                         die or grow, held together by a current that draws everything to \
+                         the middle. For looking at how volumes behave without wondering \
+                         whether what you are seeing is the simulation",
+                    )
+                    .clicked()
+                {
+                    sim.bench();
                     ui.close();
                 }
             });

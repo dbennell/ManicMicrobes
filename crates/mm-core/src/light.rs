@@ -350,6 +350,14 @@ pub enum CurrentField {
     Rotational { strength: i32 },
     /// Opposed horizontal flows, fast at the top and bottom edges and still in the middle.
     Shear { strength: i32 },
+    /// Everything drawn towards the middle — a drain, or water going down. `strength` is the
+    /// speed at the rim, falling to nothing at the centre.
+    ///
+    /// Useful as an experiment rather than as a place to live: it is the simplest way to hold
+    /// a population under steady pressure without asking the population to do anything, which
+    /// is what you want when the question is about what crowded cells *are* rather than about
+    /// what they choose.
+    Convergent { strength: i32 },
 }
 
 impl CurrentField {
@@ -372,6 +380,18 @@ impl CurrentField {
                 // v = strength * (-dy, dx) / radius: a rigid rotation.
                 let vx = -(*strength as i64) * dy2 / radius2;
                 let vy = (*strength as i64) * dx2 / radius2;
+                (crate::fixed::sat_i32(vx), crate::fixed::sat_i32(vy))
+            }
+
+            CurrentField::Convergent { strength } => {
+                // The rotational field's offset, turned inward instead of sideways.
+                let cx2 = w.saturating_sub(1) as i64;
+                let cy2 = h.saturating_sub(1) as i64;
+                let dx2 = 2 * x as i64 - cx2;
+                let dy2 = 2 * y as i64 - cy2;
+                let radius2 = cx2.max(cy2).max(1);
+                let vx = -(*strength as i64) * dx2 / radius2;
+                let vy = -(*strength as i64) * dy2 / radius2;
                 (crate::fixed::sat_i32(vx), crate::fixed::sat_i32(vy))
             }
 
@@ -429,6 +449,12 @@ impl StateHash for CurrentField {
             }
             CurrentField::Rotational { strength } => {
                 h.u8(2);
+                h.i32(*strength);
+            }
+            CurrentField::Convergent { strength } => {
+                // A new number, not a reuse: the hash is how a saved world proves it is the
+                // same world, so every variant needs its own tag for ever.
+                h.u8(4);
                 h.i32(*strength);
             }
             CurrentField::Shear { strength } => {

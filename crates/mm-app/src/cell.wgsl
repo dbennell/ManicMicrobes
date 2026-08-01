@@ -230,18 +230,18 @@ fn fragment(in: Output) -> @location(0) vec4<f32> {
     // Faint granularity: a flat disc reads as a sprite, a grainy one reads as cytoplasm.
     let grain = hash21(p * 37.0 + seed) - 0.5;
 
-    var lum = clamp(0.34 + 0.62 * lambert + 0.22 * rim + 0.045 * grain, 0.0, 1.0);
-
-    // The membrane, as a dark edge rather than a bright one, and measured against the field so
-    // it runs along the seams too.
+    // A thin brighter ring just inside the outline: the membrane, fading as it fails.
     //
-    // This is what keeps a cell a cell inside a crowd. Neighbours are often near enough in
-    // colour that without a boundary a clump of six reads as one puddle with organelles
-    // floating in it — the outline is doing more work here than the shading is. It fades with
-    // integrity, so a failing cell loses its edge before it loses its shape, which is the
-    // right order: a membrane going is exactly what that is.
-    let membrane = smoothstep(-0.20 * radius, -0.02 * radius, field) * integrity;
-    lum = lum * mix(1.0, 0.40, membrane);
+    // Against the *field* rather than the radius, which is the one thing this keeps from the
+    // dark heavy version that was here in between: the field includes the seams, so the ring
+    // runs along a flattened side as well as a curved one. Measured against the radius it
+    // stopped at the flat and left the pressed edges bare.
+    let membrane = smoothstep(-0.16, -0.02, field) * integrity;
 
+    let lum = clamp(
+        0.34 + 0.62 * lambert + 0.30 * rim + 0.18 * membrane + 0.045 * grain,
+        0.0,
+        1.0,
+    );
     return vec4<f32>(in.colour.rgb * lum, in.colour.a * alpha);
 }
