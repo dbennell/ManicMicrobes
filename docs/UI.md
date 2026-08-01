@@ -390,6 +390,25 @@ template. That one line removes most of the binary from a typical listing on its
   rewritten from outside is an intervention like any other and goes on the record with them.
 - **Byte column, optional.** `to_listing` already produces offsets and hex.
 
+### Colour, in both panes (M10.3b)
+
+Both the listing and the editor are painted from `mm_asm::highlight`, the assembler's own
+lexer, through one palette — `main.rs::ink_colour`, which `token_colour` maps onto for the
+editor. Two palettes would mean an opcode is one colour in the listing and another in the
+editor, which is two languages as far as anyone looking at both is concerned.
+
+Numbers are the loudest thing on a line, deliberately: the whole point of the reading form is
+that `%001111` becomes `60`, and a `60` in the same grey as its surroundings has not really
+arrived. `Unknown` — what the assembler would reject — takes the same colour as a jump that
+never fires, so a typo is visible as you make it rather than after you press assemble.
+
+The editor gets this *inside* the editable widget, via egui 0.35's `TextEdit::layouter`. It
+was previously a read-only highlighted copy drawn beside a plain editable one, on the grounds
+that egui had no styled-input widget; it does, and the two halves scrolled independently.
+Diagnostics are live for the same reason — the buffer reassembles on every change, because an
+error list describing the text as it was several edits ago points at line numbers that have
+since moved — and each one quotes the offending line, so `3:12` does not mean counting to
+line three.
 
 ---
 

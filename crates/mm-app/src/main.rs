@@ -1999,6 +1999,48 @@ fn ink_colour(ink: mm_app::inspector::Ink, current: bool) -> egui::Color32 {
     }
 }
 
+/// One run of editor source, in the editor's own monospace.
+///
+/// The font is resolved from the style rather than fixed, because a layouter replaces the
+/// widget's own text layout entirely — pick a different size here and the caret stops landing
+/// where the characters are.
+fn source_ink(
+    font: &egui::FontId,
+    color: egui::Color32,
+    background: Option<egui::Color32>,
+) -> egui::text::TextFormat {
+    egui::text::TextFormat {
+        font_id: font.clone(),
+        color,
+        background: background.unwrap_or(egui::Color32::TRANSPARENT),
+        ..Default::default()
+    }
+}
+
+/// The colour of one token of `.mm` source.
+///
+/// The same palette the genome pane reads with, mapped through [`ink_colour`] rather than
+/// copied — an opcode that is one colour in the listing and another in the editor is two
+/// languages as far as anyone looking at both is concerned.
+fn token_colour(kind: mm_asm::highlight::TokenKind) -> egui::Color32 {
+    use mm_app::inspector::Ink;
+    use mm_asm::highlight::TokenKind as T;
+
+    match kind {
+        T::Opcode => ink_colour(Ink::Opcode, false),
+        T::Number => ink_colour(Ink::Number, false),
+        T::Pattern => ink_colour(Ink::Pattern, false),
+        // A promoter and a label are both names for somewhere to go, and the listing already
+        // draws the genes it invents in this colour.
+        T::Promoter | T::LabelDef | T::LabelRef => ink_colour(Ink::Gene, false),
+        // What the assembler would reject, coloured as you type it rather than after you press
+        // assemble. Same colour as a jump that never fires, which is the same kind of news.
+        T::Unknown => ink_colour(Ink::Miss, false),
+        T::Comment => egui::Color32::from_gray(105),
+        T::Space => ink_colour(Ink::Note, false),
+    }
+}
+
 /// The parameter editor (M10.2, `docs/UI.md` §4).
 ///
 /// Every cost, rate and mutation the living half of the world runs on. Until M10.2 these were
@@ -3394,40 +3436,103 @@ fn editor_body(ui: &mut egui::Ui, sim: &mut SlideRes) {
     ui.separator();
 
     // Diagnostics first: they are why anyone opened this panel.
-    let errors: Vec<String> = sim
+    let mut source = sim.editor.source().to_string();
+    let errors: Vec<(u32, u32, String)> = sim
         .editor
         .build()
         .errors()
         .iter()
-        .map(|e| format!("{}:{}: {}", e.line, e.col, e.message))
+        .map(|e| (e.line, e.col, e.message.clone()))
         .collect();
+    // Which source lines are wrong, one-based as the assembler numbers them, so the layouter
+    // below can mark them where you are actually looking rather than only in a list.
+    let bad_lines: std::collections::BTreeSet<u32> = errors.iter().map(|(l, _, _)| *l).collect();
+
     if !errors.is_empty() {
+        let lines: Vec<&str> = source.lines().collect();
         egui::ScrollArea::vertical()
-            .max_height(90.0)
+            .max_height(120.0)
             .id_salt("diagnostics")
             .show(ui, |ui| {
-                for e in &errors {
-                    ui.colored_label(egui::Color32::from_rgb(230, 120, 110), e);
+                for (line, col, message) in &errors {
+                    ui.horizontal(|ui| {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(230, 120, 110),
+                            format!("{line}:{col}"),
+                        );
+                        ui.label(message);
+                        // The offending line, quoted. `3:12` means counting to line three
+                        // otherwise, and counting to line three is the part nobody enjoys.
+                        if let Some(text) = lines.get(line.saturating_sub(1) as usize) {
+                            ui.label(
+                                egui::RichText::new(text.trim())
+                                    .monospace()
+                                    .color(egui::Color32::from_gray(140)),
+                            );
+                        }
+                    });
                 }
             });
         ui.separator();
     }
 
-    // The source, highlighted line by line. Drawn read-only alongside an editable
-    // buffer rather than as a rich text editor, because egui has no styled-input
-    // widget and a plain one that silently dropped the colours would be worse.
-    let mut source = sim.editor.source().to_string();
+    // The source, highlighted as you type.
+    //
+    // egui 0.35 takes a `layouter` on `TextEdit`, which lays the buffer out through a closure
+    // of our own — so the colours and the caret come from one widget rather than from a
+    // styled copy sitting beside an editable one. That was the arrangement here before, and
+    // the two halves scrolled independently.
+    //
+    // The lexer is `mm_asm::highlight`, the assembler's own, so the editor cannot disagree
+    // with the language about what an opcode is. Called on the widget's live text rather than
+    // through `Editor::highlight`, which reads the last text handed to `set_source` and is
+    // therefore one keystroke behind.
     egui::ScrollArea::vertical()
         .id_salt("source")
         .show(ui, |ui| {
+            let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
+                let mut job = egui::text::LayoutJob::default();
+                let font = egui::TextStyle::Monospace.resolve(ui.style());
+                for (n, text) in buf.as_str().split('\n').enumerate() {
+                    if n > 0 {
+                        job.append(
+                            "\n",
+                            0.0,
+                            source_ink(&font, egui::Color32::PLACEHOLDER, None),
+                        );
+                    }
+                    // A line the assembler rejected, tinted behind its text. The message is
+                    // in the list above; this is what says *there*.
+                    let wrong = bad_lines.contains(&(n as u32 + 1));
+                    let backing = wrong.then(|| egui::Color32::from_rgb(70, 34, 34));
+                    for token in mm_asm::highlight::line(text) {
+                        let Some(part) = text.get(token.start..token.end) else {
+                            continue;
+                        };
+                        job.append(
+                            part,
+                            0.0,
+                            source_ink(&font, token_colour(token.kind), backing),
+                        );
+                    }
+                }
+                job.wrap.max_width = wrap_width;
+                ui.fonts_mut(|f| f.layout_job(job))
+            };
             let response = ui.add(
                 egui::TextEdit::multiline(&mut source)
                     .code_editor()
                     .desired_width(f32::INFINITY)
-                    .desired_rows(18),
+                    .desired_rows(18)
+                    .layouter(&mut layouter),
             );
             if response.changed() {
                 sim.editor.set_source(source.clone());
+                // Assembled on every change rather than only on the button. Diagnostics that
+                // describe the text as it was several edits ago are worse than none: they
+                // point at line numbers that have since moved. The button stays, because it
+                // is also how you find out that nothing is wrong.
+                sim.editor.assemble();
             }
         });
 
