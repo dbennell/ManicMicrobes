@@ -703,7 +703,12 @@ fn setup(
         TextureDimension::D2,
         vec![0, 0, 0, 255],
         TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::RENDER_WORLD,
+        // Both worlds, and this is not belt and braces. `RENDER_WORLD` alone drops the CPU-side
+        // pixels once the texture is uploaded, so `image.data` is `None` from the second frame
+        // — and this image is repainted every frame. Getting it wrong cost an afternoon: the
+        // field went black, the cells stopped moving and the dust vanished, because the `else`
+        // that handled `None` returned out of the whole of `redraw`.
+        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
     );
     // Linear, deliberately. A diffusion field is a continuous quantity sampled on a grid, so
     // interpolating between two measured squares is a more faithful picture of it than hard
@@ -1206,20 +1211,21 @@ fn redraw(
                 .iter()
                 .map(|l| (l.field.as_slice(), l.rgb))
                 .collect();
-            let Some(pixels) = image.data.as_mut() else {
-                return;
-            };
-            art::paint_field(
-                pixels,
-                frame.width as usize,
-                frame.height as usize,
-                &frame.light,
-                &layers,
-                // The vignette, which used to be applied per sprite and now has to be painted
-                // in. Asked per square, in square coordinates, because where a square lands on
-                // screen is the camera's business and not the painter's.
-                &|x, y| optics.vignette(field_radius(to_screen(x, y))),
-            );
+            // `if let`, not `let else`: a field with no pixels is a field that cannot be
+            // painted, not a reason to stop drawing the cells.
+            if let Some(pixels) = image.data.as_mut() {
+                art::paint_field(
+                    pixels,
+                    frame.width as usize,
+                    frame.height as usize,
+                    &frame.light,
+                    &layers,
+                    // The vignette, which used to be applied per sprite and now has to be painted
+                    // in. Asked per square, in square coordinates, because where a square lands on
+                    // screen is the camera's business and not the painter's.
+                    &|x, y| optics.vignette(field_radius(to_screen(x, y))),
+                );
+            }
         }
     }
     for (mut sprite, mut transform) in &mut field_quad {
