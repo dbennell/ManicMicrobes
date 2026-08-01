@@ -748,6 +748,33 @@ pub fn find_promoter(genome: &Genome, t: Template, threshold: u16) -> Option<u16
     }
 }
 
+/// Where a forward-scanning jump from `ip` lands: `JMPF`, `CALL`, and `JMPZ`/`JMPNZ` when
+/// they take the branch.
+///
+/// Public for exactly the reason [`find_promoter`] is. The genome pane resolves a jump to the
+/// offset it reaches, and it has to ask the VM's own scan rather than keep a second copy of
+/// the match rule. A listing that says `→ 47` while the VM goes to 12 is worse than showing
+/// the raw template, because the template does not claim anything and the listing does.
+///
+/// `None` is not an error: a jump that matches nothing falls through to the byte after its own
+/// template, which is a real and common thing for an evolved genome to do.
+#[inline]
+#[must_use]
+pub fn find_forward(genome: &Genome, ip: u16, t: Template, range: u16) -> Option<u16> {
+    let target = search_forward(genome, ip as usize, t, range, genome.len())?;
+    u16::try_from(target).ok()
+}
+
+/// Where a backward-scanning jump from `ip` lands: `JMPB`, and `LOOPLN` while `LN` is nonzero.
+///
+/// [`find_forward`], scanning the other way.
+#[inline]
+#[must_use]
+pub fn find_backward(genome: &Genome, ip: u16, t: Template, range: u16) -> Option<u16> {
+    let target = search_backward(genome, ip as usize, t, range, genome.len())?;
+    u16::try_from(target).ok()
+}
+
 /// `SKIPZ`: the offset just past the instruction at `at`, including its template if it takes
 /// one.
 #[inline]

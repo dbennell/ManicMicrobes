@@ -15,6 +15,7 @@
 
 use mm_core::cell::{CellArena, CellId};
 use mm_core::chem::CHEM_COUNT;
+use mm_core::config::VmConfig;
 use mm_core::organelle::{OrganelleType, SLOT_COUNT};
 use mm_core::vm::{CALL_STACK_LEN, DATA_STACK_LEN, RAM_WORDS, REGISTER_COUNT};
 use mm_core::World;
@@ -77,6 +78,15 @@ pub struct Inspection {
 
     pub slots: [SlotView; SLOT_COUNT],
     pub interior: [i32; CHEM_COUNT],
+
+    /// The VM parameters this cell is actually running under.
+    ///
+    /// Carried rather than assumed. Resolving a jump or a promoter binding depends on
+    /// `template_search_range` and `promoter_bind_threshold`, and since M10.2 both are
+    /// editable while the world runs — so a listing that resolved against `VmConfig::DEFAULT`
+    /// would quietly describe a different world from the one on the slide, and would keep
+    /// doing it convincingly.
+    pub vm_config: mm_core::config::VmConfig,
 }
 
 impl Inspection {
@@ -138,10 +148,8 @@ impl Inspection {
             ln: vm.ln,
             halted: vm.halted,
             slots,
-            interior: {
-                let _ = world;
-                interior
-            },
+            interior,
+            vm_config: world.scenario().vm,
         }
     }
 }
@@ -219,43 +227,173 @@ fn gene_label(nth: usize) -> String {
     format!("gene {out}")
 }
 
-/// The label for one disassembled line, if it deserves one.
-fn label_for(genome: &mm_core::Genome, line: &mm_asm::Line) -> Option<String> {
-    let promoters = genome.promoters();
-    let index_of = |entry: u16| promoters.iter().position(|p| p.entry == entry);
+/// The template the VM will actually read as this line's operand.
+///
+/// Not `line.template`, and the difference is the whole reason this function exists. The
+/// disassembler reports `Template::EMPTY` when a template's letters are non-canonical `NOP`
+/// bytes, because rendering them as `%101` would reassemble to different bytes — that is
+/// deliberate and load-bearing for the round trip. But the VM does not read source, it reads
+/// bytes, so at such a line it sees a perfectly ordinary template and jumps accordingly.
+///
+/// Resolving `line.template` there would print `IMM 0` for an instruction that pushes 60, and
+/// `binds nothing` for an `EXPRESS` that binds. So the reading asks the genome's own
+/// precomputed table, at the offset the VM would read from.
+fn operand_of(genome: &mm_core::Genome, line: &mm_asm::Line) -> mm_core::isa::Template {
+    if !line.op.takes_template() {
+        return mm_core::isa::Template::EMPTY;
+    }
+    genome.template_at(genome.wrap((line.offset as usize).wrapping_add(1)))
+}
 
+/// Where a line's own template run ends, which is where its host falls through to.
+fn falls_through_to(genome: &mm_core::Genome, line: &mm_asm::Line) -> u16 {
+    let after = genome.wrap(
+        (line.offset as usize)
+            .wrapping_add(1)
+            .wrapping_add(operand_of(genome, line).len as usize),
+    );
+    u16::try_from(after).unwrap_or(0)
+}
+
+/// The label for one disassembled line, if it deserves one.
+///
+/// Shown beside the source form, where the operand is still `%`-bits and a gene binding cannot
+/// be read off it. In the reading form the binding *is* the operand, so [`reading_of`] renders
+/// it there instead and this column is left out.
+fn label_for(genome: &mm_core::Genome, line: &mm_asm::Line, cfg: VmConfig) -> Option<String> {
     match line.op {
-        mm_core::Op::Gene => {
-            // Which declaration this is, by offset.
-            let nth = promoters
-                .iter()
-                .position(|p| p.offset == line.offset as u16)?;
-            Some(gene_label(nth))
-        }
-        mm_core::Op::Express => {
-            // Where this EXPRESS will actually jump — asked of the VM's own binding search,
-            // not of a copy of it here, so the panel cannot describe a jump that does not
-            // happen. A miss is worth showing too: an EXPRESS that binds nothing falls
-            // through, and that is usually the bug.
-            let threshold = mm_core::VmConfig::DEFAULT.promoter_bind_threshold;
-            let Some(entry) = mm_core::vm::find_promoter(genome, line.template, threshold) else {
-                return Some("binds nothing".to_string());
-            };
-            let nth = index_of(entry)?;
-            let distance = promoters
-                .get(nth)
-                .map(|p| line.template.promoter_distance(p.template))
-                .unwrap_or(0);
-            Some(if distance == 0 {
-                format!("→ {}", gene_label(nth))
-            } else {
-                // A drifted promoter still binds, and how far it has drifted is the thing
-                // worth knowing: at the threshold it is one mutation from binding something
-                // else entirely.
-                format!("→ {} (drift {distance})", gene_label(nth))
-            })
-        }
+        mm_core::Op::Gene => gene_at(genome, line).map(gene_label),
+        mm_core::Op::Express => Some(match binding_of(genome, line, cfg) {
+            Some((nth, 0)) => format!("→ {}", gene_label(nth)),
+            // A drifted promoter still binds, and how far it has drifted is the thing worth
+            // knowing: at the threshold it is one mutation from binding something else
+            // entirely.
+            Some((nth, d)) => format!("→ {} (drift {d})", gene_label(nth)),
+            None => "binds nothing".to_string(),
+        }),
         _ => None,
+    }
+}
+
+/// Which declaration a `GENE` line is, by offset.
+fn gene_at(genome: &mm_core::Genome, line: &mm_asm::Line) -> Option<usize> {
+    genome
+        .promoters()
+        .iter()
+        .position(|p| p.offset == line.offset as u16)
+}
+
+/// The gene an `EXPRESS` binds and how far its promoter has drifted, or `None` for a miss.
+///
+/// Asked of the VM's own binding search rather than a copy of it here, so the pane cannot
+/// describe a jump that does not happen. A miss is worth showing too: an `EXPRESS` that binds
+/// nothing falls through, and that is usually the bug.
+fn binding_of(
+    genome: &mm_core::Genome,
+    line: &mm_asm::Line,
+    cfg: VmConfig,
+) -> Option<(usize, u16)> {
+    let t = operand_of(genome, line);
+    let entry = mm_core::vm::find_promoter(genome, t, cfg.promoter_bind_threshold)?;
+    let promoters = genome.promoters();
+    let nth = promoters.iter().position(|p| p.entry == entry)?;
+    let distance = promoters
+        .get(nth)
+        .map(|p| t.promoter_distance(p.template))
+        .unwrap_or(0);
+    Some((nth, distance))
+}
+
+/// One line with its template operand resolved to what it means (M10.3b).
+///
+/// The other half of the pane's two documents. `Line::to_source` is byte-exact and the only
+/// text the editor ever round-trips; this one is unassemblable on purpose and exists to be
+/// read. Every resolution here comes from the VM's own search, so where the two documents
+/// disagree it is because a `%` operand and its meaning genuinely are different things.
+fn reading_of(genome: &mm_core::Genome, line: &mm_asm::Line, cfg: VmConfig) -> String {
+    let mut s = String::new();
+    s.push_str(line.op.name());
+    if line.variant != 0 {
+        s.push('~');
+        s.push_str(&line.variant.to_string());
+    }
+    let Some(operand) = resolved_operand(genome, line, cfg) else {
+        return s;
+    };
+    while s.len() < 8 {
+        s.push(' ');
+    }
+    s.push(' ');
+    s.push_str(&operand);
+    s
+}
+
+/// The resolved operand text, or `None` for an instruction that takes no template.
+fn resolved_operand(
+    genome: &mm_core::Genome,
+    line: &mm_asm::Line,
+    cfg: VmConfig,
+) -> Option<String> {
+    use mm_core::Op;
+
+    let t = operand_of(genome, line);
+    let range = cfg.template_search_range;
+    // `MAX_GENOME_LEN` is 65,536, so the last legal offset is 65,535 and this always fits.
+    // Written as a conversion rather than a cast so that stops being true loudly.
+    let ip = u16::try_from(line.offset).ok()?;
+
+    // A zero-length template makes its host a no-op, except IMM, which still pushes 0
+    // (SPEC §4.3). Saying so is more useful than an empty operand column, because a template
+    // eaten by a mutation is a common way for a lineage to go quiet.
+    let dead = t.is_empty() && line.op != Op::Imm;
+
+    Some(match line.op {
+        _ if !line.op.takes_template() => return None,
+        _ if dead => "· no template".to_string(),
+        // `Template::new` sets bit i for letter i, so `%001111` is 0b111100 = 60. This one
+        // line removes most of the binary from a typical listing on its own.
+        Op::Imm => t.value.to_string(),
+        Op::JmpF | Op::JmpZ | Op::JmpNz | Op::Call => {
+            match mm_core::vm::find_forward(genome, ip, t, range) {
+                Some(target) => jump_text(genome, target),
+                None => format!("✗ falls through to {}", falls_through_to(genome, line)),
+            }
+        }
+        // LOOPLN's template is a backward jump target like JMPB's — it is `LN` that counts,
+        // and `LN` is a register set by SETLN rather than anything encoded here.
+        Op::JmpB | Op::LoopLn => match mm_core::vm::find_backward(genome, ip, t, range) {
+            Some(target) => format!("↺ {target}"),
+            None => format!("✗ falls through to {}", falls_through_to(genome, line)),
+        },
+        Op::Gene => match gene_at(genome, line) {
+            Some(nth) => gene_label(nth),
+            None => "· unreachable declaration".to_string(),
+        },
+        Op::Express => match binding_of(genome, line, cfg) {
+            Some((nth, 0)) => format!("→ {}", gene_label(nth)),
+            Some((nth, d)) => format!("→ {} (drift {d})", gene_label(nth)),
+            None => format!(
+                "✗ binds nothing, falls through to {}",
+                falls_through_to(genome, line)
+            ),
+        },
+        _ => return None,
+    })
+}
+
+/// A jump target, named if it happens to be a gene's entry point.
+///
+/// The name is worth the lookup for `CALL` in particular: a call that lands on a promoter's
+/// entry is a call to that gene, and saying so turns a number back into a subroutine.
+fn jump_text(genome: &mm_core::Genome, target: u16) -> String {
+    match genome
+        .promoters()
+        .iter()
+        .position(|p| p.entry == target)
+        .map(gene_label)
+    {
+        Some(name) => format!("→ {target} ({name})"),
+        None => format!("→ {target}"),
     }
 }
 
@@ -318,6 +456,103 @@ pub fn tracking(
     }
 }
 
+/// What a run of a listing line is, for colour.
+///
+/// A listing is not `.mm` source — `→ 47 (gene b)` is not something any assembler would take —
+/// so it cannot simply be handed to [`mm_asm::highlight`]. But the parts of it that *are*
+/// source have to be coloured by the same rules the editor uses, or the two panes disagree
+/// about what an opcode looks like and the disagreement is the thing you are staring at. So
+/// [`spans`] classifies with the assembler's own lexer and names only what the reading adds.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Ink {
+    /// An opcode name, including its `~n` encoding suffix.
+    Opcode,
+    /// A number the instruction acts on: an immediate's value, a jump's target.
+    Number,
+    /// A `%` template, in the source form.
+    Pattern,
+    /// A gene name this listing invented.
+    Gene,
+    /// `→` or `↺`: control goes somewhere.
+    Marker,
+    /// `✗`: it does not. A jump that never fires is usually why a lineage went quiet, so it
+    /// gets a colour of its own rather than sharing one with the jumps that work.
+    Miss,
+    /// Punctuation, padding, and prose like `falls through to`.
+    Note,
+}
+
+/// A classified run of a rendered listing line, in byte offsets into that line.
+///
+/// Offsets rather than owned strings, the same shape as [`mm_asm::highlight::Token`], so the
+/// spans cost nothing beyond the line they describe.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Span {
+    pub ink: Ink,
+    pub start: usize,
+    pub end: usize,
+}
+
+/// Classify one rendered listing line for colour.
+///
+/// Covers the line exactly, gaps included, so a caller can paint straight through it without
+/// having to work out what fell between two spans.
+#[must_use]
+pub fn spans(text: &str) -> Vec<Span> {
+    use mm_asm::highlight::TokenKind;
+
+    // `gene b` is two words and only the first is recognisable. Set by the word `gene` and
+    // spent by the one after it, so the name is coloured as one thing.
+    let mut naming = false;
+    mm_asm::highlight::line(text)
+        .into_iter()
+        .map(|t| {
+            let word = text.get(t.start..t.end).unwrap_or("");
+            let ink = match t.kind {
+                TokenKind::Opcode => Ink::Opcode,
+                TokenKind::Number => Ink::Number,
+                TokenKind::Pattern => Ink::Pattern,
+                TokenKind::Promoter => Ink::Gene,
+                TokenKind::Space => Ink::Note,
+                _ => extra_ink(word, &mut naming),
+            };
+            Span {
+                ink,
+                start: t.start,
+                end: t.end,
+            }
+        })
+        .collect()
+}
+
+/// Classify a word the assembler's lexer had no name for.
+fn extra_ink(word: &str, naming: &mut bool) -> Ink {
+    // The reading brackets its gene names — `→ 47 (gene b)` — so compare on the word itself
+    // rather than on the punctuation around it.
+    let bare = word.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+    if word.contains('→') || word.contains('↺') {
+        return Ink::Marker;
+    }
+    if word.contains('✗') {
+        return Ink::Miss;
+    }
+    if bare == "gene" {
+        *naming = true;
+        return Ink::Gene;
+    }
+    if std::mem::take(naming) {
+        return Ink::Gene;
+    }
+    // `ADD~2` is a real opcode in a non-canonical encoding. The assembler's lexer does not
+    // know the `~` form because it is disassembly output rather than anything anyone writes.
+    if let Some((name, _)) = word.split_once('~') {
+        if mm_core::isa::Op::from_name(name).is_some() {
+            return Ink::Opcode;
+        }
+    }
+    Ink::Note
+}
+
 /// A disassembled genome, kept so the panel does not re-disassemble every frame.
 ///
 /// Keyed by genome hash. At sixty frames a second, taking three hundred bytes apart sixty
@@ -326,6 +561,10 @@ pub fn tracking(
 #[derive(Default)]
 pub struct Listing {
     hash: Option<u64>,
+    /// Part of the key, because the reading resolves jumps and bindings against these. Change
+    /// the search range in the parameter editor and every resolved target in the pane may
+    /// move; a cache keyed on the genome alone would go on showing the old world's answers.
+    cfg: Option<VmConfig>,
     lines: Vec<ListingLine>,
 }
 
@@ -334,7 +573,20 @@ pub struct Listing {
 pub struct ListingLine {
     /// Byte offset of the opcode, which is what `ip` is compared against.
     pub offset: u32,
+    /// The reassemblable form: `IMM      %001111`. Byte-exact, and the only text the editor
+    /// ever hands back.
     pub text: String,
+    /// [`spans`] of `text`, classified once here rather than on every frame it is drawn.
+    pub text_spans: Vec<Span>,
+    /// The same instruction with its template resolved: `IMM      60` (M10.3b).
+    ///
+    /// A separate document rather than a replacement. `%001111` is not a mistake to be
+    /// corrected — it is the source form, and `assemble(disassemble(b)) == b` is an M0
+    /// acceptance test that rendering it as `60` would break. So the pane holds both and shows
+    /// one.
+    pub reading: String,
+    /// [`spans`] of `reading`.
+    pub reading_spans: Vec<Span>,
     /// For a `GENE`, the label this listing gives it. For an `EXPRESS`, the label of the gene
     /// it will actually bind, with the Hamming distance if it is not an exact match.
     ///
@@ -348,8 +600,8 @@ pub struct ListingLine {
 
 impl Listing {
     /// The listing for this genome, disassembling only if it is not the one already held.
-    pub fn of(&mut self, genome: &mm_core::Genome, hash: u64) -> &[ListingLine] {
-        if self.hash != Some(hash) {
+    pub fn of(&mut self, genome: &mm_core::Genome, hash: u64, cfg: VmConfig) -> &[ListingLine] {
+        if self.hash != Some(hash) || self.cfg != Some(cfg) {
             // `Line::to_source` rather than a second renderer here: it is the one the editor
             // and the round-trip test already use, so the listing in the panel is the same
             // text that would reassemble to these bytes.
@@ -357,13 +609,21 @@ impl Listing {
             self.lines = d
                 .lines
                 .iter()
-                .map(|l| ListingLine {
-                    offset: l.offset,
-                    text: l.to_source(),
-                    label: label_for(genome, l),
+                .map(|l| {
+                    let text = l.to_source();
+                    let reading = reading_of(genome, l, cfg);
+                    ListingLine {
+                        offset: l.offset,
+                        text_spans: spans(&text),
+                        reading_spans: spans(&reading),
+                        text,
+                        reading,
+                        label: label_for(genome, l, cfg),
+                    }
                 })
                 .collect();
             self.hash = Some(hash);
+            self.cfg = Some(cfg);
         }
         &self.lines
     }
@@ -495,15 +755,15 @@ mod tests {
         let b = world.genomes().intern(vec![0x11u8; 24]).unwrap();
 
         let mut listing = Listing::default();
-        let first = listing.of(&a, a.hash()).len();
+        let first = listing.of(&a, a.hash(), VmConfig::DEFAULT).len();
         assert!(first > 0, "a genome disassembled to nothing");
         // Same genome again: the cache holds, which is the whole point at sixty frames a
         // second following one cell.
         let ptr = listing.lines().as_ptr();
-        assert_eq!(listing.of(&a, a.hash()).len(), first);
+        assert_eq!(listing.of(&a, a.hash(), VmConfig::DEFAULT).len(), first);
         assert_eq!(listing.lines().as_ptr(), ptr, "it disassembled again");
         // A different genome replaces it.
-        listing.of(&b, b.hash());
+        listing.of(&b, b.hash(), VmConfig::DEFAULT);
         assert_ne!(listing.lines().as_ptr(), ptr);
     }
 
@@ -512,7 +772,7 @@ mod tests {
         let world = World::new(Scenario::stress(8, 8)).unwrap();
         let g = world.genomes().intern(vec![0x2Eu8; 24]).unwrap();
         let mut listing = Listing::default();
-        listing.of(&g, g.hash());
+        listing.of(&g, g.hash(), VmConfig::DEFAULT);
 
         // Every byte offset in the genome must resolve to some line — an `ip` sitting on a
         // template letter is the common case, and a marker that vanished for it would flicker
@@ -546,7 +806,7 @@ mod tests {
         let genome = world.genomes().intern(bytes).expect("interned");
 
         let mut listing = Listing::default();
-        listing.of(&genome, genome.hash());
+        listing.of(&genome, genome.hash(), VmConfig::DEFAULT);
         let lines = listing.lines().to_vec();
 
         let genes: Vec<&ListingLine> = lines
@@ -600,7 +860,7 @@ mod tests {
         let bytes = mm_asm::assemble(src).expect("assembles").bytes;
         let genome = world.genomes().intern(bytes).expect("interned");
         let mut listing = Listing::default();
-        listing.of(&genome, genome.hash());
+        listing.of(&genome, genome.hash(), VmConfig::DEFAULT);
         let express = listing
             .lines()
             .iter()

@@ -553,6 +553,12 @@ struct View {
     /// baked atlas each sprite samples and nothing else. Off is the M2 look, which is still the
     /// right one for a screenshot meant to show data.
     rounded: bool,
+    /// Show the genome with its templates resolved rather than as `%` bits (M10.3b).
+    ///
+    /// On by default. The `%` form is not a mistake — it is the source, and it is the only
+    /// thing that round-trips — but it answers "what bytes are these", and the question the
+    /// pane is usually open for is "what does this cell do".
+    genome_reading: bool,
     /// Keep the listing scrolled to the instruction pointer.
     genome_follow_ip: bool,
     /// The last `ip` the listing was scrolled to, so it scrolls when the pointer *moves*
@@ -588,6 +594,7 @@ impl Default for View {
             focus: Focus::default(),
             follow: false,
             rounded: true,
+            genome_reading: true,
             genome_follow_ip: true,
             genome_scrolled_to: None,
             drag_distance: 0.0,
@@ -1957,6 +1964,41 @@ fn drawer(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
         });
 }
 
+/// One run of a genome listing, in the pane's monospace.
+fn listing_ink(color: egui::Color32, background: egui::Color32) -> egui::text::TextFormat {
+    egui::text::TextFormat {
+        font_id: egui::FontId::monospace(11.0),
+        color,
+        background,
+        ..Default::default()
+    }
+}
+
+/// The colour of one classified run of a listing (M10.3b).
+///
+/// Numbers are the loudest thing on the line, and deliberately: the whole point of the reading
+/// form is that `%001111` becomes `60`, and a 60 in the same grey as everything around it has
+/// not really arrived. Everything else is tuned to stay out of its way — an opcode column you
+/// read by shape rather than by colour, prose dimmer than the values it describes.
+fn ink_colour(ink: mm_app::inspector::Ink, current: bool) -> egui::Color32 {
+    use mm_app::inspector::Ink;
+
+    match ink {
+        // Lifted on the current line only: against the green backing the ordinary greys go
+        // muddy, and this is the one line somebody is definitely reading.
+        Ink::Opcode if current => egui::Color32::from_rgb(225, 235, 225),
+        Ink::Opcode => egui::Color32::from_rgb(200, 208, 220),
+        Ink::Number => egui::Color32::from_rgb(240, 195, 120),
+        // Distinct from a number, because in the source form the whole point is that these
+        // bits are *not* the value they encode.
+        Ink::Pattern => egui::Color32::from_rgb(150, 195, 165),
+        Ink::Gene => egui::Color32::from_rgb(150, 175, 215),
+        Ink::Marker => egui::Color32::from_rgb(120, 190, 190),
+        Ink::Miss => egui::Color32::from_rgb(220, 145, 110),
+        Ink::Note => egui::Color32::from_gray(130),
+    }
+}
+
 /// The parameter editor (M10.2, `docs/UI.md` §4).
 ///
 /// Every cost, rate and mutation the living half of the world runs on. Until M10.2 these were
@@ -2367,7 +2409,7 @@ fn genome_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
     };
 
     let here = {
-        sim.listing.of(&c.genome, c.genome_hash);
+        sim.listing.of(&c.genome, c.genome_hash, c.vm_config);
         sim.listing.line_at(c.ip)
     };
     let over_nucleus = c.nucleus_capacity > 0 && c.genome_len > c.nucleus_capacity;
@@ -2403,6 +2445,31 @@ fn genome_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
                 .load_bytes(c.genome.bytes(), sim.latest.species.clone());
             sim.editing = Some(c.id);
             view.panels.set(Panel::Editor, true);
+        }
+        ui.separator();
+        // Two documents, one pane. Reading is the default because it is what the pane is for:
+        // source is the form you switch to when you are about to edit, and the editor is the
+        // only thing that consumes it.
+        for (label, reading, hint) in [
+            (
+                "reading",
+                true,
+                "templates resolved to what they mean — immediates in decimal, jumps to the \
+                 offset they reach, promoters to their gene",
+            ),
+            (
+                "source",
+                false,
+                "the reassemblable form, byte for byte. This is the text the editor hands back.",
+            ),
+        ] {
+            if ui
+                .selectable_label(view.genome_reading == reading, label)
+                .on_hover_text(hint)
+                .clicked()
+            {
+                view.genome_reading = reading;
+            }
         }
         ui.separator();
         ui.checkbox(&mut view.genome_follow_ip, "follow ip")
@@ -2445,17 +2512,48 @@ fn genome_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
                             .monospace()
                             .color(egui::Color32::from_rgb(140, 230, 140)),
                     );
-                    let body =
-                        egui::RichText::new(format!("{:>4}  {:<22}", line.offset, line.text))
-                            .monospace()
-                            .size(11.0);
-                    ui.label(if current {
-                        body.background_color(egui::Color32::from_rgb(45, 70, 45))
-                            .color(egui::Color32::from_rgb(210, 255, 210))
+                    let (text, spans) = if view.genome_reading {
+                        (&line.reading, &line.reading_spans)
                     } else {
-                        body.color(egui::Color32::from_gray(175))
-                    });
-                    if let Some(label) = &line.label {
+                        (&line.text, &line.text_spans)
+                    };
+                    // The line the pointer is on keeps its ink and takes a background, rather
+                    // than being flattened to one bright colour. The `▶` in the margin already
+                    // says which line it is; throwing the colours away to say it again would
+                    // make the one line you are watching the only unreadable one.
+                    let backing = if current {
+                        egui::Color32::from_rgb(45, 70, 45)
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    };
+                    let mut job = egui::text::LayoutJob::default();
+                    job.append(
+                        &format!("{:>4}  ", line.offset),
+                        0.0,
+                        listing_ink(egui::Color32::from_gray(110), backing),
+                    );
+                    for span in spans {
+                        let Some(part) = text.get(span.start..span.end) else {
+                            continue;
+                        };
+                        job.append(
+                            part,
+                            0.0,
+                            listing_ink(ink_colour(span.ink, current), backing),
+                        );
+                    }
+                    // The operand column ends where the label column begins, and a listing
+                    // whose second column wanders is one nobody can scan down.
+                    let pad = 30usize.saturating_sub(text.chars().count());
+                    job.append(
+                        &" ".repeat(pad),
+                        0.0,
+                        listing_ink(egui::Color32::PLACEHOLDER, backing),
+                    );
+                    ui.label(job);
+                    // Only beside the source form. In the reading the binding *is* the
+                    // operand, and printing it twice on one line is noise.
+                    if let (false, Some(label)) = (view.genome_reading, &line.label) {
                         ui.label(
                             egui::RichText::new(label)
                                 .monospace()

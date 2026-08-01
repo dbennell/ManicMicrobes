@@ -310,6 +310,7 @@ you reassemble are different documents**, and the pane currently only has the se
 **Source** — what exists today. `Line::to_source()`, byte-exact, the thing the editor round-
 trips. Unchanged, still the only text the editor ever hands back.
 
+
 **Reading** — the same instructions with every template operand resolved to what it means:
 
 | op | source | reading |
@@ -329,6 +330,31 @@ function each, and both must be the VM's own search rather than a copy of it her
 same reason: a listing that says `→ 0x2f` when the VM goes somewhere else is worse than the
 binary.
 
+*Built at M10.3b, with four corrections to the above.*
+
+**`LOOPLN` does not read `n = 3`.** Its template is a backward jump target, exactly like
+`JMPB`'s — SPEC §4.3 2D is "if `LN != 0`, jump backward to complement". It is `LN` that counts,
+and `LN` is a register set by `SETLN`, nothing encoded in the operand. Reading the template's
+value as a loop count would have been a confident lie about the one thing the line does. It
+reads `LOOPLN ↺ 12`.
+
+**Offsets are decimal**, not `0x2f`. The pane's own gutter is decimal, and a target in hex
+beside a gutter in decimal makes the reader convert before they can find the line.
+
+**A miss says where it goes**, not just that it missed: `✗ falls through to 9`. Falling through
+is what the VM does with an unmatched template, and it is usually the interesting part —
+a jump that never fires is the common reason a lineage goes quiet.
+
+**The reading resolves against the genome's template table, not the disassembled line.** Where
+a template's letters are non-canonical `NOP` bytes, `disasm` deliberately reports no template
+and spells the letters out — see the losslessness note in `disasm.rs`. The VM does not read
+source, so at such a line it sees an ordinary template and jumps. Resolving the line's own
+would have printed `IMM 0` for an instruction that pushes 61.
+
+The resolution also takes the world's live `VmConfig` rather than `VmConfig::DEFAULT`, because
+M10.2 made `template_search_range` and `promoter_bind_threshold` editable mid-run: narrow the
+range and a call stops reaching its match, and the pane has to say so.
+
 The immediate is the easy one and the most common: `Template::new(n, value)` sets bit *i* for
 letter *i*, so `%001111` is `0b111100` = 60, and showing `60` is a pure function of the
 template. That one line removes most of the binary from a typical listing on its own.
@@ -345,6 +371,7 @@ template. That one line removes most of the binary from a typical listing on its
   `apply to species` pair, and applying while running is fine and stays fine — a genome
   rewritten from outside is an intervention like any other and goes on the record with them.
 - **Byte column, optional.** `to_listing` already produces offsets and hex.
+
 
 ---
 
