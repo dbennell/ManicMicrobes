@@ -261,12 +261,14 @@ fn phase_breakdown(_c: &mut Criterion) {
     let rebuild = t.elapsed() / n;
 
     let mut radii = Vec::new();
+    let mut crowding = Vec::new();
     let t = Instant::now();
     for _ in 0..n {
         std::hint::black_box(neighbours::resolve_collisions(
             world.cells_mut(),
             &index,
             &mut radii,
+            &mut crowding,
         ));
     }
     let collisions = t.elapsed() / n;

@@ -61,6 +61,22 @@ pub struct EcologyConfig {
     /// Fraction of digested carrion that becomes usable substrate, `Q10`. The rest is waste:
     /// scavenging is lossy, or a corpse would be worth more than the cell that made it.
     pub digestion_efficiency: i32,
+    /// Membrane damage a tick, per whole radius a cell is pressed into by cells it is not
+    /// joined to, `Q10`.
+    ///
+    /// Somewhere for a crowd to end. Separation resolves a fraction of each overlap per tick
+    /// and no more, so a population dividing faster than it can be pushed apart simply
+    /// interpenetrates further and further, without limit and without cost — a square of slide
+    /// would hold any number of cells given time. Nothing in the world said no.
+    ///
+    /// Now being crushed is survivable but not free: the damage goes through the same membrane
+    /// the rest of the world attacks, so a cell can pay to repair it and a crowded one spends
+    /// its energy on staying intact instead of dividing. What that buys is a real ceiling on
+    /// density, arrived at by cells dying rather than by a cap on the number of them.
+    ///
+    /// Cells joined by junctions are exempt. Tissue is *supposed* to be packed, and charging
+    /// an organism for holding itself together would make being multicellular a way to die.
+    pub crowding_damage: i32,
 }
 
 impl Default for EcologyConfig {
@@ -73,6 +89,11 @@ impl Default for EcologyConfig {
             carrion_fraction: Q10_ONE / 2,
             digestion_rate: Q10_ONE / 8,
             digestion_efficiency: (Q10_ONE * 2) / 3,
+            // A cell pressed a whole radius into its neighbours loses a sixty-fourth of a unit of
+            // membrane a tick. Against the ancestor's tolerance that is a few hundred ticks to
+            // die if it never repairs, so crowding is a pressure to be answered — by moving,
+            // by dividing less, by joining what is crushing you — rather than a wall.
+            crowding_damage: Q10_ONE / 64,
         }
     }
 }
@@ -90,6 +111,9 @@ pub struct EcologyReport {
     pub scavenged: i64,
     /// Energy spent keeping spikes extended.
     pub spike_upkeep: i64,
+    /// Membrane damage dealt by crowding, `Q10`. The measure of how much of the population is
+    /// being kept in check by having nowhere to go.
+    pub crushed: i64,
 }
 
 /// A cell's total spike extension, `0..` — zero if it has none.
@@ -160,6 +184,7 @@ pub fn step(
     cells: &mut CellArena,
     substrate: &mut Substrate,
     neighbours: &crate::neighbours::NeighbourIndex,
+    crowding: &[i32],
     config: &EcologyConfig,
     chemistry: &crate::organelle::MetabolicChemistry,
     ledger: &mut Ledger,
@@ -169,6 +194,21 @@ pub fn step(
     for i in 0..cells.capacity() {
         if !cells.occupied(i) {
             continue;
+        }
+
+        // --- being crushed ---
+        //
+        // Charged against the same membrane everything else attacks, so it is repairable and
+        // a crowded cell spends its energy staying intact instead of dividing. Scaled by the
+        // cell's own radius, because being pressed a tenth of a millimetre into a neighbour
+        // means something quite different to a large cell and a small one.
+        let pressed = crowding.get(i).copied().unwrap_or(0);
+        if pressed > 0 && config.crowding_damage > 0 {
+            let radius = crate::fixed::q10_to_pos(crate::biology::radius(cells, i)).max(1);
+            let depth = ((pressed as i64 * Q10_ONE as i64) / radius as i64).min(i32::MAX as i64);
+            let hurt = q10_scale(config.crowding_damage, depth as i32);
+            cells.damage[i] = cells.damage[i].saturating_add(hurt);
+            report.crushed = report.crushed.saturating_add(hurt as i64);
         }
 
         // --- spikes ---
@@ -392,6 +432,7 @@ mod tests {
             &mut cells,
             &mut substrate,
             &index,
+            &[],
             &EcologyConfig::default(),
             &crate::organelle::MetabolicChemistry::default(),
             &mut ledger,
@@ -424,6 +465,7 @@ mod tests {
             &mut cells,
             &mut substrate,
             &index,
+            &[],
             &EcologyConfig::default(),
             &crate::organelle::MetabolicChemistry::default(),
             &mut ledger,
@@ -448,6 +490,7 @@ mod tests {
             &mut cells,
             &mut substrate,
             &index,
+            &[],
             &EcologyConfig::default(),
             &crate::organelle::MetabolicChemistry::default(),
             &mut ledger,
@@ -475,6 +518,7 @@ mod tests {
             &mut cells,
             &mut substrate,
             &index,
+            &[],
             &EcologyConfig::default(),
             &crate::organelle::MetabolicChemistry::default(),
             &mut ledger,
@@ -504,6 +548,7 @@ mod tests {
             &mut cells,
             &mut substrate,
             &index,
+            &[],
             &EcologyConfig::default(),
             &crate::organelle::MetabolicChemistry::default(),
             &mut ledger,
@@ -530,6 +575,7 @@ mod tests {
             &mut cells,
             &mut substrate,
             &index,
+            &[],
             &EcologyConfig::default(),
             &crate::organelle::MetabolicChemistry::default(),
             &mut ledger,

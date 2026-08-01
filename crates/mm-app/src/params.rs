@@ -396,6 +396,17 @@ pub const FIELDS: &[Field] = &[
         note: "digested carrion that becomes usable substrate. The rest is waste, or a corpse \
                would be worth more than the cell that made it",
     },
+    Field {
+        path: "ecology.crowding_damage",
+        label: "crowding damage",
+        group: Group::Ecology,
+        unit: Unit::Q10,
+        note: "membrane damage a tick per whole radius a cell is pressed into by cells it is \
+               not joined to. What stops a square of slide holding any number of cells: \
+               separation only resolves part of an overlap per tick, so without this a \
+               population that divides faster than it can be pushed apart just interpenetrates \
+               for ever. Cells joined by junctions are exempt — tissue is meant to be packed",
+    },
 ];
 
 /// The prefix the metabolic pathways live under (M10.3).

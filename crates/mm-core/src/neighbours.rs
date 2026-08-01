@@ -415,6 +415,16 @@ fn reads_touch(cells: &CellArena, i: usize) -> bool {
         .any(|o| o.kind == crate::organelle::OrganelleType::TouchSensor)
 }
 
+/// Whether two cells hold a junction to each other.
+///
+/// Asked of the lower slot's list only. A junction is recorded on both ends, so one look is
+/// enough and the second would find the same answer.
+#[inline]
+fn joined(cells: &CellArena, i: usize, j: usize) -> bool {
+    let other = cells.id_at(j);
+    cells.junctions(i).iter().any(|k| k.other == other)
+}
+
 /// Distance between two cells, `POS` units.
 ///
 /// Octagonal rather than Euclidean: exact in integers, monotonic in the true distance, and
@@ -432,10 +442,17 @@ fn separation(cells: &CellArena, i: usize, j: usize) -> i32 {
 ///
 /// Returns how many pairs were separated, which is a cheap measure of how crowded the slide
 /// is and the thing to watch if a population stops growing for reasons that are not food.
+///
+/// Also records how hard each cell is being pressed, into `crowding`, in `POS`: the total
+/// overlap with cells it is *not* joined to. Measured here because this is the pass that
+/// already knows, and separation resolves only a fraction of an overlap per tick — so what is
+/// left is a real and persistent state of being crushed rather than an instant of contact.
+/// [`crate::ecology`] is what charges for it.
 pub fn resolve_collisions(
     cells: &mut CellArena,
     index: &NeighbourIndex,
     radii: &mut Vec<i32>,
+    crowding: &mut Vec<i32>,
 ) -> u32 {
     let mut separated = 0u32;
     let width = index.width;
@@ -451,6 +468,8 @@ pub fn resolve_collisions(
     // anything within *seven* squares as overlapping instead of about one and three quarters.
     // A bug since M3, found at M7 because a junction could not pull two cells closer than the
     // separation was shoving them apart.
+    crowding.clear();
+    crowding.resize(cells.capacity(), 0);
     radii.clear();
     radii.reserve(cells.capacity());
     for i in 0..cells.capacity() {
@@ -485,6 +504,17 @@ pub fn resolve_collisions(
                 continue;
             }
             let overlap = want - d;
+            // Being crushed, charged to both sides — except by whatever this cell is joined
+            // to. An organism is *meant* to hold its cells against each other, and billing it
+            // for that would make being multicellular a way to die.
+            if !joined(cells, i, j) {
+                if let Some(c) = crowding.get_mut(i) {
+                    *c = c.saturating_add(overlap);
+                }
+                if let Some(c) = crowding.get_mut(j) {
+                    *c = c.saturating_add(overlap);
+                }
+            }
             let (dx, dy) = (cells.x[i] - cells.x[j], cells.y[i] - cells.y[j]);
             // Exactly coincident cells have no line to push along, so they get a fixed
             // nudge derived from their slots — deterministic, and enough to break the tie.
@@ -655,7 +685,7 @@ mod tests {
         let mut index = NeighbourIndex::default();
         index.rebuild(&cells, 16, 16);
         let before = separation(&cells, 0, 1);
-        let n = resolve_collisions(&mut cells, &index, &mut Vec::new());
+        let n = resolve_collisions(&mut cells, &index, &mut Vec::new(), &mut Vec::new());
         assert_eq!(n, 1);
         assert!(
             separation(&cells, 0, 1) > before,
@@ -666,7 +696,10 @@ mod tests {
         let mut index2 = NeighbourIndex::default();
         index2.rebuild(&far, 16, 16);
         let positions: Vec<(i32, i32)> = far.iter().map(|i| (far.x[i], far.y[i])).collect();
-        assert_eq!(resolve_collisions(&mut far, &index2, &mut Vec::new()), 0);
+        assert_eq!(
+            resolve_collisions(&mut far, &index2, &mut Vec::new(), &mut Vec::new()),
+            0
+        );
         let after: Vec<(i32, i32)> = far.iter().map(|i| (far.x[i], far.y[i])).collect();
         assert_eq!(positions, after, "distant cells were moved");
     }
@@ -679,7 +712,7 @@ mod tests {
         let mut index = NeighbourIndex::default();
         index.rebuild(&cells, 16, 16);
         for _ in 0..20 {
-            resolve_collisions(&mut cells, &index, &mut Vec::new());
+            resolve_collisions(&mut cells, &index, &mut Vec::new(), &mut Vec::new());
             index.rebuild(&cells, 16, 16);
         }
         assert!(
@@ -694,7 +727,7 @@ mod tests {
         let mut index = NeighbourIndex::default();
         index.rebuild(&cells, 16, 16);
         for _ in 0..50 {
-            resolve_collisions(&mut cells, &index, &mut Vec::new());
+            resolve_collisions(&mut cells, &index, &mut Vec::new(), &mut Vec::new());
             index.rebuild(&cells, 16, 16);
             for i in cells.iter() {
                 assert!(cells.x[i] >= 0 && cells.x[i] < 16 * POS_ONE);
@@ -715,7 +748,7 @@ mod tests {
             let mut index = NeighbourIndex::default();
             for _ in 0..10 {
                 index.rebuild(&cells, 16, 16);
-                resolve_collisions(&mut cells, &index, &mut Vec::new());
+                resolve_collisions(&mut cells, &index, &mut Vec::new(), &mut Vec::new());
             }
             cells
                 .iter()

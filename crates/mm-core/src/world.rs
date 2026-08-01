@@ -92,6 +92,10 @@ pub struct World {
     /// Per-cell radii, reused by collision separation so it does not allocate per tick.
     /// Scratch like `scratch`: excluded from equality and from the hash.
     radii: Vec<i32>,
+    /// How hard each cell is being pressed by cells it is not joined to, `POS`, as of this
+    /// tick's separation pass. Scratch in the same sense: recomputed from positions every
+    /// tick, so it is excluded from equality and from the hash.
+    crowding: Vec<i32>,
 
     /// The population.
     cells: CellArena,
@@ -202,6 +206,7 @@ impl World {
             census: std::collections::BTreeMap::new(),
             scratch: crate::fluid::FluidScratch::new(n),
             radii: Vec::new(),
+            crowding: Vec::new(),
             cells: CellArena::new(),
             genomes: GenomePool::new(),
             biology,
@@ -513,6 +518,7 @@ impl World {
                 &mut self.cells,
                 &self.neighbours,
                 &mut self.radii,
+                &mut self.crowding,
             );
         }
 
@@ -562,6 +568,7 @@ impl World {
                 &mut self.cells,
                 &mut self.substrate,
                 &self.neighbours,
+                &self.crowding,
                 &self.biology.ecology,
                 &self.biology.metabolism.catalogue.metabolism,
                 &mut self.ledger,
