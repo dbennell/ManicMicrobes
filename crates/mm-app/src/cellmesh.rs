@@ -47,6 +47,45 @@ pub struct Shape {
     pub rounded: f32,
 }
 
+/// How many flattened sides a cell can be drawn with. Matches `mm_core::CONTACTS_PER_CELL`.
+pub const SQUASH_PER_CELL: usize = 4;
+
+/// A seam far enough out that nothing is ever cut by it.
+///
+/// Unused slots carry this rather than a flag, so the shader applies four seams unconditionally
+/// and never branches on how many a cell happens to have.
+pub const NO_SQUASH: f32 = 1.0e9;
+
+/// One flat side, as the shader wants it: a direction and how far along it the seam sits.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Squash {
+    pub nx: f32,
+    pub ny: f32,
+    /// In field units, so it is directly comparable with the outline radius.
+    pub face: f32,
+}
+
+impl Default for Squash {
+    fn default() -> Self {
+        Squash {
+            nx: 1.0,
+            ny: 0.0,
+            face: NO_SQUASH,
+        }
+    }
+}
+
+/// Two unit-vector components into one `f32`, as a pair of 16-bit snorms.
+///
+/// The seams cost two `vec4`s a vertex this way instead of three, which at fifty thousand cells
+/// is about 3 MB a frame that does not get uploaded. Sixteen bits is far more direction than a
+/// cell outline can show.
+#[must_use]
+pub fn pack_normal(nx: f32, ny: f32) -> f32 {
+    let q = |v: f32| ((v.clamp(-1.0, 1.0) * 32767.0).round() as i32 as u32) & 0xFFFF;
+    f32::from_bits(q(nx) | (q(ny) << 16))
+}
+
 /// The vertex buffers for one frame's worth of cells.
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Buffers {
@@ -54,6 +93,10 @@ pub struct Buffers {
     pub uvs: Vec<[f32; 2]>,
     pub colours: Vec<[f32; 4]>,
     pub shapes: Vec<[f32; 4]>,
+    /// The four seam directions, packed one per component. See [`pack_normal`].
+    pub squash_dirs: Vec<[f32; 4]>,
+    /// How far along each of those the seam sits.
+    pub squash_faces: Vec<[f32; 4]>,
     pub indices: Vec<u32>,
 }
 
@@ -85,6 +128,18 @@ impl Buffers {
             return;
         }
         let base = self.positions.len() as u32;
+        let dirs = [
+            pack_normal(p.squash[0].nx, p.squash[0].ny),
+            pack_normal(p.squash[1].nx, p.squash[1].ny),
+            pack_normal(p.squash[2].nx, p.squash[2].ny),
+            pack_normal(p.squash[3].nx, p.squash[3].ny),
+        ];
+        let faces = [
+            p.squash[0].face,
+            p.squash[1].face,
+            p.squash[2].face,
+            p.squash[3].face,
+        ];
         // Anticlockwise from the top left, matching the corners in `uv` — the corner is what
         // the whole signed-distance field is evaluated against, so it has to be exact.
         for (dx, dy) in [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
@@ -98,6 +153,8 @@ impl Buffers {
                 p.shape.integrity,
                 p.shape.rounded,
             ]);
+            self.squash_dirs.push(dirs);
+            self.squash_faces.push(faces);
         }
         self.indices
             .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
@@ -108,6 +165,8 @@ impl Buffers {
         self.uvs.clear();
         self.colours.clear();
         self.shapes.clear();
+        self.squash_dirs.clear();
+        self.squash_faces.clear();
         self.indices.clear();
     }
 }
@@ -127,6 +186,9 @@ pub struct Placed {
     pub half: f32,
     pub rgba: [f32; 4],
     pub shape: Shape,
+    /// The sides this blob is flattened along. Default is four seams too far out to bite, so
+    /// anything that does not care about squashing — organelles, motes — draws round.
+    pub squash: [Squash; SQUASH_PER_CELL],
 }
 
 /// Build the vertex buffers for a frame.
@@ -179,6 +241,7 @@ mod tests {
                 depth: 0.0,
                 cluster_size: 1,
                 organelles: Vec::new(),
+                squash: Vec::new(),
             })
             .collect()
     }
@@ -194,6 +257,7 @@ mod tests {
                 integrity: 1.0,
                 ..Shape::default()
             },
+            squash: Default::default(),
         })
     }
 

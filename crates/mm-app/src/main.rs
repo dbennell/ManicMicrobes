@@ -137,8 +137,9 @@ fn screenshot(
     mut commands: Commands,
     mut sim: ResMut<SlideRes>,
     mut view: ResMut<View>,
+    mut exit: MessageWriter<AppExit>,
     mut frames: Local<u32>,
-    mut done: Local<bool>,
+    mut done: Local<Option<u32>>,
 ) {
     use bevy::render::view::screenshot::{save_to_disk, Screenshot};
     *frames += 1;
@@ -164,7 +165,16 @@ fn screenshot(
     let Ok(path) = std::env::var("MM_SHOT") else {
         return;
     };
-    if *done || *frames < after {
+    // Taken, and now waiting to be written. The save is asynchronous — the observer fires when
+    // the image has come back off the GPU — so quitting the same frame would race it and
+    // produce no file. A few frames' grace, then out.
+    if let Some(taken_at) = *done {
+        if frames.saturating_sub(taken_at) > 10 {
+            exit.write(AppExit::Success);
+        }
+        return;
+    }
+    if *frames < after {
         return;
     }
     // An entity with an observer since 0.15, rather than a manager resource. Failure is the
@@ -173,7 +183,10 @@ fn screenshot(
     commands
         .spawn(Screenshot::primary_window())
         .observe(save_to_disk(path));
-    *done = true;
+    // `MM_SHOT` is a batch tool: it exists so a change can be photographed from a script, and
+    // a window that sits open afterwards waiting to be killed by a `timeout` is a window
+    // somebody has to close. It quits itself once the file is on disk.
+    *done = Some(*frames);
 }
 
 /// Put the interface into a named state, for a screenshot of it.
@@ -646,6 +659,20 @@ struct JunctionSprite(usize);
 const ATTRIBUTE_SHAPE: MeshVertexAttribute =
     MeshVertexAttribute::new("CellShape", 0x6D_6D_5F_63_65_6C_6C, VertexFormat::Float32x4);
 
+/// Which way each of a cell's four seams faces, packed two 16-bit snorms per component.
+const ATTRIBUTE_SQUASH_DIR: MeshVertexAttribute = MeshVertexAttribute::new(
+    "CellSquashDir",
+    0x6D_6D_5F_63_65_6C_6D,
+    VertexFormat::Float32x4,
+);
+
+/// How far along each of those the seam sits.
+const ATTRIBUTE_SQUASH_FACE: MeshVertexAttribute = MeshVertexAttribute::new(
+    "CellSquashFace",
+    0x6D_6D_5F_63_65_6C_6E,
+    VertexFormat::Float32x4,
+);
+
 /// Embedded at compile time rather than loaded from an `assets/` directory, so the binary runs
 /// from anywhere. The same thing `bevy_sprite` does for its own shaders.
 const CELL_SHADER: Handle<Shader> = uuid_handle!("6d6d5f63-656c-6c5f-7368-616465720001");
@@ -681,6 +708,8 @@ impl Material2d for CellMaterial {
             Mesh::ATTRIBUTE_UV_0.at_shader_location(1),
             Mesh::ATTRIBUTE_COLOR.at_shader_location(2),
             ATTRIBUTE_SHAPE.at_shader_location(3),
+            ATTRIBUTE_SQUASH_DIR.at_shader_location(4),
+            ATTRIBUTE_SQUASH_FACE.at_shader_location(5),
         ])?];
         Ok(())
     }
@@ -786,6 +815,8 @@ fn setup(
     cells.insert_attribute(Mesh::ATTRIBUTE_UV_0, Vec::<[f32; 2]>::new());
     cells.insert_attribute(Mesh::ATTRIBUTE_COLOR, Vec::<[f32; 4]>::new());
     cells.insert_attribute(ATTRIBUTE_SHAPE, Vec::<[f32; 4]>::new());
+    cells.insert_attribute(ATTRIBUTE_SQUASH_DIR, Vec::<[f32; 4]>::new());
+    cells.insert_attribute(ATTRIBUTE_SQUASH_FACE, Vec::<[f32; 4]>::new());
     cells.insert_indices(Indices::U32(Vec::new()));
     commands.spawn((
         CellMesh,
@@ -1346,6 +1377,7 @@ fn redraw(
                 integrity: 1.0,
                 rounded: if view.rounded { 1.0 } else { 0.0 },
             },
+            squash: squash_of(dot),
         })
     });
     // Organelles, into the same buffers and therefore the same draw call, at the tiers that
@@ -1379,6 +1411,10 @@ fn redraw(
                         integrity: 1.0,
                         rounded: if view.rounded { 1.0 } else { 0.0 },
                     },
+                    // Organelles are not squashed. They sit inside a cell that may be, and a
+                    // nucleus flattening against the neighbouring *cell* would be drawing a
+                    // constraint the simulation does not have.
+                    squash: Default::default(),
                 });
             }
         }
@@ -1400,6 +1436,8 @@ fn redraw(
         mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, buffers.uvs.clone());
         mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, buffers.colours.clone());
         mesh.insert_attribute(ATTRIBUTE_SHAPE, buffers.shapes.clone());
+        mesh.insert_attribute(ATTRIBUTE_SQUASH_DIR, buffers.squash_dirs.clone());
+        mesh.insert_attribute(ATTRIBUTE_SQUASH_FACE, buffers.squash_faces.clone());
         mesh.insert_indices(Indices::U32(buffers.indices.clone()));
     }
 
@@ -1962,6 +2000,24 @@ fn drawer(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
                 Panel::Cell | Panel::Metrics | Panel::Legend => {}
             }
         });
+}
+
+/// A cell's flattened sides, as the mesh wants them.
+///
+/// The seam distances arrive as a fraction of the cell's own radius, which is what makes them
+/// independent of how big it is drawn; the shader works in field units where the body radius is
+/// `FIELD_FILL`, so that is the one conversion. Slots the cell does not use are left at the
+/// default, which is a seam nothing can reach.
+fn squash_of(dot: &mm_app::CellDot) -> [cellmesh::Squash; cellmesh::SQUASH_PER_CELL] {
+    let mut out = [cellmesh::Squash::default(); cellmesh::SQUASH_PER_CELL];
+    for (slot, s) in out.iter_mut().zip(dot.squash.iter()) {
+        *slot = cellmesh::Squash {
+            nx: s.nx,
+            ny: s.ny,
+            face: s.face,
+        };
+    }
+    out
 }
 
 /// One run of a genome listing, in the pane's monospace.

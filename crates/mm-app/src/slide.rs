@@ -49,6 +49,64 @@ pub struct CellDot {
     /// How many cells are in this one's organism, over hard junctions (M7). One means a
     /// solitary cell.
     pub cluster_size: u32,
+    /// Where this cell is flattened by the neighbours it is pressed into.
+    ///
+    /// Empty below [`Lod::Organelles`], like `organelles`: a cell a few pixels across cannot
+    /// show a flattened side, and building the list for fifty thousand of them would be work
+    /// with nothing to show for it.
+    pub squash: Vec<Squash>,
+}
+
+/// One flat face where a cell is pressed into a neighbour.
+///
+/// A plane rather than a bite taken out: two cells that overlap should meet along one seam,
+/// with no gap and no doubled edge, and both of them have to agree where it is without talking
+/// to each other. The plane through the two points where their outlines cross is the one
+/// choice that satisfies that from either side — it depends only on the two centres and the
+/// two radii, so each cell computes the same seam independently.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Squash {
+    /// Unit vector from this cell's centre towards the neighbour.
+    pub nx: f32,
+    pub ny: f32,
+    /// How far along it the seam sits, as a fraction of this cell's own radius. Less than one
+    /// means the cell is genuinely cut into; a big neighbour can push this below zero and take
+    /// a bite past the centre, which is what being engulfed looks like.
+    pub face: f32,
+}
+
+/// The seams a cell is flattened along, from the neighbours pressing on it.
+fn squash_of(world: &World, i: usize, radius: f32) -> Vec<Squash> {
+    if radius <= 0.0 {
+        return Vec::new();
+    }
+    let scale = 1.0 / POS_ONE as f32;
+    world
+        .neighbours()
+        .contacts(world.cells(), i)
+        .as_slice()
+        .iter()
+        .filter_map(|c| {
+            let (dx, dy) = (c.dx as f32 * scale, c.dy as f32 * scale);
+            let d = (dx * dx + dy * dy).sqrt();
+            // Exactly coincident centres have no direction to be squashed along. Separation
+            // will pull them apart next tick; until then they are simply drawn whole.
+            if d <= f32::EPSILON {
+                return None;
+            }
+            let other = c.radius as f32 * scale;
+            // The plane through the two points where the outlines cross:
+            //   face = (d² + r² - other²) / 2d
+            // Both cells get the same seam from their own side, because swapping r and other
+            // and measuring from the far centre gives d minus this.
+            let face = (d * d + radius * radius - other * other) / (2.0 * d);
+            Some(Squash {
+                nx: dx / d,
+                ny: dy / d,
+                face: face / radius,
+            })
+        })
+        .collect()
 }
 
 /// One organelle, as it is drawn inside its cell.
@@ -441,6 +499,11 @@ impl Slide {
                         Vec::new()
                     },
                     cluster_size: components.size_of(i),
+                    squash: if detailed {
+                        squash_of(&self.world, i, radius)
+                    } else {
+                        Vec::new()
+                    },
                 }
             })
             .collect();

@@ -230,6 +230,44 @@ impl NeighbourIndex {
         self.radii = radii;
     }
 
+    /// Which neighbours a cell is overlapping, deepest first.
+    ///
+    /// The same walk the touch sensor makes, asking a different question: not "how crowded am
+    /// I" but "who exactly is pushing on me, and from where". Separation has already resolved
+    /// what it is going to this tick, so an overlap left here is one the solver allowed —
+    /// which is precisely the squash worth drawing.
+    ///
+    /// Not gathered up front like [`Self::gather_touch`], because only the cells actually on
+    /// screen need it and the renderer knows which those are.
+    #[must_use]
+    pub fn contacts(&self, cells: &CellArena, i: usize) -> ContactSet {
+        let mut out = ContactSet::default();
+        if !cells.occupied(i) {
+            return out;
+        }
+        let sx = pos_to_square(cells.x[i]);
+        let sy = pos_to_square(cells.y[i]);
+        let ri = crate::fixed::q10_to_pos(crate::biology::radius(cells, i));
+        for j in self.around(sx, sy) {
+            if j == i || !cells.occupied(j) {
+                continue;
+            }
+            let rj = crate::fixed::q10_to_pos(crate::biology::radius(cells, j));
+            let d = separation(cells, i, j);
+            let overlap = ri.saturating_add(rj).saturating_sub(d);
+            if overlap <= 0 {
+                continue;
+            }
+            out.offer(Contact {
+                dx: cells.x[j].saturating_sub(cells.x[i]),
+                dy: cells.y[j].saturating_sub(cells.y[i]),
+                radius: rj,
+                overlap,
+            });
+        }
+        out
+    }
+
     /// One cell's touch reading: from the gathered table when it is there, by walking when not.
     #[must_use]
     pub fn touch(&self, cells: &CellArena, i: usize) -> TouchReading {
@@ -237,6 +275,58 @@ impl NeighbourIndex {
             Some(reading) => reading,
             None => touch_reading(cells, self, i),
         }
+    }
+}
+
+/// How many neighbours a cell is reported as pressed against.
+///
+/// Four, like junctions. A cell with more than four neighbours deep enough to change its
+/// outline has them behind one another, and the fifth stops making a visible difference.
+pub const CONTACTS_PER_CELL: usize = 4;
+
+/// A neighbour a cell is overlapping, for whoever draws it.
+///
+/// Facts, not presentation: which way the neighbour lies, how far, and how big it is. Where to
+/// put the seam between two cells squashed together is a question about how it should *look*,
+/// which belongs in `mm-app` and needs floats to answer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Contact {
+    /// Offset from this cell's centre to the neighbour's, `POS`.
+    pub dx: i32,
+    pub dy: i32,
+    /// The neighbour's radius, `POS`.
+    pub radius: i32,
+    /// How far the two have been pushed into each other, `POS`. Always positive.
+    pub overlap: i32,
+}
+
+/// The neighbours pressing on one cell, deepest first.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct ContactSet {
+    found: [Contact; CONTACTS_PER_CELL],
+    len: usize,
+}
+
+impl ContactSet {
+    /// Keep this one if it is deeper than something already held.
+    fn offer(&mut self, c: Contact) {
+        let mut at = self.len.min(CONTACTS_PER_CELL);
+        // Ordered by depth, so the shallowest falls off the end when a deeper one arrives.
+        while at > 0 && self.found[at - 1].overlap < c.overlap {
+            if at < CONTACTS_PER_CELL {
+                self.found[at] = self.found[at - 1];
+            }
+            at -= 1;
+        }
+        if at < CONTACTS_PER_CELL {
+            self.found[at] = c;
+            self.len = (self.len + 1).min(CONTACTS_PER_CELL);
+        }
+    }
+
+    #[must_use]
+    pub fn as_slice(&self) -> &[Contact] {
+        self.found.get(..self.len).unwrap_or(&[])
     }
 }
 

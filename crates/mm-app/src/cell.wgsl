@@ -25,6 +25,11 @@ struct Vertex {
     // w: > 0.5 when the SDF is wanted at all; below that the cell is drawn as a plain quad,
     //    which is what "rounded cells: off" gets and is exactly the pre-M10.5 look.
     @location(3) shape: vec4<f32>,
+    // Four seams where this cell is squashed against a neighbour, one per component: the
+    // direction packed as a pair of 16-bit snorms, and how far along it the seam sits.
+    // Unused slots carry a distance nothing can reach, so there is no count to branch on.
+    @location(4) squash_dir: vec4<f32>,
+    @location(5) squash_face: vec4<f32>,
 };
 
 struct Output {
@@ -32,6 +37,8 @@ struct Output {
     @location(0) uv: vec2<f32>,
     @location(1) colour: vec4<f32>,
     @location(2) shape: vec4<f32>,
+    @location(3) squash_dir: vec4<f32>,
+    @location(4) squash_face: vec4<f32>,
 };
 
 @vertex
@@ -46,6 +53,8 @@ fn vertex(vertex: Vertex) -> Output {
     out.uv = vertex.uv;
     out.colour = vertex.colour;
     out.shape = vertex.shape;
+    out.squash_dir = vertex.squash_dir;
+    out.squash_face = vertex.squash_face;
     return out;
 }
 
@@ -110,7 +119,32 @@ fn fragment(in: Output) -> @location(0) vec4<f32> {
     // population a mix of squares and blobs depending on how big each one happened to be,
     // which read as two renderers fighting.
     let edge = min(fwidth(r) * 1.5 + softness, radius * 0.35);
-    let alpha = 1.0 - smoothstep(radius - edge, radius + edge, r);
+
+    // --- where the neighbours press in ---
+    //
+    // The outline so far is a distance from the edge: negative inside, zero on it. Each seam
+    // is a half-plane the cell may not cross, and `max` against it is the intersection — so a
+    // cell pressed between two others comes out with two flat sides and round everywhere else,
+    // which is what a crowd of them actually looks like down a microscope.
+    //
+    // A plane rather than the neighbour's own outline subtracted. Both cells compute the same
+    // seam from their own side (see `slide::Squash`), so they meet along one line with no gap
+    // and no doubled edge — neither of them has to know what the other decided.
+    //
+    // Four unconditionally: the unused ones carry a distance no pixel of this quad can reach,
+    // which is cheaper than branching on a count in a fragment shader.
+    var field = r - radius;
+    let faces = in.squash_face * 0.65;
+    let d0 = unpack2x16snorm(bitcast<u32>(in.squash_dir.x));
+    let d1 = unpack2x16snorm(bitcast<u32>(in.squash_dir.y));
+    let d2 = unpack2x16snorm(bitcast<u32>(in.squash_dir.z));
+    let d3 = unpack2x16snorm(bitcast<u32>(in.squash_dir.w));
+    field = max(field, dot(p, d0) - faces.x);
+    field = max(field, dot(p, d1) - faces.y);
+    field = max(field, dot(p, d2) - faces.z);
+    field = max(field, dot(p, d3) - faces.w);
+
+    let alpha = 1.0 - smoothstep(-edge, edge, field);
     if (alpha <= 0.001) {
         discard;
     }

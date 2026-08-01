@@ -666,6 +666,18 @@ impl World {
         self.ledger.set_energy_baseline(stored);
     }
 
+    /// Who is next to whom, as of the last time anything moved.
+    ///
+    /// Exposed so the renderer can ask which neighbours a cell is squashed against without
+    /// walking the population itself. Read-only, like everything else the front end gets: the
+    /// index is derived from positions and rebuilt by the tick, so there is nothing here to
+    /// write back through.
+    #[inline]
+    #[must_use]
+    pub fn neighbours(&self) -> &crate::neighbours::NeighbourIndex {
+        &self.neighbours
+    }
+
     #[inline]
     #[must_use]
     pub fn cells(&self) -> &CellArena {
