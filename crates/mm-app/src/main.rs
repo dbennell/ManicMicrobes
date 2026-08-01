@@ -1256,17 +1256,32 @@ fn redraw(
         let selected = sim.selected == Some(dot.id);
         let [r, g, b] = dot.rgb;
         let tint = if selected { 1.0 } else { dim * focus };
-        let body = (dot.radius * 2.0 * scale + blur).max(if selected { 4.0 } else { 1.5 });
+        // The cell at the size the simulation says, and *not* inflated by the blur.
+        //
+        // Inflating it was inherited from the sprite era, where a defocused cell was drawn
+        // bigger and fainter because a texture cannot be blurred. The shader blurs the outline
+        // properly now, so the only thing the inflation still did was leave a small blob inside
+        // a large quad with the fade filling the gap — which at whole-slide zoom drew a square
+        // halo round every cell and made the population look like squares.
+        //
+        // A selected cell gets a floor big enough to find in a crowd of six hundred, which is
+        // the crowd you are in when you have lost it.
+        let body = (dot.radius * 2.0 * scale).max(if selected { 12.0 } else { 1.5 });
         Some(cellmesh::Placed {
             x: at.x,
             y: at.y,
-            half: body / 2.0,
+            // The field fills part of its quad — the margin is what the outline wobbles into
+            // and what the fade needs — so the quad is grossed up to make the *body* the size
+            // asked for.
+            half: body / (2.0 * cellmesh::FIELD_FILL),
             rgba: [r * tint, g * tint, b * tint, focus.max(0.25)],
             shape: cellmesh::Shape {
                 seed: cellmesh::seed_of(dot.id.ordering_key()),
-                // In the field's own units, where 1 is the cell's radius — so a defocused cell
-                // is soft by the same *fraction* however big it is drawn.
-                softness: (blur / body.max(1.0)).clamp(0.0, 0.6),
+                // In the field's own units, where 1 is the cell's radius, so a defocused cell
+                // is soft by the same *fraction* however big it is drawn. Bounded well below
+                // the radius: past about a quarter the fade reaches the quad's corners and the
+                // cell stops being a cell.
+                softness: (blur / body.max(1.0)).clamp(0.0, 0.25),
                 integrity: 1.0,
                 rounded: if view.rounded { 1.0 } else { 0.0 },
             },
@@ -1288,7 +1303,7 @@ fn redraw(
                 art_handles.cells.push(cellmesh::Placed {
                     x: at.x,
                     y: at.y,
-                    half: size / 2.0,
+                    half: size / (2.0 * cellmesh::FIELD_FILL),
                     rgba: [r * tint, g * tint, b * tint, 1.0],
                     shape: cellmesh::Shape {
                         // Its own outline, from its slot and its cell — so the inside of a cell

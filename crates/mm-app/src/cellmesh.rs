@@ -143,6 +143,16 @@ pub fn build(into: &mut Buffers, cells: &[CellDot], place: impl Fn(&CellDot) -> 
     }
 }
 
+/// How much of its quad the signed-distance field fills, at rest.
+///
+/// The quad has to hold the outline *and* the fade around it, and the outline is not a circle:
+/// three harmonics of wobble can push it out by a fifth. At the 0.82 the baked atlas used, a
+/// big-wobble cell reached 0.98 of the quad and its fade ran off the corners — which drew a
+/// square halo round the cell and, at whole-slide zoom, made the whole population look square.
+///
+/// `cell.wgsl` hard-codes the same number. If one moves, the other must.
+pub const FIELD_FILL: f32 = 0.65;
+
 /// A cell's seed, as the shader wants it.
 ///
 /// From the cell's identity, so its outline is fixed for life — an outline that changed frame to

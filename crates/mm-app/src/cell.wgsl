@@ -93,14 +93,23 @@ fn fragment(in: Output) -> @location(0) vec4<f32> {
     // thing the baked version could not do at all because the shape was fixed before the cell
     // existed.
     let wear = (1.0 - integrity) * 0.09 * sin(11.0 * theta + hash11(seed + 23.0) * 6.2831853);
-    let radius = (1.0 - 0.18) * (1.0 + wobble + wear);
+    // 0.65 is `cellmesh::FIELD_FILL` and the two must agree. The margin is not slack: the
+    // wobble adds up to a fifth, and the fade needs room outside that or it runs off the
+    // quad's corners and the cell is drawn as a square.
+    let radius = 0.65 * (1.0 + wobble + wear);
 
     // --- the edge ---
     //
     // `fwidth` is one pixel in this field's units, so the fade is a pixel wide however far the
     // cell is zoomed — which is the whole reason this is worth doing per pixel. Widened by the
     // defocus, so depth of field is a genuinely softer outline rather than a fainter square.
-    let edge = fwidth(r) * 1.5 + softness;
+    //
+    // Capped, and the cap is not a nicety. A cell four pixels across has `fwidth(r)` of about
+    // a half, so the fade spans the entire quad and the smoothstep never reaches zero before
+    // the corner — the cell renders as a soft *square*. At whole-slide zoom that made the
+    // population a mix of squares and blobs depending on how big each one happened to be,
+    // which read as two renderers fighting.
+    let edge = min(fwidth(r) * 1.5 + softness, radius * 0.35);
     let alpha = 1.0 - smoothstep(radius - edge, radius + edge, r);
     if (alpha <= 0.001) {
         discard;
