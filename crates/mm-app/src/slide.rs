@@ -49,6 +49,9 @@ pub struct CellDot {
     /// How many cells are in this one's organism, over hard junctions (M7). One means a
     /// solitary cell.
     pub cluster_size: u32,
+    /// How long this cell has existed, in ticks. Only the first few matter to the renderer,
+    /// which uses them to swell a newborn into place rather than have it appear whole.
+    pub age: u32,
     /// Where this cell is flattened by the neighbours it is pressed into.
     ///
     /// Empty below [`Lod::Organelles`], like `organelles`: a cell a few pixels across cannot
@@ -546,6 +549,7 @@ impl Slide {
                         Vec::new()
                     },
                     cluster_size: components.size_of(i),
+                    age: cells.age[i],
                     squash: if detailed {
                         squash_of(&self.world, i, radius * PACKING)
                     } else {

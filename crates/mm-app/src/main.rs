@@ -687,14 +687,17 @@ const ATTRIBUTE_SQUASH_FACE: MeshVertexAttribute = MeshVertexAttribute::new(
     VertexFormat::Float32x4,
 );
 
-/// The last two seams, direction and distance together: `(dir4, dir5, face4, face5)`.
-///
-/// Six of them fit in three `vec4`s because the pair left over from each of the other two
-/// exactly fills this one. A fourth attribute would be about 3 MB a frame at fifty thousand
-/// cells to carry two floats.
-const ATTRIBUTE_SQUASH_TAIL: MeshVertexAttribute = MeshVertexAttribute::new(
-    "CellSquashTail",
+/// Seam directions 4..7.
+const ATTRIBUTE_SQUASH_DIR2: MeshVertexAttribute = MeshVertexAttribute::new(
+    "CellSquashDir2",
     0x6D_6D_5F_63_65_6C_6F,
+    VertexFormat::Float32x4,
+);
+
+/// How far along seams 4..7 they sit.
+const ATTRIBUTE_SQUASH_FACE2: MeshVertexAttribute = MeshVertexAttribute::new(
+    "CellSquashFace2",
+    0x6D_6D_5F_63_65_6C_70,
     VertexFormat::Float32x4,
 );
 
@@ -735,7 +738,8 @@ impl Material2d for CellMaterial {
             ATTRIBUTE_SHAPE.at_shader_location(3),
             ATTRIBUTE_SQUASH_DIR.at_shader_location(4),
             ATTRIBUTE_SQUASH_FACE.at_shader_location(5),
-            ATTRIBUTE_SQUASH_TAIL.at_shader_location(6),
+            ATTRIBUTE_SQUASH_DIR2.at_shader_location(6),
+            ATTRIBUTE_SQUASH_FACE2.at_shader_location(7),
         ])?];
         Ok(())
     }
@@ -843,7 +847,8 @@ fn setup(
     cells.insert_attribute(ATTRIBUTE_SHAPE, Vec::<[f32; 4]>::new());
     cells.insert_attribute(ATTRIBUTE_SQUASH_DIR, Vec::<[f32; 4]>::new());
     cells.insert_attribute(ATTRIBUTE_SQUASH_FACE, Vec::<[f32; 4]>::new());
-    cells.insert_attribute(ATTRIBUTE_SQUASH_TAIL, Vec::<[f32; 4]>::new());
+    cells.insert_attribute(ATTRIBUTE_SQUASH_DIR2, Vec::<[f32; 4]>::new());
+    cells.insert_attribute(ATTRIBUTE_SQUASH_FACE2, Vec::<[f32; 4]>::new());
     cells.insert_indices(Indices::U32(Vec::new()));
     commands.spawn((
         CellMesh,
@@ -1378,6 +1383,22 @@ fn redraw(
         let selected = sim.selected == Some(dot.id);
         let [r, g, b] = dot.rgb;
         let tint = if selected { 1.0 } else { dim * focus };
+        // Newly divided cells swell into place over their first few ticks rather than
+        // appearing at full size.
+        //
+        // A daughter arrives with its adult radius already — mass is conserved and split at
+        // the moment of division, so there is no growing-up for the simulation to represent —
+        // and popping into existence at full width is the single most jarring thing a crowd
+        // does. It also shoves its neighbours' seams sideways in one frame, which reads as the
+        // whole neighbourhood flinching.
+        //
+        // Presentation only, and deliberately short: eight ticks, about an eighth of a second
+        // at 1x. Long enough to be a movement rather than a jump, short enough that a cell is
+        // never drawn much smaller than it really is — which would be lying about how crowded
+        // the slide is.
+        let newborn = (dot.age as f32 / 8.0).clamp(0.0, 1.0);
+        // Eased, so it arrives rather than stops.
+        let swell = 0.35 + 0.65 * newborn * (2.0 - newborn);
         // The cell at the size the simulation says, and *not* inflated by the blur.
         //
         // Inflating it was inherited from the sprite era, where a defocused cell was drawn
@@ -1391,8 +1412,11 @@ fn redraw(
         // Drawn a fifth larger than the simulation's radius, and cut back by the seams where
         // a neighbour is in the way — see `slide::PACKING`. Cells rest at exactly touching,
         // and touching circles leave a hole between every three of them.
-        let body =
-            (dot.radius * 2.0 * scale * slide::PACKING).max(if selected { 12.0 } else { 1.5 });
+        let body = (dot.radius * 2.0 * scale * slide::PACKING * swell).max(if selected {
+            12.0
+        } else {
+            1.5
+        });
         Some(cellmesh::Placed {
             x: at.x,
             y: at.y,
@@ -1485,7 +1509,8 @@ fn redraw(
         mesh.insert_attribute(ATTRIBUTE_SHAPE, buffers.shapes.clone());
         mesh.insert_attribute(ATTRIBUTE_SQUASH_DIR, buffers.squash_dirs.clone());
         mesh.insert_attribute(ATTRIBUTE_SQUASH_FACE, buffers.squash_faces.clone());
-        mesh.insert_attribute(ATTRIBUTE_SQUASH_TAIL, buffers.squash_tail.clone());
+        mesh.insert_attribute(ATTRIBUTE_SQUASH_DIR2, buffers.squash_dirs2.clone());
+        mesh.insert_attribute(ATTRIBUTE_SQUASH_FACE2, buffers.squash_faces2.clone());
         mesh.insert_indices(Indices::U32(buffers.indices.clone()));
     }
 

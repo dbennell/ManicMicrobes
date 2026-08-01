@@ -48,7 +48,7 @@ pub struct Shape {
 }
 
 /// How many flattened sides a cell can be drawn with. Matches `mm_core::CONTACTS_PER_CELL`.
-pub const SQUASH_PER_CELL: usize = 6;
+pub const SQUASH_PER_CELL: usize = 8;
 
 /// A seam far enough out that nothing is ever cut by it.
 ///
@@ -104,11 +104,10 @@ pub struct Buffers {
     pub squash_dirs: Vec<[f32; 4]>,
     /// How far along seams 0..3 they sit.
     pub squash_faces: Vec<[f32; 4]>,
-    /// The last two of each, sharing one attribute: `(dir4, dir5, face4, face5)`.
-    ///
-    /// Six seams in three `vec4`s rather than four, because the pair left over from each of the
-    /// other two fits exactly. At fifty thousand cells a wasted attribute is about 3 MB a frame.
-    pub squash_tail: Vec<[f32; 4]>,
+    /// Seam directions 4..7.
+    pub squash_dirs2: Vec<[f32; 4]>,
+    /// How far along seams 4..7 they sit.
+    pub squash_faces2: Vec<[f32; 4]>,
     pub indices: Vec<u32>,
 }
 
@@ -152,11 +151,17 @@ impl Buffers {
             p.squash[2].face,
             p.squash[3].face,
         ];
-        let tail = [
+        let dirs2 = [
             pack_normal(p.squash[4].nx, p.squash[4].ny),
             pack_normal(p.squash[5].nx, p.squash[5].ny),
+            pack_normal(p.squash[6].nx, p.squash[6].ny),
+            pack_normal(p.squash[7].nx, p.squash[7].ny),
+        ];
+        let faces2 = [
             p.squash[4].face,
             p.squash[5].face,
+            p.squash[6].face,
+            p.squash[7].face,
         ];
         // Anticlockwise from the top left, matching the corners in `uv` — the corner is what
         // the whole signed-distance field is evaluated against, so it has to be exact.
@@ -173,7 +178,8 @@ impl Buffers {
             ]);
             self.squash_dirs.push(dirs);
             self.squash_faces.push(faces);
-            self.squash_tail.push(tail);
+            self.squash_dirs2.push(dirs2);
+            self.squash_faces2.push(faces2);
         }
         self.indices
             .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
@@ -186,7 +192,8 @@ impl Buffers {
         self.shapes.clear();
         self.squash_dirs.clear();
         self.squash_faces.clear();
-        self.squash_tail.clear();
+        self.squash_dirs2.clear();
+        self.squash_faces2.clear();
         self.indices.clear();
     }
 }
@@ -260,6 +267,7 @@ mod tests {
                 rgb: [1.0, 1.0, 1.0],
                 depth: 0.0,
                 cluster_size: 1,
+                age: 1_000,
                 organelles: Vec::new(),
                 squash: Vec::new(),
             })

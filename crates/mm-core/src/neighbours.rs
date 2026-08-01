@@ -292,11 +292,15 @@ impl NeighbourIndex {
 
 /// How many neighbours a cell is reported as pressed against.
 ///
-/// Six, which is how many a cell has when a monolayer packs as tightly as it can — the
-/// hexagonal arrangement circles of a similar size fall into under pressure. Four could not
-/// express that shape at all: it could flatten a cell on four sides and left the other two
-/// bulging through whatever was there.
-pub const CONTACTS_PER_CELL: usize = 6;
+/// Eight, which is more than a cell in a monolayer ever has.
+///
+/// Six is the number a packing of similar circles settles on, so eight is headroom — and
+/// headroom is the whole point, because the cap binding is what breaks the picture. Two cells
+/// only meet along one wall if *both* of them cut against the other, and a cell that has run
+/// out of slots stops cutting for somebody who is still cutting for it. The result is one cell
+/// laid over another with no shared wall at all, which is precisely what a crowd should never
+/// look like. Cheaper to never reach the limit than to be clever about which contact to drop.
+pub const CONTACTS_PER_CELL: usize = 8;
 
 /// A neighbour a cell is overlapping, for whoever draws it.
 ///
@@ -330,50 +334,21 @@ pub struct ContactSet {
     len: usize,
 }
 
-/// Whether two neighbours lie in close enough to the same direction that the nearer one hides
-/// the other.
-///
-/// About forty degrees, which is inside the sixty a hexagonal packing leaves between real
-/// neighbours — so the six that matter all survive and only genuine duplicates merge.
-///
-/// Integers throughout: `cos t > 0.77` is `dot² * 1000 > |a|²|b|² * 593`, and contact offsets
-/// are a couple of radii at most so the squares stay well inside `i64`.
-fn same_side(a: &Contact, b: &Contact) -> bool {
-    let dot = (a.dx as i64) * (b.dx as i64) + (a.dy as i64) * (b.dy as i64);
-    if dot <= 0 {
-        return false;
-    }
-    let la = (a.dx as i64) * (a.dx as i64) + (a.dy as i64) * (a.dy as i64);
-    let lb = (b.dx as i64) * (b.dx as i64) + (b.dy as i64) * (b.dy as i64);
-    dot.saturating_mul(dot).saturating_mul(1000) > la.saturating_mul(lb).saturating_mul(593)
-}
-
 impl ContactSet {
-    /// Keep this one if it is worth a slot.
+    /// Keep this one, and the deepest if there is no room.
     ///
-    /// Two rules, and the second is the one that matters. Deeper beats shallower when the set
-    /// is full — obviously. But *before* that, a neighbour lying in nearly the same direction
-    /// as one already held replaces it or is dropped, rather than taking a slot of its own.
+    /// Every neighbour within reach earns a slot while there are slots, and that plainness is
+    /// deliberate. An earlier version merged neighbours lying in nearly the same direction, on
+    /// the reasoning that the nearer one's seam hides the far one's. It does — for that cell.
+    /// But the merge is decided from one side only, so the cell doing the merging stops
+    /// cutting against a neighbour that is still cutting against it, and the two no longer
+    /// agree where their wall is. One is drawn straight over the other with no shared edge,
+    /// which looks exactly like the overlapping this whole mechanism exists to remove.
     ///
-    /// Because it is hidden: the nearer of two neighbours on the same side cuts first and the
-    /// far one's seam never shows. Keeping both spends a slot on an invisible seam and pushes
-    /// out a real one from a direction that has none — which is how a cell in a crowd ends up
-    /// flattened on four sides and bulging through its neighbours on the other two.
-    ///
-    /// And because it flickers. Which of two contenders is "deepest" swaps as cells jostle, so
-    /// a set chosen purely by depth is reshuffled every frame and the seams jump between
-    /// planes — edges visibly fighting on a world that is running, and perfectly still on one
-    /// that is paused. Choosing by direction first makes the set the *shape* of the
-    /// neighbourhood, which changes only when the neighbourhood does.
+    /// Two cells meet along one wall only if both cut for the other. Anything that decides
+    /// per-cell which contacts to keep can break that; the only safe cap is one high enough
+    /// never to be reached.
     fn offer(&mut self, c: Contact) {
-        for held in self.found.iter_mut().take(self.len) {
-            if same_side(held, &c) {
-                if c.overlap > held.overlap {
-                    *held = c;
-                }
-                return;
-            }
-        }
         if self.len < CONTACTS_PER_CELL {
             self.found[self.len] = c;
             self.len += 1;
@@ -687,28 +662,17 @@ mod tests {
     }
 
     #[test]
-    fn a_neighbour_behind_another_does_not_take_a_slot() {
-        // Two cells on the same side: the nearer one's seam cuts first and the far one never
-        // shows, so keeping both spends a slot on nothing and pushes out a direction that has
-        // no seam at all.
+    fn every_neighbour_within_reach_keeps_its_own_seam() {
+        // No merging, no cleverness: two cells share a wall only if both cut against the
+        // other, and anything that drops a contact from one side alone breaks that.
         let mut set = ContactSet::default();
         set.offer(contact(100, 0, 40));
         set.offer(contact(105, 8, 10));
-        assert_eq!(set.as_slice().len(), 1, "the hidden one took a slot");
-        assert_eq!(set.as_slice()[0].overlap, 40, "the wrong one was kept");
-
-        // And the deeper one wins whichever order they arrive in.
-        let mut set = ContactSet::default();
-        set.offer(contact(105, 8, 10));
-        set.offer(contact(100, 0, 40));
-        assert_eq!(set.as_slice().len(), 1);
-        assert_eq!(set.as_slice()[0].overlap, 40, "arrival order decided it");
+        assert_eq!(set.as_slice().len(), 2, "a contact was merged away");
     }
 
     #[test]
     fn the_six_directions_of_a_hexagonal_packing_all_survive() {
-        // Sixty degrees apart, which is how a monolayer of similar cells packs. All six are
-        // real seams and none of them may be merged into another.
         let mut set = ContactSet::default();
         let r = 1000.0f64;
         for k in 0..6 {
@@ -727,20 +691,21 @@ mod tests {
     }
 
     #[test]
-    fn a_seventh_neighbour_replaces_only_a_shallower_one() {
+    fn past_the_cap_the_deepest_are_kept() {
         let mut set = ContactSet::default();
-        let r = 1000.0f64;
-        for k in 0..6 {
-            let a = std::f64::consts::TAU * k as f64 / 6.0;
-            set.offer(contact((r * a.cos()) as i32, (r * a.sin()) as i32, 50));
+        for k in 0..CONTACTS_PER_CELL {
+            set.offer(contact(1000, k as i32 * 7, 50));
         }
-        // Between two of them, so it is nobody's duplicate, and shallower than all of them.
-        let a = std::f64::consts::TAU / 12.0;
-        set.offer(contact((r * a.cos()) as i32, (r * a.sin()) as i32, 5));
-        assert_eq!(set.as_slice().len(), 6);
+        set.offer(contact(1000, 99, 5));
+        assert_eq!(set.as_slice().len(), CONTACTS_PER_CELL);
         assert!(
             set.as_slice().iter().all(|c| c.overlap == 50),
             "a shallower newcomer displaced a deeper seam"
+        );
+        set.offer(contact(1000, 99, 500));
+        assert!(
+            set.as_slice().iter().any(|c| c.overlap == 500),
+            "a deeper newcomer was refused"
         );
     }
 
