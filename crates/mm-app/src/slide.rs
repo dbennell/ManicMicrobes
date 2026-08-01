@@ -58,6 +58,9 @@ pub struct CellDot {
     /// show a flattened side, and building the list for fifty thousand of them would be work
     /// with nothing to show for it.
     pub squash: Vec<Squash>,
+    /// How much larger than [`PACKING`] this cell is drawn so that its clipped outline still
+    /// encloses the area it has. See [`area_swell`]. One for a cell nothing is pressing on.
+    pub area_swell: f32,
 }
 
 /// One flat face where a cell is pressed into a neighbour.
@@ -95,10 +98,28 @@ pub struct Squash {
 /// This changes nothing but the picture. Collision, sensing, junction reach and everything else
 /// use the radius `mm-core` reports; this is the last step before the mesh, and the amount is a
 /// judgement about how a crowd should look rather than a measurement of anything.
-pub const PACKING: f32 = 1.2;
+pub const PACKING: f32 = 1.15;
 
-/// [`PACKING`] as the permille reach `mm_core::NeighbourIndex::contacts` wants.
-const PACKING_PERMILLE: i32 = 1200;
+/// How far out to look for neighbours, in permille of the two physical radii.
+///
+/// [`PACKING`] **times [`MAX_SWELL`]**, which is the part that was missing. A cell is drawn at
+/// `PACKING * area_swell` times its physical radius, so two cells can be far enough apart to be
+/// no contact at all by the `PACKING` measure and still have their *drawn* outlines overlap once
+/// both have swollen. Such a pair gets no seam, so neither cuts the other, and they are drawn one
+/// lying over the other with the lower one's outline running on behind — which is precisely the
+/// overlapping that survived every other fix.
+///
+/// The rule is that the search radius has to cover the largest a cell can ever be drawn, not the
+/// size it usually is — and with margin. At exactly `PACKING * MAX_SWELL` (1.219) the seam
+/// appears at 1.220 and the drawn outlines meet at 1.219, a gap of one part in a thousand, which
+/// is inside the quantisation of an integer position. A pair sitting on that distance is drawn
+/// overlapping with no seam on one frame and sharing a wall on the next, which is exactly what
+/// two cells flicking back and forth between overlapping and having a boundary looks like.
+///
+/// Wide enough that a seam is always in hand well before it is needed. A contact that is not yet
+/// overlapping costs one half-plane test that clips nothing, which is cheap; a contact that
+/// arrives late costs the picture.
+const PACKING_PERMILLE: i32 = 1500;
 
 /// The closest to its own centre a cell may be cut, as a fraction of its drawn radius.
 ///
@@ -119,16 +140,128 @@ const PACKING_PERMILLE: i32 = 1200;
 /// than sharing a wall. That is the right way round. Past this depth something has to give,
 /// and a little overlap between two cells that should not be that close is a far smaller lie
 /// than shattering both of them.
+///
+/// The physics now keeps the same core, as `mm_core::neighbours::CORE_PERMILLE` — the same
+/// fraction, as a floor on how close two centres may come rather than on where a cell may be
+/// cut. **Change the two together.** They are not redundant: for equal radii they coincide
+/// exactly, but a cell twice its neighbour's radius has the crossing plane past the smaller
+/// cell's centre while the two cores are still apart, so this clamp still does real work. What
+/// has changed is that it is no longer the *only* thing standing between a crowd and collapse,
+/// which is why cells that deep in each other are now rare rather than the normal state of the
+/// middle of a pack. See SPEC §6.4.
+/// **Not** `mm_core::neighbours::CORE_PERMILLE`, and deliberately far below it. Tried tying the
+/// two together and it was a clear mistake, worth recording so it is not tried again.
+///
+/// They sound like the same idea and they are not. The core is where the *physics* stops pressing
+/// cells together, and a packed crowd sits exactly on it. This is a floor on where a cell may be
+/// *cut*, and its job is to catch the pathological case — a big neighbour whose crossing plane
+/// falls past a small cell's centre — which is rare. Setting this to the core made it bind on
+/// every contact in the pack rather than on the rare bad one, so the seam stopped being the plane
+/// through the crossing outlines and became the clamp, and cells came out as wedges.
+///
+/// Worse, the two-cores-do-not-fit branch below then sat exactly on the boundary the physics pins
+/// crowds to, so it flickered in and out between frames — two different seam rules alternating on
+/// the same pair, which reads as boundaries fighting over where they belong.
 pub const MIN_FACE: f32 = 0.55;
 
-/// The seams a cell is flattened along, from the neighbours pressing on it.
+/// The most a cell may be swollen to keep its area. See [`area_swell`].
+const MAX_SWELL: f32 = 1.25;
+
+/// How many directions the clipped area is measured along. See [`area_swell`].
+const SWELL_RAYS: usize = 64;
+
+/// How much larger a cell must be drawn for its *clipped* outline to enclose the area it has.
+///
+/// This is what separates a foam from a gravel pile, and it is the thing that was missing when
+/// a packed crowd still read as a heap of pebbles with holes between them.
+///
+/// A cell is a bag of nearly incompressible fluid. Squeeze it and it does not lose volume; it
+/// changes shape and bulges out wherever nothing is holding it in. Clipping alone models the
+/// first half and not the second: every seam *removes* area, so a cell with six neighbours is
+/// drawn as a hexagon distinctly smaller than the disc it started as, and the area it lost turns
+/// into the gaps between cells. Real tissue has no gaps for exactly this reason.
+///
+/// So: hold the seams still and grow the circle until what survives the cutting is the area the
+/// cell actually has. The seam planes do not move, which matters — they are the shared walls, and
+/// both cells have to keep agreeing on them — so the growth goes entirely into the free arcs,
+/// which is precisely where the gaps are.
+///
+/// Measured rather than derived. The clipped shape is a disc intersected with up to eight
+/// half-planes, all of which contain the centre, so it is star-shaped about the centre and its
+/// area is `½∫ρ(θ)²dθ` with `ρ(θ) = min(radius, min_k face_k / cos(θ - φ_k))`. Only the `radius`
+/// term depends on the scale being solved for, so the per-seam part is computed once and the
+/// solve is a bisection over a fixed array. Subtracting circular segments instead would have been
+/// cheaper and wrong: segments overlap once a cell has more than about three neighbours, and
+/// double-subtracting the overlaps says the cell has lost more area than it has.
+///
+/// Capped, because a cell enclosed on every side has no free arc to grow into and the solve would
+/// otherwise run away.
+///
+/// Depends on nothing but this frame's seams — no feedback from the previous frame's swell — so
+/// it cannot oscillate on its own account. It does *amplify* a seam appearing or disappearing,
+/// because that resizes the whole cell rather than one edge of it.
+fn area_swell(radius: f32, want_radius: f32, seams: &[Squash]) -> f32 {
+    if seams.is_empty() || radius <= 0.0 {
+        return 1.0;
+    }
+    // Distance to the nearest seam along each of `SWELL_RAYS` directions, ignoring the circle.
+    let mut reach = [f32::INFINITY; SWELL_RAYS];
+    for (j, r) in reach.iter_mut().enumerate() {
+        let theta = std::f32::consts::TAU * j as f32 / SWELL_RAYS as f32;
+        let (sy, sx) = theta.sin_cos();
+        for s in seams {
+            // `face` is a fraction of `radius`; the seam sits at `face * radius` along its own
+            // normal. A ray pointing away from a seam is not limited by it.
+            let along = sx * s.nx + sy * s.ny;
+            if along > 1e-4 {
+                *r = r.min((s.face * radius) / along);
+            }
+        }
+    }
+    let target = std::f32::consts::PI * want_radius * want_radius;
+    let area_at = |scale: f32| -> f32 {
+        let r = radius * scale;
+        let mut sum = 0.0;
+        for reach in reach.iter() {
+            let rho = reach.min(r);
+            sum += rho * rho;
+        }
+        // ½ ρ² dθ, with dθ the same for every ray.
+        0.5 * sum * std::f32::consts::TAU / SWELL_RAYS as f32
+    };
+    if area_at(MAX_SWELL) < target {
+        return MAX_SWELL;
+    }
+    // The bottom of the range is *below* one, and deliberately. `radius` arrives already
+    // inflated by `PACKING`, which exists only so that cells the physics leaves touching still
+    // overlap on screen and have a seam to share. That inflation is a lie about the cell's size,
+    // and an unclipped cell should not be told it: with the target set to the honest area, a cell
+    // nothing is pressing on solves to `1 / PACKING` and is drawn at exactly the radius it has.
+    let (mut lo, mut hi) = (1.0f32, MAX_SWELL);
+    for _ in 0..16 {
+        let mid = 0.5 * (lo + hi);
+        if area_at(mid) < target {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    0.5 * (lo + hi)
+}
+
+/// The seams a cell is flattened along, and how much it must swell to keep its area.
 ///
 /// `radius` is the drawn radius, not the physical one — the seams have to be worked out at the
 /// size the cell is actually going to appear, or they cut it somewhere other than where its
 /// outline is.
-fn squash_of(world: &World, i: usize, radius: f32) -> Vec<Squash> {
+///
+/// The returned faces are fractions of the *swollen* radius, so that the seam planes stay exactly
+/// where they were in absolute terms. Both cells of a pair must still agree on their shared wall,
+/// and they compute it from the two unswollen radii — swelling is a thing each cell does to its
+/// own free arcs, not to the walls it shares.
+fn squash_of(world: &World, i: usize, radius: f32) -> (Vec<Squash>, f32) {
     if radius <= 0.0 {
-        return Vec::new();
+        return (Vec::new(), 1.0);
     }
     let scale = 1.0 / POS_ONE as f32;
     // How firmly this cell holds its own shape. See `Contact::rigidity`.
@@ -137,7 +270,7 @@ fn squash_of(world: &World, i: usize, radius: f32) -> Vec<Squash> {
         .slots(i)
         .first()
         .map_or(0.0, |m| m.param as f32);
-    world
+    let mut seams: Vec<Squash> = world
         .neighbours()
         .contacts(world.cells(), i, PACKING_PERMILLE)
         .as_slice()
@@ -171,14 +304,46 @@ fn squash_of(world: &World, i: usize, radius: f32) -> Vec<Squash> {
             let (mine, theirs) = (rigidity, c.rigidity as f32);
             let firmness = (mine - theirs) / (mine + theirs).max(1.0);
             let face = face + 0.5 * overlap * firmness;
+            // Then held off both cores — this one's and the neighbour's — as *one* interval
+            // rather than one clamp per side.
+            //
+            // Clamping each cell's own face independently is what this replaced, and it broke
+            // the one property the whole scheme rests on: that both cells arrive at the same
+            // plane. Whenever the clamp bit, the two faces stopped summing to the distance
+            // between the centres and the pair was drawn overlapping instead of sharing a wall.
+            // With cells of a size, that was rare. Now that the physics presses crowds to their
+            // core it fires constantly on any mismatched pair — the neighbour's face is the part
+            // that goes short, and nothing on this side could see it.
+            //
+            // Written as an interval, it is antisymmetric again: if this cell's face is pushed
+            // out to `d - theirs`, the neighbour computing from its own side is pushed in to
+            // exactly `theirs`, and the two still meet on one line.
+            let my_core = MIN_FACE * radius;
+            let their_core = MIN_FACE * other;
+            let face = if my_core + their_core >= d {
+                // No plane can respect both cores: the pair is closer than SPEC §6.4 should
+                // allow, which happens for a tick after a division places a daughter inside its
+                // parent. Split the distance between them in proportion instead — still one
+                // plane, still the same from both sides.
+                d * my_core / (my_core + their_core).max(f32::EPSILON)
+            } else {
+                face.clamp(my_core, d - their_core)
+            };
             Some(Squash {
                 nx: dx / d,
                 ny: dy / d,
-                // Never closer in than the core. See `MIN_FACE`.
-                face: (face / radius).max(MIN_FACE),
+                face: face / radius,
             })
         })
-        .collect()
+        .collect();
+
+    // Then grown until what survives the cutting is the area the cell has, and the faces
+    // re-expressed against the bigger radius so the planes themselves have not moved.
+    let swell = area_swell(radius, radius, &seams);
+    for s in seams.iter_mut() {
+        s.face /= swell;
+    }
+    (seams, swell)
 }
 
 /// One organelle, as it is drawn inside its cell.
@@ -553,11 +718,16 @@ impl Slide {
             }
         }
 
-        let dots = cells
+        let dots: Vec<CellDot> = cells
             .iter()
             .map(|i| {
                 let id = cells.id_at(i);
                 let radius = mm_core::biology::radius(cells, i) as f32 / Q10_ONE as f32;
+                let (squash, area_swell) = if detailed {
+                    squash_of(&self.world, i, radius * PACKING)
+                } else {
+                    (Vec::new(), 1.0)
+                };
                 CellDot {
                     x: cells.x[i] as f32 / POS_ONE as f32,
                     y: cells.y[i] as f32 / POS_ONE as f32,
@@ -572,14 +742,122 @@ impl Slide {
                     },
                     cluster_size: components.size_of(i),
                     age: cells.age[i],
-                    squash: if detailed {
-                        squash_of(&self.world, i, radius * PACKING)
-                    } else {
-                        Vec::new()
-                    },
+                    squash,
+                    area_swell,
                 }
             })
             .collect();
+
+        // `MM_SEAM_STATS=1`: seam-slot usage, swell, and how fast the crowd is actually moving.
+        // Earned its keep twice — it found that 68% of cells were saturating their eight seam
+        // slots, and that a "settled" pack had every cell moving a fifteenth of a square a tick.
+        if std::env::var("MM_SEAM_STATS").is_ok() {
+            let cap: usize = mm_core::neighbours::CONTACTS_PER_CELL;
+            let mut hist: Vec<usize> = vec![0; cap + 1];
+            let mut swell = (f32::MAX, 0.0f32, 0.0f32);
+            for d in dots.iter() {
+                let d: &CellDot = d;
+                hist[d.squash.len().min(cap)] += 1;
+                swell.0 = swell.0.min(d.area_swell);
+                swell.1 = swell.1.max(d.area_swell);
+                swell.2 += d.area_swell;
+            }
+            // How fast the crowd is actually moving — and it takes *two* numbers, which is the
+            // trap this fell into.
+            //
+            // `speed` is `cells.vx/vy`, and reading it alone says a packed slide is perfectly
+            // still. It is not. The fluid drift is added straight to the position step in
+            // `sensing`, never stored in velocity, so a cell can be shoved a measurable distance
+            // every single tick with its velocity reading exactly zero. `drift` is that motion:
+            // the amount the current moves a cell each tick before the contact solver pushes it
+            // back, which is the amplitude of the in-and-out the centre of a jammed pack does.
+            // The only metric that cannot lie: how far each cell actually moved since the last
+            // tick. `speed` reads `cells.vx`, and the contact solver writes positions directly —
+            // so a cell can shuttle back and forth every tick with its velocity reading zero.
+            // Both earlier diagnoses were wrong for exactly this reason.
+            type Snapshot = (u64, Vec<(i32, i32)>);
+            static LAST: std::sync::Mutex<Option<Snapshot>> = std::sync::Mutex::new(None);
+            let now: Vec<(i32, i32)> = (0..cells.capacity())
+                .map(|i| (cells.x[i], cells.y[i]))
+                .collect();
+            let mut moved = (0.0f32, 0.0f32);
+            {
+                let mut last = LAST.lock().unwrap();
+                if let Some((t, prev)) = last.as_ref() {
+                    if *t != self.world.tick_count() && prev.len() == now.len() {
+                        let mut c = 0.0f32;
+                        for i in 0..now.len() {
+                            if !cells.occupied(i) {
+                                continue;
+                            }
+                            let dx = (now[i].0 - prev[i].0) as f32 / POS_ONE as f32;
+                            let dy = (now[i].1 - prev[i].1) as f32 / POS_ONE as f32;
+                            let m = (dx * dx + dy * dy).sqrt();
+                            moved.0 += m;
+                            moved.1 = moved.1.max(m);
+                            c += 1.0;
+                        }
+                        moved.0 /= c.max(1.0);
+                    }
+                }
+                if last.as_ref().is_none_or(|(t, _)| *t != self.world.tick_count()) {
+                    *last = Some((self.world.tick_count(), now));
+                }
+            }
+            let (svx, svy) = substrate.velocity();
+            // Mean distance from the middle of the slide: the one number that says whether a
+            // crowd under an inward force is actually coming in.
+            let (cx, cy) = (substrate.width() as f32 / 2.0, substrate.height() as f32 / 2.0);
+            let mut radius_sum = 0.0f32;
+            // The whole velocity field, not just where cells happen to be: is the fluid moving
+            // at all when the current is `Still`?
+            let mut field_max = 0.0f32;
+            for k in 0..svx.len().min(svy.len()) {
+                let (a, b) = (svx[k] as f32, svy[k] as f32);
+                let m = (a * a + b * b).sqrt() / Q10_ONE as f32;
+                field_max = field_max.max(m);
+            }
+            let mut speed = (0.0f32, 0.0f32);
+            let mut drift = (0.0f32, 0.0f32);
+            let mut n = 0.0f32;
+            for i in 0..cells.capacity() {
+                if !cells.occupied(i) {
+                    continue;
+                }
+                let (vx, vy) = (cells.vx[i] as f32, cells.vy[i] as f32);
+                let s = (vx * vx + vy * vy).sqrt() / Q10_ONE as f32;
+                speed.0 += s;
+                speed.1 = speed.1.max(s);
+                let sq = pos_to_square(cells.x[i]) as usize
+                    + pos_to_square(cells.y[i]) as usize * substrate.width() as usize;
+                let dx = svx.get(sq).copied().unwrap_or(0) as f32;
+                let dy = svy.get(sq).copied().unwrap_or(0) as f32;
+                let d = (dx * dx + dy * dy).sqrt() / Q10_ONE as f32;
+                drift.0 += d;
+                drift.1 = drift.1.max(d);
+                let px = cells.x[i] as f32 / POS_ONE as f32 - cx;
+                let py = cells.y[i] as f32 / POS_ONE as f32 - cy;
+                radius_sum += (px * px + py * py).sqrt();
+                n += 1.0;
+            }
+            eprintln!(
+                "SEAMS tick={} hist={:?} full={} swell {:.2}/{:.2}/{:.2} speed mean {:.4} max {:.4} drift mean {:.4} max {:.4} squares/tick radius {:.2} FIELD {:.4} MOVED mean {:.4} max {:.4}",
+                self.world.tick_count(),
+                hist,
+                hist[cap],
+                swell.0,
+                swell.2 / dots.len().max(1) as f32,
+                swell.1,
+                speed.0 / n.max(1.0),
+                speed.1,
+                drift.0 / n.max(1.0),
+                drift.1,
+                radius_sum / n.max(1.0),
+                field_max,
+                moved.0,
+                moved.1,
+            );
+        }
 
         Frame {
             tick: self.world.tick_count(),

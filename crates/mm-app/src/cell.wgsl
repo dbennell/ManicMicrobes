@@ -32,6 +32,8 @@ struct Vertex {
     @location(5) squash_face: vec4<f32>,
     @location(6) squash_dir2: vec4<f32>,
     @location(7) squash_face2: vec4<f32>,
+    @location(8) squash_dir3: vec4<f32>,
+    @location(9) squash_face3: vec4<f32>,
 };
 
 struct Output {
@@ -43,6 +45,8 @@ struct Output {
     @location(4) squash_face: vec4<f32>,
     @location(5) squash_dir2: vec4<f32>,
     @location(6) squash_face2: vec4<f32>,
+    @location(7) squash_dir3: vec4<f32>,
+    @location(8) squash_face3: vec4<f32>,
 };
 
 @vertex
@@ -61,6 +65,8 @@ fn vertex(vertex: Vertex) -> Output {
     out.squash_face = vertex.squash_face;
     out.squash_dir2 = vertex.squash_dir2;
     out.squash_face2 = vertex.squash_face2;
+    out.squash_dir3 = vertex.squash_dir3;
+    out.squash_face3 = vertex.squash_face3;
     return out;
 }
 
@@ -112,11 +118,29 @@ fn fragment(in: Output) -> @location(0) vec4<f32> {
     // seam closes on its centre. Free, because the seams are already here.
     let faces = in.squash_face * 0.65;
     let faces2 = in.squash_face2 * 0.65;
-    let nearest_face = min(
-        min(min(faces.x, faces.y), min(faces.z, faces.w)),
-        min(min(faces2.x, faces2.y), min(faces2.z, faces2.w)),
+    let faces3 = in.squash_face3 * 0.65;
+    // Measured against the cell's own radius, as a fraction: 1 is a seam just grazing the
+    // outline, below that is a real cut, and an unused slot carries 8 and never wins the `min`.
+    let nearest = min(
+        min(min(in.squash_face.x, in.squash_face.y), min(in.squash_face.z, in.squash_face.w)),
+        min(
+            min(
+                min(in.squash_face2.x, in.squash_face2.y),
+                min(in.squash_face2.z, in.squash_face2.w),
+            ),
+            min(
+                min(in.squash_face3.x, in.squash_face3.y),
+                min(in.squash_face3.z, in.squash_face3.w),
+            ),
+        ),
     );
-    let pressure = clamp(1.0 - nearest_face / 0.65, 0.0, 1.0);
+    // Full pressure by the time a seam has taken a quarter of the radius, rather than only when
+    // one reaches the centre. The old scale reached 1 only for a cell cut clean through, so an
+    // ordinary packed contact — which cuts about a sixth of the way in — read as 0.17 and left
+    // the wobble almost untouched. That is why a packed sheet had wavy walls: the seam is a
+    // straight line, but either side of it the cell's own irregularity is the same size as the
+    // cut, so what you see is the wobble and not the wall.
+    let pressure = clamp((1.0 - nearest) / 0.25, 0.0, 1.0);
 
     // --- the outline ---
     //
@@ -135,7 +159,7 @@ fn fragment(in: Output) -> @location(0) vec4<f32> {
     // pressure that makes the seam is the same pressure that would smooth the membrane out.
     // So the irregularity is a luxury of having room, and a cell in a crowd gives it up.
     let theta = atan2(p.y, p.x);
-    let slack = 1.0 - 0.9 * pressure;
+    let slack = 1.0 - 0.96 * pressure;
     let a1 = (0.055 + 0.045 * hash11(seed)) * slack;
     let a2 = (0.030 + 0.030 * hash11(seed + 7.0)) * slack;
     let a3 = (0.015 + 0.020 * hash11(seed + 13.0)) * slack;
@@ -184,7 +208,16 @@ fn fragment(in: Output) -> @location(0) vec4<f32> {
     let d3 = unpack2x16snorm(bitcast<u32>(in.squash_dir.w));
     // The shoulder scales with the cell, so a small one is not rounded away entirely and a
     // large one does not get a corner that reads as sharp.
-    let shoulder = radius * 0.14;
+    //
+    // Small, and it has to be. `smax` is a *smooth* max, so it returns slightly more than the
+    // true maximum near the seam — and in a field where positive is outside, more means the
+    // outline is eroded back from the plane it was supposed to stop at. Both cells of a pair are
+    // eroded, so the shared wall they were meant to meet along opens into a gap, and the erosion
+    // is worst where two seams meet, which is exactly where a packed sheet needs to close up.
+    // At a seventh of the radius that gap is wide enough to read as background, and a crowd of
+    // cells that should be one continuous mass reads as separate rounded pebbles with shadows
+    // between them.
+    let shoulder = radius * 0.035;
     field = smax(field, dot(p, d0) - faces.x, shoulder);
     field = smax(field, dot(p, d1) - faces.y, shoulder);
     field = smax(field, dot(p, d2) - faces.z, shoulder);
@@ -200,6 +233,15 @@ fn fragment(in: Output) -> @location(0) vec4<f32> {
     field = smax(field, dot(p, d5) - faces2.y, shoulder);
     field = smax(field, dot(p, d6) - faces2.z, shoulder);
     field = smax(field, dot(p, d7) - faces2.w, shoulder);
+    // And the last four. See `ATTRIBUTE_SQUASH_DIR3`.
+    let d8 = unpack2x16snorm(bitcast<u32>(in.squash_dir3.x));
+    let d9 = unpack2x16snorm(bitcast<u32>(in.squash_dir3.y));
+    let d10 = unpack2x16snorm(bitcast<u32>(in.squash_dir3.z));
+    let d11 = unpack2x16snorm(bitcast<u32>(in.squash_dir3.w));
+    field = smax(field, dot(p, d8) - faces3.x, shoulder);
+    field = smax(field, dot(p, d9) - faces3.y, shoulder);
+    field = smax(field, dot(p, d10) - faces3.z, shoulder);
+    field = smax(field, dot(p, d11) - faces3.w, shoulder);
 
     let alpha = 1.0 - smoothstep(-edge, edge, field);
     if (alpha <= 0.001) {
@@ -230,18 +272,33 @@ fn fragment(in: Output) -> @location(0) vec4<f32> {
     // Faint granularity: a flat disc reads as a sprite, a grainy one reads as cytoplasm.
     let grain = hash21(p * 37.0 + seed) - 0.5;
 
-    // A thin brighter ring just inside the outline: the membrane, fading as it fails.
+    // A dark ring just inside the outline: the membrane, fading as it fails.
     //
-    // Against the *field* rather than the radius, which is the one thing this keeps from the
-    // dark heavy version that was here in between: the field includes the seams, so the ring
-    // runs along a flattened side as well as a curved one. Measured against the radius it
-    // stopped at the flat and left the pressed edges bare.
-    let membrane = smoothstep(-0.16, -0.02, field) * integrity;
+    // Against the *field* rather than the radius, so it includes the seams and runs along a
+    // flattened side as well as a curved one. Measured against the radius it stopped at the flat
+    // and left the pressed edges bare.
+    //
+    // Dark and heavy rather than a thin bright highlight, which is the change that makes a
+    // packed crowd legible. Once cells tile there is no background left between them, so a
+    // boundary drawn as *lighter than the cell* has nothing to contrast against and the mass
+    // reads as one lumpy object. Every cell in a real monolayer is drawn with a dark wall for
+    // exactly this reason. Scaled by the radius so it is a proportion of the cell rather than a
+    // fixed width that swallows the small ones.
+    // Thin, because every wall in a packed sheet is drawn twice — once by the cell on each
+    // side. At half this width the two rings read as one line between two cells, which is what
+    // a membrane between two cells is; at the width that looked right on a *solitary* cell they
+    // stack into a dark band and push the two apart visually.
+    let wall = max(radius * 0.025, edge);
+    let membrane = smoothstep(-wall, -wall * 0.35, field) * integrity;
 
-    let lum = clamp(
-        0.34 + 0.62 * lambert + 0.30 * rim + 0.18 * membrane + 0.045 * grain,
-        0.0,
-        1.0,
-    );
-    return vec4<f32>(in.colour.rgb * lum, in.colour.a * alpha);
+    // Flat-shaded, near enough. The hemisphere normal above is kept for a *hint* of form and for
+    // the seam-following it does, but at the weight it used to carry — two thirds lambert plus a
+    // strong rim — every cell read as a lit sphere, so a crowd of them read as a heap of pebbles
+    // rather than as a sheet of cells. Cells in a monolayer are flat.
+    let lum = clamp(0.72 + 0.17 * lambert + 0.05 * rim + 0.045 * grain, 0.0, 1.0);
+    // The wall is the cell's own colour taken well down, rather than black: a dark version of
+    // each cell keeps the species colouring readable through the outline.
+    let body = in.colour.rgb * lum;
+    let rgb = mix(body, in.colour.rgb * 0.16, membrane);
+    return vec4<f32>(rgb, in.colour.a * alpha);
 }

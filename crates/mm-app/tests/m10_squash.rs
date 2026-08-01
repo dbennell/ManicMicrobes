@@ -33,6 +33,49 @@ fn two_cells_agree_where_their_shared_face_is() {
     }
 }
 
+/// The seam one cell computes once both cores are respected, as `slide::squash_of` does it.
+fn clamped_seam(radius: f32, other: f32, distance: f32) -> f32 {
+    let min = mm_app::slide::MIN_FACE;
+    let (mine, theirs) = (min * radius, min * other);
+    if mine + theirs >= distance {
+        return distance * mine / (mine + theirs);
+    }
+    seam(radius, other, distance).clamp(mine, distance - theirs)
+}
+
+#[test]
+fn mismatched_cells_pressed_to_the_core_still_agree() {
+    // The clamp used to be applied by each cell to its own face alone, which silently gave up
+    // the property the test above exists to protect: whenever it bit, the two faces stopped
+    // summing to the distance between the centres and the pair drew as one cell lying over the
+    // other rather than as two sharing a wall.
+    //
+    // It went unnoticed because it needs *both* a size mismatch and a pair pressed near its
+    // core, and until the physics grew a core (SPEC §6.4) crowds rarely got that deep. Once they
+    // did it was the most visible thing on the packing bench.
+    let min = mm_app::slide::MIN_FACE;
+    for (a, b) in [(1.0f32, 1.0), (1.0, 0.7), (2.0, 1.0), (3.0, 0.6), (0.4, 1.9)] {
+        // Walk in from merely touching to exactly the distance where the two cores meet, which
+        // is as close as the physics will now let them get.
+        for step in 0..=10 {
+            let touching = a + b;
+            let core = min * (a + b);
+            let d = touching + (core - touching) * step as f32 / 10.0;
+            let from_a = clamped_seam(a, b, d);
+            let from_b = clamped_seam(b, a, d);
+            assert!(
+                (from_a + from_b - d).abs() < 1e-4,
+                "radii {a} and {b} at {d}: faces {from_a} and {from_b} do not meet"
+            );
+            // And neither cell has been cut into its own core to achieve that.
+            assert!(
+                from_a >= min * a - 1e-4 && from_b >= min * b - 1e-4,
+                "radii {a} and {b} at {d}: {from_a}, {from_b} cut inside a core"
+            );
+        }
+    }
+}
+
 #[test]
 fn cells_resting_at_contact_still_close_the_gap() {
     // The case that matters, because it is the one the physics settles into. Separation pushes

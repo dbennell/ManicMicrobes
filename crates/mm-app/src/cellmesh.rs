@@ -48,7 +48,7 @@ pub struct Shape {
 }
 
 /// How many flattened sides a cell can be drawn with. Matches `mm_core::CONTACTS_PER_CELL`.
-pub const SQUASH_PER_CELL: usize = 8;
+pub const SQUASH_PER_CELL: usize = 12;
 
 /// A seam far enough out that nothing is ever cut by it.
 ///
@@ -106,8 +106,10 @@ pub struct Buffers {
     pub squash_faces: Vec<[f32; 4]>,
     /// Seam directions 4..7.
     pub squash_dirs2: Vec<[f32; 4]>,
+    pub squash_dirs3: Vec<[f32; 4]>,
     /// How far along seams 4..7 they sit.
     pub squash_faces2: Vec<[f32; 4]>,
+    pub squash_faces3: Vec<[f32; 4]>,
     pub indices: Vec<u32>,
 }
 
@@ -163,6 +165,18 @@ impl Buffers {
             p.squash[6].face,
             p.squash[7].face,
         ];
+        let dirs3 = [
+            pack_normal(p.squash[8].nx, p.squash[8].ny),
+            pack_normal(p.squash[9].nx, p.squash[9].ny),
+            pack_normal(p.squash[10].nx, p.squash[10].ny),
+            pack_normal(p.squash[11].nx, p.squash[11].ny),
+        ];
+        let faces3 = [
+            p.squash[8].face,
+            p.squash[9].face,
+            p.squash[10].face,
+            p.squash[11].face,
+        ];
         // Anticlockwise from the top left, matching the corners in `uv` — the corner is what
         // the whole signed-distance field is evaluated against, so it has to be exact.
         for (dx, dy) in [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
@@ -180,6 +194,8 @@ impl Buffers {
             self.squash_faces.push(faces);
             self.squash_dirs2.push(dirs2);
             self.squash_faces2.push(faces2);
+            self.squash_dirs3.push(dirs3);
+            self.squash_faces3.push(faces3);
         }
         self.indices
             .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
@@ -194,6 +210,8 @@ impl Buffers {
         self.squash_faces.clear();
         self.squash_dirs2.clear();
         self.squash_faces2.clear();
+        self.squash_dirs3.clear();
+        self.squash_faces3.clear();
         self.indices.clear();
     }
 }
@@ -270,6 +288,7 @@ mod tests {
                 age: 1_000,
                 organelles: Vec::new(),
                 squash: Vec::new(),
+                area_swell: 1.0,
             })
             .collect()
     }

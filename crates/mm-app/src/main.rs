@@ -504,7 +504,25 @@ fn seed_packing(slide: &mut Slide) {
         // anything having to want it to. Gently is the operative word: strong enough and the
         // bench stops being a packing and becomes a crush, which shows how the renderer fails
         // rather than how it behaves.
-        current: mm_core::light::CurrentField::Convergent { strength: 45 },
+        // Firm rather than gentle. It was turned down when a crush was indistinguishable from a
+        // packing, because nothing bounded how far cells could sink into one another and the
+        // bench only showed the renderer failing. SPEC §6.4 bounds it now, so leaning hard on
+        // the crowd is the interesting case again: a dense pack is the thing being built, and a
+        // gentle current only ever produces the loose edge of one.
+        current: mm_core::light::CurrentField::Still,
+        // `Scenario::gravity` is the better mechanism for this and is deliberately *not* used
+        // yet: a single cell falls towards the middle under it correctly (there is a test), but
+        // a crowd of 220 evacuates the centre and packs against the walls, which is not
+        // understood and is not something to leave a bench standing on. The current has the
+        // known flaw described in `Scenario::gravity` — it cannot be damped — but it packs.
+        gravity: 2,
+        // No thermal motion. The bench's premise is that whatever moves is volumes resolving
+        // against each other, and the default 24 breaks it: every cell wanders about a
+        // sixteenth of a square per tick for no reason to do with packing, which in a sheet of
+        // cells with sharp shared walls is every boundary in the picture redrawing every frame.
+        // Biology was zeroed here when the bench was built; this was missed because it lives in
+        // the physics rather than in a rate.
+        jitter: 0,
         seeding: vec![],
         ..Scenario::default()
     };
@@ -536,14 +554,23 @@ fn seed_packing(slide: &mut Slide) {
     // nothing about the case that actually looks wrong.
     for k in 0..220u32 {
         let genome = std::sync::Arc::clone(&inert);
+        // Seeded already overlapping, and left alone. The bench used to start the cells apart
+        // and squeeze them together with a convergent current, which worked but meant the
+        // picture was never still: the current adds its drift straight to the position step
+        // every tick and the contact solver takes it straight back out, so a jammed crowd
+        // oscillates for as long as the current runs — measured at a sixteenth of a square per
+        // cell per tick, with `cells.vx` reading exactly zero throughout.
+        //
+        // With an area-preserving core there is no need for the squeeze. Start them inside one
+        // another and the solver's own expansion packs them, then stops. Whatever moves after
+        // that really is volumes resolving against each other, which is what the bench was for.
         let across = 15;
-        let step = 3;
-        let x = 2 + (k % across) * step;
-        let y = 2 + (k / across) * step;
+        let x = pos(15) + (k % across) as i32 * (mm_core::fixed::POS_ONE * 5 / 4);
+        let y = pos(15) + (k / across) as i32 * (mm_core::fixed::POS_ONE * 5 / 4);
         let size = 18 + (k * 7 % 26) as i32;
         let id = world.spawn_cell(CellSeed {
-            x: pos(x as i32),
-            y: pos(y as i32),
+            x,
+            y,
             mass: q10(size),
             // Enough that nothing starves in the time anybody watches.
             energy: q10(1_000_000),
@@ -820,6 +847,25 @@ const ATTRIBUTE_SQUASH_FACE2: MeshVertexAttribute = MeshVertexAttribute::new(
     VertexFormat::Float32x4,
 );
 
+/// Seams 8..11, for the cells a packed sheet presses on from every side.
+///
+/// Eight was called headroom over the six a monolayer settles on, and it was not: once the
+/// neighbour search covered a cell's real neighbourhood, cells routinely found nine or ten, and
+/// a cell that runs out of slots stops cutting for a neighbour that is still cutting for it —
+/// which draws as five clean shared walls and one side simply overlapping.
+const ATTRIBUTE_SQUASH_DIR3: MeshVertexAttribute = MeshVertexAttribute::new(
+    "CellSquashDir3",
+    0x6D_6D_5F_63_65_6C_71,
+    VertexFormat::Float32x4,
+);
+
+/// How far along seams 8..11 they sit.
+const ATTRIBUTE_SQUASH_FACE3: MeshVertexAttribute = MeshVertexAttribute::new(
+    "CellSquashFace3",
+    0x6D_6D_5F_63_65_6C_72,
+    VertexFormat::Float32x4,
+);
+
 /// Embedded at compile time rather than loaded from an `assets/` directory, so the binary runs
 /// from anywhere. The same thing `bevy_sprite` does for its own shaders.
 const CELL_SHADER: Handle<Shader> = uuid_handle!("6d6d5f63-656c-6c5f-7368-616465720001");
@@ -859,6 +905,8 @@ impl Material2d for CellMaterial {
             ATTRIBUTE_SQUASH_FACE.at_shader_location(5),
             ATTRIBUTE_SQUASH_DIR2.at_shader_location(6),
             ATTRIBUTE_SQUASH_FACE2.at_shader_location(7),
+            ATTRIBUTE_SQUASH_DIR3.at_shader_location(8),
+            ATTRIBUTE_SQUASH_FACE3.at_shader_location(9),
         ])?];
         Ok(())
     }
@@ -968,6 +1016,8 @@ fn setup(
     cells.insert_attribute(ATTRIBUTE_SQUASH_FACE, Vec::<[f32; 4]>::new());
     cells.insert_attribute(ATTRIBUTE_SQUASH_DIR2, Vec::<[f32; 4]>::new());
     cells.insert_attribute(ATTRIBUTE_SQUASH_FACE2, Vec::<[f32; 4]>::new());
+    cells.insert_attribute(ATTRIBUTE_SQUASH_DIR3, Vec::<[f32; 4]>::new());
+    cells.insert_attribute(ATTRIBUTE_SQUASH_FACE3, Vec::<[f32; 4]>::new());
     cells.insert_indices(Indices::U32(Vec::new()));
     commands.spawn((
         CellMesh,
@@ -1531,11 +1581,13 @@ fn redraw(
         // Drawn a fifth larger than the simulation's radius, and cut back by the seams where
         // a neighbour is in the way — see `slide::PACKING`. Cells rest at exactly touching,
         // and touching circles leave a hole between every three of them.
-        let body = (dot.radius * 2.0 * scale * slide::PACKING * swell).max(if selected {
-            12.0
-        } else {
-            1.5
-        });
+        let body = (dot.radius * 2.0 * scale * slide::PACKING * dot.area_swell * swell).max(
+            if selected {
+                12.0
+            } else {
+                1.5
+            },
+        );
         Some(cellmesh::Placed {
             x: at.x,
             y: at.y,
@@ -1630,6 +1682,8 @@ fn redraw(
         mesh.insert_attribute(ATTRIBUTE_SQUASH_FACE, buffers.squash_faces.clone());
         mesh.insert_attribute(ATTRIBUTE_SQUASH_DIR2, buffers.squash_dirs2.clone());
         mesh.insert_attribute(ATTRIBUTE_SQUASH_FACE2, buffers.squash_faces2.clone());
+        mesh.insert_attribute(ATTRIBUTE_SQUASH_DIR3, buffers.squash_dirs3.clone());
+        mesh.insert_attribute(ATTRIBUTE_SQUASH_FACE3, buffers.squash_faces3.clone());
         mesh.insert_indices(Indices::U32(buffers.indices.clone()));
     }
 
@@ -1854,7 +1908,7 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                     .button("Packing bench")
                     .on_hover_text(
                         "a slide with the biology switched off: cells that cannot divide, \
-                         die or grow, held together by a current that draws everything to \
+                         die or grow, and no Brownian jitter, gathered by gravity towards \
                          the middle. For looking at how volumes behave without wondering \
                          whether what you are seeing is the simulation",
                     )
