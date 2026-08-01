@@ -120,11 +120,44 @@ impl NeighbourIndex {
             .unwrap_or(&[])
     }
 
+    /// The three horizontally-adjacent squares of one row, as a single run.
+    ///
+    /// Squares are laid out row-major and `starts` is a prefix sum over them, so `sx-1`, `sx`
+    /// and `sx+1` in the same row are three *consecutive* buckets — which means they are one
+    /// contiguous slice of `entries`, findable with one pair of lookups instead of three.
+    ///
+    /// Exactly the three buckets in the same order, including at the edges: clamping the run
+    /// to the slide drops the squares that are off it, which is what the three separate
+    /// lookups did by returning nothing for them.
+    fn row_run(&self, sx: i32, sy: i32) -> &[u32] {
+        if self.width <= 0 || sy < 0 || sy >= self.height {
+            return &[];
+        }
+        let x0 = sx.saturating_sub(1).max(0);
+        let x1 = sx.saturating_add(1).min(self.width - 1);
+        if x0 > x1 {
+            return &[];
+        }
+        let row = (sy as usize).saturating_mul(self.width as usize);
+        let (Some(from), Some(to)) = (
+            self.starts.get(row + x0 as usize),
+            self.starts.get(row + x1 as usize + 1),
+        ) else {
+            return &[];
+        };
+        self.entries
+            .get(*from as usize..*to as usize)
+            .unwrap_or(&[])
+    }
+
     /// Every cell in the nine squares around one, in a fixed order.
+    ///
+    /// Three runs rather than nine buckets. The order is unchanged — that is load-bearing, not
+    /// incidental: separation pushes cells apart pairwise and pairwise pushes do not commute,
+    /// so a different order here is a different world (I1, I6).
     pub fn around(&self, sx: i32, sy: i32) -> impl Iterator<Item = usize> + '_ {
         (-1..=1)
-            .flat_map(move |dy| (-1..=1).map(move |dx| (dx, dy)))
-            .flat_map(move |(dx, dy)| self.in_square(sx + dx, sy + dy))
+            .flat_map(move |dy| self.row_run(sx, sy.saturating_add(dy)))
             .map(|s| *s as usize)
     }
 
@@ -409,6 +442,65 @@ mod tests {
             });
         }
         (cells, pool)
+    }
+
+    /// The nine-bucket walk `around` replaced, kept as the thing to measure it against.
+    fn nine_buckets(index: &NeighbourIndex, sx: i32, sy: i32) -> Vec<usize> {
+        (-1..=1)
+            .flat_map(|dy| (-1..=1).map(move |dx| (dx, dy)))
+            .flat_map(|(dx, dy)| index.in_square(sx + dx, sy + dy))
+            .map(|s| *s as usize)
+            .collect()
+    }
+
+    #[test]
+    fn three_row_runs_are_the_same_walk_as_nine_buckets() {
+        // `around` gathers each row of the neighbourhood as one contiguous run rather than
+        // three separate buckets. That is only sound if it is the same *sequence*, not merely
+        // the same set: separation pushes cells apart pairwise and pairwise pushes do not
+        // commute, so a reordering here is a different world (I1, I6).
+        //
+        // Checked over a crowded slide and past every edge, because the runs are clamped and
+        // clamping is where an off-by-one would hide.
+        let mut positions = Vec::new();
+        for x in 0..8i32 {
+            for y in 0..8i32 {
+                positions.push((pos(x), pos(y)));
+                if (x + y) % 3 == 0 {
+                    positions.push((pos(x), pos(y)));
+                }
+            }
+        }
+        let (cells, _p) = arena(&positions);
+        let mut index = NeighbourIndex::default();
+        index.rebuild(&cells, 8, 8);
+
+        for sy in -2..=9 {
+            for sx in -2..=9 {
+                let walked: Vec<usize> = index.around(sx, sy).collect();
+                assert_eq!(walked, nine_buckets(&index, sx, sy), "at ({sx}, {sy})");
+            }
+        }
+    }
+
+    #[test]
+    fn a_one_square_slide_still_walks_itself() {
+        // The degenerate clamp: every neighbour is the same square, and the run must not
+        // reach past it into whatever the prefix sum has next.
+        let (cells, _p) = arena(&[(pos(0), pos(0)), (pos(0), pos(0))]);
+        let mut index = NeighbourIndex::default();
+        index.rebuild(&cells, 1, 1);
+        assert_eq!(index.around(0, 0).collect::<Vec<_>>(), vec![0, 1]);
+        assert_eq!(nine_buckets(&index, 0, 0), vec![0, 1]);
+        // A square off the end still has the last real square as its neighbour, and always
+        // did — the run is clamped, not truncated to nothing.
+        for sx in -1..=2 {
+            assert_eq!(
+                index.around(sx, 0).collect::<Vec<_>>(),
+                nine_buckets(&index, sx, 0),
+                "at ({sx}, 0)"
+            );
+        }
     }
 
     #[test]
