@@ -30,12 +30,29 @@ use crate::cell::CellArena;
 use crate::fixed::{pos_to_square, POS_ONE};
 use crate::sensing::TouchReading;
 
-/// How far apart two cells are pushed per tick when they overlap, as a fraction of the
-/// overlap, in sixteenths.
+/// How much of an overlap one relaxation pass takes out, in sixteenths.
 ///
-/// Partial rather than complete: shoving two cells fully apart in one tick makes a crowd
+/// Partial rather than complete: shoving two cells fully apart in one go makes a crowd
 /// explode, and a crowd that explodes is not a crowd.
-const SEPARATION_STRENGTH: i32 = 4;
+const SEPARATION_STRENGTH: i32 = 8;
+
+/// Relaxation passes per tick.
+///
+/// Separation is a distance constraint — two cells must be at least their radii apart — and
+/// SPEC §8.4 already asks for exactly this treatment on the other kind: position-based
+/// dynamics, two to three Gauss-Seidel iterations a tick. Junctions got it and contacts did
+/// not, and one pass at a quarter strength is not a solver, it is a nudge.
+///
+/// It shows as a crowd with no stiffness. One pass leaves three quarters of every overlap
+/// behind, so a steady inward pressure wins outright: cells sink into each other until the
+/// push, which stays proportional to the overlap, finally balances the squeeze — and by then
+/// they are deep inside one another and the outlines are meaningless. Three passes take out
+/// seven eighths, and what was a pile of interpenetrating discs becomes a body that holds its
+/// shape.
+///
+/// Three rather than more because it is the top of SPEC's range and because each pass is
+/// another walk of every contact — the phase is already a quarter of the tick.
+const SEPARATION_PASSES: usize = 3;
 
 /// Cells indexed by the substrate square they stand on.
 #[derive(Clone, Debug, Default)]
@@ -520,96 +537,104 @@ pub fn resolve_collisions(
         budget.push(radii.get(i).copied().unwrap_or(0) / 4);
     }
 
-    for i in 0..cells.capacity() {
-        if !cells.occupied(i) {
-            continue;
-        }
-        let sx = pos_to_square(cells.x[i]);
-        let sy = pos_to_square(cells.y[i]);
-        let ri = radii[i];
+    for pass in 0..SEPARATION_PASSES {
+        for i in 0..cells.capacity() {
+            if !cells.occupied(i) {
+                continue;
+            }
+            let sx = pos_to_square(cells.x[i]);
+            let sy = pos_to_square(cells.y[i]);
+            let ri = radii[i];
 
-        // `around` borrows the index and the push writes to cells, which are different
-        // objects, so the neighbours are walked directly. Collecting them first would be one
-        // heap allocation per cell per tick, which at fifty thousand cells was a third of the
-        // tick on its own.
-        for j in index.around(sx, sy) {
-            // Each pair is handled once, by its lower slot, so the push is applied to both
-            // sides of one decision rather than to two sides of two.
-            if j <= i || !cells.occupied(j) {
-                continue;
-            }
-            let want = ri.saturating_add(radii[j]);
-            let d = separation(cells, i, j);
-            if d >= want {
-                continue;
-            }
-            let overlap = want - d;
-            // Being crushed, charged to both sides — except by whatever this cell is joined
-            // to. An organism is *meant* to hold its cells against each other, and billing it
-            // for that would make being multicellular a way to die.
-            if !joined(cells, i, j) {
-                if let Some(c) = crowding.get_mut(i) {
-                    *c = c.saturating_add(overlap);
+            // `around` borrows the index and the push writes to cells, which are different
+            // objects, so the neighbours are walked directly. Collecting them first would be one
+            // heap allocation per cell per tick, which at fifty thousand cells was a third of the
+            // tick on its own.
+            for j in index.around(sx, sy) {
+                // Each pair is handled once, by its lower slot, so the push is applied to both
+                // sides of one decision rather than to two sides of two.
+                if j <= i || !cells.occupied(j) {
+                    continue;
                 }
-                if let Some(c) = crowding.get_mut(j) {
-                    *c = c.saturating_add(overlap);
+                let want = ri.saturating_add(radii[j]);
+                let d = separation(cells, i, j);
+                if d >= want {
+                    continue;
+                }
+                let overlap = want - d;
+                // Being crushed, charged to both sides — except by whatever this cell is joined
+                // to. An organism is *meant* to hold its cells against each other, and billing it
+                // for that would make being multicellular a way to die.
+                //
+                // Counted on the first pass only. The later passes are the same contacts being
+                // relaxed further, not new ones, and charging for each would make the price of
+                // being in a crowd depend on how many times the solver looked at it.
+                if pass == 0 && !joined(cells, i, j) {
+                    if let Some(c) = crowding.get_mut(i) {
+                        *c = c.saturating_add(overlap);
+                    }
+                    if let Some(c) = crowding.get_mut(j) {
+                        *c = c.saturating_add(overlap);
+                    }
+                }
+                let (dx, dy) = (cells.x[i] - cells.x[j], cells.y[i] - cells.y[j]);
+                // Exactly coincident cells have no line to push along, so they get a fixed
+                // nudge derived from their slots — deterministic, and enough to break the tie.
+                let (ux, uy) = if dx == 0 && dy == 0 {
+                    (
+                        if (i + j) % 2 == 0 { POS_ONE } else { -POS_ONE },
+                        if (i / 2 + j) % 2 == 0 {
+                            POS_ONE
+                        } else {
+                            -POS_ONE
+                        },
+                    )
+                } else {
+                    let scale = separation(cells, i, j).max(1);
+                    (
+                        (dx as i64 * POS_ONE as i64 / scale as i64) as i32,
+                        (dy as i64 * POS_ONE as i64 / scale as i64) as i32,
+                    )
+                };
+                // Bounded by what each of the two has left to give this tick.
+                //
+                // Every overlapping pair used to be shoved independently, so a cell wedged among
+                // eight neighbours took eight pushes in one tick and they added up: measured, the
+                // worst cells were travelling most of their own radius per tick, which is a cell
+                // passing its neighbour between one frame and the next. A crowd rearranged faster
+                // than it could be looked at, and no arrangement of contact seams can be stable
+                // through that because the neighbourhood genuinely is not.
+                //
+                // Water is viscous and cells are not projectiles: a budget per cell per tick is
+                // closer to what being in a crowd is like than an unbounded sum of pairwise
+                // impulses, and it makes separation converge on its answer over a few ticks
+                // instead of overshooting past it in one.
+                let shove = overlap.saturating_mul(SEPARATION_STRENGTH) / 16 / 2;
+                let allowed = shove
+                    .min(budget.get(i).copied().unwrap_or(0))
+                    .min(budget.get(j).copied().unwrap_or(0))
+                    .max(0);
+                if allowed <= 0 {
+                    continue;
+                }
+                if let Some(b) = budget.get_mut(i) {
+                    *b -= allowed;
+                }
+                if let Some(b) = budget.get_mut(j) {
+                    *b -= allowed;
+                }
+                let px = (ux as i64 * allowed as i64 / POS_ONE as i64) as i32;
+                let py = (uy as i64 * allowed as i64 / POS_ONE as i64) as i32;
+                let max_x = (width as i64 * POS_ONE as i64) - 1;
+                let max_y = (height as i64 * POS_ONE as i64) - 1;
+                cells.x[i] = ((cells.x[i] as i64) + px as i64).clamp(0, max_x) as i32;
+                cells.y[i] = ((cells.y[i] as i64) + py as i64).clamp(0, max_y) as i32;
+                cells.x[j] = ((cells.x[j] as i64) - px as i64).clamp(0, max_x) as i32;
+                cells.y[j] = ((cells.y[j] as i64) - py as i64).clamp(0, max_y) as i32;
+                if pass == 0 {
+                    separated = separated.saturating_add(1);
                 }
             }
-            let (dx, dy) = (cells.x[i] - cells.x[j], cells.y[i] - cells.y[j]);
-            // Exactly coincident cells have no line to push along, so they get a fixed
-            // nudge derived from their slots — deterministic, and enough to break the tie.
-            let (ux, uy) = if dx == 0 && dy == 0 {
-                (
-                    if (i + j) % 2 == 0 { POS_ONE } else { -POS_ONE },
-                    if (i / 2 + j) % 2 == 0 {
-                        POS_ONE
-                    } else {
-                        -POS_ONE
-                    },
-                )
-            } else {
-                let scale = separation(cells, i, j).max(1);
-                (
-                    (dx as i64 * POS_ONE as i64 / scale as i64) as i32,
-                    (dy as i64 * POS_ONE as i64 / scale as i64) as i32,
-                )
-            };
-            // Bounded by what each of the two has left to give this tick.
-            //
-            // Every overlapping pair used to be shoved independently, so a cell wedged among
-            // eight neighbours took eight pushes in one tick and they added up: measured, the
-            // worst cells were travelling most of their own radius per tick, which is a cell
-            // passing its neighbour between one frame and the next. A crowd rearranged faster
-            // than it could be looked at, and no arrangement of contact seams can be stable
-            // through that because the neighbourhood genuinely is not.
-            //
-            // Water is viscous and cells are not projectiles: a budget per cell per tick is
-            // closer to what being in a crowd is like than an unbounded sum of pairwise
-            // impulses, and it makes separation converge on its answer over a few ticks
-            // instead of overshooting past it in one.
-            let shove = overlap.saturating_mul(SEPARATION_STRENGTH) / 16 / 2;
-            let allowed = shove
-                .min(budget.get(i).copied().unwrap_or(0))
-                .min(budget.get(j).copied().unwrap_or(0))
-                .max(0);
-            if allowed <= 0 {
-                continue;
-            }
-            if let Some(b) = budget.get_mut(i) {
-                *b -= allowed;
-            }
-            if let Some(b) = budget.get_mut(j) {
-                *b -= allowed;
-            }
-            let px = (ux as i64 * allowed as i64 / POS_ONE as i64) as i32;
-            let py = (uy as i64 * allowed as i64 / POS_ONE as i64) as i32;
-            let max_x = (width as i64 * POS_ONE as i64) - 1;
-            let max_y = (height as i64 * POS_ONE as i64) - 1;
-            cells.x[i] = ((cells.x[i] as i64) + px as i64).clamp(0, max_x) as i32;
-            cells.y[i] = ((cells.y[i] as i64) + py as i64).clamp(0, max_y) as i32;
-            cells.x[j] = ((cells.x[j] as i64) - px as i64).clamp(0, max_x) as i32;
-            cells.y[j] = ((cells.y[j] as i64) - py as i64).clamp(0, max_y) as i32;
-            separated = separated.saturating_add(1);
         }
     }
     separated
