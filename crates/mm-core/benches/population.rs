@@ -72,8 +72,69 @@ fn slide(seed: u64) -> Scenario {
     }
 }
 
-/// Grow a population to `TARGET_CELLS`, or give up and report what it reached.
+/// Where a grown population is kept between runs.
+fn cache_path(genome_file: &str, seed: u64) -> std::path::PathBuf {
+    let root = std::env::var("CARGO_TARGET_DIR")
+        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../target").to_string());
+    std::path::PathBuf::from(root)
+        .join("bench-cache")
+        .join(format!(
+            "{}-{seed}-{TARGET_CELLS}.mmslide",
+            genome_file.replace('.', "_")
+        ))
+}
+
+/// A grown population, from cache when there is one.
+///
+/// Growing fifty thousand cells takes about ten minutes, and it was the same ten minutes on
+/// every invocation — which made this a benchmark you ran once a day rather than after a
+/// change, and a benchmark nobody runs is not a gate.
+///
+/// The grown world is snapshotted instead. Hard rule 7 says a snapshot restores
+/// bit-identically and there is a test holding it to that, so the cached population is not an
+/// approximation of the grown one: it is the grown one. Comparing two builds against the same
+/// cached world is also *better* measurement than comparing two independently grown ones,
+/// because the population stops being something each side re-derived and becomes a constant.
+///
+/// The snapshot's own format version invalidates the cache whenever world state changes shape.
+/// It cannot know about a change that alters behaviour without altering the format — after one
+/// of those the cached population is from the old physics, and is still a perfectly good fifty
+/// thousand cells to measure throughput on, but regrow with `MM_BENCH_REGROW=1` if what you
+/// want is a population the *new* rules would have produced.
 fn grown(genome_file: &str, seed: u64) -> Option<World> {
+    let path = cache_path(genome_file, seed);
+    if std::env::var("MM_BENCH_REGROW").is_err() {
+        if let Ok(bytes) = std::fs::read(&path) {
+            match mm_core::Snapshot::read(&bytes) {
+                Ok(world) => {
+                    eprintln!(
+                        "  {genome_file}: {} cells from cache ({})",
+                        world.cells().len(),
+                        path.display()
+                    );
+                    return Some(world);
+                }
+                Err(e) => eprintln!("  {genome_file}: cache unusable ({e:?}); regrowing"),
+            }
+        }
+    }
+    let world = grow(genome_file, seed)?;
+    match mm_core::Snapshot::write(&world) {
+        Ok(bytes) => {
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            if let Err(e) = std::fs::write(&path, bytes) {
+                eprintln!("  {genome_file}: could not cache the grown world: {e}");
+            }
+        }
+        Err(e) => eprintln!("  {genome_file}: could not snapshot the grown world: {e:?}"),
+    }
+    Some(world)
+}
+
+/// Grow a population from scratch, the long way.
+fn grow(genome_file: &str, seed: u64) -> Option<World> {
     let bytes = assemble(genome_file);
     let mut world = World::new(slide(seed)).expect("world");
     world.set_biology(BiologyConfig {
@@ -210,8 +271,42 @@ fn phase_breakdown(_c: &mut Criterion) {
     }
     let collisions = t.elapsed() / n;
 
-    // `execute` and `resolve` need pieces `World` keeps private, so they are measured as the
-    // remainder: whole tick minus everything above and minus the fluid.
+    // The VM itself, measured rather than left inside the remainder. It is the phase any
+    // proposal to move the simulation onto a GPU would be moving, so what it actually costs
+    // decides whether that is worth discussing: Amdahl bounds the whole exercise at whatever
+    // share this line reports.
+    //
+    // Running it repeatedly on one world advances the cells' VMs without advancing anything
+    // else, which is the same liberty `resolve_collisions` is measured under above — the work
+    // per call is what is being timed, not the trajectory.
+    let vm = world.scenario().vm;
+    let spike_damage = world.biology().ecology.spike_damage;
+    let chemistry = world.biology().metabolism.catalogue.metabolism;
+    // Cloned once, because `execute` wants the cells mutably and the substrate shared, and
+    // both live in the same `World`. Outside the timed loop, so it costs the measurement
+    // nothing.
+    let substrate = world.substrate().clone();
+    let capacity = world.cells().capacity();
+    let mut intents = mm_core::intent::IntentBuffer::new();
+    let t = Instant::now();
+    for _ in 0..n {
+        intents.begin_tick(capacity);
+        mm_core::biology::execute(
+            world.cells_mut(),
+            &substrate,
+            &index,
+            &mut intents,
+            &vm,
+            0,
+            1,
+            spike_damage,
+            chemistry,
+        );
+    }
+    let execute = t.elapsed() / n;
+
+    // `resolve` needs pieces `World` keeps private, so it stays inside the remainder: whole
+    // tick minus everything measured above and minus the fluid.
     let t = Instant::now();
     world.run(n as u64);
     let whole = t.elapsed() / n;
@@ -222,7 +317,7 @@ fn phase_breakdown(_c: &mut Criterion) {
     empty.run(n as u64);
     let fluid = t.elapsed() / n;
 
-    let accounted = rebuild * 2 + collisions + fluid;
+    let accounted = rebuild * 2 + collisions + fluid + execute;
     let rest = whole.saturating_sub(accounted);
     let pct = |d: std::time::Duration| d.as_secs_f64() / whole.as_secs_f64() * 100.0;
     eprintln!("  whole tick            {whole:>10.2?}");
@@ -236,14 +331,18 @@ fn phase_breakdown(_c: &mut Criterion) {
         pct(collisions)
     );
     eprintln!(
+        "  execute (the VM)      {execute:>10.2?}  {:5.1}%",
+        pct(execute)
+    );
+    eprintln!(
         "  fluid + bookkeeping   {fluid:>10.2?}  {:5.1}%",
         pct(fluid)
     );
     eprintln!(
-        "  execute + resolve +   {rest:>10.2?}  {:5.1}%  (the remainder)",
+        "  resolve + metabolism  {rest:>10.2?}  {:5.1}%  (the remainder)",
         pct(rest)
     );
-    eprintln!("    metabolism + physics");
+    eprintln!("    + physics");
 }
 
 /// Per-phase throughput, for finding out *where* a regression went rather than only that one
