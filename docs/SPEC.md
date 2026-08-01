@@ -452,6 +452,54 @@ internal chemical state varies across a cluster because neighbours pump chemical
 other. That is morphogen gradients, and it gives evo-devo for free. Do not shortcut it with
 a type field.
 
+### 6.4 Contact, and why cells compress
+
+A cell occupies space, and its radius is derived from its mass. Two cells whose radii overlap
+are pushed apart along the line between their centres, by position projection, over the same
+2–3 Gauss–Seidel iterations §8.4 specifies for junctions.
+
+Contact is **not** a non-penetration constraint, and this is the part that is easy to get
+wrong by assuming otherwise. Cells are allowed to overlap. The response has two regimes:
+
+- **Soft**, through most of the overlap: a weak restoring push, so a pair under load rests
+  visibly compressed and how deeply it is compressed is a reading of how hard it is pressed.
+- **Stiff**, past a **core** at a fixed fraction of the touching distance: sixteen times the
+  soft response, so compression effectively stops there regardless of load.
+
+A crowd therefore gets harder to squash the more it is squashed, and the depth it settles at
+is set by geometry rather than by whatever the load happens to be, or by the solver's budget.
+
+Three consequences that are normative rather than incidental:
+
+1. **The resting overlap is the tissue, not an error.** The renderer draws the flat wall
+   between two cells by cutting each at the plane where their outlines cross, which exists
+   only where they overlap. Drive overlap to zero and there is no wall to draw — and
+   non-overlapping circles cannot tile a plane, so a crowd solved to convergence is a bag of
+   marbles with holes between them, however good the shader is.
+2. **The core fraction is shared with the renderer.** `mm_core::neighbours::CORE_PERMILLE` and
+   `mm_app::slide::MIN_FACE` are the same fraction expressing the same idea — every cell keeps
+   an incompressible core of that fraction of its own radius — as a floor on centre distance
+   in the physics and as a floor on where a cell may be cut in the renderer. They must be
+   changed together. A cell drawn with a core it does not physically have is a cell drawn
+   overlapping.
+
+   They are not, however, the same constraint, and the renderer's clamp is not redundant. For
+   two cells of equal radius the two coincide exactly: at the distance where the cores touch,
+   the plane through the crossing outlines falls precisely at the core of each. For unequal
+   radii it does not — a cell twice its neighbour's radius has that plane past the smaller
+   cell's *centre* while the cores are still apart. Respecting the core in the physics does
+   not make a cell safe from being cut away, so both floors are load-bearing.
+3. **Being crushed means being driven past the core**, not being in contact. Crowding damage
+   (§ecology) is charged on core penetration only. Charging for ordinary resting compression
+   would make a crowd lethal and a tissue impossible to hold together.
+
+Every correction is clamped to a fraction of the cell's own radius, **per contact rather than
+as a pooled per-tick budget.** A pool is spent in slot order, so a cell with eight neighbours
+resolves the first few contacts and silently skips the rest: the surface of a pack behaves and
+its interior collapses into itself. That clamp also bounds the stiff regime, so there is a
+load above which the core loses and cells pass through one another; that ceiling is asserted
+by test rather than left to be discovered.
+
 ---
 
 ## 7. Chemistry, matter and energy

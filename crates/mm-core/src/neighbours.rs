@@ -15,14 +15,26 @@
 //! commute. A neighbour list that came back in a different order would give a different world
 //! (I1, I6).
 //!
-//! # Separation is not a physics engine
+//! # Contact is not a physics engine
 //!
-//! Two cells that overlap are pushed apart along the line between them, a little, once per
-//! tick. There is no restitution, no momentum exchange and no iteration to convergence,
-//! because none of that is what the simulation is about — what it needs is that cells occupy
-//! space, so that a crowded patch is crowded and a cell has a reason to leave it. Junction
-//! constraints at M7 are where a real solver goes, and SPEC §8.4 is explicit that even that
-//! one is two or three Gauss-Seidel iterations and no more.
+//! Two cells that overlap are pushed apart along the line between them, a little, a few times
+//! per tick. There is no restitution and no momentum exchange, because none of that is what the
+//! simulation is about — what it needs is that cells occupy space, so that a crowded patch is
+//! crowded and a cell has a reason to leave it. SPEC §8.4 is explicit that even the junction
+//! solver is two or three Gauss-Seidel iterations and no more.
+//!
+//! # Cells compress; they do not interpenetrate freely, and they do not stay circles
+//!
+//! Contact is deliberately *not* a non-penetration constraint. Two cells in contact are allowed
+//! to overlap, softly at first and then against a hard floor — see [`CORE_PERMILLE`] — so that
+//! how deeply a cell is pressed into its neighbour is a reading of how hard it is being pressed.
+//!
+//! This is load-bearing for the picture as well as the physics, and it took a while to see why.
+//! The renderer draws the flat wall between two cells by cutting each of them at the plane where
+//! their outlines cross, which only exists where they overlap. Solve contact to convergence and
+//! there is no overlap, so there is no wall — and non-overlapping circles cannot tile a plane, so
+//! what you get is a bag of marbles with holes between them however good the shader is. A packed
+//! tissue is cells pressed *into* one another. The overlap is the tissue.
 
 use rayon::prelude::*;
 
@@ -30,11 +42,96 @@ use crate::cell::CellArena;
 use crate::fixed::{pos_to_square, POS_ONE};
 use crate::sensing::TouchReading;
 
-/// How much of an overlap one relaxation pass takes out, in sixteenths.
+/// The closest two cells may be pressed together, as a fraction of the distance at which their
+/// outlines merely touch, in permille.
 ///
-/// Partial rather than complete: shoving two cells fully apart in one go makes a crowd
-/// explode, and a crowd that explodes is not a crowd.
-const SEPARATION_STRENGTH: i32 = 8;
+/// A cell is not a circle that happens to be solid; it is a bag of nearly incompressible water.
+/// Pressed, it flattens against its neighbour and the two share a wall, and it goes on doing
+/// that until there is nothing left to give. This is where nothing is left.
+///
+/// The same fraction as `mm_app::slide::MIN_FACE`, expressing the same idea from the other side:
+/// every cell keeps an incompressible core of this much of its own radius. Here that is a floor
+/// on how close two centres may come; there it is a floor on how deeply a cell may be cut. The
+/// two must be changed together or the picture stops being a picture of the physics.
+///
+/// Not the same constraint, though, and neither makes the other redundant. For equal radii they
+/// coincide exactly — at the distance where the cores touch, the plane through the crossing
+/// outlines falls precisely at the core of each. For unequal radii they do not: a cell twice its
+/// neighbour's radius has that plane past the smaller cell's *centre* while the two cores are
+/// still apart, so respecting the core here does not stop the renderer cutting a small cell away.
+pub const CORE_PERMILLE: i32 = 950;
+
+/// How much of a contact's compression one relaxation pass takes out, in sixteenths.
+///
+/// Soft on purpose, and much softer than the value this replaced. Contact used to be a hard
+/// non-penetration constraint driving every overlap to zero, which is the wrong target: cells
+/// that are merely touching have no shared wall to draw, and circles that do not overlap cannot
+/// tile a plane, so a crowd solved to convergence is a heap of discs with holes between them.
+/// A gentle response lets an unloaded pair rest almost exactly touching and a loaded one sink in
+/// proportionally, which is what flattens the contact into a face.
+const CONTACT_STRENGTH: i32 = 1;
+
+/// How much of the compression *past* the core one pass takes out, in sixteenths, on top of
+/// [`CONTACT_STRENGTH`].
+///
+/// This is the whole mechanism: resistance is nearly free through the soft band and sixteen
+/// times stiffer once the core is reached, so how deep a crowd settles is set by geometry rather
+/// than by whatever the load happens to be. A crowd gets harder to squash the more it is
+/// squashed.
+///
+/// Sixteen sixteenths, so one pass takes out a core penetration exactly once — each cell moves
+/// half of it and the pair closes the whole of it. Not more: at thirty-two the pair separates by
+/// twice what it was overlapping, which is an over-relaxed constraint, and an over-relaxed
+/// constraint oscillates instead of settling. Modelled before it was written; at a load that
+/// pins a pair to its core, this holds it within about 6% of the core and a softer 8/16 lets it
+/// through by twice that.
+///
+/// Note that the core is stiff, not infinite, and [`MAX_SHOVE`] caps it further. A load heavy
+/// enough will still press a pair through it — this bounds compression, it does not forbid it.
+///
+/// The response is continuous at the knee — at exactly the core this term contributes nothing —
+/// so there is no step for the solver to chatter across.
+const CORE_STRENGTH: i32 = 15;
+
+/// The furthest one contact may move one cell in one pass, as a divisor of its own radius.
+///
+/// The guard rail, and the reason a rising stiffness is safe here when it was not before. A
+/// stiff response to a deep overlap is a large number, and the deepest overlaps in the
+/// simulation are not crowds at all — a daughter is placed within half a square of its parent,
+/// which is far past the core. Clamping each shove means depth can buy stiffness without ever
+/// buying a teleport.
+///
+/// Per shove rather than per tick, which is the substantive change. The budget this replaced was
+/// a pool for the whole tick, so a cell wedged among eight neighbours spent it on the first two
+/// or three contacts in slot order and the rest were silently skipped — the interior of a pack
+/// could not resolve at all while its surface resolved perfectly. That is a starvation, not a
+/// speed limit, and it is what a per-contact clamp gets right: eight neighbours may each push,
+/// none of them may push far, and in a real pack they mostly cancel.
+const MAX_SHOVE: i32 = 8;
+
+/// Fraction of a touching cell's sliding velocity that survives a tick, `Q10`.
+///
+/// Cells are not ball bearings. Water alone is already syrup — see `sensing::DRAG_RETAIN` — but
+/// drag acts on a cell moving through fluid, and two cells pressed against each other are a
+/// different situation: there is a membrane dragging on a membrane, and it resists.
+///
+/// Without it the normal direction is handled and the tangential one is not, so a crowd under
+/// load has no way to lock up: cells slide freely past their neighbours, the arrangement
+/// reshuffles, and every shared wall in the picture is redrawn somewhere new each frame.
+const CONTACT_FRICTION: i32 = crate::fixed::Q10_ONE / 4;
+
+/// Speed below which a touching cell is treated as at rest, `Q10` squares per tick.
+///
+/// Static friction, and the thing that finally makes a loaded pack stop rather than merely
+/// slow down. A steady body force re-accelerates a jammed cell every tick and the contacts undo
+/// the position every tick, so the residual is one tick of acceleration — small, permanent, and
+/// visible as a crowd that buzzes without going anywhere. A pile of sand under gravity does not
+/// do this because grains in contact hold each other still until something exceeds the friction
+/// between them.
+///
+/// Well below anything a cilium produces — a cilium at full power is hundreds of `Q10` — so this
+/// stops a resting crowd without ever stopping a cell that is trying to swim.
+const REST_SPEED: i32 = crate::fixed::Q10_ONE / 24;
 
 /// Relaxation passes per tick.
 ///
@@ -43,15 +140,13 @@ const SEPARATION_STRENGTH: i32 = 8;
 /// dynamics, two to three Gauss-Seidel iterations a tick. Junctions got it and contacts did
 /// not, and one pass at a quarter strength is not a solver, it is a nudge.
 ///
-/// It shows as a crowd with no stiffness. One pass leaves three quarters of every overlap
-/// behind, so a steady inward pressure wins outright: cells sink into each other until the
-/// push, which stays proportional to the overlap, finally balances the squeeze — and by then
-/// they are deep inside one another and the outlines are meaningless. Three passes take out
-/// seven eighths, and what was a pile of interpenetrating discs becomes a body that holds its
-/// shape.
-///
 /// Three rather than more because it is the top of SPEC's range and because each pass is
 /// another walk of every contact — the phase is already a quarter of the tick.
+///
+/// Note that passes are no longer what bounds compression; [`CORE_PERMILLE`] is. Under the hard
+/// non-penetration constraint this replaced, pass count set how deep a crowd ended up, so the
+/// number was load-bearing and undertuned. Now it only sets how quickly the crowd gets to a
+/// depth the core already decides, which is a much less interesting job for a constant to have.
 const SEPARATION_PASSES: usize = 3;
 
 /// Cells indexed by the substrate square they stand on.
@@ -63,6 +158,17 @@ pub struct NeighbourIndex {
     entries: Vec<u32>,
     width: i32,
     height: i32,
+    /// The largest cell radius on the slide, `POS`. What sizes the neighbour search.
+    max_radius: i32,
+    /// How many squares out [`Self::around`] walks.
+    ///
+    /// Was a hard-coded one, and that was correct only while a cell was smaller than a substrate
+    /// square. It is not: a cell of mass 44 has a radius of a whole square, so two of them sit
+    /// about 1.65 squares apart and a three-by-three walk cannot see half of a cell's real
+    /// neighbours. Contacts that are never found are never separated and never drawn with a
+    /// shared wall, which is why a packed sheet came out as discs layered over one another with
+    /// only three or four seams each where a tiled monolayer needs six.
+    search: i32,
     /// Each cell's touch reading, gathered once per tick by [`Self::gather_touch`].
     ///
     /// `None` for a cell that was not gathered — either because the table is not built at all,
@@ -93,6 +199,16 @@ impl NeighbourIndex {
         self.entries.clear();
         // Whatever was gathered described the old positions. See the field's own note.
         self.touch.clear();
+
+        // Sized from the population rather than assumed. Two cells interact out to the sum of
+        // their radii, so the walk has to reach twice the largest radius, plus one square
+        // because a cell sits somewhere *within* its square rather than at the corner.
+        let mut max_radius = 0i32;
+        for i in cells.iter() {
+            max_radius = max_radius.max(crate::fixed::q10_to_pos(crate::biology::radius(cells, i)));
+        }
+        self.max_radius = max_radius;
+        self.search = self.squares_for(max_radius.saturating_mul(2));
 
         // Count.
         for i in cells.iter() {
@@ -146,12 +262,18 @@ impl NeighbourIndex {
     /// Exactly the three buckets in the same order, including at the edges: clamping the run
     /// to the slide drops the squares that are off it, which is what the three separate
     /// lookups did by returning nothing for them.
-    fn row_run(&self, sx: i32, sy: i32) -> &[u32] {
+    /// How many squares a reach of `POS` units needs, rounded up, plus one for the offset of a
+    /// cell within its own square.
+    fn squares_for(&self, reach: i32) -> i32 {
+        (reach.saturating_add(POS_ONE - 1) / POS_ONE).saturating_add(1)
+    }
+
+    fn row_run(&self, sx: i32, sy: i32, k: i32) -> &[u32] {
         if self.width <= 0 || sy < 0 || sy >= self.height {
             return &[];
         }
-        let x0 = sx.saturating_sub(1).max(0);
-        let x1 = sx.saturating_add(1).min(self.width - 1);
+        let x0 = sx.saturating_sub(k).max(0);
+        let x1 = sx.saturating_add(k).min(self.width - 1);
         if x0 > x1 {
             return &[];
         }
@@ -173,8 +295,14 @@ impl NeighbourIndex {
     /// incidental: separation pushes cells apart pairwise and pairwise pushes do not commute,
     /// so a different order here is a different world (I1, I6).
     pub fn around(&self, sx: i32, sy: i32) -> impl Iterator<Item = usize> + '_ {
-        (-1..=1)
-            .flat_map(move |dy| self.row_run(sx, sy.saturating_add(dy)))
+        self.within(sx, sy, self.search)
+    }
+
+    /// Every cell within `k` squares, in a fixed order.
+    pub fn within(&self, sx: i32, sy: i32, k: i32) -> impl Iterator<Item = usize> + '_ {
+        let k = k.clamp(1, 64);
+        (-k..=k)
+            .flat_map(move |dy| self.row_run(sx, sy.saturating_add(dy), k))
             .map(|s| *s as usize)
     }
 
@@ -275,13 +403,25 @@ impl NeighbourIndex {
         let sy = pos_to_square(cells.y[i]);
         let ri = crate::fixed::q10_to_pos(crate::biology::radius(cells, i));
         let reach = reach_permille.max(0) as i64;
-        for j in self.around(sx, sy) {
+        // The renderer looks further than the physics does, so it gets its own radius rather
+        // than the index's default. A seam that is never looked for is a wall that is never
+        // drawn, and the cell is then drawn lying over its neighbour instead.
+        let k = self.squares_for(
+            ((self.max_radius.saturating_mul(2) as i64 * reach) / 1000).min(i32::MAX as i64) as i32,
+        );
+        for j in self.within(sx, sy, k) {
             if j == i || !cells.occupied(j) {
                 continue;
             }
             let rj = crate::fixed::q10_to_pos(crate::biology::radius(cells, j));
-            let d = separation(cells, i, j);
             let touching = ((ri.saturating_add(rj) as i64 * reach) / 1000) as i32;
+            // The same metric the seam will be drawn from. Admitting a neighbour on one distance
+            // and drawing it from another is what made seams flicker in and out.
+            let d_sq = separation_sq(cells, i, j);
+            if d_sq >= (touching as i64) * (touching as i64) {
+                continue;
+            }
+            let d = d_sq.isqrt().min(i32::MAX as i64) as i32;
             let overlap = touching.saturating_sub(d);
             if overlap <= 0 {
                 continue;
@@ -317,7 +457,7 @@ impl NeighbourIndex {
 /// out of slots stops cutting for somebody who is still cutting for it. The result is one cell
 /// laid over another with no shared wall at all, which is precisely what a crowd should never
 /// look like. Cheaper to never reach the limit than to be clever about which contact to drop.
-pub const CONTACTS_PER_CELL: usize = 8;
+pub const CONTACTS_PER_CELL: usize = 12;
 
 /// A neighbour a cell is overlapping, for whoever draws it.
 ///
@@ -473,29 +613,59 @@ fn joined(cells: &CellArena, i: usize, j: usize) -> bool {
     cells.junctions(i).iter().any(|k| k.other == other)
 }
 
-/// Distance between two cells, `POS` units.
+/// Distance between two cells, `POS` units. Euclidean, by integer square root.
 ///
-/// Octagonal rather than Euclidean: exact in integers, monotonic in the true distance, and
-/// nothing here needs the difference. A Euclidean distance would need a square root, and this
-/// is on a path walked once per neighbour per cell per tick.
+/// It was octagonal — `max + min/2` — on the reasoning that it is monotonic in the true distance
+/// and nothing needed the difference. Both halves of that turned out to be wrong.
+///
+/// The octagonal distance overestimates by 6% at 45° and not at all on the axes, so it is not one
+/// metric but a direction-dependent family of them, and two things depended on the difference.
+///
+/// The solver settled a pair at a distance that depended on the angle between them, which was
+/// tolerable while compression was bounded only by a starved budget and became the dominant
+/// effect once [`CORE_PERMILLE`] made the whole band 5% wide — a 6% error inside a 5% band means
+/// a crowd that can never settle, only rotate and be pushed around. It looks exactly like what it
+/// is: cell boundaries fighting over where they belong.
+///
+/// And [`NeighbourIndex::contacts`] admitted a neighbour on this distance while handing back the
+/// exact `dx, dy` for the renderer to draw the seam from. So a diagonal neighbour was rejected
+/// where an equally close axial one was admitted, and cells jiggling across that inconsistent
+/// threshold made seams appear and vanish between frames.
+///
+/// The square root is cheaper than it sounds, because [`separation_sq`] answers the common
+/// question without one.
 #[inline]
 fn separation(cells: &CellArena, i: usize, j: usize) -> i32 {
-    let dx = (cells.x[i] - cells.x[j]).abs();
-    let dy = (cells.y[i] - cells.y[j]).abs();
-    let (lo, hi) = if dx < dy { (dx, dy) } else { (dy, dx) };
-    hi.saturating_add(lo / 2)
+    separation_sq(cells, i, j).isqrt().min(i32::MAX as i64) as i32
 }
 
-/// Push overlapping cells apart, once, in slot order.
+/// The square of [`separation`], which is the form most callers actually want.
 ///
-/// Returns how many pairs were separated, which is a cheap measure of how crowded the slide
-/// is and the thing to watch if a population stops growing for reasons that are not food.
+/// Comparing `d² >= want²` answers "are these two apart?" without a square root, and that is the
+/// answer for the overwhelming majority of pairs the solver looks at. Only the few that really do
+/// overlap pay for the root.
+#[inline]
+fn separation_sq(cells: &CellArena, i: usize, j: usize) -> i64 {
+    let dx = (cells.x[i] as i64) - (cells.x[j] as i64);
+    let dy = (cells.y[i] as i64) - (cells.y[j] as i64);
+    dx * dx + dy * dy
+}
+
+/// Resolve contacts, in slot order, with bounded compression.
 ///
-/// Also records how hard each cell is being pressed, into `crowding`, in `POS`: the total
-/// overlap with cells it is *not* joined to. Measured here because this is the pass that
-/// already knows, and separation resolves only a fraction of an overlap per tick — so what is
-/// left is a real and persistent state of being crushed rather than an instant of contact.
-/// [`crate::ecology`] is what charges for it.
+/// Cells are not driven apart until they stop overlapping. They are allowed to compress, softly
+/// at first and then very stiffly past [`CORE_PERMILLE`] of their touching distance, so an
+/// unloaded pair rests very nearly tangent and a loaded one flattens against its neighbour by an
+/// amount that depends on the load. That resting overlap is the point rather than an error: it is
+/// the region the renderer cuts into a shared wall, and without it a crowd is a heap of circles
+/// with holes between them, because circles do not tile a plane.
+///
+/// Returns how many pairs were moved, which is a cheap measure of how crowded the slide is and
+/// the thing to watch if a population stops growing for reasons that are not food.
+///
+/// Also records how hard each cell is being pressed, into `crowding`, in `POS`: how far past the
+/// core it is driven by cells it is *not* joined to. Measured here because this is the pass that
+/// already knows. [`crate::ecology`] is what charges for it.
 pub fn resolve_collisions(
     cells: &mut CellArena,
     index: &NeighbourIndex,
@@ -518,10 +688,6 @@ pub fn resolve_collisions(
     // separation was shoving them apart.
     crowding.clear();
     crowding.resize(cells.capacity(), 0);
-    // How far separation may still move each cell this tick. An eighth of its own radius: far
-    // enough to resolve an ordinary overlap in a few ticks, not far enough to cross a
-    // neighbour in one.
-    let mut budget: Vec<i32> = Vec::with_capacity(cells.capacity());
     radii.clear();
     radii.reserve(cells.capacity());
     for i in 0..cells.capacity() {
@@ -532,10 +698,15 @@ pub fn resolve_collisions(
         });
     }
 
-    budget.clear();
-    for i in 0..cells.capacity() {
-        budget.push(radii.get(i).copied().unwrap_or(0) / 4);
-    }
+    // What the constraints ended up moving each cell, so that velocity can be reconciled with it
+    // once the passes are done. See the note below the pass loop.
+    let mut push_x: Vec<i32> = vec![0; cells.capacity()];
+    let mut push_y: Vec<i32> = vec![0; cells.capacity()];
+    // Whether a cell is touching anything at all. Not the same question as whether it was
+    // *moved*: the interior of a pack is where the pushes cancel, so a cell can be gripped on
+    // every side and have a net correction of zero. Friction has to key off contact, not motion,
+    // or it would apply everywhere except the one place that needs it.
+    let mut touching: Vec<bool> = vec![false; cells.capacity()];
 
     for pass in 0..SEPARATION_PASSES {
         for i in 0..cells.capacity() {
@@ -557,24 +728,37 @@ pub fn resolve_collisions(
                     continue;
                 }
                 let want = ri.saturating_add(radii[j]);
-                let d = separation(cells, i, j);
-                if d >= want {
+                // Tested on squares, so the pairs that are merely near each other — nearly all of
+                // them — never pay for a square root.
+                let d_sq = separation_sq(cells, i, j);
+                if d_sq >= (want as i64) * (want as i64) {
                     continue;
                 }
-                let overlap = want - d;
+                let d = d_sq.isqrt().min(i32::MAX as i64) as i32;
+                // How far the pair is compressed, and how much of that is past the core.
+                let squeeze = want - d;
+                let core = ((want as i64 * CORE_PERMILLE as i64) / 1000) as i32;
+                let crushed = (core - d).max(0);
                 // Being crushed, charged to both sides — except by whatever this cell is joined
                 // to. An organism is *meant* to hold its cells against each other, and billing it
                 // for that would make being multicellular a way to die.
+                //
+                // Charged on the whole compression, which is safe again now that [`CORE_PERMILLE`]
+                // bounds it at a twentieth of the touching distance. It was briefly charged on
+                // core penetration only, to stop an ordinary crowd being lethal back when a cell
+                // could legitimately rest more than halfway inside its neighbour — with a core
+                // this tight, nothing penetrates it and that measure would read zero for every
+                // cell on the slide, which would quietly delete crowding pressure altogether.
                 //
                 // Counted on the first pass only. The later passes are the same contacts being
                 // relaxed further, not new ones, and charging for each would make the price of
                 // being in a crowd depend on how many times the solver looked at it.
                 if pass == 0 && !joined(cells, i, j) {
                     if let Some(c) = crowding.get_mut(i) {
-                        *c = c.saturating_add(overlap);
+                        *c = c.saturating_add(squeeze);
                     }
                     if let Some(c) = crowding.get_mut(j) {
-                        *c = c.saturating_add(overlap);
+                        *c = c.saturating_add(squeeze);
                     }
                 }
                 let (dx, dy) = (cells.x[i] - cells.x[j], cells.y[i] - cells.y[j]);
@@ -590,38 +774,27 @@ pub fn resolve_collisions(
                         },
                     )
                 } else {
-                    let scale = separation(cells, i, j).max(1);
+                    let scale = d.max(1);
                     (
                         (dx as i64 * POS_ONE as i64 / scale as i64) as i32,
                         (dy as i64 * POS_ONE as i64 / scale as i64) as i32,
                     )
                 };
-                // Bounded by what each of the two has left to give this tick.
+                // Soft everywhere, plus a second term that only exists inside the core. The sum
+                // is continuous at the knee, because `crushed` is zero there.
                 //
-                // Every overlapping pair used to be shoved independently, so a cell wedged among
-                // eight neighbours took eight pushes in one tick and they added up: measured, the
-                // worst cells were travelling most of their own radius per tick, which is a cell
-                // passing its neighbour between one frame and the next. A crowd rearranged faster
-                // than it could be looked at, and no arrangement of contact seams can be stable
-                // through that because the neighbourhood genuinely is not.
-                //
-                // Water is viscous and cells are not projectiles: a budget per cell per tick is
-                // closer to what being in a crowd is like than an unbounded sum of pairwise
-                // impulses, and it makes separation converge on its answer over a few ticks
-                // instead of overshooting past it in one.
-                let shove = overlap.saturating_mul(SEPARATION_STRENGTH) / 16 / 2;
-                let allowed = shove
-                    .min(budget.get(i).copied().unwrap_or(0))
-                    .min(budget.get(j).copied().unwrap_or(0))
-                    .max(0);
+                // Halved once for the sixteenths and once more because both cells move, so the
+                // pair closes by the full fraction while each travels half of it.
+                let push = squeeze
+                    .saturating_mul(CONTACT_STRENGTH)
+                    .saturating_add(crushed.saturating_mul(CORE_STRENGTH));
+                let shove = push / 16 / 2;
+                // Clamped per contact, not drawn from a per-tick pool. See [`MAX_SHOVE`]: the
+                // pool starved the inside of a crowd, which is the one place that has to work.
+                let cap = (ri / MAX_SHOVE).min(radii[j] / MAX_SHOVE).max(1);
+                let allowed = shove.min(cap).max(0);
                 if allowed <= 0 {
                     continue;
-                }
-                if let Some(b) = budget.get_mut(i) {
-                    *b -= allowed;
-                }
-                if let Some(b) = budget.get_mut(j) {
-                    *b -= allowed;
                 }
                 let px = (ux as i64 * allowed as i64 / POS_ONE as i64) as i32;
                 let py = (uy as i64 * allowed as i64 / POS_ONE as i64) as i32;
@@ -631,12 +804,76 @@ pub fn resolve_collisions(
                 cells.y[i] = ((cells.y[i] as i64) + py as i64).clamp(0, max_y) as i32;
                 cells.x[j] = ((cells.x[j] as i64) - px as i64).clamp(0, max_x) as i32;
                 cells.y[j] = ((cells.y[j] as i64) - py as i64).clamp(0, max_y) as i32;
+                if let Some(t) = touching.get_mut(i) {
+                    *t = true;
+                }
+                if let Some(t) = touching.get_mut(j) {
+                    *t = true;
+                }
+                if let Some(v) = push_x.get_mut(i) {
+                    *v = v.saturating_add(px);
+                }
+                if let Some(v) = push_y.get_mut(i) {
+                    *v = v.saturating_add(py);
+                }
+                if let Some(v) = push_x.get_mut(j) {
+                    *v = v.saturating_sub(px);
+                }
+                if let Some(v) = push_y.get_mut(j) {
+                    *v = v.saturating_sub(py);
+                }
                 if pass == 0 {
                     separated = separated.saturating_add(1);
                 }
             }
         }
     }
+    // Velocity, reconciled with what the constraints actually did.
+    //
+    // Without this the solver cannot win, and the packing bench showed it plainly: a settled
+    // crowd had a mean speed of a fifteenth of a square per tick and was going nowhere. A cell
+    // moves under whatever is pushing it — a current, a cilium — and the constraint then puts it
+    // back, but the *velocity* that drove it there is untouched, so next tick it drives in again
+    // and is put back again. Position-based dynamics has to close that loop or the two fight for
+    // as long as the load lasts, which reads as every boundary in the picture jittering.
+    //
+    // Removed rather than reversed. Full PBD sets `v = (x - x_before) / dt`, which here would
+    // hand the cell the whole correction as outgoing speed — that is restitution, and cells in
+    // water do not bounce. So only the component of velocity *opposing* the correction is taken
+    // out: a cell being pushed out of its neighbour loses exactly the part of its motion that was
+    // driving it in, and keeps the part along the wall it is sliding on. Strictly removes energy,
+    // so it cannot be the source of a new instability.
+    for i in 0..cells.capacity() {
+        if !cells.occupied(i) {
+            continue;
+        }
+        if !touching.get(i).copied().unwrap_or(false) {
+            continue;
+        }
+        let (cx, cy) = (
+            push_x.get(i).copied().unwrap_or(0) as i64,
+            push_y.get(i).copied().unwrap_or(0) as i64,
+        );
+        let mag_sq = cx * cx + cy * cy;
+        if mag_sq > 0 {
+            let dot = (cells.vx[i] as i64) * cx + (cells.vy[i] as i64) * cy;
+            // Negative means the cell was driving into what pushed it; that part goes.
+            // Positive means it was already going that way, and there is nothing to remove.
+            if dot < 0 {
+                cells.vx[i] = cells.vx[i].saturating_sub((dot * cx / mag_sq) as i32);
+                cells.vy[i] = cells.vy[i].saturating_sub((dot * cy / mag_sq) as i32);
+            }
+        }
+        // What is left is the cell sliding along its neighbours, which membranes resist.
+        cells.vx[i] = crate::fixed::q10_scale(cells.vx[i], CONTACT_FRICTION);
+        cells.vy[i] = crate::fixed::q10_scale(cells.vy[i], CONTACT_FRICTION);
+        // And below a threshold it is simply held: see `REST_SPEED`.
+        if cells.vx[i].saturating_abs().saturating_add(cells.vy[i].saturating_abs()) < REST_SPEED {
+            cells.vx[i] = 0;
+            cells.vy[i] = 0;
+        }
+    }
+
     separated
 }
 
@@ -646,6 +883,26 @@ mod tests {
     use crate::cell::{CellId, CellSeed};
     use crate::fixed::{pos, q10};
     use crate::genome::GenomePool;
+
+    fn arena_of_mass(positions: &[(i32, i32)], mass: i32) -> (CellArena, GenomePool) {
+        let pool = GenomePool::new();
+        let mut cells = CellArena::new();
+        for (x, y) in positions {
+            cells.spawn(CellSeed {
+                x: *x,
+                y: *y,
+                mass: q10(mass),
+                energy: q10(100),
+                membrane: 16,
+                key: 0,
+                species: 0,
+                parent: CellId::NONE,
+                birth_tick: 0,
+                genome: pool.intern(vec![0x2E]).unwrap(),
+            });
+        }
+        (cells, pool)
+    }
 
     fn arena(positions: &[(i32, i32)]) -> (CellArena, GenomePool) {
         let pool = GenomePool::new();
@@ -668,9 +925,10 @@ mod tests {
     }
 
     /// The nine-bucket walk `around` replaced, kept as the thing to measure it against.
-    fn nine_buckets(index: &NeighbourIndex, sx: i32, sy: i32) -> Vec<usize> {
-        (-1..=1)
-            .flat_map(|dy| (-1..=1).map(move |dx| (dx, dy)))
+    /// The naive bucket-at-a-time walk of the `(2k+1)²` block, which the row runs must match.
+    fn block_buckets(index: &NeighbourIndex, sx: i32, sy: i32, k: i32) -> Vec<usize> {
+        (-k..=k)
+            .flat_map(|dy| (-k..=k).map(move |dx| (dx, dy)))
             .flat_map(|(dx, dy)| index.in_square(sx + dx, sy + dy))
             .map(|s| *s as usize)
             .collect()
@@ -705,7 +963,7 @@ mod tests {
             set.offer(contact(
                 (r * a.cos()) as i32,
                 (r * a.sin()) as i32,
-                50 + k as i32,
+                50 + k,
             ));
         }
         assert_eq!(
@@ -735,9 +993,9 @@ mod tests {
     }
 
     #[test]
-    fn three_row_runs_are_the_same_walk_as_nine_buckets() {
-        // `around` gathers each row of the neighbourhood as one contiguous run rather than
-        // three separate buckets. That is only sound if it is the same *sequence*, not merely
+    fn row_runs_are_the_same_walk_as_bucket_at_a_time() {
+        // The walk gathers each row of the neighbourhood as one contiguous run rather than a
+        // bucket at a time. That is only sound if it is the same *sequence*, not merely
         // the same set: separation pushes cells apart pairwise and pairwise pushes do not
         // commute, so a reordering here is a different world (I1, I6).
         //
@@ -756,12 +1014,45 @@ mod tests {
         let mut index = NeighbourIndex::default();
         index.rebuild(&cells, 8, 8);
 
-        for sy in -2..=9 {
-            for sx in -2..=9 {
-                let walked: Vec<usize> = index.around(sx, sy).collect();
-                assert_eq!(walked, nine_buckets(&index, sx, sy), "at ({sx}, {sy})");
+        // Over every radius the walk can be asked for, not just the one it used to hard-code.
+        for k in 1..=4 {
+            for sy in -2..=9 {
+                for sx in -2..=9 {
+                    let walked: Vec<usize> = index.within(sx, sy, k).collect();
+                    assert_eq!(walked, block_buckets(&index, sx, sy, k), "at ({sx}, {sy}) k={k}");
+                }
             }
         }
+    }
+
+    #[test]
+    fn the_search_grows_with_the_cells_on_the_slide() {
+        // The bug this replaced, as a test. A three-by-three walk is right only while a cell is
+        // smaller than a substrate square, and these are not: a cell of mass 44 has a radius of
+        // a whole square, so two of them rest about 1.65 squares apart and half of any cell's
+        // real neighbours fall outside a fixed three-by-three. They were then never separated
+        // and never given a shared wall, so a packed sheet drew as discs lying over each other
+        // with three or four seams each where a tiled monolayer needs six.
+        let (small, _p) = arena_of_mass(&[(pos(4), pos(4))], 1);
+        let (big, _p2) = arena_of_mass(&[(pos(4), pos(4))], 4000);
+        let mut a = NeighbourIndex::default();
+        let mut b = NeighbourIndex::default();
+        a.rebuild(&small, 32, 32);
+        b.rebuild(&big, 32, 32);
+        assert!(
+            b.search > a.search,
+            "a slide of large cells must be searched further than one of small cells: {} vs {}",
+            b.search,
+            a.search
+        );
+        // And it must cover the distance two of the largest can interact over, which is the
+        // sum of their radii.
+        let r = crate::fixed::q10_to_pos(crate::biology::radius(&big, 0));
+        assert!(
+            b.search * POS_ONE >= 2 * r,
+            "search of {} squares does not reach two radii ({r} POS)",
+            b.search
+        );
     }
 
     #[test]
@@ -771,14 +1062,14 @@ mod tests {
         let (cells, _p) = arena(&[(pos(0), pos(0)), (pos(0), pos(0))]);
         let mut index = NeighbourIndex::default();
         index.rebuild(&cells, 1, 1);
-        assert_eq!(index.around(0, 0).collect::<Vec<_>>(), vec![0, 1]);
-        assert_eq!(nine_buckets(&index, 0, 0), vec![0, 1]);
+        assert_eq!(index.within(0, 0, 1).collect::<Vec<_>>(), vec![0, 1]);
+        assert_eq!(block_buckets(&index, 0, 0, 1), vec![0, 1]);
         // A square off the end still has the last real square as its neighbour, and always
         // did — the run is clamped, not truncated to nothing.
         for sx in -1..=2 {
             assert_eq!(
-                index.around(sx, 0).collect::<Vec<_>>(),
-                nine_buckets(&index, sx, 0),
+                index.within(sx, 0, 1).collect::<Vec<_>>(),
+                block_buckets(&index, sx, 0, 1),
                 "at ({sx}, 0)"
             );
         }
@@ -814,7 +1105,7 @@ mod tests {
     }
 
     #[test]
-    fn a_neighbourhood_is_the_nine_squares_around_a_cell() {
+    fn a_neighbourhood_of_radius_one_is_the_nine_squares_around_a_cell() {
         let (cells, _p) = arena(&[
             (pos(5), pos(5)),
             (pos(6), pos(5)),
@@ -823,7 +1114,7 @@ mod tests {
         ]);
         let mut index = NeighbourIndex::default();
         index.rebuild(&cells, 16, 16);
-        let near: Vec<usize> = index.around(5, 5).collect();
+        let near: Vec<usize> = index.within(5, 5, 1).collect();
         assert!(near.contains(&0) && near.contains(&1) && near.contains(&2));
         assert!(!near.contains(&3), "three squares away is not adjacent");
     }
@@ -851,6 +1142,168 @@ mod tests {
         );
         let after: Vec<(i32, i32)> = far.iter().map(|i| (far.x[i], far.y[i])).collect();
         assert_eq!(positions, after, "distant cells were moved");
+    }
+
+    /// Squeeze a pair together by `load` per cell per tick for long enough to settle, and report
+    /// what separation they hold. The load stands in for whatever presses a real crowd together
+    /// — a current, gravity, the weight of the cells further out.
+    fn rest_under_load(load: i32) -> i32 {
+        let (mut cells, _p) = arena(&[(pos(6), pos(6)), (pos(8), pos(6))]);
+        let mut index = NeighbourIndex::default();
+        for _ in 0..400 {
+            cells.x[0] = cells.x[0].saturating_add(load);
+            cells.x[1] = cells.x[1].saturating_sub(load);
+            index.rebuild(&cells, 16, 16);
+            resolve_collisions(&mut cells, &index, &mut Vec::new(), &mut Vec::new());
+        }
+        separation(&cells, 0, 1)
+    }
+
+    #[test]
+    fn a_pressed_pair_settles_at_its_core_whatever_is_pressing_it() {
+        // A cell is a bag of water, so how deeply it is pressed into a neighbour is *not* a
+        // reading of how hard it is being pressed — past a very short soft band it simply stops,
+        // and the picture is set by geometry rather than by pressure.
+        //
+        // This is the opposite of what an earlier version of this test asserted, and the change
+        // is the point. When the core sat at 0.55 of touching there was a wide band to be graded
+        // across, but a cell resting there has lost 69% of its area, which is not a cell. At an
+        // area-preserving core the band is a twentieth of the touching distance, and everything
+        // from the lightest load up pins to the same place.
+        let want = 2 * crate::fixed::q10_to_pos(crate::biology::radius(&arena(&[(0, 0)]).0, 0));
+        let core = ((want as i64 * CORE_PERMILLE as i64) / 1000) as i32;
+        for load in [4, 16, 48] {
+            let d = rest_under_load(load);
+            assert!(
+                (d - core).abs() * 20 <= want,
+                "load {load} settled at {d}, not near the core at {core}"
+            );
+        }
+        // And an unloaded pair is left very nearly tangent, so two cells that merely meet in
+        // open water still read as two cells rather than as one flattened blob.
+        assert!(
+            rest_under_load(0) * 20 > want * 19,
+            "an unpressed pair should barely compress"
+        );
+    }
+
+    #[test]
+    fn compression_stops_at_the_core() {
+        // The bound, and the reason this is safe to make soft. Lean on a pair as hard as the
+        // solver can be leaned on and it still does not collapse: past the core the response is
+        // sixteen times stiffer, so the depth stops being a function of the load.
+        //
+        // `MIN_FACE` in the renderer cuts at the same fraction, and the two have to agree — a
+        // cell drawn with a core it does not physically have is a cell drawn overlapping.
+        let want = 2 * crate::fixed::q10_to_pos(crate::biology::radius(&arena(&[(0, 0)]).0, 0));
+        let core = ((want as i64 * CORE_PERMILLE as i64) / 1000) as i32;
+        for load in [48, 96] {
+            let d = rest_under_load(load);
+            // Still in contact, first. Without this the assertion below passes for the worst
+            // possible reason: a load the solver cannot hold drives one cell clean through the
+            // other, after which they are far apart and trivially "not compressed". Caught
+            // exactly that way, at a load of 160.
+            assert!(
+                d < want,
+                "load {load} pushed the pair apart entirely, to {d} — it did not compress at all"
+            );
+            // Not a hard floor — `MAX_SHOVE` caps how hard the core may shove back — so this
+            // asserts the bound that is actually claimed: near the core, and nowhere near the
+            // unbounded collapse a fixed-rate push gives under a steady squeeze.
+            assert!(
+                d * 4 > core * 3,
+                "load {load} drove the pair to {d}, well past a core of {core}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_load_heavier_than_the_core_can_answer_pushes_through_it() {
+        // The limit of the mechanism, asserted rather than left to be discovered. `MAX_SHOVE`
+        // caps how hard a contact may shove per pass, so there is a load above which the core
+        // simply loses. Recorded here because the number matters: if a current, a spike or a
+        // junction ever pulls harder than this, cells will pass through one another and the
+        // renderer will draw the result faithfully and look broken.
+        let want = 2 * crate::fixed::q10_to_pos(crate::biology::radius(&arena(&[(0, 0)]).0, 0));
+        let r = want / 2;
+        // Three passes of at most `r / MAX_SHOVE` each, from both sides.
+        let ceiling = 2 * SEPARATION_PASSES as i32 * (r / MAX_SHOVE);
+        assert!(
+            rest_under_load(ceiling / 2) < want,
+            "a load inside the ceiling should still be held"
+        );
+        assert!(
+            rest_under_load(ceiling * 2) >= want,
+            "a load past the ceiling should be expected to break contact"
+        );
+    }
+
+    #[test]
+    fn a_cell_surrounded_on_all_sides_still_resolves_every_contact() {
+        // The starvation this replaced. A per-tick displacement pool was spent in slot order, so
+        // a cell with eight neighbours resolved the first two or three contacts and silently
+        // skipped the rest — the surface of a pack behaved and the interior collapsed into it.
+        //
+        // Six neighbours on a ring, all overlapping the middle cell. Every one of them must end
+        // up no deeper than the core; a pool would leave the later slots untouched.
+        //
+        // Six rather than eight because six is the most equal discs that fit around one in a
+        // plane. Eight was asking for a configuration that does not exist — ring neighbours at
+        // the core distance from the centre are closer than the core to *each other* — so the
+        // solver was being failed for not achieving the impossible.
+        let r = crate::fixed::q10_to_pos(crate::biology::radius(&arena(&[(0, 0)]).0, 0));
+        let mut ring = vec![(pos(8), pos(8))];
+        // Sixths of a turn, at half the distance they want. `(±1, ±2)` and `(±2, 0)` is a
+        // hexagon to within a few percent, and there is no trigonometry in `mm-core`.
+        for (dx, dy) in [(2, 0), (1, 2), (-1, 2), (-2, 0), (-1, -2), (1, -2)] {
+            ring.push((pos(8) + dx * r / 2, pos(8) + dy * r / 2));
+        }
+        let (mut cells, _p) = arena(&ring);
+        let mut index = NeighbourIndex::default();
+        for _ in 0..400 {
+            index.rebuild(&cells, 16, 16);
+            resolve_collisions(&mut cells, &index, &mut Vec::new(), &mut Vec::new());
+        }
+        let want = 2 * r;
+        let core = ((want as i64 * CORE_PERMILLE as i64) / 1000) as i32;
+        for j in 1..=6 {
+            let d = separation(&cells, 0, j);
+            assert!(
+                d * 4 > core * 3,
+                "neighbour {j} was left at {d}, inside a core of {core} — starved of budget"
+            );
+        }
+    }
+
+    #[test]
+    fn crowding_is_charged_for_overlap_and_only_for_overlap() {
+        // Charged on the whole compression rather than on core penetration, which is safe only
+        // because [`CORE_PERMILLE`] now bounds compression at a twentieth of the touching
+        // distance. Measured against the core instead, every cell on a packed slide would read
+        // exactly zero and crowding pressure would quietly cease to exist.
+        let mut crowding = Vec::new();
+
+        // Clear of each other: free.
+        let r = crate::fixed::q10_to_pos(crate::biology::radius(&arena(&[(0, 0)]).0, 0));
+        let (mut apart, _p) = arena(&[(pos(6), pos(6)), (pos(6) + 3 * r, pos(6))]);
+        let mut index = NeighbourIndex::default();
+        index.rebuild(&apart, 16, 16);
+        resolve_collisions(&mut apart, &index, &mut Vec::new(), &mut crowding);
+        assert_eq!(
+            crowding.iter().filter(|c| **c > 0).count(),
+            0,
+            "a cell was billed for a neighbour it is not touching"
+        );
+
+        // Driven well inside the core: charged, to both sides.
+        let (mut crushed, _p2) = arena(&[(pos(6), pos(6)), (pos(6) + r / 4, pos(6))]);
+        let mut index2 = NeighbourIndex::default();
+        index2.rebuild(&crushed, 16, 16);
+        resolve_collisions(&mut crushed, &index2, &mut Vec::new(), &mut crowding);
+        assert!(
+            crowding[0] > 0 && crowding[1] > 0,
+            "a crushed pair was not billed: {crowding:?}"
+        );
     }
 
     #[test]
