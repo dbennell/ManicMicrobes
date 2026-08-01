@@ -230,17 +230,26 @@ impl NeighbourIndex {
         self.radii = radii;
     }
 
-    /// Which neighbours a cell is overlapping, deepest first.
+    /// Which neighbours are within reach of a cell, nearest first.
     ///
     /// The same walk the touch sensor makes, asking a different question: not "how crowded am
-    /// I" but "who exactly is pushing on me, and from where". Separation has already resolved
-    /// what it is going to this tick, so an overlap left here is one the solver allowed —
-    /// which is precisely the squash worth drawing.
+    /// I" but "who exactly is beside me, and where".
+    ///
+    /// `reach_permille` scales what counts as touching: 1000 is the bare radii, 1200 counts a
+    /// neighbour whose centre is within a fifth further out than that. It exists because
+    /// separation drives overlap to *zero* — it pushes every tick until `d >= ri + rj` — so at
+    /// rest almost nothing overlaps and a caller asking only for genuine overlap would be told
+    /// about nothing almost all of the time. A caller that wants to know who a cell is packed
+    /// against, rather than who it is presently colliding with, has to ask slightly wider than
+    /// the physics does.
+    ///
+    /// Per pair rather than as a flat distance, so it means the same thing for a large cell as
+    /// for a small one. In permille because `mm-core` has no floats.
     ///
     /// Not gathered up front like [`Self::gather_touch`], because only the cells actually on
     /// screen need it and the renderer knows which those are.
     #[must_use]
-    pub fn contacts(&self, cells: &CellArena, i: usize) -> ContactSet {
+    pub fn contacts(&self, cells: &CellArena, i: usize, reach_permille: i32) -> ContactSet {
         let mut out = ContactSet::default();
         if !cells.occupied(i) {
             return out;
@@ -248,13 +257,15 @@ impl NeighbourIndex {
         let sx = pos_to_square(cells.x[i]);
         let sy = pos_to_square(cells.y[i]);
         let ri = crate::fixed::q10_to_pos(crate::biology::radius(cells, i));
+        let reach = reach_permille.max(0) as i64;
         for j in self.around(sx, sy) {
             if j == i || !cells.occupied(j) {
                 continue;
             }
             let rj = crate::fixed::q10_to_pos(crate::biology::radius(cells, j));
             let d = separation(cells, i, j);
-            let overlap = ri.saturating_add(rj).saturating_sub(d);
+            let touching = ((ri.saturating_add(rj) as i64 * reach) / 1000) as i32;
+            let overlap = touching.saturating_sub(d);
             if overlap <= 0 {
                 continue;
             }
@@ -296,7 +307,8 @@ pub struct Contact {
     pub dy: i32,
     /// The neighbour's radius, `POS`.
     pub radius: i32,
-    /// How far the two have been pushed into each other, `POS`. Always positive.
+    /// How far inside each other's reach the two are, `POS`. Always positive, and measured
+    /// against whatever reach the caller asked for rather than against bare radii.
     pub overlap: i32,
 }
 

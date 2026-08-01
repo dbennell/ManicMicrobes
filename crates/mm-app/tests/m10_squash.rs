@@ -34,6 +34,32 @@ fn two_cells_agree_where_their_shared_face_is() {
 }
 
 #[test]
+fn cells_resting_at_contact_still_close_the_gap() {
+    // The case that matters, because it is the one the physics settles into. Separation pushes
+    // overlapping cells apart every tick and stops at `d >= ri + rj`, so at rest cells touch
+    // with *zero* overlap — and circles touching at a point leave a triangular hole between
+    // every three of them. Drawing them larger than they are and cutting at the seam is what
+    // closes that hole.
+    let r = 1.0f32;
+    let d = 2.0 * r; // exactly touching, which is where separation leaves them
+    let drawn = r * mm_app::slide::PACKING;
+
+    let face = seam(drawn, drawn, d);
+    // Each is cut at the midpoint between the centres — they abut, sharing one wall.
+    assert!(
+        (face - d / 2.0).abs() < 1e-5,
+        "seam at {face}, not {}",
+        d / 2.0
+    );
+    // And each actually reaches that wall, which is the whole point: a cell drawn at its
+    // physical radius would stop short of it and leave the hole open.
+    assert!(
+        drawn > face,
+        "drawn radius {drawn} does not reach its own seam at {face}"
+    );
+}
+
+#[test]
 fn equal_cells_meet_half_way() {
     let d = 1.5f32;
     assert!((seam(1.0, 1.0, d) - d / 2.0).abs() < 1e-6);

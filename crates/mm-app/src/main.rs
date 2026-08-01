@@ -101,7 +101,7 @@ use mm_app::editor::Editor;
 use mm_app::engine::{Engine, Published, Rate};
 use mm_app::inspector::Inspection;
 use mm_app::params;
-use mm_app::slide::{Frame, Lod, Slide};
+use mm_app::slide::{self, Frame, Lod, Slide};
 use mm_app::tools::{self, ToolEvent};
 use mm_app::ui::{self, Dock, Ecology, Focus, Panel, Panels, Rect, Target};
 use mm_app::wiki;
@@ -1358,7 +1358,11 @@ fn redraw(
         //
         // A selected cell gets a floor big enough to find in a crowd of six hundred, which is
         // the crowd you are in when you have lost it.
-        let body = (dot.radius * 2.0 * scale).max(if selected { 12.0 } else { 1.5 });
+        // Drawn a fifth larger than the simulation's radius, and cut back by the seams where
+        // a neighbour is in the way — see `slide::PACKING`. Cells rest at exactly touching,
+        // and touching circles leave a hole between every three of them.
+        let body =
+            (dot.radius * 2.0 * scale * slide::PACKING).max(if selected { 12.0 } else { 1.5 });
         Some(cellmesh::Placed {
             x: at.x,
             y: at.y,

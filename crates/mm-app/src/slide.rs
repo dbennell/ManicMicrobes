@@ -75,7 +75,33 @@ pub struct Squash {
     pub face: f32,
 }
 
+/// How much larger than its physical radius a cell is *drawn*.
+///
+/// Cells are drawn touching because otherwise they never are. Separation pushes every
+/// overlapping pair apart on every tick and stops only when `d >= ri + rj`, so the state the
+/// physics is always driving towards is cells resting exactly *at* contact with zero overlap —
+/// and circles that touch at a point leave a triangular hole between every three of them. A
+/// clump drawn honestly at the simulation's radii is mostly gaps, which is why it reads as
+/// cells floating near each other rather than packed together.
+///
+/// So the drawing is bigger than the physics by a fifth, and the seams are computed at the
+/// drawn size. Two cells resting at contact then overlap *on screen* and cut each other along
+/// the plane between them: the hole closes, the two share a flat wall, and because the seam
+/// partitions the overlap exactly there is still no pixel drawn twice.
+///
+/// This changes nothing but the picture. Collision, sensing, junction reach and everything else
+/// use the radius `mm-core` reports; this is the last step before the mesh, and the amount is a
+/// judgement about how a crowd should look rather than a measurement of anything.
+pub const PACKING: f32 = 1.2;
+
+/// [`PACKING`] as the permille reach `mm_core::NeighbourIndex::contacts` wants.
+const PACKING_PERMILLE: i32 = 1200;
+
 /// The seams a cell is flattened along, from the neighbours pressing on it.
+///
+/// `radius` is the drawn radius, not the physical one — the seams have to be worked out at the
+/// size the cell is actually going to appear, or they cut it somewhere other than where its
+/// outline is.
 fn squash_of(world: &World, i: usize, radius: f32) -> Vec<Squash> {
     if radius <= 0.0 {
         return Vec::new();
@@ -83,7 +109,7 @@ fn squash_of(world: &World, i: usize, radius: f32) -> Vec<Squash> {
     let scale = 1.0 / POS_ONE as f32;
     world
         .neighbours()
-        .contacts(world.cells(), i)
+        .contacts(world.cells(), i, PACKING_PERMILLE)
         .as_slice()
         .iter()
         .filter_map(|c| {
@@ -94,7 +120,7 @@ fn squash_of(world: &World, i: usize, radius: f32) -> Vec<Squash> {
             if d <= f32::EPSILON {
                 return None;
             }
-            let other = c.radius as f32 * scale;
+            let other = c.radius as f32 * scale * PACKING;
             // The plane through the two points where the outlines cross:
             //   face = (d² + r² - other²) / 2d
             // Both cells get the same seam from their own side, because swapping r and other
@@ -500,7 +526,7 @@ impl Slide {
                     },
                     cluster_size: components.size_of(i),
                     squash: if detailed {
-                        squash_of(&self.world, i, radius)
+                        squash_of(&self.world, i, radius * PACKING)
                     } else {
                         Vec::new()
                     },
