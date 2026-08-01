@@ -667,7 +667,18 @@ fn parse_operand(
         return Some(Operand::Promoter(name.to_string()));
     }
 
-    if op == Op::Imm {
+    // A number, on any template opcode. `%000101` and `40` are two spellings of the same six
+    // letters — bit *i* is letter *i* — and a bare number takes the narrowest width that holds
+    // it, so the two round-trip to identical bytes.
+    //
+    // This used to be `IMM` only, which meant a genome taken off a cell came back as a page of
+    // `%00110000` and the editor was a hex editor with extra steps. A label or a `#name` is
+    // better still, but neither survives assembly, so they cannot be recovered from bytes that
+    // evolved: a number is what is actually knowable about a template found in the world.
+    //
+    // Told from a label by the first character, which is unambiguous — `is_ident` requires a
+    // letter or `_`, so nothing that starts with a digit was ever a name.
+    if tok.starts_with(|c: char| c.is_ascii_digit()) {
         return match parse_number(tok) {
             Ok((value, width)) => Some(Operand::Number { value, width }),
             Err(message) => {
@@ -675,6 +686,17 @@ fn parse_operand(
                 None
             }
         };
+    }
+
+    if op == Op::Imm {
+        // IMM's template is a value, not a place, so there is no label reading to fall back
+        // on the way the jumps have.
+        errors.push(AsmError {
+            line,
+            col,
+            message: format!("`{tok}` is not a byte value (0-255)"),
+        });
+        return None;
     }
 
     if matches!(op, Op::Gene | Op::Express) {

@@ -310,6 +310,24 @@ you reassemble are different documents**, and the pane currently only has the se
 **Source** — what exists today. `Line::to_source()`, byte-exact, the thing the editor round-
 trips. Unchanged, still the only text the editor ever hands back.
 
+*Changed at M10.3b: the source form itself is readable.* The premise above — that `%001111` is
+the price of round-tripping — was wrong, and the assembler already said so. It takes a numeric
+template operand, and a bare number takes the narrowest width that holds it, so `%001111` and
+`60` assemble to identical bytes. `Line::to_readable` renders that, pinning the width as
+`60:7` only where the template is padded past its value. So the editor and the pane's source
+column show `IMM 60`, and `assemble(disassemble(b)) == b` still holds for every byte string —
+the exhaustive two-byte sweep in `disasm.rs` now runs against both renderings.
+
+What this does *not* recover is labels and `#names`. Those are hashed at assembly and the
+strings are gone (SPEC §4.4), so a genome that evolved never had them. A number is what is
+genuinely knowable about a template found in the world; the `%` form remains legal input and
+is still what you want when the template is a base-pairing pattern rather than a value.
+
+Numeric operands were previously accepted on `IMM` alone, which appears to have been an
+oversight rather than a decision: a template is eight bits wherever it appears, and `%00110000`
+is no more readable on an `EXPRESS` than on an `IMM`. They are now accepted on all nine
+template-taking opcodes, told apart from a label by the leading character — `is_ident` requires
+a letter or `_`, so nothing beginning with a digit was ever a name.
 
 **Reading** — the same instructions with every template operand resolved to what it means:
 

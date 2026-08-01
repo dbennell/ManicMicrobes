@@ -200,9 +200,13 @@ impl Editor {
     }
 
     /// Replace the buffer with the disassembly of a genome taken off a live cell.
+    ///
+    /// The readable rendering, so templates arrive as `IMM 40` rather than `IMM %000101`. It
+    /// reassembles to the identical bytes — see [`mm_asm::Line::to_readable`] — so nothing
+    /// about the round trip changes, only what you have to look at while editing.
     pub fn load_bytes(&mut self, bytes: &[u8], name: impl Into<String>) {
         self.name = name.into();
-        self.set_source(mm_asm::disassemble(bytes).to_source());
+        self.set_source(mm_asm::disassemble(bytes).to_readable());
         self.assemble();
     }
 }

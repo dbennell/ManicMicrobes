@@ -610,7 +610,10 @@ impl Listing {
                 .lines
                 .iter()
                 .map(|l| {
-                    let text = l.to_source();
+                    // The readable rendering rather than `%` letters, so the pane's source
+                    // column is the same text the editor is loaded with. Both reassemble to
+                    // the identical bytes.
+                    let text = l.to_readable();
                     let reading = reading_of(genome, l, cfg);
                     ListingLine {
                         offset: l.offset,
