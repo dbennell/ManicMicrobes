@@ -100,15 +100,35 @@ fn fragment(in: Output) -> @location(0) vec4<f32> {
         return in.colour;
     }
 
+    // --- how hard this cell is being squeezed ---
+    //
+    // Read off the nearest seam: 0 when nothing is cutting into the cell, approaching 1 as a
+    // seam closes on its centre. Free, because the seams are already here.
+    let faces = in.squash_face * 0.65;
+    let nearest_face = min(min(faces.x, faces.y), min(faces.z, faces.w));
+    let pressure = clamp(1.0 - nearest_face / 0.65, 0.0, 1.0);
+
     // --- the outline ---
     //
     // Three harmonics of angle, with amplitudes and phases from the cell's own seed. Small
     // enough that the blob stays a blob: past about 0.2 total it reads as a splat, and past
     // 0.35 the outline folds back on itself.
+    //
+    // Damped by how hard the cell is being pressed, and that is what makes a clump look like a
+    // clump. A seam is a straight line agreed by two cells from their own centres, but the
+    // wobble is each cell's private business — so a cell whose outline happens to wander
+    // *inwards* towards its neighbour stops short of the seam it agreed to, and leaves a gap
+    // exactly where the two are supposed to be pressed together. It reads as cells floating
+    // near each other rather than packed.
+    //
+    // A cell being squashed flat by its neighbours has no business being knobbly anyway: the
+    // pressure that makes the seam is the same pressure that would smooth the membrane out.
+    // So the irregularity is a luxury of having room, and a cell in a crowd gives it up.
     let theta = atan2(p.y, p.x);
-    let a1 = 0.055 + 0.045 * hash11(seed);
-    let a2 = 0.030 + 0.030 * hash11(seed + 7.0);
-    let a3 = 0.015 + 0.020 * hash11(seed + 13.0);
+    let slack = 1.0 - 0.9 * pressure;
+    let a1 = (0.055 + 0.045 * hash11(seed)) * slack;
+    let a2 = (0.030 + 0.030 * hash11(seed + 7.0)) * slack;
+    let a3 = (0.015 + 0.020 * hash11(seed + 13.0)) * slack;
     let wobble = a1 * sin(3.0 * theta + hash11(seed + 3.0) * 6.2831853)
         + a2 * sin(5.0 * theta + hash11(seed + 11.0) * 6.2831853)
         + a3 * sin(7.0 * theta + hash11(seed + 17.0) * 6.2831853);
@@ -148,14 +168,13 @@ fn fragment(in: Output) -> @location(0) vec4<f32> {
     // Four unconditionally: the unused ones carry a distance no pixel of this quad can reach,
     // which is cheaper than branching on a count in a fragment shader.
     var field = r - radius;
-    let faces = in.squash_face * 0.65;
     let d0 = unpack2x16snorm(bitcast<u32>(in.squash_dir.x));
     let d1 = unpack2x16snorm(bitcast<u32>(in.squash_dir.y));
     let d2 = unpack2x16snorm(bitcast<u32>(in.squash_dir.z));
     let d3 = unpack2x16snorm(bitcast<u32>(in.squash_dir.w));
     // The shoulder scales with the cell, so a small one is not rounded away entirely and a
     // large one does not get a corner that reads as sharp.
-    let shoulder = radius * 0.30;
+    let shoulder = radius * 0.14;
     field = smax(field, dot(p, d0) - faces.x, shoulder);
     field = smax(field, dot(p, d1) - faces.y, shoulder);
     field = smax(field, dot(p, d2) - faces.z, shoulder);
@@ -170,7 +189,12 @@ fn fragment(in: Output) -> @location(0) vec4<f32> {
     //
     // The hemisphere normal. `sqrt(1 - r^2)` against a fixed light is what turns a disc into a
     // ball, and it is three operations.
-    let t = min(r / max(radius, 0.001), 1.0);
+    //
+    // Driven by the field rather than by the raw radius, so the ball follows the seams: where
+    // a neighbour has flattened this cell the shading reaches the *flat* at full curvature
+    // instead of continuing to a circle that is not there. `field` is zero on the outline
+    // wherever the outline has ended up, so `t` is one there and zero in the middle.
+    let t = clamp(1.0 + field / max(radius, 0.001), 0.0, 1.0);
     let nz = sqrt(max(0.0, 1.0 - t * t));
     var n = vec3<f32>(0.0, 0.0, 1.0);
     if (r > 0.0001) {
@@ -184,9 +208,19 @@ fn fragment(in: Output) -> @location(0) vec4<f32> {
     let rim = pow(1.0 - nz, 4.0);
     // Faint granularity: a flat disc reads as a sprite, a grainy one reads as cytoplasm.
     let grain = hash21(p * 37.0 + seed) - 0.5;
-    // A thin brighter ring just inside the outline: the membrane, fading as it fails.
-    let membrane = smoothstep(radius - 0.16, radius - 0.02, r) * integrity;
 
-    let lum = clamp(0.34 + 0.62 * lambert + 0.30 * rim + 0.18 * membrane + 0.045 * grain, 0.0, 1.0);
+    var lum = clamp(0.34 + 0.62 * lambert + 0.22 * rim + 0.045 * grain, 0.0, 1.0);
+
+    // The membrane, as a dark edge rather than a bright one, and measured against the field so
+    // it runs along the seams too.
+    //
+    // This is what keeps a cell a cell inside a crowd. Neighbours are often near enough in
+    // colour that without a boundary a clump of six reads as one puddle with organelles
+    // floating in it — the outline is doing more work here than the shading is. It fades with
+    // integrity, so a failing cell loses its edge before it loses its shape, which is the
+    // right order: a membrane going is exactly what that is.
+    let membrane = smoothstep(-0.20 * radius, -0.02 * radius, field) * integrity;
+    lum = lum * mix(1.0, 0.40, membrane);
+
     return vec4<f32>(in.colour.rgb * lum, in.colour.a * alpha);
 }

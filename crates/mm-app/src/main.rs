@@ -1366,7 +1366,20 @@ fn redraw(
             // and what the fade needs — so the quad is grossed up to make the *body* the size
             // asked for.
             half: body / (2.0 * cellmesh::FIELD_FILL),
-            rgba: [r * tint, g * tint, b * tint, focus.max(0.25)],
+            // Opaque. A cell out of focus was being drawn at a quarter alpha *as well as*
+            // dimmed by `tint`, so depth of field was charged twice and the second charge cost
+            // the picture its solidity: in a clump you saw through the front cell into the one
+            // behind, and a mass of cells read as one pane of stained glass.
+            //
+            // Nothing is lost by it. Defocus is still carried by `tint`, which darkens, and by
+            // `softness`, which genuinely blurs the outline — and blur is the part a sprite
+            // could never do and the reason the shader exists. What transparency added was the
+            // ability to see through a solid object.
+            //
+            // Safe because the seams partition the overlap exactly: two cells pressed together
+            // cut each other along the same plane from either side, so opaque bodies tile with
+            // no region drawn twice.
+            rgba: [r * tint, g * tint, b * tint, 1.0],
             shape: cellmesh::Shape {
                 seed: cellmesh::seed_of(dot.id.ordering_key()),
                 // In the field's own units, where 1 is the cell's radius, so a defocused cell
