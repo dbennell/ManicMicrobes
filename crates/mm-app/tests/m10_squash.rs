@@ -76,6 +76,24 @@ fn the_packed_direction_survives_the_round_trip() {
 }
 
 #[test]
+fn the_empty_seam_is_out_of_reach_but_not_out_of_precision() {
+    // Both halves matter. Too near and it cuts a cell that has no neighbour there; too far and
+    // the smooth intersection that combines the four seams loses the field to rounding —
+    // `mix(b, a, h)` is `b + h*(a - b)`, and once `b` is large enough that `a - b` rounds to
+    // `-b` in `f32`, the field value is gone and the cell draws as a translucent square.
+    let far = mm_app::cellmesh::NO_SQUASH;
+    // The furthest any pixel of the quad can be from its centre, in field units.
+    let corner = 2.0f32.sqrt();
+    assert!(far > corner + 1.0, "{far} is close enough to cut a corner");
+    // Survives being added to and subtracted from a field value of ordinary size.
+    let field = 0.125f32;
+    assert!(
+        (-far + (field + far) - field).abs() < 1e-4,
+        "{far} loses a field value of {field} to rounding"
+    );
+}
+
+#[test]
 fn a_cell_with_no_neighbours_carries_no_seams() {
     // The default has to be a seam nothing can reach, because the shader applies all four
     // unconditionally rather than branching on a count.

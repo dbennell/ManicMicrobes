@@ -58,6 +58,20 @@ fn vertex(vertex: Vertex) -> Output {
     return out;
 }
 
+// Intersection with a rounded corner, rather than a mitred one.
+//
+// A plain `max` is a clean geometric intersection and it looks like scissors: the cell arrives
+// at the seam, turns through a hard angle, and leaves. Real cells under pressure meet their
+// neighbours along a flat and then curve away from it, and it is that curve — not the flat —
+// that makes a clump read as one mass rather than as a pile of clipped discs.
+//
+// `k` is how much shoulder to leave, in the field's own units. IQ's polynomial smooth-min,
+// negated into a max.
+fn smax(a: f32, b: f32, k: f32) -> f32 {
+    let h = clamp(0.5 - 0.5 * (b - a) / k, 0.0, 1.0);
+    return mix(b, a, h) + k * h * (1.0 - h);
+}
+
 // Deterministic noise in 0..1. The same shape of hash `art.rs` uses, in the space WGSL has.
 fn hash11(p: f32) -> f32 {
     var x = fract(p * 0.1031);
@@ -139,10 +153,13 @@ fn fragment(in: Output) -> @location(0) vec4<f32> {
     let d1 = unpack2x16snorm(bitcast<u32>(in.squash_dir.y));
     let d2 = unpack2x16snorm(bitcast<u32>(in.squash_dir.z));
     let d3 = unpack2x16snorm(bitcast<u32>(in.squash_dir.w));
-    field = max(field, dot(p, d0) - faces.x);
-    field = max(field, dot(p, d1) - faces.y);
-    field = max(field, dot(p, d2) - faces.z);
-    field = max(field, dot(p, d3) - faces.w);
+    // The shoulder scales with the cell, so a small one is not rounded away entirely and a
+    // large one does not get a corner that reads as sharp.
+    let shoulder = radius * 0.30;
+    field = smax(field, dot(p, d0) - faces.x, shoulder);
+    field = smax(field, dot(p, d1) - faces.y, shoulder);
+    field = smax(field, dot(p, d2) - faces.z, shoulder);
+    field = smax(field, dot(p, d3) - faces.w, shoulder);
 
     let alpha = 1.0 - smoothstep(-edge, edge, field);
     if (alpha <= 0.001) {

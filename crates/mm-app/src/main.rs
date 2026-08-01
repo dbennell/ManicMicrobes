@@ -2013,7 +2013,11 @@ fn squash_of(dot: &mm_app::CellDot) -> [cellmesh::Squash; cellmesh::SQUASH_PER_C
     for (slot, s) in out.iter_mut().zip(dot.squash.iter()) {
         *slot = cellmesh::Squash {
             nx: s.nx,
-            ny: s.ny,
+            // Negated, because `to_screen` negates it. The slide's rows run downwards and the
+            // screen's run upwards, so a neighbour below a cell in the world is above it in
+            // the picture — and a seam that did not turn over with everything else flattened
+            // the cell on the side where there was nobody.
+            ny: -s.ny,
             face: s.face,
         };
     }

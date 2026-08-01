@@ -54,7 +54,14 @@ pub const SQUASH_PER_CELL: usize = 4;
 ///
 /// Unused slots carry this rather than a flag, so the shader applies four seams unconditionally
 /// and never branches on how many a cell happens to have.
-pub const NO_SQUASH: f32 = 1.0e9;
+///
+/// Far, but *not* enormous, and the difference is not academic. The quad's corner is at
+/// `sqrt(2)` in field units, so anything past about two already never cuts. A huge sentinel
+/// instead breaks the smooth intersection that combines the seams: it interpolates as
+/// `b + h*(a - b)`, and when `b` is a billion, `a - b` rounds to exactly `-b` in `f32` and the
+/// field value it was supposed to preserve is annihilated. Every pixel comes back zero and the
+/// cell draws as a translucent square.
+pub const NO_SQUASH: f32 = 8.0;
 
 /// One flat side, as the shader wants it: a direction and how far along it the seam sits.
 #[derive(Clone, Copy, PartialEq, Debug)]
