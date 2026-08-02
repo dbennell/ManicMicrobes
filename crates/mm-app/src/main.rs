@@ -134,6 +134,15 @@ use mm_core::{CellId, LightRegime, MutationRates, Organelle, OrganelleType, Scen
 /// for and none of the interface drawn over it. That is the half worth photographing anyway,
 /// and the panels prove themselves a different way: `ctx.available_rect()` shrinking to the
 /// viewport is the layout having happened.
+/// `slide.png` and a frame number, as `slide_000.png`. A single shot still gets a number, so a
+/// series and a lone frame are named the same way and one analysis script reads both.
+fn numbered_path(path: &str, n: u32) -> String {
+    match path.rsplit_once('.') {
+        Some((stem, ext)) => format!("{stem}_{n:03}.{ext}"),
+        None => format!("{path}_{n:03}"),
+    }
+}
+
 fn screenshot(
     mut commands: Commands,
     mut sim: ResMut<SlideRes>,
@@ -141,6 +150,7 @@ fn screenshot(
     mut exit: MessageWriter<AppExit>,
     mut frames: Local<u32>,
     mut done: Local<Option<u32>>,
+    mut shot: Local<u32>,
 ) {
     use bevy::render::view::screenshot::{save_to_disk, Screenshot};
     *frames += 1;
@@ -192,10 +202,32 @@ fn screenshot(
     let Ok(path) = std::env::var("MM_SHOT") else {
         return;
     };
+    // How many consecutive frames to photograph. One is a picture; a series is a measurement.
+    //
+    // A still frame cannot show instability, and describing one in prose is not analysis — a
+    // change that altered nothing at all was twice reported here as making things visibly worse,
+    // because the pictures were being read rather than compared. A series can be differenced,
+    // which turns "it flickers" into a number.
+    let series: u32 = std::env::var("MM_SHOT_SERIES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1)
+        .max(1);
     // Taken, and now waiting to be written. The save is asynchronous — the observer fires when
     // the image has come back off the GPU — so quitting the same frame would race it and
     // produce no file. A few frames' grace, then out.
     if let Some(taken_at) = *done {
+        if *shot < series {
+            // Still collecting the series: one frame apart, so what shows up between them is a
+            // tick's worth of movement and nothing else.
+            let n = *shot;
+            *shot += 1;
+            let numbered = numbered_path(&path, n);
+            commands
+                .spawn(Screenshot::primary_window())
+                .observe(save_to_disk(numbered));
+            return;
+        }
         if frames.saturating_sub(taken_at) > 10 {
             exit.write(AppExit::Success);
         }
@@ -212,9 +244,11 @@ fn screenshot(
     // An entity with an observer since 0.15, rather than a manager resource. Failure is the
     // observer's problem and is reported by it: a missing directory should not take down a run
     // that is otherwise doing its job.
+    let first = numbered_path(&path, 0);
+    *shot = 1;
     commands
         .spawn(Screenshot::primary_window())
-        .observe(save_to_disk(path));
+        .observe(save_to_disk(first));
     // `MM_SHOT` is a batch tool: it exists so a change can be photographed from a script, and
     // a window that sits open afterwards waiting to be killed by a `timeout` is a window
     // somebody has to close. It quits itself once the file is on disk.
@@ -521,8 +555,13 @@ fn seed_packing(slide: &mut Slide) {
     let scenario = Scenario {
         name: "packing bench".to_string(),
         seed: 7,
-        width: 48,
-        height: 48,
+        // `MM_BENCH_SLIDE=<n>` shrinks it until the pack is pressed against the walls, which is
+        // the other thing a live slide has and this bench does not. A colony floating in open
+        // water can spread until it is comfortable; one against a boundary cannot, and
+        // `step_physics` clamps a cell at the edge — so separation pushes it in and the clamp
+        // puts it back, every tick, for as long as the crowd leans on the wall.
+        width: bench_slide(),
+        height: bench_slide(),
         light: LightRegime::Uniform {
             intensity: mm_core::Q10_ONE,
         },
@@ -565,12 +604,27 @@ fn seed_packing(slide: &mut Slide) {
 
     // Nothing lives, nothing dies, nothing grows. Every rate that could change a cell is zero,
     // so the population is a constant and the only thing left in motion is geometry.
+    //
+    // Each piece can be put back one at a time, which is the point: the bench tiles perfectly
+    // and a live slide of the same density does not, and the two differ only in this. Turning
+    // them on one by one and measuring each says which one it is, rather than which one sounds
+    // most likely — and eight plausible answers have already been wrong.
+    //
+    //   MM_BENCH_GROWTH   cells grow towards their membrane target again
+    //   MM_BENCH_DEATH    upkeep and wear, so a cell can starve
+    //   MM_BENCH_DIVIDE   the ancestor instead of an inert `HALT`, so cells bud
+    let on = |name: &str| std::env::var(name).is_ok();
     let mut biology = BiologyConfig {
         mutation: MutationRates::none(),
         ..BiologyConfig::default()
     };
-    biology.metabolism.rates.background_damage = 0;
-    biology.metabolism.rates.metabolic_floor = 0;
+    if !on("MM_BENCH_DEATH") {
+        biology.metabolism.rates.background_damage = 0;
+        biology.metabolism.rates.metabolic_floor = 0;
+    }
+    if !on("MM_BENCH_GROWTH") {
+        biology.metabolism.rates.growth_rate = 0;
+    }
     biology.ecology.crowding_damage = 0;
     biology.ecology.spike_damage = 0;
     slide.world_mut().set_biology(biology);
@@ -579,10 +633,12 @@ fn seed_packing(slide: &mut Slide) {
     // One `HALT`. Not the ancestor with its organelles left off — an actual genome that does
     // nothing, so there is no chance of a cell here reaching into the world and no need to
     // wonder whether it did.
-    let Ok(inert) = world
-        .genomes()
-        .intern(vec![mm_core::Op::Halt.canonical_byte()])
-    else {
+    let seed_genome = if on("MM_BENCH_DIVIDE") {
+        ancestor_genome().unwrap_or_else(|| vec![mm_core::Op::Halt.canonical_byte()])
+    } else {
+        vec![mm_core::Op::Halt.canonical_byte()]
+    };
+    let Ok(inert) = world.genomes().intern(seed_genome) else {
         return;
     };
     // A spread of sizes, because a packing of identical circles is a lattice and tells you
@@ -599,9 +655,13 @@ fn seed_packing(slide: &mut Slide) {
         // With an area-preserving core there is no need for the squeeze. Start them inside one
         // another and the solver's own expansion packs them, then stops. Whatever moves after
         // that really is volumes resolving against each other, which is what the bench was for.
+        // Centred on whatever slide it was given, so shrinking the slide presses the same pack
+        // against the walls rather than seeding it off the edge.
         let across = 15;
-        let x = pos(15) + (k % across) as i32 * (mm_core::fixed::POS_ONE * 5 / 4);
-        let y = pos(15) + (k / across) as i32 * (mm_core::fixed::POS_ONE * 5 / 4);
+        let span = mm_core::fixed::POS_ONE * 5 / 4;
+        let start = (pos(bench_slide() as i32) - (across - 1) * span) / 2;
+        let x = start + (k % across as u32) as i32 * span;
+        let y = start + (k / across as u32) as i32 * span;
         let size = 18 + (k * 7 % 26) as i32;
         let id = world.spawn_cell(CellSeed {
             x,
@@ -719,6 +779,15 @@ const DEFAULT_SLIDE: u32 = 512;
 /// machine can diffuse sixty times a second.
 fn petri() -> Scenario {
     petri_of(slide_size())
+}
+
+/// How big the packing bench's slide is. See the note where it is used.
+fn bench_slide() -> u32 {
+    std::env::var("MM_BENCH_SLIDE")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(48)
+        .clamp(16, 512)
 }
 
 fn slide_size() -> u32 {
