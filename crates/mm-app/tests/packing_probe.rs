@@ -290,7 +290,7 @@ fn packing_probe() {
 
     // Step 2: stop the births and let the same pack settle. If it relaxes to bench quality,
     // births are the whole story and the solver is adequate given time.
-    for extra in [200u64, 800, 3000] {
+    for extra in [200u64, 800, 3000, 10000, 20000] {
         stop_division(&mut growth);
         growth.run(extra);
         report(&format!("growth, +{extra} no births"), &stats(&growth));
