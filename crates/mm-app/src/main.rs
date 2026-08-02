@@ -846,7 +846,9 @@ impl Default for View {
             // from a number you have to discover.
             new_size: slide_size(),
             new_founders: 16,
-            centre: Vec2::new(48.0, 48.0),
+            // The middle of whatever slide the app opened on. It was a constant of 48, which
+            // was the middle of a 96-square slide and has been the middle of nothing since.
+            centre: Vec2::splat(slide_size() as f32 / 2.0),
             zoom: 1.0,
             paused: false,
             panels: Panels::default(),
@@ -2117,7 +2119,14 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                         .on_hover_text("throws away what is on the slide now")
                         .clicked()
                     {
-                        sim.new_slide(view.new_size, view.new_founders);
+                        let size = view.new_size;
+                        sim.new_slide(size, view.new_founders);
+                        // Look at it. The camera stays where it was told to be otherwise, and
+                        // making a sixteen-square slide while parked over the middle of a
+                        // five-hundred-square one leaves you staring at open water with no clue
+                        // that anything happened.
+                        view.centre = Vec2::splat(size as f32 / 2.0);
+                        view.zoom = (BASE_SCALE * 6.0 / size as f32).clamp(0.05, 40.0);
                         ui.close();
                     }
                 });
