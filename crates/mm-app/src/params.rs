@@ -129,6 +129,18 @@ pub const FIELDS: &[Field] = &[
         note: "energy a division costs outright",
     },
     Field {
+        path: "split_pressure",
+        label: "split pressure",
+        group: Group::Division,
+        unit: Unit::Q10,
+        note: "how wedged a cell may be and still bud: one unit per neighbour bottomed out on \
+               its core, nothing for one merely resting against it. A daughter has to go \
+               somewhere, and without this a full slide went on accepting cells — matter was \
+               the only ceiling, and a fixed budget of it accommodates any number of cells if \
+               each is smaller, which is a field of shards. Not enclosure: a cell ringed by \
+               neighbours that all have room to spread can still divide. Zero switches it off",
+    },
+    Field {
         path: "copy_energy_per_byte",
         label: "copy energy per byte",
         group: Group::Division,
@@ -406,6 +418,17 @@ pub const FIELDS: &[Field] = &[
                separation only resolves part of an overlap per tick, so without this a \
                population that divides faster than it can be pushed apart just interpenetrates \
                for ever. Cells joined by junctions are exempt — tissue is meant to be packed",
+    },
+    Field {
+        path: "ecology.crowding_reference_radius",
+        label: "crowding reference radius",
+        group: Group::Ecology,
+        unit: Unit::Q10,
+        note: "the cell size at which crowding damage is charged at face value. Smaller cells \
+               pay proportionally more, which is what stops a crowded population escaping the \
+               charge by shrinking — the damage is otherwise a pure ratio and reads the same \
+               for a slide of big cells as for a slide of shards. Surface over contents: a \
+               membrane goes as the square of the radius and what it holds as the cube",
     },
     Field {
         path: "ecology.crowding_grace",

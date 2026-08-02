@@ -610,9 +610,18 @@ fn seed_ancestors(slide: &mut Slide) {
             let Ok(genome) = world.genomes().intern(bytes.clone()) else {
                 continue;
             };
+            // A four-by-four grid spread across whatever size the slide is, rather than at
+            // fixed coordinates that huddled in one corner the moment the slide grew.
+            //
+            // Spread on purpose, and not only to look even. Sixteen founders far enough apart
+            // to grow independently for a while are sixteen experiments; sixteen founders in a
+            // heap are one, because they interbreed and compete from the first tick. Standing
+            // diversity is the thing the crowding bound costs, and this is some of it back.
+            let size = slide_size() as i32;
+            let cell_of = |n: u32| pos(size * (2 * n as i32 + 1) / 8);
             let id = world.spawn_cell(CellSeed {
-                x: pos((8 + (k % 4) * 20) as i32),
-                y: pos((8 + (k / 4) * 20) as i32),
+                x: cell_of(k % 4),
+                y: cell_of(k / 4),
                 mass: q10(30),
                 energy: q10(400),
                 membrane: 24,
@@ -643,13 +652,42 @@ fn seed_ancestors(slide: &mut Slide) {
     slide.world_mut().adopt_current_contents_as_baseline();
 }
 
+/// How wide and tall the default slide is, in substrate squares.
+///
+/// Quadruple the area the microscope opened on for its first ten milestones, which was 96. A
+/// population that fills its slide in a thousand ticks has nothing left to do but subdivide, and
+/// what is interesting about this project needs somewhere for a lineage to go that is not
+/// already occupied — a frontier to spread into, a corner to be isolated in, room for two
+/// strategies to be tried at once without immediately meeting.
+///
+/// Note that this is four times the *matter* as well as four times the room, because seeding is
+/// per square: the carrying capacity scales with it rather than the crowd merely thinning out.
+///
+/// `MM_SLIDE=<n>` overrides it, for trying a size without a rebuild. The slide has been a
+/// scenario field all along — `width` and `height` in every `.ron` — and this is only what the
+/// app opens on when nobody has said otherwise.
+const DEFAULT_SLIDE: u32 = 192;
+
+/// The slide size to open on, from `MM_SLIDE` or [`DEFAULT_SLIDE`].
+///
+/// Clamped rather than trusted. A zero-square slide has nowhere to put a cell and fails
+/// scenario validation, and the upper bound is where the substrate stops being something a
+/// machine can diffuse sixty times a second.
+fn slide_size() -> u32 {
+    std::env::var("MM_SLIDE")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(DEFAULT_SLIDE)
+        .clamp(16, 1024)
+}
+
 /// The default slide: light, food, no flow. The habitat the ancestor was written for.
 fn petri() -> Scenario {
     Scenario {
         name: "petri".to_string(),
         seed: 1,
-        width: 96,
-        height: 96,
+        width: slide_size(),
+        height: slide_size(),
         light: LightRegime::Uniform {
             intensity: mm_core::Q10_ONE,
         },
