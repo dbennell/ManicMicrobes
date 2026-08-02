@@ -493,7 +493,17 @@ impl Slide {
             flows_filling: crate::foodweb::Flows::default(),
             overlays,
             lod: Lod::Dots,
-            optics: crate::optics::Optics::default(),
+            // Off to begin with, and on from the View menu.
+            //
+            // `Optics::default()` is still the full look and still what the type means by a
+            // microscope; this is only what the slide *opens* on. The optics are a photograph of
+            // the thing rather than the thing — vignette, depth of field, dust — and they read
+            // over the top of the one signal the picture is actually carrying, which is what each
+            // cell is made of. Two cells of the same colour at different depths do not look like
+            // two cells at different depths until you already know that is what you are seeing;
+            // they look like two kinds of cell. Better to open on the honest view and let someone
+            // reach for the microscope once they know what they are looking at.
+            optics: crate::optics::Optics::flat(),
             history: MetricHistory::new(600),
         })
     }
