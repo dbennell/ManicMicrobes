@@ -262,6 +262,7 @@ fn phase_breakdown(_c: &mut Criterion) {
 
     let mut radii = Vec::new();
     let mut crowding = Vec::new();
+    let mut pressure = Vec::new();
     let t = Instant::now();
     for _ in 0..n {
         std::hint::black_box(neighbours::resolve_collisions(
@@ -269,6 +270,7 @@ fn phase_breakdown(_c: &mut Criterion) {
             &index,
             &mut radii,
             &mut crowding,
+            &mut pressure,
         ));
     }
     let collisions = t.elapsed() / n;
