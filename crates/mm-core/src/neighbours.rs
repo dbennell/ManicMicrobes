@@ -663,14 +663,23 @@ fn separation_sq(cells: &CellArena, i: usize, j: usize) -> i64 {
 /// Returns how many pairs were moved, which is a cheap measure of how crowded the slide is and
 /// the thing to watch if a population stops growing for reasons that are not food.
 ///
-/// Also records how hard each cell is being pressed, into `crowding`, in `POS`: how far past the
-/// core it is driven by cells it is *not* joined to. Measured here because this is the pass that
-/// already knows. [`crate::ecology`] is what charges for it.
+/// Also records two different things about being crowded, because they answer different
+/// questions and this is the pass that already knows both.
+///
+/// `crowding` is how far each cell is driven into cells it is *not* joined to, in `POS`.
+/// [`crate::ecology`] charges membrane damage for it.
+///
+/// `pressure` is how *stuck* each cell is, in `Q10`, summed over the same contacts: one unit per
+/// neighbour that has bottomed out on its core, nothing for a neighbour merely resting against
+/// it. [`crate::biology`] refuses divisions above a threshold of it. Enclosure alone is not the
+/// signal — a cell ringed by neighbours with room to spread still has somewhere to put a
+/// daughter, and only one whose neighbourhood has nothing left to give does not.
 pub fn resolve_collisions(
     cells: &mut CellArena,
     index: &NeighbourIndex,
     radii: &mut Vec<i32>,
     crowding: &mut Vec<i32>,
+    pressure: &mut Vec<i32>,
 ) -> u32 {
     let mut separated = 0u32;
     let width = index.width;
@@ -688,6 +697,8 @@ pub fn resolve_collisions(
     // separation was shoving them apart.
     crowding.clear();
     crowding.resize(cells.capacity(), 0);
+    pressure.clear();
+    pressure.resize(cells.capacity(), 0);
     radii.clear();
     radii.reserve(cells.capacity());
     for i in 0..cells.capacity() {
@@ -759,6 +770,34 @@ pub fn resolve_collisions(
                     }
                     if let Some(c) = crowding.get_mut(j) {
                         *c = c.saturating_add(squeeze);
+                    }
+                    // And how *stuck* the pair is, which is a different question from how deep
+                    // they overlap and the one that decides whether there is room to bud into.
+                    //
+                    // Zero where the two merely touch and `Q10_ONE` where they are bottomed out
+                    // on their cores and the solver has nothing left to give. Summed over
+                    // contacts, so it rises both with how many neighbours are pressing and with
+                    // how hard each one presses — which is the combination that means "pressed
+                    // into a space too small" rather than merely "surrounded". A cell ringed by
+                    // neighbours that are all resting lightly is enclosed and not under
+                    // pressure: its whole neighbourhood still has somewhere to expand into, and
+                    // it can divide. One wedged in a jam has the same neighbour count and
+                    // nowhere for any of them to go.
+                    //
+                    // Normalised against the band rather than the radius, so it does not change
+                    // when a population shrinks: being jammed is being jammed at any size, and
+                    // the size question is [`crate::ecology`]'s to answer.
+                    let band = want - core;
+                    if band > 0 {
+                        let one = crate::fixed::Q10_ONE as i64;
+                        let share =
+                            (((squeeze.max(0) as i64) * one) / band as i64).clamp(0, one) as i32;
+                        if let Some(p) = pressure.get_mut(i) {
+                            *p = p.saturating_add(share);
+                        }
+                        if let Some(p) = pressure.get_mut(j) {
+                            *p = p.saturating_add(share);
+                        }
                     }
                 }
                 let (dx, dy) = (cells.x[i] - cells.x[j], cells.y[i] - cells.y[j]);
@@ -1125,7 +1164,7 @@ mod tests {
         let mut index = NeighbourIndex::default();
         index.rebuild(&cells, 16, 16);
         let before = separation(&cells, 0, 1);
-        let n = resolve_collisions(&mut cells, &index, &mut Vec::new(), &mut Vec::new());
+        let n = resolve_collisions(&mut cells, &index, &mut Vec::new(), &mut Vec::new(), &mut Vec::new());
         assert_eq!(n, 1);
         assert!(
             separation(&cells, 0, 1) > before,
@@ -1137,7 +1176,7 @@ mod tests {
         index2.rebuild(&far, 16, 16);
         let positions: Vec<(i32, i32)> = far.iter().map(|i| (far.x[i], far.y[i])).collect();
         assert_eq!(
-            resolve_collisions(&mut far, &index2, &mut Vec::new(), &mut Vec::new()),
+            resolve_collisions(&mut far, &index2, &mut Vec::new(), &mut Vec::new(), &mut Vec::new()),
             0
         );
         let after: Vec<(i32, i32)> = far.iter().map(|i| (far.x[i], far.y[i])).collect();
@@ -1154,7 +1193,7 @@ mod tests {
             cells.x[0] = cells.x[0].saturating_add(load);
             cells.x[1] = cells.x[1].saturating_sub(load);
             index.rebuild(&cells, 16, 16);
-            resolve_collisions(&mut cells, &index, &mut Vec::new(), &mut Vec::new());
+            resolve_collisions(&mut cells, &index, &mut Vec::new(), &mut Vec::new(), &mut Vec::new());
         }
         separation(&cells, 0, 1)
     }
@@ -1262,7 +1301,7 @@ mod tests {
         let mut index = NeighbourIndex::default();
         for _ in 0..400 {
             index.rebuild(&cells, 16, 16);
-            resolve_collisions(&mut cells, &index, &mut Vec::new(), &mut Vec::new());
+            resolve_collisions(&mut cells, &index, &mut Vec::new(), &mut Vec::new(), &mut Vec::new());
         }
         let want = 2 * r;
         let core = ((want as i64 * CORE_PERMILLE as i64) / 1000) as i32;
@@ -1288,7 +1327,7 @@ mod tests {
         let (mut apart, _p) = arena(&[(pos(6), pos(6)), (pos(6) + 3 * r, pos(6))]);
         let mut index = NeighbourIndex::default();
         index.rebuild(&apart, 16, 16);
-        resolve_collisions(&mut apart, &index, &mut Vec::new(), &mut crowding);
+        resolve_collisions(&mut apart, &index, &mut Vec::new(), &mut crowding, &mut Vec::new());
         assert_eq!(
             crowding.iter().filter(|c| **c > 0).count(),
             0,
@@ -1299,11 +1338,57 @@ mod tests {
         let (mut crushed, _p2) = arena(&[(pos(6), pos(6)), (pos(6) + r / 4, pos(6))]);
         let mut index2 = NeighbourIndex::default();
         index2.rebuild(&crushed, 16, 16);
-        resolve_collisions(&mut crushed, &index2, &mut Vec::new(), &mut crowding);
+        resolve_collisions(&mut crushed, &index2, &mut Vec::new(), &mut crowding, &mut Vec::new());
         assert!(
             crowding[0] > 0 && crowding[1] > 0,
             "a crushed pair was not billed: {crowding:?}"
         );
+    }
+
+    #[test]
+    fn pressure_reads_how_stuck_a_cell_is_not_how_many_neighbours_it_has() {
+        // The distinction the division gate rests on. A pair resting against each other is a
+        // contact and not a predicament: there is still somewhere for them to go, so neither is
+        // under pressure. A pair driven onto their cores has nothing left to give.
+        let r = crate::biology::radius(&arena(&[(pos(6), pos(6))]).0, 0);
+        let r = crate::fixed::q10_to_pos(r);
+
+        // Just touching — a contact, but nothing is pushing back.
+        let (mut resting, _) = arena(&[(pos(6), pos(6)), (pos(6) + 2 * r - 8, pos(6))]);
+        let mut index = NeighbourIndex::default();
+        index.rebuild(&resting, 16, 16);
+        let mut light = Vec::new();
+        resolve_collisions(
+            &mut resting,
+            &index,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut light,
+        );
+
+        // Driven onto the core.
+        let (mut wedged, _) = arena(&[(pos(6), pos(6)), (pos(6) + r / 2, pos(6))]);
+        let mut index2 = NeighbourIndex::default();
+        index2.rebuild(&wedged, 16, 16);
+        let mut heavy = Vec::new();
+        resolve_collisions(
+            &mut wedged,
+            &index2,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut heavy,
+        );
+
+        assert!(
+            heavy[0] > light[0],
+            "being wedged read no worse than resting: {heavy:?} against {light:?}"
+        );
+        assert!(
+            heavy[0] <= crate::fixed::Q10_ONE,
+            "one bottomed-out neighbour scored more than one neighbour's worth: {heavy:?}"
+        );
+        // Symmetric, like the crowding it rides along with — both sides of a contact are stuck.
+        assert_eq!(heavy[0], heavy[1]);
     }
 
     #[test]
@@ -1314,7 +1399,7 @@ mod tests {
         let mut index = NeighbourIndex::default();
         index.rebuild(&cells, 16, 16);
         for _ in 0..20 {
-            resolve_collisions(&mut cells, &index, &mut Vec::new(), &mut Vec::new());
+            resolve_collisions(&mut cells, &index, &mut Vec::new(), &mut Vec::new(), &mut Vec::new());
             index.rebuild(&cells, 16, 16);
         }
         assert!(
@@ -1329,7 +1414,7 @@ mod tests {
         let mut index = NeighbourIndex::default();
         index.rebuild(&cells, 16, 16);
         for _ in 0..50 {
-            resolve_collisions(&mut cells, &index, &mut Vec::new(), &mut Vec::new());
+            resolve_collisions(&mut cells, &index, &mut Vec::new(), &mut Vec::new(), &mut Vec::new());
             index.rebuild(&cells, 16, 16);
             for i in cells.iter() {
                 assert!(cells.x[i] >= 0 && cells.x[i] < 16 * POS_ONE);
@@ -1350,7 +1435,7 @@ mod tests {
             let mut index = NeighbourIndex::default();
             for _ in 0..10 {
                 index.rebuild(&cells, 16, 16);
-                resolve_collisions(&mut cells, &index, &mut Vec::new(), &mut Vec::new());
+                resolve_collisions(&mut cells, &index, &mut Vec::new(), &mut Vec::new(), &mut Vec::new());
             }
             cells
                 .iter()

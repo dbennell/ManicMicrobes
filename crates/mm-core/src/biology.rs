@@ -552,6 +552,24 @@ pub struct BiologyConfig {
     pub division_matter: i32,
     /// Energy a division costs outright, `Q10`.
     pub division_energy: i32,
+    /// How wedged a cell may be and still bud, `Q10`, against the per-cell pressure
+    /// [`crate::neighbours::resolve_collisions`] records: one unit per neighbour that has
+    /// bottomed out on its core, nothing for a neighbour merely resting against it.
+    ///
+    /// A daughter has to go somewhere. Division used to ask only whether the parent could
+    /// afford it — energy and mass — and never whether there was anywhere to put the result, so
+    /// a slide that had run out of room went on accepting cells anyway: matter was the only
+    /// ceiling, and a fixed budget of it accommodates any number of cells if they each get
+    /// smaller. That is what a field of shards is.
+    ///
+    /// Deliberately *not* enclosure. A cell ringed by six neighbours that are all resting
+    /// lightly is surrounded and perfectly able to divide — its whole neighbourhood has
+    /// somewhere to spread, and the daughter's arrival pushes it there. What has to be refused
+    /// is a cell pressed into a space too small, which is a statement about how hard its
+    /// neighbours are pushing back rather than about how many of them there are.
+    ///
+    /// Zero switches the check off, which is what a scenario studying unbounded growth wants.
+    pub split_pressure: i32,
     /// Which chemical structural mass is made of. Must match the metabolism's.
     pub structural_chemical: usize,
     /// Energy per genome byte copied at full fidelity, `Q10`. Accuracy is not free.
@@ -582,6 +600,7 @@ impl crate::state_hash::StateHash for BiologyConfig {
 
         h.i32(self.division_matter);
         h.i32(self.division_energy);
+        h.i32(self.split_pressure);
         h.u64(self.structural_chemical as u64);
         h.i32(self.copy_energy_per_byte);
 
@@ -603,6 +622,7 @@ impl crate::state_hash::StateHash for BiologyConfig {
         h.i32(e.digestion_rate);
         h.i32(e.digestion_efficiency);
         h.i32(e.crowding_damage);
+        h.i32(e.crowding_reference_radius);
         h.u32(e.crowding_grace);
 
         let r = &self.metabolism.rates;
@@ -667,6 +687,11 @@ impl Default for BiologyConfig {
             mutation: MutationRates::default(),
             division_matter: q10(4),
             division_energy: q10(20),
+            // Three neighbours' worth of bottomed-out contact. A cell in a settled monolayer
+            // has about six contacts, so this refuses one whose neighbourhood is half solid
+            // while leaving an ordinary crowd free to keep growing outward. Measured rather
+            // than guessed — see the pressure histogram in `crowding_bounds_a_population`.
+            split_pressure: q10(3),
             structural_chemical: 4,
             copy_energy_per_byte: Q10_ONE / 64,
             junctions: crate::junction::JunctionConfig::default(),
@@ -690,6 +715,7 @@ pub fn resolve(
     chem: &ChemTable,
     ledger: &mut Ledger,
     pending: &mut Pending,
+    pressure: &[i32],
     tick: u64,
     seed: u64,
 ) -> BiologyReport {
@@ -855,7 +881,8 @@ pub fn resolve(
                 }
 
                 Intent::Split => {
-                    if try_split(cells, config, ledger, pending, &ctx, i, &mut report) {
+                    let squeezed = pressure.get(i).copied().unwrap_or(0);
+                    if try_split(cells, config, ledger, pending, &ctx, i, squeezed, &mut report) {
                         report.births = report.births.saturating_add(1);
                     } else {
                         report.failed_splits = report.failed_splits.saturating_add(1);
@@ -1186,6 +1213,7 @@ fn try_split(
     pending: &mut Pending,
     ctx: &RandCtx,
     i: usize,
+    pressure: i32,
     report: &mut BiologyReport,
 ) -> bool {
     let Some(buffer) = cells.daughter[i].take() else {
@@ -1201,6 +1229,12 @@ fn try_split(
         return false;
     }
     if cells.mass[i] < config.division_matter.saturating_mul(2) {
+        return false;
+    }
+    // Nowhere to put it. See `BiologyConfig::split_pressure` — the buffer is spent either way,
+    // like the other refusals here, so a cell that keeps trying to divide in a jam keeps paying
+    // for the copying and gets nothing, which is the cost of not reading the room.
+    if config.split_pressure > 0 && pressure > config.split_pressure {
         return false;
     }
 
@@ -1640,6 +1674,10 @@ mod tests {
                 &self.chem,
                 &mut self.ledger,
                 &mut self.pending,
+                // No pressure: these tests are about what an intent does, not about whether
+                // there is room for the result. `pressure_refuses_a_division_with_nowhere_to_go`
+                // is the one that supplies some.
+                &[],
                 0,
                 1,
             )
@@ -1884,6 +1922,91 @@ mod tests {
         f.intents.begin_tick(f.cells.capacity());
         f.intents.push(i, Intent::Split);
         assert_eq!(f.resolve().births, 1, "a sloppy cell must still divide");
+    }
+
+    #[test]
+    fn pressure_refuses_a_division_with_nowhere_to_go() {
+        // A daughter has to go somewhere. Division used to ask only whether the parent could
+        // afford one, so a slide with no room left went on accepting cells and answered a fixed
+        // matter budget by cutting it into more, smaller pieces.
+        let mut f = Fixture::new();
+        let i = f.spawn(vec![0x2E; 32]);
+        f.cells.slots_mut(i)[1] = Organelle::finished(OrganelleType::Nucleus, 40);
+        f.cells.mass[i] = q10(200);
+        f.cells.energy[i] = q10(4_000);
+
+        let threshold = f.config.split_pressure;
+        let split = |f: &mut Fixture, pressure: i32| -> u32 {
+            f.cells.daughter[i] = Some(vec![0u8; 32]);
+            f.intents.begin_tick(f.cells.capacity());
+            f.intents.push(i, Intent::Split);
+            let squeeze = vec![pressure; f.cells.capacity()];
+            resolve(
+                &mut f.cells,
+                &mut f.substrate,
+                &f.pool,
+                &f.intents,
+                &f.config,
+                &f.chem,
+                &mut f.ledger,
+                &mut f.pending,
+                &squeeze,
+                0,
+                1,
+            )
+            .births
+        };
+
+        // Room to spare: a cell with neighbours resting against it divides normally. This is
+        // the case enclosure alone would have refused, and it must not be refused — a cell
+        // ringed by six neighbours that all have somewhere to spread has somewhere to bud.
+        assert_eq!(split(&mut f, 0), 1, "an unpressed cell was refused");
+        f.pending.births.clear();
+
+        // Wedged: every neighbour bottomed out on its core and nothing left to give.
+        assert_eq!(
+            split(&mut f, threshold + 1),
+            0,
+            "a cell with nowhere to put a daughter divided anyway"
+        );
+
+        // Exactly at the threshold is still allowed, so the boundary is not a coin toss.
+        f.pending.births.clear();
+        assert_eq!(split(&mut f, threshold), 1);
+    }
+
+    #[test]
+    fn a_refused_division_for_want_of_room_costs_the_parent_no_matter() {
+        // The same guarantee as `a_refused_division_costs_the_parent_no_matter`, for the
+        // refusal this change adds. I4 does not care why a division was declined.
+        let mut f = Fixture::new();
+        let i = f.spawn(vec![0x2E; 32]);
+        f.cells.slots_mut(i)[1] = Organelle::finished(OrganelleType::Nucleus, 40);
+        f.cells.mass[i] = q10(200);
+        f.cells.energy[i] = q10(4_000);
+        f.cells.daughter[i] = Some(vec![0u8; 32]);
+        let before = f.total();
+        let mass_before = f.cells.mass[i];
+
+        f.intents.begin_tick(f.cells.capacity());
+        f.intents.push(i, Intent::Split);
+        let squeeze = vec![f.config.split_pressure + 1; f.cells.capacity()];
+        let report = resolve(
+            &mut f.cells,
+            &mut f.substrate,
+            &f.pool,
+            &f.intents,
+            &f.config,
+            &f.chem,
+            &mut f.ledger,
+            &mut f.pending,
+            &squeeze,
+            0,
+            1,
+        );
+        assert_eq!(report.births, 0);
+        assert_eq!(f.cells.mass[i], mass_before, "the parent was halved anyway");
+        assert_eq!(f.total(), before, "a refused division moved matter");
     }
 
     #[test]

@@ -96,6 +96,10 @@ pub struct World {
     /// tick's separation pass. Scratch in the same sense: recomputed from positions every
     /// tick, so it is excluded from equality and from the hash.
     crowding: Vec<i32>,
+    /// How stuck each cell is, `Q10`, one unit per neighbour bottomed out on its core. Derived
+    /// every physics phase like `crowding`, and read by division a phase later — a cell that was
+    /// wedged last tick is still wedged, and the alternative is running the collision pass twice.
+    pressure: Vec<i32>,
 
     /// The population.
     cells: CellArena,
@@ -207,6 +211,7 @@ impl World {
             scratch: crate::fluid::FluidScratch::new(n),
             radii: Vec::new(),
             crowding: Vec::new(),
+            pressure: Vec::new(),
             cells: CellArena::new(),
             genomes: GenomePool::new(),
             biology,
@@ -458,6 +463,7 @@ impl World {
                 &self.scenario.chemicals,
                 &mut self.ledger,
                 &mut self.pending,
+                &self.pressure,
                 tick,
                 seed,
             );
@@ -522,6 +528,7 @@ impl World {
                 &self.neighbours,
                 &mut self.radii,
                 &mut self.crowding,
+                &mut self.pressure,
             );
         }
 

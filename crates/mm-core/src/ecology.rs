@@ -91,6 +91,13 @@ pub struct EcologyConfig {
     /// cell born somewhere genuinely full is still overlapped when the grace runs out, and pays
     /// from then on.
     pub crowding_grace: u32,
+    /// The radius at which `crowding_damage` is charged at face value, `Q10`.
+    ///
+    /// Cells smaller than this pay proportionally more and larger ones less, which is what stops
+    /// a crowded population escaping the charge by shrinking. Set it to the size a cell of this
+    /// scenario's ancestor settles at, so the existing calibration is what a normal cell sees and
+    /// the term only bites on the ones that have given up size to fit.
+    pub crowding_reference_radius: i32,
 }
 
 impl Default for EcologyConfig {
@@ -109,6 +116,9 @@ impl Default for EcologyConfig {
             // by dividing less, by joining what is crushing you — rather than a wall.
             crowding_damage: Q10_ONE / 64,
             crowding_grace: 64,
+            // `biology::radius` of a cell of about thirty units of mass, which is what the
+            // ancestors are seeded at: a quarter of a square plus five eighths.
+            crowding_reference_radius: (Q10_ONE * 7) / 8,
         }
     }
 }
@@ -219,9 +229,31 @@ pub fn step(
         // means something quite different to a large cell and a small one.
         let pressed = crowding.get(i).copied().unwrap_or(0);
         if pressed > 0 && config.crowding_damage > 0 && cells.age[i] >= config.crowding_grace {
-            let radius = crate::fixed::q10_to_pos(crate::biology::radius(cells, i)).max(1);
+            let own = crate::biology::radius(cells, i);
+            let radius = crate::fixed::q10_to_pos(own).max(1);
             let depth = ((pressed as i64 * Q10_ONE as i64) / radius as i64).min(i32::MAX as i64);
-            let hurt = q10_scale(config.crowding_damage, depth as i32);
+            // Smaller cells suffer more for the same *relative* squeeze, and without this term
+            // nothing does.
+            //
+            // `depth` is a ratio — the compression scales with the radius and is then divided by
+            // it — so it reads exactly the same for a slide of big cells and a slide of shards.
+            // Tolerance does not scale with size either; it is the membrane parameter. So
+            // crowding used to be perfectly indifferent to how small cells got, while the one
+            // real ceiling, matter, is happy to be divided into any number of smaller pieces.
+            // A population under pressure therefore answered by shrinking, which cost it
+            // nothing, and kept dividing until it hit `division_matter`. That is the field of
+            // shards, and it is why crowding never bounded anything.
+            //
+            // The factor is surface over contents. A cell is a bag held by its membrane, the
+            // membrane goes as the square of the radius and what it contains as the cube, so
+            // the wall of a small cell carries proportionally more of the load — the same
+            // fractional dent is a bigger deal to it. Linear in `1 / radius`, which is that
+            // relationship, and capped so a cell shrinking towards nothing cannot produce an
+            // unbounded charge out of a rounding error.
+            let frail = ((config.crowding_reference_radius as i64 * Q10_ONE as i64)
+                / own.max(1) as i64)
+                .clamp(0, (Q10_ONE * 8) as i64) as i32;
+            let hurt = q10_scale(q10_scale(config.crowding_damage, depth as i32), frail);
             cells.damage[i] = cells.damage[i].saturating_add(hurt);
             report.crushed = report.crushed.saturating_add(hurt as i64);
         }
@@ -428,6 +460,55 @@ mod tests {
             birth_tick: 0,
             genome,
         })
+    }
+
+    #[test]
+    fn a_small_cell_suffers_more_for_the_same_relative_squeeze() {
+        // The term that stops a crowded population escaping by shrinking. `depth` is a ratio —
+        // compression over radius — so without this it read identically for a slide of big
+        // cells and a slide of shards, and since tolerance is the membrane parameter and does
+        // not scale either, crowding was perfectly indifferent to how small cells got. Matter,
+        // the only real ceiling, is happy to be divided into any number of smaller pieces, so
+        // that is exactly what a population under pressure did.
+        let (mut cells, pool, mut substrate, mut ledger) = arena();
+        let big = spawn(&mut cells, &pool, 5, 5);
+        let small = spawn(&mut cells, &pool, 12, 12);
+        let (bi, si) = (cells.index(big).unwrap(), cells.index(small).unwrap());
+        cells.mass[si] = cells.mass[bi] / 8;
+        // Past the grace, or neither is charged at all.
+        let config = EcologyConfig::default();
+        cells.age[bi] = config.crowding_grace;
+        cells.age[si] = config.crowding_grace;
+
+        // The *same relative* squeeze: each pressed the same fraction of its own radius, which
+        // is the case the old code could not tell apart.
+        let press = |i: usize| -> i32 {
+            crate::fixed::q10_to_pos(crate::biology::radius(&cells, i)).max(1) / 2
+        };
+        let crowding = {
+            let mut v = vec![0i32; cells.capacity()];
+            v[bi] = press(bi);
+            v[si] = press(si);
+            v
+        };
+
+        let index = crate::neighbours::NeighbourIndex::default();
+        step(
+            &mut cells,
+            &mut substrate,
+            &index,
+            &crowding,
+            &config,
+            &Scenario::stress(16, 16).biology.metabolism.catalogue.metabolism,
+            &mut ledger,
+        );
+        assert!(
+            cells.damage[si] > cells.damage[bi],
+            "a shard took no more than a full-sized cell for the same relative squeeze: \
+             {} against {}",
+            cells.damage[si],
+            cells.damage[bi]
+        );
     }
 
     #[test]
