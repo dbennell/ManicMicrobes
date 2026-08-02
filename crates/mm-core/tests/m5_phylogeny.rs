@@ -592,12 +592,40 @@ fn the_wiki_has_something_to_say_about_every_species() {
     );
 }
 
+/// Runs in release only, because it needs a real population and there is no cheap way to have
+/// one. Species come from births — a birth is when a genome mutates — and it takes on the order
+/// of thirty-five thousand of them before a fourth species exists. Debug reached two whatever
+/// slide it was given, and did so before any of this year's work as well: this has been failing
+/// in debug on `main` for some time, and the tick budget was the reason.
+#[ignore = "8,000 ticks on a 256-square slide for a real population; run with --release --ignored"]
 #[test]
 fn no_two_species_share_a_name() {
     // A wiki cannot have two pages with the same title. The syllable tables are finite, so
     // collisions are expected rather than rare — a seventeen-species run produced two distinct
     // lineages both called *Membraopsis mixtus* — and the archive has to resolve them.
-    let mut world = living_world(11, 64, 16, "ancestor.mm");
+    // A slide sixteen times the area this used to have, which is a restoration and not a
+    // concession.
+    //
+    // Cells used to pile into each other without limit: separation resolves a fraction of an
+    // overlap per tick and nothing in the world said no, so a square of slide held any number of
+    // them given time. `split_pressure` ended that, and it was a fix — a slide now holds what its
+    // area can hold. But every expectation calibrated against the old behaviour was quietly
+    // counting on the vertical room, and this is one of them. Species need individuals to diverge
+    // from, and more precisely they need *births*, because a birth is when a genome mutates.
+    //
+    // Measured, rather than multiplied until it went green:
+    //
+    // ```text
+    //   size    population   species   births
+    //     64          1990         2     2801
+    //    128          7547         2     9873
+    //    256         28893         4    36175
+    // ```
+    //
+    // Species track births, and it takes something like thirty-five thousand of them to clear the
+    // three this test needs. Four times the area was not enough, and finding that out is why the
+    // table is here rather than a number. The same file already runs two tests at 256.
+    let mut world = living_world(11, 256, 16, "ancestor.mm");
     world.run(if cfg!(debug_assertions) { 1_500 } else { 8_000 });
     let archive = world.archive();
     assert!(
