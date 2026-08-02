@@ -906,3 +906,117 @@ table, light regime, fluid rates, energy costs, mutation rates, `instr_per_tick`
 The ISA version is stamped into every save file, scenario and archived genome. Changing the
 opcode table changes the meaning of every stored genome, so archived species must be
 replayed under the ISA version they evolved in.
+
+---
+
+## 17. Planned: what sets the carrying capacity
+
+Normative once implemented; recorded here first so the pieces are designed together rather
+than bolted on one at a time. Everything in this section exists to answer one question — what
+stops a slide filling up — with something more interesting than *area*.
+
+At the time of writing, area is the whole answer. A slide of a given size holds a given number
+of cells, every square is as good as every other, and the only thing a lineage can do about a
+full world is wait for someone to die. That is a poor substrate for open-endedness: it selects
+for growth rate and nothing else, because there is no second axis on which to be better.
+
+### 17.1 Barriers as habitat, not decoration
+
+Substrate squares already carry a `blocked` flag (§7.4) and the fluid already respects it —
+flux across a blocked edge is zero, which is what makes barriers conserve matter for free.
+What is missing is any reason to have them.
+
+Barriers break a slide into rooms joined by channels. That does three things a uniform slide
+cannot:
+
+- **It reduces usable area without reducing the slide**, which is a carrying-capacity dial
+  that does not change the scale of anything else.
+- **It creates isolation.** Two rooms joined by a narrow channel are two populations with
+  limited gene flow, which is the classic condition for allopatric speciation. The phylogeny
+  (§10) already records what happens; it has never been given a world where it can happen
+  properly.
+- **It creates edges.** A cell against a wall has fewer neighbours pressing on it than one in
+  open water, so `split_pressure` (§6) makes the perimeter of a room a better place to live
+  than its middle. That is a spatial gradient in fitness that nobody had to write down.
+
+Scenarios describe barriers as shapes rather than as bitmaps: rectangles, channels, and a
+sparse-noise "reef" generator. A bitmap is a serialisation detail, not a way to author a world.
+
+### 17.2 Light and nutrient as separate limiters
+
+Today light is the only real input and it is uniform. Two changes:
+
+- **Light becomes spatially structured** — the regimes of §7.3 already allow it, and nothing
+  uses the gradient ones by default. A slide where the top half is lit and the bottom is not is
+  a slide with two trades, not one.
+- **Nutrient influx becomes a scenario input in its own right**, injected at points or edges
+  rather than seeded uniformly at tick zero. A world whose matter arrives continuously at a
+  *place* is a world with somewhere worth being, and matter that arrives must also be able to
+  leave, or the ledger's conservation becomes a slow flood.
+
+The two limiters must be genuinely independent, or they collapse into one. A cell that has
+light but no carbon and a cell that has carbon but no light should both be stuck, and stuck in
+ways that select for different answers — one for motility, one for storage.
+
+### 17.3 The vent scenario
+
+No light anywhere. Heat and reduced chemistry pumped in at one or more points on the floor,
+with a prescribed flow carrying the plume. Everything alive is downstream of a vent, and the
+plume is the habitat.
+
+This is the sharpest test of whether the chemistry is really data-driven. There is no
+photosynthesis to fall back on, so the whole food web has to start from a chemical gradient —
+chemosynthesis is a pathway (§7.2) and nothing in the engine should need to know it is special.
+If the vent scenario requires an engine change, the chemistry was not general.
+
+Flow matters more here than anywhere else: the plume's reach is a scenario parameter, and it
+decides how much of the slide is habitable. That makes `CurrentField` a carrying-capacity
+control rather than set dressing.
+
+### 17.4 Particulates
+
+Solid matter suspended in a square: it does not diffuse the way a dissolved chemical does, it
+breaks down slowly into the dissolved form, and it can be **ingested directly** by a cell
+standing in it.
+
+The precedent is already here and works: carrion (§7.2, `ecology::CARRION`) is a chemical, not
+an object, with a very low diffusion rate and a slow decay into ordinary waste. Particulates
+generalise exactly that, and for the same reason — the substrate already diffuses, decays and
+conserves every chemical exactly, so anything expressed as a chemical inherits all of it, and
+inherits it correctly.
+
+What is new is **direct ingestion**. A cell currently eats by absorbing from the fluid in its
+own square, which means everything edible must first dissolve. Particulate feeding is a second
+route: slower per unit, available only where the particulate physically is, and not shared with
+every other cell in the square the way a dissolved pool is. That difference is the point. A
+dissolved resource is a commons; a particulate is a thing you can be standing on.
+
+`ChemicalDef` grows a `particulate: bool` — or more precisely a settling rate and a breakdown
+rate, since "solid" is a behaviour and not a category.
+
+### 17.5 Lysis: turning cells into particulate
+
+A cell can already wound another with a spike, and a cell that dies becomes carrion. What it
+cannot do is *break another cell down* — attack the body rather than the membrane, and get
+matter out of it directly.
+
+Lysis is that: an organelle that converts an adjacent cell's structural mass into particulate
+in the square, whether that cell is alive or dead. Two consequences worth stating plainly:
+
+- **It shortens the food chain.** Today a predator kills, waits for the corpse to become
+  carrion, and then digests it with a lysosome — three steps and two lossy conversions. Lysis
+  makes flesh into food in one, which changes the economics of predation enough that it may
+  become worth doing.
+- **It applies to the living.** A cell being lysed is losing mass while alive, which is a
+  pressure with no current equivalent: not damage, which is repairable, but *theft*.
+
+Efficiency must stay below one, as digestion's already is (§7.2). A corpse must never be worth
+more than the cell that made it, or the food web runs backwards.
+
+### 17.6 What this is all for
+
+Each of these is a carrying-capacity term, and that is deliberate. Area is a limit that selects
+for one thing. Light, nutrient influx, barriers, particulate availability and predation
+pressure are five limits that select for five things, and a world with five limits has room for
+strategies that are better in different places — which is the minimum condition for the
+radiations the timeline (§10) exists to report.
