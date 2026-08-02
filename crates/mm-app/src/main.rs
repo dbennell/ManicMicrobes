@@ -548,7 +548,16 @@ fn seed_packing(slide: &mut Slide) {
         // cells with sharp shared walls is every boundary in the picture redrawing every frame.
         // Biology was zeroed here when the bench was built; this was missed because it lives in
         // the physics rather than in a rate.
-        jitter: 0,
+        //
+        // `MM_BENCH_JITTER=<n>` puts it back, which is the experiment that separates "the
+        // packing maths is wrong" from "the packing maths is fine and cannot keep up with a
+        // population that never stops moving". The bench and a live slide of the same density
+        // differ in exactly two things — this, and whether biology runs — and the bench already
+        // carries the spread of sizes, so size is not one of them.
+        jitter: std::env::var("MM_BENCH_JITTER")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
         seeding: vec![],
         ..Scenario::default()
     };
