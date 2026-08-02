@@ -124,8 +124,9 @@ use mm_core::{CellId, LightRegime, MutationRates, Organelle, OrganelleType, Scen
 /// MM_SHOT=/tmp/slide.png MM_SHOT_AFTER=900 MM_SHOT_ZOOM=14 cargo run -p mm-app --features render --release
 /// ```
 ///
-/// `MM_SHOT_AFTER` is in frames, so there is a world to photograph rather than sixteen
-/// ancestors; `MM_SHOT_ZOOM` and `MM_SHOT_FLAT` set the camera and the cell style up front,
+/// `MM_SHOT_TICK` is the one to reach for: it photographs a *state*, so two runs of different
+/// speed produce comparable pictures. `MM_SHOT_AFTER` is in frames and is what there was
+/// before, which is a proxy for wall-clock and therefore for how fast the build happened to be; `MM_SHOT_ZOOM` and `MM_SHOT_FLAT` set the camera and the cell style up front,
 /// because a run that exits after one photograph has nobody to drive it.
 ///
 /// **It photographs the slide and not the panels.** Bevy 0.15 moved where the screenshot is
@@ -168,6 +169,17 @@ fn screenshot(
     }
     // Arranged one frame before the photograph rather than at startup, so a panel that needs a
     // selection has a populated world to select from.
+    // `MM_SHOT_TICK` waits for a state; `MM_SHOT_AFTER` waits for a number of frames.
+    //
+    // Prefer the tick. Frames are a proxy for wall-clock, and wall-clock buys wildly different
+    // amounts of simulation depending on how fast the thing is running — the same
+    // `MM_SHOT_AFTER=2600` photographed twenty thousand cells before a renderer change and a
+    // hundred and eight thousand after it. Two screenshots taken that way are not comparable,
+    // which turns a measurement into an anecdote, and it did so repeatedly before anyone noticed
+    // the units.
+    let want_tick: Option<u64> = std::env::var("MM_SHOT_TICK")
+        .ok()
+        .and_then(|v| v.parse().ok());
     let after: u32 = std::env::var("MM_SHOT_AFTER")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -189,7 +201,12 @@ fn screenshot(
         }
         return;
     }
-    if *frames < after {
+    // A tick to wait for beats a frame count, so it wins when both are set.
+    if let Some(want) = want_tick {
+        if sim.engine.tick_count() < want {
+            return;
+        }
+    } else if *frames < after {
         return;
     }
     // An entity with an observer since 0.15, rather than a manager resource. Failure is the
@@ -1554,6 +1571,26 @@ fn redraw(
     // Half-diagonal of the *viewport*, for the field radius the vignette and the aberration are
     // measured in — so the circular field is centred on the slide rather than on the window.
     let half_diagonal = (viewport.width().powi(2) + viewport.height().powi(2)).sqrt() / 2.0;
+    // What is actually on screen, in the same space `to_screen` produces, with a margin.
+    //
+    // Everything not inside this used to be built into the mesh anyway. At whole-slide zoom that
+    // is harmless — every cell is on screen. Zoomed in on a full slide it is most of the work in
+    // the frame: at 420x on seventy-two thousand cells you can see perhaps five hundred of them,
+    // and the renderer was uploading a quad for every one of the rest, plus a quad per organelle
+    // inside each, which is well over a million vertices of geometry that lands nowhere.
+    //
+    // The margin is generous on purpose. A cell is culled on its centre, so it has to cover the
+    // largest a cell is ever *drawn* or one whose middle is just off screen would lose the part
+    // of it that is not.
+    let cull = {
+        let m = (BASE_SCALE * view.zoom * slide::PACKING * 4.0).max(64.0);
+        Rect::new(
+            origin.x - size.x / 2.0 - m,
+            origin.y - size.y / 2.0 - m,
+            origin.x + size.x / 2.0 + m,
+            origin.y + size.y / 2.0 + m,
+        )
+    };
 
     let to_screen = |x: f32, y: f32| -> Vec3 {
         Vec3::new(
@@ -1637,6 +1674,10 @@ fn redraw(
     // The baked atlas could do none of that; it is still what organelles and dust wear.
     cellmesh::build(&mut art_handles.cells, &frame.cells, |dot| {
         let at = to_screen(dot.x, dot.y);
+        // Off screen: no quad, no organelles, nothing uploaded.
+        if at.x < cull.min_x || at.x > cull.max_x || at.y < cull.min_y || at.y > cull.max_y {
+            return None;
+        }
         let dim = optics.vignette(field_radius(at));
         // Depth of field. The size-and-alpha approximation is still here, but the *edge* is
         // genuinely softer now — `softness` widens the smoothstep in the shader, which is the
