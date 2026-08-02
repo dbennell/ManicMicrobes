@@ -654,19 +654,25 @@ fn seed_ancestors(slide: &mut Slide) {
 
 /// How wide and tall the default slide is, in substrate squares.
 ///
-/// Quadruple the area the microscope opened on for its first ten milestones, which was 96. A
-/// population that fills its slide in a thousand ticks has nothing left to do but subdivide, and
-/// what is interesting about this project needs somewhere for a lineage to go that is not
-/// already occupied — a frontier to spread into, a corner to be isolated in, room for two
-/// strategies to be tried at once without immediately meeting.
+/// The microscope opened on 96 for its first ten milestones. This is seven times that area, and
+/// the same slide the population benchmark measures — which is the point of the number rather
+/// than an accident of it. A gate that measures a different world from the one people run tells
+/// you about a world nobody has.
 ///
-/// Note that this is four times the *matter* as well as four times the room, because seeding is
-/// per square: the carrying capacity scales with it rather than the crowd merely thinning out.
+/// A population that fills its slide in a thousand ticks has nothing left to do but subdivide,
+/// and what is interesting here needs somewhere for a lineage to *go* that is not already
+/// occupied: a frontier to spread into, a corner to be isolated in, room for two strategies to
+/// be tried at once without immediately meeting. Sixteen founders on this much slide grow as
+/// sixteen separate colonies for a long while before their frontiers touch.
 ///
-/// `MM_SLIDE=<n>` overrides it, for trying a size without a rebuild. The slide has been a
-/// scenario field all along — `width` and `height` in every `.ron` — and this is only what the
-/// app opens on when nobody has said otherwise.
-const DEFAULT_SLIDE: u32 = 192;
+/// It is seven times the *matter* as well as the room, because seeding is per square — carrying
+/// capacity scales with the slide rather than the same crowd thinning out over it.
+///
+/// The cost is speed, and it is worth knowing before changing it: the simulation, not the
+/// renderer, is the limit at this size. See `MM_SLIDE` below for trying another without a
+/// rebuild. The slide has been a scenario field all along — `width` and `height` in every `.ron`
+/// — and this is only what the app opens on when nobody has said otherwise.
+const DEFAULT_SLIDE: u32 = 512;
 
 /// The slide size to open on, from `MM_SLIDE` or [`DEFAULT_SLIDE`].
 ///
