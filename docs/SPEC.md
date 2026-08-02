@@ -1175,13 +1175,13 @@ either 600 or 2,000 ticks with the nights fully dark. This was the payoff the me
 supposed to buy and it did not arrive, for a reason worth writing down: a cost alone only teaches
 a cell to hold *less*. For storage to be worth building, holding has to be worth something, and
 today the best reserve in the world is stored energy — free, unbounded, and needing no organelle
-at all. The vacuole is answering a question no cell has. It cannot pay for itself until energy is
-rationed too, at which point matter that is out of solution is the only reserve left.
+at all. The vacuole is answering a question no cell has.
 
 The vacuole is not evidence against any of this. It is an evolutionary strategy and one that has
-to be seeded before a twenty-thousand-tick run can be asked whether it pays; expecting it to
-arise unprompted was the wrong test, not the wrong mechanism. What the run does say is that the
-brute-force half was still missing.
+to be seeded before a run can be asked whether it pays; expecting it to arise unprompted was the
+wrong test, not the wrong mechanism. What the run does say is that the brute-force half was still
+missing. Whether it pays once energy is rationed is asked and answered below, and the answer is
+no — for a reason that is arithmetic rather than principle.
 
 #### The leak, which is the other half
 
@@ -1217,6 +1217,47 @@ which is the dissipative structure §7.2 says the whole simulation exists to dis
 
 **What neither half touches is occupancy**, 124% against 125%. It was never going to: turgor and
 the leak are the economy, and area is geometry. §17.8 is where that goes.
+
+#### The vacuole still does not pay, and now there is a number for why
+
+Seeded properly this time. Organelles are not inherited — a daughter is born with a membrane and
+builds the rest from its genome — so putting a vacuole on a founder seeds nothing. The strategy
+has to be a genome, and it is `genomes/hoarder.mm`: `ancestor.mm` with a vacuole in slot 4 and
+its surplus-sugar dump removed, no other difference. Neither half pays alone, which is why they
+are paired: a vacuole with nothing in it is upkeep, and kept sugar with no vacuole is charged for
+as free solute. Together they are a battery made of matter — fix while the sun is up, hold it out
+of solution for nothing, burn it when the sun goes down.
+
+Raced head to head against `ancestor.mm` from one founder each, mutation off, 60,000 ticks, five
+seeds (`gradient_probe::does_the_vacuole_pay`). Hoarder's share of the final population:
+
+| regime | seed 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|---|
+| uniform | 49% | 38% | 55% | 46% | 38% |
+| night 1,000 | 11% | 7% | 9% | 7% | 2% |
+| night 6,000 | extinct | extinct | extinct | extinct | extinct |
+
+It is roughly neutral under uniform light and it is *crushed* by the night — which is the regime
+it was built for, so the hypothesis is not merely unsupported, it is backwards.
+
+The reason is a ratio nobody had written down. A vacuole slot holds `q10(param)` and `param` is a
+`u8`, so one slot sequesters at most 255 units of matter; at 200, which is what the hoarder
+builds, that is 200 units, worth about 150 units of energy once respiration has taken its
+quarter, which covers roughly 330 ticks of a working loadout's 0.45 a tick. The free energy
+reserve is 2,000 units, or about 4,400 ticks, and it costs no organelle, no slot and no upkeep.
+**Energy is an order of magnitude denser per unit of upkeep than matter is, so nothing will ever
+choose to store matter.** Sixteen vacuoles would match the reserve and cost eight times a whole
+body's upkeep to do it.
+
+The night-6,000 column is the same arithmetic from the other side: 6,000 ticks of darkness
+against a reserve that covers 4,400 kills everything regardless of strategy, so there is no
+window between "the reserve is enough" and "nothing survives" for a matter battery to live in.
+
+So storage-as-a-strategy is starved by a parameter, and the parameter is the ratio of
+`energy_reserve` to what a vacuole slot can hold. Closing it means one of: a much smaller energy
+reserve, a vacuole whose capacity is not bounded by a `u8` param, or — most likely the right
+answer — matter storage buying something energy cannot, which is what a famine in the *nutrient*
+rather than in the light would do. §17.2's separate limiters are where that lives.
 
 Rupture — damage rising steeply with pressure until a cell bursts — belongs after these, not
 instead of them. It is a ceiling, and a ceiling on top of an economy with no sink only decides

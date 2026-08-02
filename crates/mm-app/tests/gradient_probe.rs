@@ -804,3 +804,123 @@ fn vacuoles_under_a_night() {
         );
     }
 }
+
+/// Does the vacuole pay for itself now that energy is rationed?
+///
+/// Organelles are not inherited — a daughter is born with a membrane and builds the rest from
+/// its genome — so seeding one on a founder seeds nothing. The strategy has to be a *genome*,
+/// which is `genomes/hoarder.mm`: `ancestor.mm` with a vacuole in slot 4 and its surplus-sugar
+/// dump removed, and no other difference.
+///
+/// Neither half pays alone, which is the point of pairing them. A vacuole with nothing in it is
+/// upkeep; kept sugar with no vacuole is free solute, and free solute is charged for. Together
+/// they are a battery made of matter — fix while the sun is up, hold it out of solution for
+/// nothing, burn it when the sun goes down — and that is only worth anything in a world whose
+/// night outlasts the energy reserve. The reserve covers about 4,400 ticks of a working
+/// loadout's upkeep, so the regimes below bracket it.
+///
+/// Mutation is off. This asks whether a strategy pays, not whether it can be found.
+#[test]
+#[ignore = "diagnostic; run with --release --ignored --nocapture"]
+fn does_the_vacuole_pay() {
+    let hoarder_src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../genomes/hoarder.mm"),
+    )
+    .expect("hoarder.mm");
+    let ancestor_src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../genomes/ancestor.mm"),
+    )
+    .expect("ancestor.mm");
+
+    println!("VAC  regime            seed   ticks   total   hoarders   plain   solute p50   energy p50");
+    for seed in [1u64, 2, 3, 4, 5] {
+    for (label, regime) in [
+        ("uniform         ", LightRegime::Uniform { intensity: Q10_ONE }),
+        (
+            "night 1,000     ",
+            LightRegime::DayNight { period_ticks: 2_000, day: Q10_ONE * 2, night: 0 },
+        ),
+        (
+            "night 6,000     ",
+            LightRegime::DayNight { period_ticks: 12_000, day: Q10_ONE * 2, night: 0 },
+        ),
+    ] {
+        let sc = Scenario {
+            name: "race".into(),
+            seed,
+            width: 24,
+            height: 24,
+            light: regime,
+            seeding: vec![
+                Seeding::Uniform { chemical: 11, per_square: q10(400) },
+                Seeding::Uniform { chemical: 14, per_square: q10(400) },
+                Seeding::Uniform { chemical: 4, per_square: q10(400) },
+            ],
+            ..Scenario::default()
+        };
+        let mut world = World::new(sc).expect("race");
+        world.set_biology(BiologyConfig {
+            mutation: MutationRates::none(),
+            ..BiologyConfig::default()
+        });
+        for (n, src) in [(0usize, &hoarder_src), (1, &ancestor_src)] {
+            let bytes = mm_asm::assemble(src).expect("assembles").bytes;
+            let genome = world.genomes().intern(bytes).expect("intern");
+            let id = world.spawn_cell(CellSeed {
+                x: pos(8 + 8 * n as i32),
+                y: pos(12),
+                mass: q10(30),
+                energy: q10(400),
+                membrane: 24,
+                key: 11,
+                species: 0,
+                parent: CellId::NONE,
+                birth_tick: 0,
+                genome,
+            });
+            if let Some(i) = world.cells_mut().index(id) {
+                let c = world.cells_mut();
+                c.slots_mut(i)[1] = Organelle::finished(OrganelleType::Nucleus, 64);
+                c.slots_mut(i)[3] = Organelle::finished(OrganelleType::Chloroplast, 60);
+            }
+        }
+        world.adopt_current_contents_as_baseline();
+
+        for mark in [60_000u64] {
+            while world.tick_count() < mark {
+                world.run(2_000);
+            }
+            let cells = world.cells();
+            if cells.len() == 0 {
+                println!("VAC  {label} {seed:>4} {mark:>7}  EXTINCT");
+                break;
+            }
+            // Only the hoarder's genome builds a vacuole, so carrying one is the lineage mark.
+            let hoarders = cells
+                .iter()
+                .filter(|&i| {
+                    cells.slots(i).iter().any(|o| o.kind == OrganelleType::Vacuole && o.is_present())
+                })
+                .count();
+            let mut solute: Vec<f32> = cells
+                .iter()
+                .map(|i| {
+                    mm_core::biology::osmotic_load(cells, i) as f32
+                        / mm_core::biology::interior_capacity(cells, i).max(1) as f32
+                })
+                .collect();
+            solute.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let mut energy: Vec<i64> = cells.iter().map(|i| cells.energy[i] as i64).collect();
+            energy.sort_unstable();
+            println!(
+                "VAC  {label} {seed:>4} {mark:>7} {:>7} {:>10} {:>7} {:>12.1} {:>12}",
+                cells.len(),
+                hoarders,
+                cells.len() - hoarders,
+                percentile(&solute, 50),
+                energy[energy.len() / 2] / Q10_ONE as i64,
+            );
+        }
+    }
+    }
+}
