@@ -1013,7 +1013,26 @@ in the square, whether that cell is alive or dead. Two consequences worth statin
 Efficiency must stay below one, as digestion's already is (§7.2). A corpse must never be worth
 more than the cell that made it, or the food web runs backwards.
 
-### 17.6 What this is all for
+### 17.6 The sessile filter feeder, which is the point
+
+Take the pieces together rather than one at a time. Barriers make channels; a prescribed flow
+pushes water through them; particulates ride that flow because they are matter in the fluid and
+the fluid advects. Now a cell anchored in a channel has food arriving past it without having to
+go anywhere, and a cell that can hold position and intercept particulate outcompetes one that
+swims about looking for a dissolved pool.
+
+That is a sponge, and nothing in the engine will know it. It needs junctions to anchor with
+(§8), a flow to sit in, a particulate to catch, and a wall to sit against — four features none
+of which mention filter feeding. It is the sharpest available test of the design rule in
+CLAUDE.md that there are no special-cased organisms: if a sessile filter feeder needs a
+`sessile` flag, the mechanism was wrong.
+
+It is also a strategy that cannot exist under the current limiter. In a uniform slide with a
+dissolved commons there is no advantage to being still, so nothing is ever still. Motility is
+currently free of any opportunity cost, and a world where staying put can win is a world with
+somewhere new for evolution to go.
+
+### 17.7 What this is all for
 
 Each of these is a carrying-capacity term, and that is deliberate. Area is a limit that selects
 for one thing. Light, nutrient influx, barriers, particulate availability and predation
