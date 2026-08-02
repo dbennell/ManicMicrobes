@@ -669,7 +669,7 @@ mod tests {
         let i = spawn(&mut cells, &pool);
         cells.energy[i] = 0;
         let mut starving = Vec::new();
-        met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+        met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
         assert_eq!(
             cells.damage[i], met.rates.background_damage,
             "a cell carrying no toxin at all took no wear"
@@ -681,7 +681,7 @@ mod tests {
         let mut ticks = 0u32;
         while cells.damage[i] <= tolerance && ticks < 100_000 {
             cells.energy[i] = 0;
-            met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+            met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
             ticks += 1;
         }
         assert!(
@@ -704,7 +704,7 @@ mod tests {
         let before = cells.energy[i];
 
         let mut starving = Vec::new();
-        met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+        met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
 
         assert!(
             cells.damage[i] < q10(5),
@@ -726,7 +726,7 @@ mod tests {
         cells.energy[i] = 0;
 
         let mut starving = Vec::new();
-        met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+        met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
         assert!(
             cells.damage[i] >= q10(5),
             "a cell with no energy repaired itself anyway"
@@ -788,7 +788,7 @@ mod tests {
         let before_total = grand_total(&cells, &sub);
         let before_energy = cells.energy[i];
         let mut starving = Vec::new();
-        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
 
         assert!(report.burned > 0, "nothing was respired");
         assert!(
@@ -825,7 +825,7 @@ mod tests {
         ledger.set_baseline(total_matter(&cells, &sub));
         let before = grand_total(&cells, &sub);
         let mut starving = Vec::new();
-        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
 
         assert!(report.fixed > 0, "nothing was photosynthesised");
         assert!(report.absorbed > 0, "light was free");
@@ -862,13 +862,13 @@ mod tests {
         cells.interior_mut(i)[m.primary().substrate] = q10(50);
         cells.interior_mut(i)[m.primary().oxidant] = q10(50);
         let mut starving = Vec::new();
-        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
         assert_eq!(report.burned, 0, "it burned a substrate it was not set to");
         assert_eq!(cells.interior(i)[m.primary().substrate], q10(50));
 
         // Fed its own, it eats.
         cells.interior_mut(i)[one.substrate] = q10(50);
-        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
         assert!(report.burned > 0, "it would not burn its own substrate");
     }
 
@@ -895,7 +895,7 @@ mod tests {
             cells.interior_mut(i)[p.oxidant] = q10(50);
             let before = cells.energy[i];
             let mut starving = Vec::new();
-            met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+            met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
             cells.energy[i] - before
         };
         assert!(
@@ -933,7 +933,7 @@ mod tests {
         ledger.set_baseline(total_matter(&cells, &sub));
         let before = grand_total(&cells, &sub);
         let mut starving = Vec::new();
-        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
 
         assert!(report.fixed > 0, "the chloroplast did nothing");
         assert!(report.burned > 0, "the mitochondrion did nothing");
@@ -961,7 +961,7 @@ mod tests {
         cells.interior_mut(i)[m.primary().substrate] = q10(50);
         cells.interior_mut(i)[m.primary().oxidant] = q10(50);
         let mut starving = Vec::new();
-        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
         assert!(
             report.burned > 0,
             "an unconfigured mitochondrion did nothing"
@@ -992,7 +992,7 @@ mod tests {
         let before = grand_total(&cells, &sub);
         let mut starving = Vec::new();
         for tick in 0..2_000 {
-            met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+            met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
             assert_eq!(
                 grand_total(&cells, &sub),
                 before,
@@ -1032,7 +1032,7 @@ mod tests {
 
         let mut starving = Vec::new();
         for tick in 0..1_000 {
-            met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+            met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
             ledger
                 .check_energy()
                 .unwrap_or_else(|e| panic!("identity broke at tick {tick}: {e}"));
@@ -1070,7 +1070,7 @@ mod tests {
 
         ledger.absorb(q10(100_000) as i64);
         let mut starving = Vec::new();
-        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
 
         assert_eq!(cells.damage[tolerable], 0, "a survivable dose did harm");
         assert!(cells.damage[poisoned] > 0, "an overdose did none");
@@ -1090,7 +1090,7 @@ mod tests {
         let mut starving = Vec::new();
         let mut ticks = 0;
         while starving.is_empty() && ticks < 10_000 {
-            met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+            met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
             ticks += 1;
         }
         assert!(!starving.is_empty(), "a poisoned cell never died");
@@ -1108,7 +1108,7 @@ mod tests {
         let before = cells.damage[i];
         let mut starving = Vec::new();
         for _ in 0..200 {
-            met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+            met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
         }
         assert!(cells.damage[i] < before, "damage never healed");
     }
@@ -1133,7 +1133,7 @@ mod tests {
         }
         ledger.absorb(q10(100_000) as i64);
         let mut starving = Vec::new();
-        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
         assert_eq!(report.damage, 0);
         assert_eq!(cells.damage[i], 0);
     }
@@ -1147,7 +1147,7 @@ mod tests {
 
         let mut starving = Vec::new();
         ledger.absorb(1_000_000);
-        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
         assert_eq!(report.starved, 1);
         assert_eq!(starving, vec![cells.id_at(i)]);
         assert_eq!(cells.energy[i], 0, "it spent everything it had trying");
@@ -1159,7 +1159,7 @@ mod tests {
         let i = spawn(&mut cells, &pool);
         ledger.absorb(q10(1000) as i64);
         let mut starving = Vec::new();
-        met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+        met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
         assert_eq!(cells.age[i], 1);
         assert!(
             cells.energy[i] < q10(100),
@@ -1180,7 +1180,7 @@ mod tests {
         cells.interior_mut(i)[m.primary().oxidant] = q10(50);
 
         let mut starving = Vec::new();
-        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
         assert_eq!(report.burned, 0, "a half-built mitochondrion must be inert");
         assert!(cells.energy[i] < q10(100), "but it is still being carried");
     }
@@ -1200,7 +1200,7 @@ mod tests {
             cells.interior_mut(i)[m.primary().substrate] = q10(50);
             cells.interior_mut(i)[m.primary().oxidant] = q10(50);
             let mut starving = Vec::new();
-            let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving);
+            let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
             burned.push(report.burned);
             cells.despawn(cells.id_at(i));
         }
