@@ -414,7 +414,7 @@ impl SlideRes {
         // the built-in default: the same petri dish M2's tests use, seeded with the ancestor
         // from `genomes/`, which divides and fills it within a few thousand ticks.
         let mut slide = Slide::new(petri()).expect("default scenario");
-        seed_ancestors(&mut slide);
+        seed_ancestors(&mut slide, slide_size(), 16);
         let chem_names = slide.chemical_names();
         let latest = Published {
             frame: slide.frame(),
@@ -482,8 +482,17 @@ impl SlideRes {
     }
 
     fn reseed(&mut self) {
+        self.new_slide(slide_size(), 16);
+    }
+
+    /// Throw the slide away and start again at a given size with a given number of founders.
+    ///
+    /// The size is the reason this exists. It was a constant, then an environment variable, and
+    /// neither is any use to someone who wants to watch one cell fill a small dish and then try
+    /// it again bigger — which is the experiment the whole thing is for.
+    fn new_slide(&mut self, size: u32, founders: u32) {
         let held = self.engine.handle();
-        seed_ancestors(&mut held.slide());
+        seed_ancestors(&mut held.slide(), size, founders);
         self.selected = None;
         self.engine.select(None);
         self.sandbox = None;
@@ -611,8 +620,8 @@ fn seed_packing(slide: &mut Slide) {
 }
 
 /// Replace whatever is on the slide with a fresh petri dish and sixteen ancestors.
-fn seed_ancestors(slide: &mut Slide) {
-    *slide.world_mut() = mm_core::World::new(petri()).expect("default scenario");
+fn seed_ancestors(slide: &mut Slide, size: u32, founders: u32) {
+    *slide.world_mut() = mm_core::World::new(petri_of(size)).expect("default scenario");
     slide.world_mut().set_biology(BiologyConfig {
         mutation: MutationRates::default(),
         ..BiologyConfig::default()
@@ -623,7 +632,7 @@ fn seed_ancestors(slide: &mut Slide) {
     {
         let world = slide.world_mut();
         let structural = world.biology().structural_chemical;
-        for k in 0..16u32 {
+        for k in 0..founders {
             let Ok(genome) = world.genomes().intern(bytes.clone()) else {
                 continue;
             };
@@ -634,11 +643,14 @@ fn seed_ancestors(slide: &mut Slide) {
             // to grow independently for a while are sixteen experiments; sixteen founders in a
             // heap are one, because they interbreed and compete from the first tick. Standing
             // diversity is the thing the crowding bound costs, and this is some of it back.
-            let size = slide_size() as i32;
-            let cell_of = |n: u32| pos(size * (2 * n as i32 + 1) / 8);
+            // A square grid sized to however many founders there are, so one lands in the
+            // middle and sixteen spread across the slide as before.
+            let across = (founders as f64).sqrt().ceil().max(1.0) as u32;
+            let size = size as i32;
+            let cell_of = |n: u32| pos(size * (2 * n as i32 + 1) / (2 * across as i32));
             let id = world.spawn_cell(CellSeed {
-                x: cell_of(k % 4),
-                y: cell_of(k / 4),
+                x: cell_of(k % across),
+                y: cell_of(k / across),
                 mass: q10(30),
                 energy: q10(400),
                 membrane: 24,
@@ -696,6 +708,10 @@ const DEFAULT_SLIDE: u32 = 512;
 /// Clamped rather than trusted. A zero-square slide has nowhere to put a cell and fails
 /// scenario validation, and the upper bound is where the substrate stops being something a
 /// machine can diffuse sixty times a second.
+fn petri() -> Scenario {
+    petri_of(slide_size())
+}
+
 fn slide_size() -> u32 {
     std::env::var("MM_SLIDE")
         .ok()
@@ -705,12 +721,15 @@ fn slide_size() -> u32 {
 }
 
 /// The default slide: light, food, no flow. The habitat the ancestor was written for.
-fn petri() -> Scenario {
+///
+/// Sized by the caller, because the slide is a thing the user can change now — see the Slide
+/// menu. `petri()` is this at whatever [`slide_size`] says.
+fn petri_of(size: u32) -> Scenario {
     Scenario {
         name: "petri".to_string(),
         seed: 1,
-        width: slide_size(),
-        height: slide_size(),
+        width: size,
+        height: size,
         light: LightRegime::Uniform {
             intensity: mm_core::Q10_ONE,
         },
@@ -761,6 +780,10 @@ fn ancestor_genome() -> Option<Vec<u8>> {
 struct View {
     centre: Vec2,
     zoom: f32,
+    /// What the next slide will be, as the Slide menu is currently set. Kept on `View` rather
+    /// than in the menu closure because a menu is rebuilt every frame and would forget.
+    new_size: u32,
+    new_founders: u32,
     paused: bool,
     /// Which panels are showing. One place rather than eight booleans, so the View menu and
     /// the keyboard are generated from the same list and cannot drift apart.
@@ -819,6 +842,10 @@ struct View {
 impl Default for View {
     fn default() -> Self {
         View {
+            // What the slide opened on, so "New slide" starts from where you are rather than
+            // from a number you have to discover.
+            new_size: slide_size(),
+            new_founders: 16,
             centre: Vec2::new(48.0, 48.0),
             zoom: 1.0,
             paused: false,
@@ -2060,6 +2087,40 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
             });
 
             ui.menu_button("Slide", |ui| {
+                ui.menu_button("New slide…", |ui| {
+                    ui.label("start again, at a size you choose");
+                    ui.add(
+                        egui::DragValue::new(&mut view.new_size)
+                            .range(16..=1024)
+                            .speed(4.0)
+                            .prefix("slide  ")
+                            .suffix(" squares"),
+                    )
+                    .on_hover_text(
+                        "the slide is square. Everything scales with the area: the matter \
+                         seeded into it, the carrying capacity, and how long a population \
+                         takes to fill it",
+                    );
+                    ui.add(
+                        egui::DragValue::new(&mut view.new_founders)
+                            .range(1..=64)
+                            .prefix("founders  "),
+                    )
+                    .on_hover_text(
+                        "how many ancestors to start with, spread evenly over the slide. One \
+                         is a clean experiment — everything that follows descends from it. \
+                         Sixteen grow as sixteen colonies and keep far more diversity",
+                    );
+                    ui.separator();
+                    if ui
+                        .button("Create")
+                        .on_hover_text("throws away what is on the slide now")
+                        .clicked()
+                    {
+                        sim.new_slide(view.new_size, view.new_founders);
+                        ui.close();
+                    }
+                });
                 soon(ui, "Scenario library", "", LATER);
                 soon(ui, "Open scenario…", "", LATER);
                 if ui
