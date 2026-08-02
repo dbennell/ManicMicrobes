@@ -205,6 +205,13 @@ struct Shared {
     // thread is already taking to build the frame.
     /// Pixels per substrate square, as `f32` bits.
     zoom: AtomicU32,
+    /// Where the camera is looking, in substrate squares, and how much of the slide it covers —
+    /// all as `f32` bits. The frame builder uses it to decide which cells are worth the
+    /// expensive per-cell work. See `Slide::set_camera`.
+    camera_x: AtomicU32,
+    camera_y: AtomicU32,
+    camera_half_w: AtomicU32,
+    camera_half_h: AtomicU32,
     /// One bit per chemical.
     overlays: AtomicU32,
     optics: AtomicBool,
@@ -317,6 +324,12 @@ impl Engine {
             ticks: AtomicU64::new(0),
             priority: AtomicU32::new(0),
             zoom: AtomicU32::new(1.0f32.to_bits()),
+            camera_x: AtomicU32::new(0.0f32.to_bits()),
+            camera_y: AtomicU32::new(0.0f32.to_bits()),
+            // Infinite until the front end says otherwise, so a slide is never quietly missing
+            // detail because nobody set a camera — a headless run has no camera at all.
+            camera_half_w: AtomicU32::new(f32::INFINITY.to_bits()),
+            camera_half_h: AtomicU32::new(f32::INFINITY.to_bits()),
             overlays: AtomicU32::new(overlays),
             optics: AtomicBool::new(optics),
         });
@@ -352,6 +365,22 @@ impl Engine {
         self.shared
             .zoom
             .store(pixels_per_square.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Where the camera is and how much slide it can see, in substrate squares.
+    ///
+    /// Crosses the wall the same way the zoom does and for the same reason: the frame builder
+    /// has to make a level-of-detail decision, and the camera is what the decision is about. It
+    /// does not let the render side reach the world — `Slide::frame` is still read-only over it.
+    pub fn set_camera(&self, x: f32, y: f32, half_w: f32, half_h: f32) {
+        self.shared.camera_x.store(x.to_bits(), Ordering::Relaxed);
+        self.shared.camera_y.store(y.to_bits(), Ordering::Relaxed);
+        self.shared
+            .camera_half_w
+            .store(half_w.to_bits(), Ordering::Relaxed);
+        self.shared
+            .camera_half_h
+            .store(half_h.to_bits(), Ordering::Relaxed);
     }
 
     pub fn toggle_overlay(&self, chemical: usize) {
@@ -490,6 +519,12 @@ fn run(shared: &Shared) {
                 // The renderer's presentation choices, applied under the lock that is being
                 // taken anyway, so setting them never had to wait for a tick.
                 slide.set_zoom(f32::from_bits(shared.zoom.load(Ordering::Relaxed)));
+                slide.set_camera(
+                    f32::from_bits(shared.camera_x.load(Ordering::Relaxed)),
+                    f32::from_bits(shared.camera_y.load(Ordering::Relaxed)),
+                    f32::from_bits(shared.camera_half_w.load(Ordering::Relaxed)),
+                    f32::from_bits(shared.camera_half_h.load(Ordering::Relaxed)),
+                );
                 slide.set_overlay_mask(shared.overlays.load(Ordering::Relaxed));
                 slide.optics.enabled = shared.optics.load(Ordering::Relaxed);
 

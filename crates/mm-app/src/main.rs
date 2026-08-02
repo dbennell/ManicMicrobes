@@ -1343,6 +1343,17 @@ fn handle_mouse(
     }
     let scale = BASE_SCALE * view.zoom;
     sim.engine.set_zoom(scale);
+    // And where it is looking, so the frame builder can skip the expensive per-cell work for
+    // cells nobody can see. Half-extents in substrate squares: what fits on screen at this zoom.
+    {
+        let win = window.single().map(|w| (w.width(), w.height())).unwrap_or((1280.0, 720.0));
+        sim.engine.set_camera(
+            view.centre.x,
+            view.centre.y,
+            win.0 / (2.0 * scale.max(0.001)),
+            win.1 / (2.0 * scale.max(0.001)),
+        );
+    }
 
     if buttons.pressed(MouseButton::Left) && target == Target::Slide {
         for ev in motion.read() {

@@ -502,6 +502,12 @@ pub struct Slide {
     lod: Lod,
     /// The microscope's look.
     pub optics: crate::optics::Optics,
+    /// What the camera can see, in substrate squares: centre and half-extents.
+    ///
+    /// Infinite until someone says otherwise, so a headless run — which has no camera — builds
+    /// every cell in full, and so does anything that forgets to set one. Detail that goes
+    /// missing by default is a bug that hides.
+    camera: (f32, f32, f32, f32),
     /// Rolling history for the live plots.
     history: MetricHistory,
     /// Trophic flows over the last complete window, and the one still filling (M8).
@@ -543,6 +549,7 @@ impl Slide {
             // they look like two kinds of cell. Better to open on the honest view and let someone
             // reach for the microscope once they know what they are looking at.
             optics: crate::optics::Optics::flat(),
+            camera: (0.0, 0.0, f32::INFINITY, f32::INFINITY),
             history: MetricHistory::new(600),
         })
     }
@@ -649,6 +656,23 @@ impl Slide {
     }
 
     /// Choose the detail tier from how many pixels a substrate square occupies.
+    /// Where the camera is looking, in substrate squares, and how much it can see.
+    ///
+    /// Only the *expensive* per-cell work is skipped outside it — seams and the organelle list.
+    /// Every cell is still in the frame, wherever it is, with its position, size and colour.
+    ///
+    /// That distinction is the whole design. Dropping the cell entirely would be cheaper and
+    /// would show as a hole: the frame in flight was built for wherever the camera was when it
+    /// was published, so panning would reveal a band of empty water at the leading edge until
+    /// the next frame caught up — and at four frames a second that is a quarter of a second of
+    /// missing world, arriving exactly when the user is looking hardest. Skipping only the
+    /// detail degrades to a cell drawn as a plain blob for one frame instead, which is a look
+    /// the renderer already has: it is what the `Dots` tier draws, and this is that tier's
+    /// decision made per cell rather than per frame.
+    pub fn set_camera(&mut self, x: f32, y: f32, half_w: f32, half_h: f32) {
+        self.camera = (x, y, half_w.max(0.0), half_h.max(0.0));
+    }
+
     pub fn set_zoom(&mut self, pixels_per_square: f32) {
         self.lod = Lod::for_pixels_per_square(pixels_per_square);
     }
@@ -792,13 +816,33 @@ impl Slide {
             cluster_size[i] = components.size_of(i);
         }
 
+        // The camera, with a screen's worth of margin either side, in `POS`.
+        //
+        // The margin is what makes the degradation graceful rather than visible: ordinary
+        // panning stays inside it, so the detail is already built by the time the cell reaches
+        // the screen, and only a fling or a fast zoom-out outruns it — for one frame.
+        let (cam_x, cam_y, cam_w, cam_h) = self.camera;
+        let visible = |i: usize| -> bool {
+            if !cam_w.is_finite() || !cam_h.is_finite() {
+                return true;
+            }
+            let x = cells.x[i] as f32 / POS_ONE as f32;
+            let y = cells.y[i] as f32 / POS_ONE as f32;
+            (x - cam_x).abs() <= cam_w * 2.0 && (y - cam_y).abs() <= cam_h * 2.0
+        };
+
         let indices: Vec<usize> = cells.iter().collect();
         let dots: Vec<CellDot> = indices
             .par_iter()
             .map(|&i| {
                 let id = cells.id_at(i);
                 let radius = mm_core::biology::radius(cells, i) as f32 / Q10_ONE as f32;
-                let (squash, area_swell) = if packed {
+                // The two expensive things, and the only two that are skipped off camera. A
+                // cell out of view still gets everything below — where it is, how big, what
+                // colour — so it is never missing, only plain. `Vec::new` does not allocate,
+                // so skipping these skips the heap traffic as well as the arithmetic.
+                let near = visible(i);
+                let (squash, area_swell) = if packed && near {
                     squash_of(&self.world, i, radius * PACKING)
                 } else {
                     (Vec::new(), 1.0)
@@ -810,7 +854,7 @@ impl Slide {
                     rgb: cell_colour(cells, i, table),
                     depth: crate::optics::depth_of(id.ordering_key()),
                     id,
-                    organelles: if detailed {
+                    organelles: if detailed && near {
                         organelle_dots(cells, i, radius)
                     } else {
                         Vec::new()
