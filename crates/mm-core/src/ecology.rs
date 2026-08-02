@@ -64,15 +64,33 @@ pub struct EcologyConfig {
     /// Membrane damage a tick, per whole radius a cell is pressed into by cells it is not
     /// joined to, `Q10`.
     ///
-    /// Somewhere for a crowd to end. Separation resolves a fraction of each overlap per tick
-    /// and no more, so a population dividing faster than it can be pushed apart simply
-    /// interpenetrates further and further, without limit and without cost — a square of slide
-    /// would hold any number of cells given time. Nothing in the world said no.
+    /// **Zero by default, because it was measured and it does almost nothing.**
     ///
-    /// Now being crushed is survivable but not free: the damage goes through the same membrane
-    /// the rest of the world attacks, so a cell can pay to repair it and a crowded one spends
-    /// its energy on staying intact instead of dividing. What that buys is a real ceiling on
-    /// density, arrived at by cells dying rather than by a cap on the number of them.
+    /// It was meant to be somewhere for a crowd to end. Separation resolves a fraction of each
+    /// overlap per tick and no more, so a population dividing faster than it can be pushed apart
+    /// interpenetrates further and further; the idea was that being crushed should be survivable
+    /// but not free, and that a crowded cell would spend its energy staying intact instead of
+    /// dividing.
+    ///
+    /// It does not work, and it did not work before `split_pressure` either. Two runs of 2,500
+    /// ticks differing only in this rate:
+    ///
+    /// ```text
+    ///   tick   population        mean mass         deaths
+    ///          on / off          on / off          on / off
+    ///   1500   9063 / 9363       62254 / 63337      2 / 3
+    ///   2500  11595 / 11751      67609 / 68474      0 / 0
+    /// ```
+    ///
+    /// A 1.3% difference in the settled population and no deaths to speak of in either. The
+    /// reason is that the damage goes through the membrane, and a cell with energy simply
+    /// repairs it — so the mechanism converts to a small energy tax rather than to a ceiling.
+    /// What actually bounds a crowd is `BiologyConfig::split_pressure`, which refuses a division
+    /// to a cell with nowhere to put the daughter, and which bounds it without killing anything.
+    ///
+    /// Kept rather than deleted because it is a real mechanism and a scenario about being
+    /// crushed should be able to ask for it. But it is not what holds a population, and a
+    /// default that costs every tick to achieve 1.3% is not a default.
     ///
     /// Cells joined by junctions are exempt. Tissue is *supposed* to be packed, and charging
     /// an organism for holding itself together would make being multicellular a way to die.
@@ -110,11 +128,10 @@ impl Default for EcologyConfig {
             carrion_fraction: Q10_ONE / 2,
             digestion_rate: Q10_ONE / 8,
             digestion_efficiency: (Q10_ONE * 2) / 3,
-            // A cell pressed a whole radius into its neighbours loses a sixty-fourth of a unit of
-            // membrane a tick. Against the ancestor's tolerance that is a few hundred ticks to
-            // die if it never repairs, so crowding is a pressure to be answered — by moving,
-            // by dividing less, by joining what is crushing you — rather than a wall.
-            crowding_damage: Q10_ONE / 64,
+            // Off by default, on the evidence. See the field's own note: measured against a run
+            // with it at `Q10_ONE / 64`, it moved the settled population by 1.3% and killed
+            // almost nobody. `split_pressure` is what bounds a crowd now.
+            crowding_damage: 0,
             crowding_grace: 64,
             // `biology::radius` of a cell of about thirty units of mass, which is what the
             // ancestors are seeded at: a quarter of a square plus five eighths.
@@ -475,8 +492,12 @@ mod tests {
         let small = spawn(&mut cells, &pool, 12, 12);
         let (bi, si) = (cells.index(big).unwrap(), cells.index(small).unwrap());
         cells.mass[si] = cells.mass[bi] / 8;
-        // Past the grace, or neither is charged at all.
-        let config = EcologyConfig::default();
+        // Past the grace, or neither is charged at all. And with a rate of its own, because the
+        // default is now zero — this tests the mechanism, not whether it is switched on.
+        let config = EcologyConfig {
+            crowding_damage: Q10_ONE / 64,
+            ..EcologyConfig::default()
+        };
         cells.age[bi] = config.crowding_grace;
         cells.age[si] = config.crowding_grace;
 

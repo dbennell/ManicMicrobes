@@ -426,10 +426,12 @@ pub const FIELDS: &[Field] = &[
         group: Group::Ecology,
         unit: Unit::Q10,
         note: "membrane damage a tick per whole radius a cell is pressed into by cells it is \
-               not joined to. What stops a square of slide holding any number of cells: \
-               separation only resolves part of an overlap per tick, so without this a \
-               population that divides faster than it can be pushed apart just interpenetrates \
-               for ever. Cells joined by junctions are exempt — tissue is meant to be packed",
+               not joined to. Zero by default, on the evidence: measured against a run with it \
+               on, it moved the settled population by 1.3% and killed almost nobody, because \
+               the damage goes through the membrane and a cell with energy just repairs it. \
+               What bounds a crowd is split pressure, which refuses the division instead. Kept \
+               for scenarios about being crushed. Cells joined by junctions are exempt — tissue \
+               is meant to be packed",
     },
     Field {
         path: "ecology.crowding_reference_radius",
