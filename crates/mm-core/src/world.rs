@@ -533,12 +533,20 @@ impl World {
             // leave it. Rebuilt first because everything just moved.
             self.neighbours
                 .rebuild(&self.cells, self.substrate.width(), self.substrate.height());
+            // And barriers occupy space too. Passed as an empty slice when the slide has none,
+            // so a scenario without barriers does not pay for the scan.
+            let blocked: &[bool] = if self.substrate.has_barriers() {
+                self.substrate.blocked()
+            } else {
+                &[]
+            };
             report.physics.separated = crate::neighbours::resolve_collisions(
                 &mut self.cells,
                 &mut self.neighbours,
                 &mut self.radii,
                 &mut self.crowding,
                 &mut self.pressure,
+                blocked,
             );
         }
 

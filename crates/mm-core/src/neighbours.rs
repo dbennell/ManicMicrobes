@@ -109,6 +109,20 @@ const CORE_STRENGTH: i32 = 15;
 /// none of them may push far, and in a real pack they mostly cancel.
 const MAX_SHOVE: i32 = 8;
 
+/// How much of a barrier overlap one relaxation pass takes out, in sixteenths.
+///
+/// Sixteen, where a cell-cell contact is one: a wall is not a bag of water and there is no
+/// tissue to be made by pressing into it. The soft band of [`CONTACT_STRENGTH`] exists so that
+/// two cells share a face; a barrier has nothing to share, so the constraint is the whole
+/// penetration, taken out at once and bounded only by [`MAX_SHOVE`].
+///
+/// That bound is what makes it safe rather than the strength being modest. One pass may move a
+/// cell an eighth of its own radius, three passes three eighths — for the seeded ancestor about
+/// a third of a square a tick, comfortably above `fluid::MAX_VELOCITY`. So a current cannot
+/// drive a cell through a wall faster than the solver takes it back out, which is the property
+/// that has to hold and the one [`barrier_correction`]'s test asserts directly.
+const BARRIER_STRENGTH: i32 = 16;
+
 /// Fraction of a touching cell's sliding velocity that survives a tick, `Q10`.
 ///
 /// Cells are not ball bearings. Water alone is already syrup — see `sensing::DRAG_RETAIN` — but
@@ -714,6 +728,121 @@ struct Correction {
     contacts: u32,
 }
 
+/// Push one cell out of any blocked square its body overlaps.
+///
+/// # Why this did not exist until now
+///
+/// `blocked` has been in the substrate since M1 and the fluid has always respected it — flux
+/// across a blocked edge is zero, which is what makes a barrier conserve matter for free. Cells
+/// were never told. A barrier stopped chemistry and light and let bodies straight through, so
+/// every wall in every scenario was a wall for the water and a suggestion for everything alive
+/// in it, and `scenarios/archipelago.ron` was fragmenting the fluid without fragmenting the
+/// population it was written to isolate.
+///
+/// SPEC §17.1 asks barriers to do three things — reduce usable area, isolate populations, and
+/// make an edge a different place to live from open water — and not one of them can happen
+/// while a cell can swim through the wall.
+///
+/// # What it deliberately does not do
+///
+/// A barrier contact contributes a shove and sets `touching`. It does **not** contribute to
+/// `crowding` or to `pressure`, and that is a decision rather than an omission. `crowding` is
+/// what [`crate::ecology`] charges membrane damage for and `pressure` is what
+/// [`crate::biology`] refuses divisions above, so counting a wall in either would make the
+/// perimeter of a room a worse place to live than its middle. SPEC §17.1 wants the opposite:
+/// a cell against a wall has fewer *neighbours* pressing on it, so the edge should be the
+/// better address and the gradient that creates is the point of drawing rooms at all. A wall
+/// is something to rest against, not something that crushes.
+///
+/// An empty `blocked` means a slide with no barriers on it, and the whole scan is skipped —
+/// the common case, and a real grid is never zero squares.
+fn barrier_correction(
+    cells: &CellArena,
+    blocked: &[bool],
+    width: i32,
+    height: i32,
+    i: usize,
+    ri: i32,
+) -> (i32, i32, bool) {
+    if blocked.is_empty() || ri <= 0 || width <= 0 || height <= 0 {
+        return (0, 0, false);
+    }
+    let (cx, cy) = (cells.x[i], cells.y[i]);
+    // Only the squares the body can actually reach. At the seeded radius that is three by
+    // three; at `max_mass` it is six by six, which is the ceiling `biology::max_mass` exists
+    // to keep on the collision phase generally.
+    let lo_x = pos_to_square(cx - ri).max(0);
+    let hi_x = pos_to_square(cx + ri).min(width - 1);
+    let lo_y = pos_to_square(cy - ri).max(0);
+    let hi_y = pos_to_square(cy + ri).min(height - 1);
+    // The same per-contact clamp cell-cell contacts use, and for the same reason: depth may buy
+    // stiffness but it may never buy a teleport.
+    let cap = (ri / MAX_SHOVE).max(1);
+
+    let (mut dx, mut dy, mut touching) = (0i32, 0i32, false);
+    for sy in lo_y..=hi_y {
+        for sx in lo_x..=hi_x {
+            let idx = sy as usize * width as usize + sx as usize;
+            if !blocked.get(idx).copied().unwrap_or(false) {
+                continue;
+            }
+            let left = sx.saturating_mul(POS_ONE);
+            let top = sy.saturating_mul(POS_ONE);
+            let (right, bottom) = (left + POS_ONE, top + POS_ONE);
+            // Closest point on the square to the centre — the standard disc-against-box test.
+            let qx = cx.clamp(left, right);
+            let qy = cy.clamp(top, bottom);
+
+            let (ux, uy, penetration) = if qx != cx || qy != cy {
+                // Centre outside the square, which is nearly always. Leave along the line from
+                // the closest point, so a cell against a face leaves square to it and a cell on
+                // a corner leaves diagonally.
+                let (ox, oy) = ((cx - qx) as i64, (cy - qy) as i64);
+                let d = (ox * ox + oy * oy).isqrt().max(1);
+                if d >= ri as i64 {
+                    continue;
+                }
+                (
+                    (ox * POS_ONE as i64 / d) as i32,
+                    (oy * POS_ONE as i64 / d) as i32,
+                    ri - d as i32,
+                )
+            } else {
+                // Centre *inside* the square. There is no line to leave along — the closest
+                // point is the centre itself — so leave by whichever face is nearest, which is
+                // the shortest way out and cannot pick a direction that drives deeper.
+                //
+                // Reachable despite the constraint, and it must be total rather than merely
+                // unlikely: a barrier drawn on top of a standing cell by the drawing tool puts
+                // one here immediately, and so does a daughter budded into a wall.
+                let (dl, dr) = (cx - left, right - cx);
+                let (dt, db) = (cy - top, bottom - cy);
+                let least = dl.min(dr).min(dt).min(db);
+                let (ux, uy) = if least == dl {
+                    (-POS_ONE, 0)
+                } else if least == dr {
+                    (POS_ONE, 0)
+                } else if least == dt {
+                    (0, -POS_ONE)
+                } else {
+                    (0, POS_ONE)
+                };
+                (ux, uy, ri.saturating_add(least))
+            };
+
+            let shove = penetration.saturating_mul(BARRIER_STRENGTH) / 16;
+            let allowed = shove.min(cap).max(0);
+            if allowed <= 0 {
+                continue;
+            }
+            touching = true;
+            dx = dx.saturating_add((ux as i64 * allowed as i64 / POS_ONE as i64) as i32);
+            dy = dy.saturating_add((uy as i64 * allowed as i64 / POS_ONE as i64) as i32);
+        }
+    }
+    (dx, dy, touching)
+}
+
 /// Solve one cell against its neighbourhood, reading everything and writing nothing.
 ///
 /// The whole body of the old inner loop, with the two-sided writes turned into one cell's share.
@@ -724,6 +853,7 @@ fn correction_for(
     cells: &CellArena,
     index: &NeighbourIndex,
     radii: &[i32],
+    blocked: &[bool],
     i: usize,
     first_pass: bool,
 ) -> Correction {
@@ -732,6 +862,13 @@ fn correction_for(
         return out;
     }
     let ri = radii[i];
+    // The world before the neighbours. A barrier is immovable, so its shove is one-sided and
+    // needs no pair to agree with — see [`barrier_correction`] for why it feeds only `dx`,
+    // `dy` and `touching`.
+    let (bdx, bdy, btouch) = barrier_correction(cells, blocked, index.width, index.height, i, ri);
+    out.dx = bdx;
+    out.dy = bdy;
+    out.touching = btouch;
     let sx = pos_to_square(cells.x[i]);
     let sy = pos_to_square(cells.y[i]);
     for j in index.around_radius(sx, sy, ri) {
@@ -861,12 +998,15 @@ fn correction_for(
 /// it. [`crate::biology`] refuses divisions above a threshold of it. Enclosure alone is not the
 /// signal — a cell ringed by neighbours with room to spread still has somewhere to put a
 /// daughter, and only one whose neighbourhood has nothing left to give does not.
+/// `blocked` is the substrate's barrier mask, one entry per square in row-major order. Pass an
+/// empty slice for a slide with no barriers on it; see [`barrier_correction`].
 pub fn resolve_collisions(
     cells: &mut CellArena,
     index: &NeighbourIndex,
     radii: &mut Vec<i32>,
     crowding: &mut Vec<i32>,
     pressure: &mut Vec<i32>,
+    blocked: &[bool],
 ) -> u32 {
     let mut separated = 0u32;
     let width = index.width;
@@ -947,7 +1087,7 @@ pub fn resolve_collisions(
             .map(|&i| {
                 (
                     i,
-                    correction_for(arena, index, radii_ref, i as usize, first),
+                    correction_for(arena, index, radii_ref, blocked, i as usize, first),
                 )
             })
             .collect();
@@ -1301,7 +1441,14 @@ mod tests {
         let mut index = NeighbourIndex::default();
         index.rebuild(&cells, 16, 16);
         let before = separation(&cells, 0, 1);
-        let n = resolve_collisions(&mut cells, &mut index, &mut Vec::new(), &mut Vec::new(), &mut Vec::new());
+        let n = resolve_collisions(
+            &mut cells,
+            &mut index,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &[],
+        );
         assert_eq!(n, 1);
         assert!(
             separation(&cells, 0, 1) > before,
@@ -1313,7 +1460,14 @@ mod tests {
         index2.rebuild(&far, 16, 16);
         let positions: Vec<(i32, i32)> = far.iter().map(|i| (far.x[i], far.y[i])).collect();
         assert_eq!(
-            resolve_collisions(&mut far, &mut index2, &mut Vec::new(), &mut Vec::new(), &mut Vec::new()),
+            resolve_collisions(
+                &mut far,
+                &mut index2,
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &[],
+            ),
             0
         );
         let after: Vec<(i32, i32)> = far.iter().map(|i| (far.x[i], far.y[i])).collect();
@@ -1330,7 +1484,14 @@ mod tests {
             cells.x[0] = cells.x[0].saturating_add(load);
             cells.x[1] = cells.x[1].saturating_sub(load);
             index.rebuild(&cells, 16, 16);
-            resolve_collisions(&mut cells, &mut index, &mut Vec::new(), &mut Vec::new(), &mut Vec::new());
+            resolve_collisions(
+            &mut cells,
+            &mut index,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &[],
+        );
         }
         separation(&cells, 0, 1)
     }
@@ -1438,7 +1599,14 @@ mod tests {
         let mut index = NeighbourIndex::default();
         for _ in 0..400 {
             index.rebuild(&cells, 16, 16);
-            resolve_collisions(&mut cells, &mut index, &mut Vec::new(), &mut Vec::new(), &mut Vec::new());
+            resolve_collisions(
+            &mut cells,
+            &mut index,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &[],
+        );
         }
         let want = 2 * r;
         let core = ((want as i64 * CORE_PERMILLE as i64) / 1000) as i32;
@@ -1464,7 +1632,14 @@ mod tests {
         let (mut apart, _p) = arena(&[(pos(6), pos(6)), (pos(6) + 3 * r, pos(6))]);
         let mut index = NeighbourIndex::default();
         index.rebuild(&apart, 16, 16);
-        resolve_collisions(&mut apart, &mut index, &mut Vec::new(), &mut crowding, &mut Vec::new());
+        resolve_collisions(
+            &mut apart,
+            &mut index,
+            &mut Vec::new(),
+            &mut crowding,
+            &mut Vec::new(),
+            &[],
+        );
         assert_eq!(
             crowding.iter().filter(|c| **c > 0).count(),
             0,
@@ -1475,7 +1650,14 @@ mod tests {
         let (mut crushed, _p2) = arena(&[(pos(6), pos(6)), (pos(6) + r / 4, pos(6))]);
         let mut index2 = NeighbourIndex::default();
         index2.rebuild(&crushed, 16, 16);
-        resolve_collisions(&mut crushed, &mut index2, &mut Vec::new(), &mut crowding, &mut Vec::new());
+        resolve_collisions(
+            &mut crushed,
+            &mut index2,
+            &mut Vec::new(),
+            &mut crowding,
+            &mut Vec::new(),
+            &[],
+        );
         assert!(
             crowding[0] > 0 && crowding[1] > 0,
             "a crushed pair was not billed: {crowding:?}"
@@ -1501,6 +1683,7 @@ mod tests {
             &mut Vec::new(),
             &mut Vec::new(),
             &mut light,
+            &[],
         );
 
         // Driven onto the core.
@@ -1514,6 +1697,7 @@ mod tests {
             &mut Vec::new(),
             &mut Vec::new(),
             &mut heavy,
+            &[],
         );
 
         assert!(
@@ -1536,7 +1720,14 @@ mod tests {
         let mut index = NeighbourIndex::default();
         index.rebuild(&cells, 16, 16);
         for _ in 0..20 {
-            resolve_collisions(&mut cells, &mut index, &mut Vec::new(), &mut Vec::new(), &mut Vec::new());
+            resolve_collisions(
+            &mut cells,
+            &mut index,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &[],
+        );
             index.rebuild(&cells, 16, 16);
         }
         assert!(
@@ -1551,7 +1742,14 @@ mod tests {
         let mut index = NeighbourIndex::default();
         index.rebuild(&cells, 16, 16);
         for _ in 0..50 {
-            resolve_collisions(&mut cells, &mut index, &mut Vec::new(), &mut Vec::new(), &mut Vec::new());
+            resolve_collisions(
+            &mut cells,
+            &mut index,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &[],
+        );
             index.rebuild(&cells, 16, 16);
             for i in cells.iter() {
                 assert!(cells.x[i] >= 0 && cells.x[i] < 16 * POS_ONE);
@@ -1572,7 +1770,14 @@ mod tests {
             let mut index = NeighbourIndex::default();
             for _ in 0..10 {
                 index.rebuild(&cells, 16, 16);
-                resolve_collisions(&mut cells, &mut index, &mut Vec::new(), &mut Vec::new(), &mut Vec::new());
+                resolve_collisions(
+            &mut cells,
+            &mut index,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &[],
+        );
             }
             cells
                 .iter()
@@ -1602,5 +1807,115 @@ mod tests {
         let lonely = touch_reading(&cells, &index, 3);
         assert_eq!(lonely.contacts, 0);
         assert_eq!(lonely.contact_mass, 0);
+    }
+
+    /// A grid of the given size with one square blocked.
+    fn wall_at(w: i32, h: i32, bx: i32, by: i32) -> Vec<bool> {
+        let mut blocked = vec![false; (w * h) as usize];
+        blocked[(by * w + bx) as usize] = true;
+        blocked
+    }
+
+    #[test]
+    fn a_cell_overlapping_a_barrier_is_pushed_out_of_it() {
+        // Centre just left of the blocked square at (6, 5), overlapping its left face.
+        let (mut cells, _p) = arena(&[(pos(6) - 8, pos(5) + POS_ONE / 2)]);
+        let mut index = NeighbourIndex::default();
+        index.rebuild(&cells, 16, 16);
+        let before = cells.x[0];
+        resolve_collisions(
+            &mut cells,
+            &mut index,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &wall_at(16, 16, 6, 5),
+        );
+        assert!(
+            cells.x[0] < before,
+            "a cell overlapping a wall was not pushed away from it: {before} -> {}",
+            cells.x[0]
+        );
+        assert_eq!(cells.y[0], pos(5) + POS_ONE / 2, "pushed along the face");
+    }
+
+    #[test]
+    fn a_cell_standing_inside_a_barrier_leaves_by_the_nearest_face() {
+        // The degenerate case the closest-point test cannot answer, and it is reachable: the
+        // drawing tool can put a barrier on top of a standing cell. Placed nearest the top
+        // face, so that is the way out.
+        let (mut cells, _p) = arena(&[(pos(6) + POS_ONE / 2, pos(5) + POS_ONE / 8)]);
+        let mut index = NeighbourIndex::default();
+        index.rebuild(&cells, 16, 16);
+        resolve_collisions(
+            &mut cells,
+            &mut index,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &wall_at(16, 16, 6, 5),
+        );
+        assert!(
+            cells.y[0] < pos(5) + POS_ONE / 8,
+            "a cell inside a wall did not leave by its nearest face"
+        );
+        assert_eq!(cells.x[0], pos(6) + POS_ONE / 2, "and not sideways");
+    }
+
+    #[test]
+    fn a_slide_with_no_barriers_is_untouched_by_the_barrier_pass() {
+        // The empty-slice path has to be exactly inert, or every scenario without barriers
+        // silently changes trajectory. Same arrangement, solved with and without a mask of all
+        // false, compared bit for bit.
+        let arrangement = [(pos(5), pos(5)), (pos(5) + 4, pos(5)), (pos(9), pos(9))];
+        let (mut empty, _p) = arena(&arrangement);
+        let (mut clear, _q) = arena(&arrangement);
+        let mut i1 = NeighbourIndex::default();
+        let mut i2 = NeighbourIndex::default();
+        i1.rebuild(&empty, 16, 16);
+        i2.rebuild(&clear, 16, 16);
+        let a = resolve_collisions(
+            &mut empty,
+            &mut i1,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &[],
+        );
+        let b = resolve_collisions(
+            &mut clear,
+            &mut i2,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &vec![false; 16 * 16],
+        );
+        assert_eq!(a, b);
+        for i in 0..arrangement.len() {
+            assert_eq!((empty.x[i], empty.y[i]), (clear.x[i], clear.y[i]));
+            assert_eq!((empty.vx[i], empty.vy[i]), (clear.vx[i], clear.vy[i]));
+        }
+    }
+
+    #[test]
+    fn a_barrier_contact_is_not_charged_as_crowding_or_pressure() {
+        // SPEC §17.1: an edge is meant to be a *better* address than the middle of a room,
+        // because a cell against a wall has fewer neighbours pressing on it. Counting the wall
+        // as a neighbour would invert exactly that, and it would do it silently — `crowding`
+        // is membrane damage and `pressure` refuses divisions.
+        let (mut cells, _p) = arena(&[(pos(6) - 8, pos(5) + POS_ONE / 2)]);
+        let mut index = NeighbourIndex::default();
+        index.rebuild(&cells, 16, 16);
+        let (mut crowding, mut pressure) = (Vec::new(), Vec::new());
+        resolve_collisions(
+            &mut cells,
+            &mut index,
+            &mut Vec::new(),
+            &mut crowding,
+            &mut pressure,
+            &wall_at(16, 16, 6, 5),
+        );
+        assert_eq!(crowding[0], 0, "a wall wounded a cell resting against it");
+        assert_eq!(pressure[0], 0, "a wall stopped a cell dividing");
     }
 }

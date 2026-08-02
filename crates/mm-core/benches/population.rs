@@ -293,6 +293,7 @@ fn phase_breakdown(_c: &mut Criterion) {
             &mut radii,
             &mut crowding,
             &mut pressure,
+            &[],
         ));
     }
     let collisions = t.elapsed() / n;

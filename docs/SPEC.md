@@ -926,6 +926,24 @@ Substrate squares already carry a `blocked` flag (§7.4) and the fluid already r
 flux across a blocked edge is zero, which is what makes barriers conserve matter for free.
 What is missing is any reason to have them.
 
+*That last sentence was wrong, and the way it was wrong is worth recording, because it made a
+missing mechanism look like a missing motivation.* What was also missing was any effect on
+anything alive. `blocked` stopped chemistry and light and had no bearing whatever on a body:
+`resolve_collisions` took a `CellArena` and a `NeighbourIndex` and no barrier mask, so a cell
+swam through a wall and the fluid carried it through one. Every scenario in `scenarios/` that
+drew a barrier was drawing it for the water only, and `archipelago.ron` — written to isolate
+two populations — was fragmenting the fluid while its cells crossed the wall as if it were not
+there. So M8's allopatric-speciation result was measuring diffusion barriers rather than
+dispersal barriers, and none of the three consequences below could have happened. **A barrier
+is now solid to bodies as well as to the fluid**, as a one-sided position correction in the
+same Jacobi pass that resolves cell-cell contact, clamped by the same per-contact rule.
+
+One asymmetry with cell-cell contact is deliberate and normative: **a barrier contact
+contributes neither `crowding` nor `pressure`.** Those are what §ecology charges membrane
+damage for and what §6 refuses divisions above, so counting a wall in either would make the
+perimeter of a room a worse address than its middle — the exact inverse of the third bullet
+below. A wall is something to rest against, not something that crushes.
+
 Barriers break a slide into rooms joined by channels. That does three things a uniform slide
 cannot:
 
