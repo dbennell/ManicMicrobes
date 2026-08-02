@@ -960,13 +960,26 @@ pub fn resolve_collisions(
                 continue;
             }
             if c.dx != 0 || c.dy != 0 {
-                cells.x[i] = ((cells.x[i] as i64) + c.dx as i64).clamp(0, max_x) as i32;
-                cells.y[i] = ((cells.y[i] as i64) + c.dy as i64).clamp(0, max_y) as i32;
+                // What the constraint *did*, which at the slide edge is not what it asked for.
+                //
+                // The velocity reconciliation below exists to take out the part of a cell's
+                // motion that the constraints had to undo, and it was being handed the intended
+                // correction rather than the achieved one. Against a wall those differ
+                // completely: the clamp eats the whole push, the cell does not move, and the
+                // cell's velocity is then adjusted for a movement that never happened — every
+                // tick, for as long as the crowd leans on the boundary.
+                //
+                // Measured on the packing bench with nothing else running: a pack floating free
+                // is perfectly still, and the same pack squeezed onto a slide small enough to
+                // reach the walls churned 2.12% of its pixels every tick.
+                let (was_x, was_y) = (cells.x[i], cells.y[i]);
+                cells.x[i] = ((was_x as i64) + c.dx as i64).clamp(0, max_x) as i32;
+                cells.y[i] = ((was_y as i64) + c.dy as i64).clamp(0, max_y) as i32;
                 if let Some(v) = push_x.get_mut(i) {
-                    *v = v.saturating_add(c.dx);
+                    *v = v.saturating_add(cells.x[i].saturating_sub(was_x));
                 }
                 if let Some(v) = push_y.get_mut(i) {
-                    *v = v.saturating_add(c.dy);
+                    *v = v.saturating_add(cells.y[i].saturating_sub(was_y));
                 }
             }
             if c.touching {

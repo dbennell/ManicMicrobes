@@ -580,7 +580,12 @@ fn seed_packing(slide: &mut Slide) {
         // a crowd of 220 evacuates the centre and packs against the walls, which is not
         // understood and is not something to leave a bench standing on. The current has the
         // known flaw described in `Scenario::gravity` — it cannot be damped — but it packs.
-        gravity: 2,
+        // `MM_BENCH_GRAVITY=0` takes it off, which separates "cells fight the wall" from "cells
+        // are being *pushed* into the wall and fight it". A live slide has no gravity.
+        gravity: std::env::var("MM_BENCH_GRAVITY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2),
         // No thermal motion. The bench's premise is that whatever moves is volumes resolving
         // against each other, and the default 24 breaks it: every cell wanders about a
         // sixteenth of a square per tick for no reason to do with packing, which in a sheet of
