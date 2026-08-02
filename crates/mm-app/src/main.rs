@@ -2275,6 +2275,7 @@ fn status_bar(
                 ui.separator();
                 ui.label(match frame.lod {
                     Lod::Dots => "points",
+                    Lod::Packed => "packed",
                     Lod::Organelles => "organelles",
                     Lod::Full => "full",
                 });

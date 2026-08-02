@@ -54,9 +54,10 @@ pub struct CellDot {
     pub age: u32,
     /// Where this cell is flattened by the neighbours it is pressed into.
     ///
-    /// Empty below [`Lod::Organelles`], like `organelles`: a cell a few pixels across cannot
-    /// show a flattened side, and building the list for fifty thousand of them would be work
-    /// with nothing to show for it.
+    /// Empty below [`Lod::Packed`], which is a tier earlier than `organelles` — a crowd reads as
+    /// overlapping discs long before there is anything inside a cell worth resolving. Below that
+    /// a cell is a few pixels across, cannot show a flattened side at all, and building the list
+    /// for fifty thousand of them would be work with nothing to show for it.
     pub squash: Vec<Squash>,
     /// How much larger than [`PACKING`] this cell is drawn so that its clipped outline still
     /// encloses the area it has. See [`area_swell`]. One for a cell nothing is pressing on.
@@ -372,6 +373,8 @@ pub enum Lod {
     /// Instanced points. One draw call, no per-cell detail.
     #[default]
     Dots,
+    /// Cells cut against their neighbours: shared walls, no contents.
+    Packed,
     /// Organelle-resolved sprites.
     Organelles,
     /// Membranes, organelles and junctions.
@@ -382,18 +385,52 @@ impl Lod {
     /// Which tier a zoom level calls for.
     ///
     /// The thresholds are in pixels per substrate square, which is the only unit that says
-    /// anything about whether a thing is visible. A cell is about half a square across, so
-    /// below roughly twelve pixels per square its organelles are sub-pixel and there is
-    /// nothing to resolve.
+    /// anything about whether a thing is visible. Multiply by 12.5 for the magnification the
+    /// status bar reports, which is what you are actually reading when you decide a tier
+    /// arrives too early: 6 is 75x, 28 is 350x, 48 is 600x.
+    ///
+    /// # Why packing and contents are separate tiers
+    ///
+    /// They used to arrive together, and a single step took the picture from rounded cells
+    /// floating unaligned to shared walls *and* a confetti of organelles in the same frame.
+    /// Both halves were wrong at that zoom. The packing was wrong below it — cells that are
+    /// touching are drawn overlapping, which is the thing the seams exist to fix and it is
+    /// visible long before an organelle is. The organelles were wrong above it: at twelve
+    /// pixels per square an organelle is two or three pixels, so a crowd reads as coloured
+    /// speckle laid over the cells rather than as anything inside them, and it hides the
+    /// packing structure that had just become legible.
+    ///
+    /// So the seams come in as soon as they read and the contents wait until there is a cell
+    /// big enough to have an inside. There is a wide band between them where the slide is a
+    /// sheet of plain tiled cells, and that is the most legible view of a large population
+    /// there is.
+    ///
+    /// Packing starts at six rather than the twelve the organelles used to share, because
+    /// overlap is visible far earlier than an organelle is. A cell is about two squares across,
+    /// so six pixels per square still puts twelve pixels on a cell and three or four on a
+    /// flattened side — and *un*packed at that size does not read as small, it reads as a heap
+    /// of loose discs, which is a wrong picture rather than a coarse one. The floor is where a
+    /// cell stops being wide enough to have a side at all.
     #[must_use]
     pub fn for_pixels_per_square(pixels: f32) -> Lod {
         if pixels >= 48.0 {
             Lod::Full
-        } else if pixels >= 12.0 {
+        } else if pixels >= 28.0 {
             Lod::Organelles
+        } else if pixels >= 6.0 {
+            Lod::Packed
         } else {
             Lod::Dots
         }
+    }
+
+    /// Whether this tier cuts cells against their neighbours.
+    ///
+    /// Cheaper than it looks and worth having early: it is the neighbour walk and a handful of
+    /// half-planes per cell, and without it a packed crowd is drawn as overlapping discs.
+    #[must_use]
+    pub fn resolves_packing(self) -> bool {
+        self >= Lod::Packed
     }
 
     /// Whether this tier draws individual organelles.
@@ -692,6 +729,9 @@ impl Slide {
             .map(|v| (*v as f32 / Q10_ONE as f32).clamp(0.0, 1.0))
             .collect();
 
+        // Two questions, not one. Cutting cells against their neighbours starts a long way
+        // before there is a cell big enough to have a visible inside — see [`Lod`].
+        let packed = self.lod.resolves_packing();
         let detailed = self.lod.resolves_organelles();
 
         // Components, for colouring a cluster as one thing. Rebuilt here rather than kept,
@@ -733,7 +773,7 @@ impl Slide {
             .map(|i| {
                 let id = cells.id_at(i);
                 let radius = mm_core::biology::radius(cells, i) as f32 / Q10_ONE as f32;
-                let (squash, area_swell) = if detailed {
+                let (squash, area_swell) = if packed {
                     squash_of(&self.world, i, radius * PACKING)
                 } else {
                     (Vec::new(), 1.0)
@@ -1311,8 +1351,15 @@ mod tests {
             far.cells.iter().all(|c| c.organelles.is_empty()),
             "far zoom built organelle lists nobody can see"
         );
+        assert!(
+            far.cells.iter().all(|c| c.squash.is_empty()),
+            "far zoom cut cells against neighbours nobody can see"
+        );
 
-        slide.set_zoom(24.0);
+        slide.set_zoom(16.0);
+        assert_eq!(slide.frame().lod, Lod::Packed);
+
+        slide.set_zoom(32.0);
         let near = slide.frame();
         assert_eq!(near.lod, Lod::Organelles);
 
@@ -1324,6 +1371,75 @@ mod tests {
         for (a, b) in far.cells.iter().zip(near.cells.iter()) {
             assert_eq!((a.x, a.y, a.id), (b.x, b.y, b.id));
         }
+    }
+
+    #[test]
+    fn packing_arrives_before_the_contents_do() {
+        use mm_core::fixed::{pos, q10};
+        use mm_core::{CellId, CellSeed, Organelle, OrganelleType};
+
+        // Two cells placed close enough to press on each other, because the question is what
+        // each tier *builds* and a slide with nothing touching cannot answer it.
+        let mut slide = Slide::new(scenario()).unwrap();
+        let genome = slide.world_mut().genomes().intern(vec![0u8; 16]).unwrap();
+        let mut ids = Vec::new();
+        for (n, x) in [6i32, 7].into_iter().enumerate() {
+            let id = slide.world_mut().spawn_cell(CellSeed {
+                x: pos(x),
+                y: pos(6),
+                mass: q10(40),
+                energy: q10(100),
+                membrane: 20,
+                key: n as u8 + 1,
+                species: 0,
+                parent: CellId::NONE,
+                birth_tick: 0,
+                genome: genome.clone(),
+            });
+            if let Some(i) = slide.world_mut().cells_mut().index(id) {
+                slide.world_mut().cells_mut().slots_mut(i)[1] =
+                    Organelle::finished(OrganelleType::Nucleus, 40);
+            }
+            ids.push(id);
+        }
+        // Pressed together rather than merely placed a square apart, and measured rather than
+        // guessed: a contact is what this test is about, so the gap is set from the radius the
+        // cells actually have instead of from a distance that looks close enough.
+        {
+            let (a, b) = (ids[0], ids[1]);
+            let cells = slide.world_mut().cells_mut();
+            let (a, b) = (cells.index(a).unwrap(), cells.index(b).unwrap());
+            let r = mm_core::biology::radius(cells, a) as i64 * POS_ONE as i64
+                / mm_core::Q10_ONE as i64;
+            cells.x[b] = (cells.x[a] as i64 + r) as i32;
+            cells.y[b] = cells.y[a];
+        }
+        slide.world_mut().adopt_current_contents_as_baseline();
+        // One tick, because the neighbour index is built by stepping and `squash_of` reads it.
+        // A pair this deep inside each other is still a contact after one round of separation.
+        slide.advance(1);
+
+        // The two used to share one threshold, so a single step of the wheel took the slide
+        // from loose overlapping discs straight to tiled cells covered in two-pixel organelle
+        // speckle. Both halves were wrong at that zoom.
+        slide.set_zoom(16.0);
+        let packed = slide.frame();
+        assert_eq!(packed.lod, Lod::Packed);
+        assert!(
+            packed.cells.iter().any(|c| !c.squash.is_empty()),
+            "the packing tier did not cut cells against their neighbours"
+        );
+        assert!(
+            packed.cells.iter().all(|c| c.organelles.is_empty()),
+            "organelles turned up at the packing tier"
+        );
+
+        // And the tier above adds the contents without losing the packing.
+        slide.set_zoom(32.0);
+        let detailed = slide.frame();
+        assert_eq!(detailed.lod, Lod::Organelles);
+        assert!(detailed.cells.iter().any(|c| !c.squash.is_empty()));
+        assert!(detailed.cells.iter().any(|c| !c.organelles.is_empty()));
     }
 
     #[test]
