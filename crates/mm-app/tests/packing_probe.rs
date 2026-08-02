@@ -1,0 +1,212 @@
+//! What a pack actually looks like, as numbers rather than as a screenshot.
+//!
+//! Run with `--release --ignored --nocapture`. Reports, for each scenario, the things that
+//! distinguish a good pack from a bad one: how deeply cells interpenetrate, how far the worst
+//! pair is through the core floor, and the spread of radii — because the packing bench holds
+//! cells of one size and a growing population does not.
+//!
+//! Kept in the repository because describing screenshots was how this went wrong for a long
+//! time: two changes were reported as visible improvements when a pixel diff later showed they
+//! had altered nothing at all.
+use mm_core::biology::BiologyConfig;
+use mm_core::cell::{CellId, CellSeed};
+use mm_core::fixed::{pos, pos_to_square, q10, q10_to_pos, POS_ONE};
+use mm_core::{LightRegime, MutationRates, Op, Organelle, OrganelleType, Scenario, Seeding, World};
+
+struct Stats {
+    population: usize,
+    pairs: usize,
+    deep: usize,
+    worst: f32,
+    radii: Vec<f32>,
+    occupancy: f32,
+    press: Vec<f32>,
+}
+
+fn stats(world: &World) -> Stats {
+    let cells = world.cells();
+    let index = world.neighbours();
+    let (mut pairs, mut deep) = (0usize, 0usize);
+    let mut worst = 1.0f32;
+    let mut radii = Vec::new();
+    for i in cells.iter() {
+        let ri = q10_to_pos(mm_core::biology::radius(cells, i));
+        radii.push(ri as f32 / POS_ONE as f32);
+        let (sx, sy) = (pos_to_square(cells.x[i]), pos_to_square(cells.y[i]));
+        for j in index.around(sx, sy) {
+            if j <= i || !cells.occupied(j) {
+                continue;
+            }
+            let rj = q10_to_pos(mm_core::biology::radius(cells, j));
+            let want = (ri + rj) as f32;
+            let dx = (cells.x[i] - cells.x[j]) as f32;
+            let dy = (cells.y[i] - cells.y[j]) as f32;
+            let d = (dx * dx + dy * dy).sqrt();
+            if d >= want {
+                continue;
+            }
+            pairs += 1;
+            let frac = d / want.max(1.0);
+            worst = worst.min(frac);
+            // The core floor is 95% of touching. Under 80% is a pair the solver has failed.
+            if frac < 0.80 {
+                deep += 1;
+            }
+        }
+    }
+    radii.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    // How much of the slide the cells would cover if they did not overlap. Over 100% and they
+    // physically cannot fit, and no solver can help.
+    let area: f32 = radii.iter().map(|r| std::f32::consts::PI * r * r).sum();
+    let slide = (world.substrate().width() * world.substrate().height()) as f32;
+    // And how hard the population says it is being squeezed, which is what division reads.
+    let mut press: Vec<f32> = world
+        .pressure()
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| cells.occupied(*i))
+        .map(|(_, p)| *p as f32 / mm_core::Q10_ONE as f32)
+        .collect();
+    press.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    Stats { population: cells.len(), pairs, deep, worst, radii, occupancy: 100.0 * area / slide, press }
+}
+
+fn report(label: &str, s: &Stats) {
+    let p = |q: usize| -> f32 {
+        if s.radii.is_empty() { 0.0 } else { s.radii[(s.radii.len() * q / 100).min(s.radii.len() - 1)] }
+    };
+    println!(
+        "PROBE {label:<28} pop {:>5}  pairs {:>5}  deep {:>5} ({:>5.1}%)  worst {:>5.1}%  \
+         r p50 {:.2} max {:.2}  area {:>5.0}% of slide  pressure p50 {:.1} p90 {:.1}",
+        s.population, s.pairs, s.deep,
+        100.0 * s.deep as f32 / s.pairs.max(1) as f32,
+        100.0 * s.worst,
+        p(50), p(100),
+        s.occupancy,
+        if s.press.is_empty() { 0.0 } else { s.press[s.press.len() / 2] },
+        if s.press.is_empty() { 0.0 } else { s.press[s.press.len() * 9 / 10] },
+    );
+}
+
+/// The packing bench, as `SlideRes::bench` builds it: a fixed population settling.
+fn bench_world() -> World {
+    let scenario = Scenario {
+        name: "bench".into(),
+        seed: 1,
+        width: 48,
+        height: 48,
+        light: LightRegime::Uniform { intensity: mm_core::Q10_ONE },
+        current: mm_core::light::CurrentField::Still,
+        gravity: 2,
+        jitter: 0,
+        seeding: vec![],
+        ..Scenario::default()
+    };
+    let mut world = World::new(scenario).expect("bench");
+    let mut biology = BiologyConfig { mutation: MutationRates::none(), ..BiologyConfig::default() };
+    biology.metabolism.rates.background_damage = 0;
+    biology.metabolism.rates.metabolic_floor = 0;
+    biology.metabolism.rates.growth_rate = 0;
+    biology.ecology.crowding_damage = 0;
+    biology.ecology.spike_damage = 0;
+    world.set_biology(biology);
+    let inert = world.genomes().intern(vec![Op::Halt.canonical_byte()]).expect("genome");
+    for k in 0..220u32 {
+        let across = 15u32;
+        let span = POS_ONE * 5 / 4;
+        let start = (pos(48) - (across as i32 - 1) * span) / 2;
+        let id = world.spawn_cell(CellSeed {
+            x: start + (k % across) as i32 * span,
+            y: start + (k / across) as i32 * span,
+            mass: q10(18 + (k * 7 % 26) as i32),
+            energy: q10(1_000_000),
+            membrane: 24,
+            key: 11,
+            species: 0,
+            parent: CellId::NONE,
+            birth_tick: 0,
+            genome: std::sync::Arc::clone(&inert),
+        });
+        if let Some(i) = world.cells_mut().index(id) {
+            world.cells_mut().slots_mut(i)[0] =
+                Organelle::finished(OrganelleType::Membrane, 24 + (k % 5) as u8 * 40);
+        }
+    }
+    world.adopt_current_contents_as_baseline();
+    world
+}
+
+/// A live slide grown from one founder: overlap injected continuously by division.
+fn growth_world(size: u32) -> World {
+    let sc = Scenario {
+        name: "growth".into(),
+        seed: 1,
+        width: size,
+        height: size,
+        light: LightRegime::Uniform { intensity: mm_core::Q10_ONE },
+        seeding: vec![
+            Seeding::Uniform { chemical: 11, per_square: q10(400) },
+            Seeding::Uniform { chemical: 14, per_square: q10(400) },
+            Seeding::Uniform { chemical: 4, per_square: q10(400) },
+        ],
+        ..Scenario::default()
+    };
+    let mut world = World::new(sc).expect("growth");
+    world.set_biology(BiologyConfig {
+        mutation: MutationRates::default(),
+        ..BiologyConfig::default()
+    });
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../genomes/ancestor.mm"),
+    )
+    .expect("ancestor");
+    let bytes = mm_asm::assemble(&src).expect("assemble").bytes;
+    let genome = world.genomes().intern(bytes).expect("intern");
+    let id = world.spawn_cell(CellSeed {
+        x: pos(size as i32 / 2),
+        y: pos(size as i32 / 2),
+        mass: q10(30),
+        energy: q10(400),
+        membrane: 24,
+        key: 11,
+        species: 0,
+        parent: CellId::NONE,
+        birth_tick: 0,
+        genome,
+    });
+    if let Some(i) = world.cells_mut().index(id) {
+        let c = world.cells_mut();
+        c.slots_mut(i)[1] = Organelle::finished(OrganelleType::Nucleus, 64);
+        c.slots_mut(i)[3] = Organelle::finished(OrganelleType::Chloroplast, 60);
+    }
+    world.adopt_current_contents_as_baseline();
+    world
+}
+
+/// Stop cells dividing without touching the solver: make a division unaffordable.
+fn stop_division(world: &mut World) {
+    let mut b = world.biology().clone();
+    b.division_energy = i32::MAX / 2;
+    world.set_biology(b);
+}
+
+#[test]
+#[ignore = "diagnostic; run with --release --ignored --nocapture"]
+fn packing_probe() {
+    let mut bench = bench_world();
+    bench.run(900);
+    report("bench, settled", &stats(&bench));
+
+    let mut growth = growth_world(16);
+    growth.run(1600);
+    let before = stats(&growth);
+    report("growth, dividing", &before);
+
+    // Step 2: stop the births and let the same pack settle. If it relaxes to bench quality,
+    // births are the whole story and the solver is adequate given time.
+    for extra in [200u64, 800, 3000] {
+        stop_division(&mut growth);
+        growth.run(extra);
+        report(&format!("growth, +{extra} no births"), &stats(&growth));
+    }
+}
