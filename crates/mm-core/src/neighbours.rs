@@ -843,6 +843,52 @@ fn barrier_correction(
     (dx, dy, touching)
 }
 
+/// Whether any part of this cell's body is against a barrier.
+///
+/// What a holdfast needs to know, and a strictly cheaper question than
+/// [`barrier_correction`]'s: it stops at the first blocked square within reach instead of
+/// accumulating a push from all of them. Kept beside that function rather than in
+/// [`crate::sensing`] so the two answers can never disagree about what "against a wall" means.
+#[must_use]
+pub fn touches_barrier(
+    cells: &CellArena,
+    blocked: &[bool],
+    width: i32,
+    height: i32,
+    i: usize,
+    ri: i32,
+) -> bool {
+    if blocked.is_empty() || ri <= 0 || width <= 0 || height <= 0 {
+        return false;
+    }
+    let (cx, cy) = (cells.x[i], cells.y[i]);
+    let lo_x = pos_to_square(cx - ri).max(0);
+    let hi_x = pos_to_square(cx + ri).min(width - 1);
+    let lo_y = pos_to_square(cy - ri).max(0);
+    let hi_y = pos_to_square(cy + ri).min(height - 1);
+    for sy in lo_y..=hi_y {
+        for sx in lo_x..=hi_x {
+            if !blocked
+                .get(sy as usize * width as usize + sx as usize)
+                .copied()
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let left = sx.saturating_mul(POS_ONE);
+            let top = sy.saturating_mul(POS_ONE);
+            let (ox, oy) = (
+                (cx - cx.clamp(left, left + POS_ONE)) as i64,
+                (cy - cy.clamp(top, top + POS_ONE)) as i64,
+            );
+            if ox * ox + oy * oy < (ri as i64) * (ri as i64) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Solve one cell against its neighbourhood, reading everything and writing nothing.
 ///
 /// The whole body of the old inner loop, with the two-sided writes turned into one cell's share.

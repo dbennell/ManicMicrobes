@@ -84,8 +84,13 @@ pub enum OrganelleType {
     Spike = 12,
     /// M3.
     Oscillator = 13,
-    /// Unimplemented; a no-op until a later milestone fills it.
-    ReservedA = 14,
+    /// Grips a barrier, so a cell can hold station in moving water (SPEC §17.1, §17.6).
+    ///
+    /// The first thing in the engine that can *resist* the fluid rather than be carried by it.
+    /// Until it existed, every body on the slide was in free fall with the current — a cluster
+    /// drifted as one, and staying put was not a strategy that went unrewarded so much as a
+    /// strategy that was unavailable.
+    Holdfast = 14,
     /// Unimplemented; a no-op until a later milestone fills it.
     ReservedB = 15,
 }
@@ -105,7 +110,7 @@ const CATALOGUE: [OrganelleType; SLOT_COUNT] = [
     OrganelleType::Lysosome,
     OrganelleType::Spike,
     OrganelleType::Oscillator,
-    OrganelleType::ReservedA,
+    OrganelleType::Holdfast,
     OrganelleType::ReservedB,
 ];
 
@@ -127,16 +132,13 @@ impl OrganelleType {
     /// Whether this milestone implements the type. Unimplemented types can still be built and
     /// paid for; they simply do nothing, which is what `RESERVED` means.
     ///
-    /// As of M8 that is the two reserved slots and nothing else: M2 brought the metabolic
-    /// types, M3 the sensors and the cilium, M7 the junction port, M8 the lysosome and the
-    /// spike. `Empty` is not a type a cell can hold.
+    /// That is now one reserved slot and nothing else: M2 brought the metabolic types, M3 the
+    /// sensors and the cilium, M7 the junction port, M8 the lysosome and the spike, and §17.1
+    /// the holdfast. `Empty` is not a type a cell can hold.
     #[inline]
     #[must_use]
     pub const fn is_implemented(self) -> bool {
-        !matches!(
-            self,
-            OrganelleType::Empty | OrganelleType::ReservedA | OrganelleType::ReservedB
-        )
+        !matches!(self, OrganelleType::Empty | OrganelleType::ReservedB)
     }
 
     #[must_use]
@@ -157,7 +159,7 @@ impl OrganelleType {
             OrganelleType::Lysosome => "lysosome",
             OrganelleType::Spike => "spike",
             OrganelleType::Oscillator => "oscillator",
-            OrganelleType::ReservedA => "reserved_a",
+            OrganelleType::Holdfast => "holdfast",
             OrganelleType::ReservedB => "reserved_b",
         }
     }
@@ -591,6 +593,26 @@ impl OrganelleCatalogue {
             teardown_recovery: Q10_ONE / 2,
         };
 
+        // A holdfast is a commitment to a place. Dear to build and slow, because deciding to
+        // stop moving should not be a thing a cell does casually and reverses next tick;
+        // ordinary to carry, because cement does not cost much to keep — the price of holding
+        // is charged per tick against the force actually resisted, in `sensing::step_physics`,
+        // so a cell anchored in still water pays only upkeep and one in a torrent pays for the
+        // torrent.
+        //
+        // `teardown_recovery` is a quarter where everything else is a half: letting go leaves
+        // the attachment behind. Small, and deliberate — it is the only asymmetry that makes
+        // "stay" and "leave" different decisions rather than the same decision twice.
+        specs[OrganelleType::Holdfast as usize] = OrganelleSpec {
+            build_matter: q10(7),
+            build_matter_per_param: q10(1) / 6,
+            build_energy: q10(14),
+            build_ticks: 16,
+            upkeep: q10(1) / 48,
+            upkeep_per_param: q10(1) / 768,
+            teardown_recovery: Q10_ONE / 4,
+        };
+
         // Scavenging is the cheaper trade and the lower-yield one: a lysosome costs about what
         // a mitochondrion costs, and what it digests has already been through someone else.
         specs[OrganelleType::Lysosome as usize] = OrganelleSpec {
@@ -758,7 +780,7 @@ mod tests {
             .filter(|k| !k.is_implemented())
             .map(|k| k.name())
             .collect();
-        assert_eq!(unimplemented, vec!["reserved_a", "reserved_b"]);
+        assert_eq!(unimplemented, vec!["reserved_b"]);
         let implemented: Vec<&str> = OrganelleType::all()
             .iter()
             .filter(|k| k.is_implemented())
@@ -781,6 +803,7 @@ mod tests {
                 "lysosome",
                 "spike",
                 "oscillator",
+                "holdfast",
             ]
         );
     }

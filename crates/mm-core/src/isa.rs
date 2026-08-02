@@ -1,9 +1,11 @@
 //! The instruction set (SPEC §5.1) and the template encoding (SPEC §4.3).
 //!
-//! ISA version 1. Any change to this file is an ISA version bump (hard rule 8).
+//! Any change to this file is an ISA version bump (hard rule 8), and so is any change to the
+//! organelle catalogue or to template semantics. Version 2 made metabolism a set of pathways
+//! (M10.3); version 3 filled the `RESERVED_A` catalogue slot with the holdfast (SPEC §17.1).
 
 /// ISA version stamped into save files, scenarios and archived genomes (SPEC §16).
-pub const ISA_VERSION: u16 = 2;
+pub const ISA_VERSION: u16 = 3;
 
 /// Number of opcodes. The opcode of a byte is `byte % OPCODE_COUNT` (SPEC §4.2), so four
 /// distinct byte values map to each opcode and most point mutations are synonymous.

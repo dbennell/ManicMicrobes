@@ -58,6 +58,40 @@ pub const DRAG_RETAIN: i32 = Q10_ONE / 4;
 /// mechanism is worth its cost — and the second question is the interesting one.
 pub const THRUST_ENERGY: i32 = Q10_ONE / 4;
 
+/// Holding force one unit of holdfast `param` provides, per unit of effort.
+///
+/// The same figure as [`THRUST_PER_PARAM`], deliberately, so that gripping and swimming are
+/// denominated in the same currency and a genome trading one for the other is trading like for
+/// like. Against `fluid::MAX_VELOCITY` that makes a holdfast at half `param` just enough to
+/// pin a newly-seeded cell in the fastest water the fluid can produce, and a larger body
+/// proportionally harder to hold — see the load term in `step_physics`.
+pub const GRIP_PER_PARAM: i32 = 4;
+
+/// Energy a holdfast spends per unit of force it resists, `Q10`.
+///
+/// A quarter of [`THRUST_ENERGY`], which is the number that decides whether being sessile is
+/// worth anything at all. Holding station has to be *cheaper* than swimming against the same
+/// current or there is no reason to prefer it, and much cheaper still is wrong for the opposite
+/// reason: a free anchor is one every lineage grows and never lets go of. A quarter puts a
+/// fully-loaded grip at about a sixteenth of a working body's upkeep, so an anchored cell is
+/// meaningfully better off than a swimming one and still visibly paying for something.
+pub const HOLDFAST_ENERGY: i32 = Q10_ONE / 8;
+
+/// How far past its own body a holdfast can reach to grip, `POS`.
+///
+/// Not decoration, and the reason is worth writing down because it cost a failing test to see.
+/// The barrier pass drives a cell out of a wall until it *exactly* stops overlapping and then
+/// stops pushing, so a cell resting against a wall settles at precisely the distance where an
+/// overlap test flips to false. With the grip gated on overlap alone, the resting position is
+/// the one position in which nothing holds: a cell would grip while being pushed out, let go
+/// the moment it arrived, and slide away — measured at 3,776 `POS` of slip against 3,841 for a
+/// cell with no holdfast at all, which is to say the anchor did nothing.
+///
+/// Half a square of reach past the body puts the grip's range comfortably outside the band the
+/// collision pass parks a cell in. It is also the more honest picture: an attachment is a
+/// stalk, not a point of tangency.
+pub const HOLDFAST_REACH: i32 = POS_ONE / 2;
+
 /// What a chemosensor reports (SPEC §6.2): concentration, and the gradient's two components.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct ChemReading {
@@ -218,8 +252,50 @@ pub fn read_sensor(organelle: &Organelle, index: i16, ctx: SensorContext<'_>) ->
             0 => sat_i16(cilium_thrust(organelle) / Q10_ONE),
             _ => sat_i16(organelle.param as i32),
         }),
+        OrganelleType::Holdfast => {
+            let sq = substrate.index(x, y);
+            let (svx, svy) = substrate.velocity();
+            let flow = svx
+                .get(sq)
+                .copied()
+                .unwrap_or(0)
+                .saturating_abs()
+                .saturating_add(svy.get(sq).copied().unwrap_or(0).saturating_abs());
+            Some(match (index as u16) % 3 {
+                // The grip it is exerting, so a genome can read back what it asked for.
+                0 => sat_i16(holdfast_grip_of(organelle) / Q10_ONE),
+                // How fast the water is going past. The reason to anchor at all, and the
+                // quantity the load in `step_physics` is computed from.
+                1 => sat_i16(flow / Q10_ONE),
+                // Whether there is anything here worth gripping.
+                //
+                // Deliberately coarser than the physics: this asks whether any of the nine
+                // squares around the cell is blocked, where `neighbours::touches_barrier` asks
+                // whether the body actually overlaps one. So a cell can *feel* a wall it is
+                // not yet holding, which is what makes a wall something to swim towards. The
+                // two are allowed to differ because one is a sensor and the other is a
+                // constraint; they would not be allowed to differ if this gated the grip.
+                _ => {
+                    let near = (-SENSOR_RANGE..=SENSOR_RANGE).any(|dy| {
+                        (-SENSOR_RANGE..=SENSOR_RANGE)
+                            .any(|dx| substrate.is_blocked(x + dx, y + dy))
+                    });
+                    i16::from(near)
+                }
+            })
+        }
         _ => None,
     }
+}
+
+/// The grip one holdfast is exerting, `Q10`. See [`holdfast_grip`] for the whole cell.
+#[must_use]
+pub fn holdfast_grip_of(o: &Organelle) -> i32 {
+    if !o.is_active() || o.kind != OrganelleType::Holdfast {
+        return 0;
+    }
+    let effort = (o.control[0] as i32).clamp(0, Q10_ONE);
+    q10_scale(GRIP_PER_PARAM.saturating_mul(o.param as i32), effort)
 }
 
 /// How much finer a gradient reading is than a concentration reading.
@@ -270,6 +346,20 @@ pub fn cilium_thrust(o: &Organelle) -> i32 {
     q10_scale(capacity, power)
 }
 
+/// Total holding force this cell's holdfasts are exerting, `Q10`.
+///
+/// Unsigned, unlike [`cilium_thrust`]: there is no such thing as gripping backwards. A negative
+/// control input clamps to zero, which is "let go" — the one instruction a holdfast needs
+/// besides "hold on", and it costs nothing to give.
+#[must_use]
+pub fn holdfast_grip(cells: &CellArena, i: usize) -> i32 {
+    let mut grip = 0i32;
+    for o in cells.slots(i) {
+        grip = grip.saturating_add(holdfast_grip_of(o));
+    }
+    grip
+}
+
 /// The direction a cilium is mounted, as a unit-ish vector in `Q10`.
 ///
 /// Sixteen mount angles, from the second control input. Sixteen rather than a continuum
@@ -316,6 +406,13 @@ pub fn step_physics(
     let mut report = PhysicsReport::default();
     let w = substrate.width() as i32;
     let h = substrate.height() as i32;
+    // Empty on a slide with no barriers, which makes `touches_barrier` a single branch and a
+    // holdfast on such a slide correctly useless: there is nothing to hold.
+    let blocked: &[bool] = if substrate.has_barriers() {
+        substrate.blocked()
+    } else {
+        &[]
+    };
 
     for i in 0..cells.capacity() {
         if !cells.occupied(i) {
@@ -385,8 +482,59 @@ pub fn step_physics(
         // The fluid carries the cell along with it.
         let sq = substrate.index(pos_to_square(cells.x[i]), pos_to_square(cells.y[i]));
         let (svx, svy) = substrate.velocity();
-        let drift_x = svx.get(sq).copied().unwrap_or(0);
-        let drift_y = svy.get(sq).copied().unwrap_or(0);
+        let mut drift_x = svx.get(sq).copied().unwrap_or(0);
+        let mut drift_y = svy.get(sq).copied().unwrap_or(0);
+
+        // --- the holdfast: how much of that carrying a cell can refuse ---
+        //
+        // Everything above is a body in free fall with the water. This is the one thing that
+        // can decline, and it is what makes staying put a strategy rather than an impossibility
+        // (SPEC §17.6). It needs a barrier to grip: a cell holding nothing but water holds
+        // nothing, which is why this and cell-barrier contact had to arrive together.
+        //
+        // Load rises with the drift it is resisting *and with the cell's own radius*, because a
+        // bigger body presents more of itself to the current. That is the term that makes size
+        // a trade here — a large sessile cell intercepts more water and must grip harder for
+        // it — and it is the same frontal-area reasoning particulate capture will want.
+        //
+        // Slipping is proportional rather than all-or-nothing. A cliff at `grip == load` would
+        // be exactly the discontinuity SPEC §3 works to keep out of the landscape: one point of
+        // `param` would flip a cell from anchored to adrift, and evolution cannot climb that.
+        // Under-gripping instead means being carried more slowly, which is a gradient.
+        let grip = holdfast_grip(cells, i);
+        if grip > 0 && (drift_x != 0 || drift_y != 0) {
+            // Only now is the barrier scan worth doing. A cell with no holdfast, or one in
+            // still water, never pays for it — which matters because this runs over the whole
+            // population every tick and most cells will never grow one.
+            let radius = crate::biology::radius(cells, i);
+            let ri = crate::fixed::q10_to_pos(radius).saturating_add(HOLDFAST_REACH);
+            if crate::neighbours::touches_barrier(cells, blocked, w, h, i, ri) {
+                let speed = drift_x
+                    .saturating_abs()
+                    .saturating_add(drift_y.saturating_abs());
+                let load = q10_scale(speed, radius).max(1);
+                let want =
+                    ((grip as i64 * Q10_ONE as i64) / load as i64).min(Q10_ONE as i64) as i32;
+                // Charged on the force actually resisted, so an anchored cell in still water
+                // pays nothing beyond the organelle's upkeep and one in a torrent pays for the
+                // torrent. Routed through `energy_spent`, which `World` dissipates through the
+                // ledger — holding on is work, and work leaves the world as heat (I5).
+                //
+                // A cell that cannot afford the whole grip buys the part it can, rather than
+                // being charged for a hold it does not get. Same shape as the cilium above.
+                let cost = q10_scale(q10_scale(load, want), HOLDFAST_ENERGY);
+                let held = if cost <= 0 {
+                    want
+                } else {
+                    let paid = cells.energy[i].min(cost);
+                    cells.energy[i] = cells.energy[i].saturating_sub(paid);
+                    report.energy_spent += paid as i64;
+                    ((want as i64 * paid as i64) / cost as i64) as i32
+                };
+                drift_x = drift_x.saturating_sub(q10_scale(drift_x, held));
+                drift_y = drift_y.saturating_sub(q10_scale(drift_y, held));
+            }
+        }
 
         // Velocity is `Q10` squares per tick; position is `POS` within a square.
         let step_x =

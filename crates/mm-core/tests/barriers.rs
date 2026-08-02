@@ -13,7 +13,7 @@
 use mm_core::cell::{CellId, CellSeed};
 use mm_core::fixed::{pos, q10, Q10_ONE};
 use mm_core::light::CurrentField;
-use mm_core::{Barrier, Scenario, World};
+use mm_core::{Barrier, Organelle, OrganelleType, Scenario, World};
 
 /// A small slide with a vertical wall down column `at`, and whatever current is asked for.
 fn walled_slide(at: u32, current: CurrentField) -> Scenario {
@@ -196,4 +196,190 @@ fn a_sealed_room_holds_what_is_put_in_it() {
             "a cell escaped the sealed room to ({x}, {y})"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// The holdfast (SPEC §17.6). A barrier is something to hold on to.
+// ---------------------------------------------------------------------------
+
+/// Give a cell a holdfast of the given `param`, already finished and gripping at full effort.
+fn anchor(world: &mut World, id: CellId, param: u8) {
+    let Some(i) = world.cells_mut().index(id) else {
+        return;
+    };
+    world.cells_mut().slots_mut(i)[4] = Organelle::finished(OrganelleType::Holdfast, param);
+}
+
+/// How far a cell has travelled from where it was put, along each axis.
+fn drifted(world: &World, id: CellId, from_x: i32) -> i32 {
+    world
+        .cells()
+        .index(id)
+        .map_or(0, |i| world.cells().x[i] - from_x)
+}
+
+fn drifted_y(world: &World, id: CellId, from_y: i32) -> i32 {
+    world
+        .cells()
+        .index(id)
+        .map_or(0, |i| world.cells().y[i] - from_y)
+}
+
+#[test]
+fn a_holdfast_holds_a_cell_against_the_current_and_bare_water_does_not() {
+    // The current runs *along* the wall, not into it, and that is the whole point rather than
+    // an incidental choice of axis. A current blowing into a wall is stopped by the wall: the
+    // collision pass alone pins both cells and the anchor is invisible. Tangentially there is
+    // no constraint at all — a cell against a wall slides down it freely — so this is the one
+    // direction in which holding station is a thing only a holdfast can do.
+    //
+    // The first version of this test pushed into the wall and passed for both cells at exactly
+    // 128 `POS`, which is the distance to the wall face. It was measuring the barrier.
+    // One cell per world, same square, same current, so the only difference is the anchor.
+    // Sixty ticks: at a quarter of a square each, a free cell covers fifteen squares, which is
+    // well clear of the anchored one and well short of the slide's floor. An earlier version
+    // ran for four hundred and both cells hit the bottom edge and clamped, which made the
+    // *free* one look like the one that had stopped.
+    fn slid(param: Option<u8>) -> i32 {
+        let mut world = World::new(walled_slide(
+            16,
+            CurrentField::Uniform {
+                vx: 0,
+                vy: Q10_ONE / 4,
+            },
+        ))
+        .expect("world");
+        let (x, y) = (pos(15) + 128, pos(4));
+        let id = put_cell(&mut world, x, y);
+        if let Some(p) = param {
+            anchor(&mut world, id, p);
+        }
+        for _ in 0..60 {
+            world.step();
+        }
+        drifted_y(&world, id, y).abs()
+    }
+
+    let (held_moved, adrift_moved) = (slid(Some(200)), slid(None));
+    eprintln!("anchored slid {held_moved} POS, free slid {adrift_moved} POS");
+    assert!(
+        held_moved * 4 < adrift_moved.max(1),
+        "the anchored cell slid {held_moved} along the wall and the free one {adrift_moved}; \
+         the holdfast is not holding"
+    );
+}
+
+#[test]
+fn a_holdfast_with_nothing_to_grip_holds_nothing() {
+    // It anchors to a barrier, not to the water. Without this a holdfast would be a general
+    // brake on the current — which would make it useful everywhere, and useful everywhere is
+    // exactly what SPEC §17.6 says a sessile strategy must not be.
+    let mut scenario = walled_slide(
+        16,
+        CurrentField::Uniform {
+            vx: Q10_ONE / 4,
+            vy: 0,
+        },
+    );
+    scenario.barriers.clear();
+    let mut world = World::new(scenario).expect("world");
+
+    let start = pos(4);
+    let gripping = put_cell(&mut world, start, pos(10));
+    let bare = put_cell(&mut world, start, pos(20));
+    anchor(&mut world, gripping, 255);
+
+    for _ in 0..200 {
+        world.step();
+    }
+    assert_eq!(
+        drifted(&world, gripping, start),
+        drifted(&world, bare, start),
+        "a holdfast slowed a cell in open water, with no barrier anywhere on the slide"
+    );
+}
+
+#[test]
+fn a_bigger_cell_is_harder_to_hold() {
+    // The load term. A larger body presents more of itself to the current, so the same grip
+    // buys less holding — which is what stops a sponge growing without limit, and is the same
+    // frontal-area reasoning particulate capture will want.
+    fn slip_at(mass: i32) -> i32 {
+        let mut world = World::new(walled_slide(
+            16,
+            CurrentField::Uniform {
+                vx: Q10_ONE / 4,
+                vy: 0,
+            },
+        ))
+        .expect("world");
+        let start = pos(15) + 128;
+        let genome = world.genomes().intern(vec![0x2E]).expect("genome");
+        let id = world.cells_mut().spawn(CellSeed {
+            x: start,
+            y: pos(10),
+            mass: q10(mass),
+            energy: q10(100_000),
+            membrane: 16,
+            key: 0,
+            species: 0,
+            parent: CellId::NONE,
+            birth_tick: 0,
+            genome,
+        });
+        // Deliberately under-powered, so both are slipping and the comparison is of *how much*.
+        anchor(&mut world, id, 24);
+        for _ in 0..400 {
+            world.step();
+        }
+        drifted(&world, id, start).abs()
+    }
+
+    let (small, large) = (slip_at(30), slip_at(360));
+    assert!(
+        large > small,
+        "a cell of mass 360 slipped {large} and one of mass 30 slipped {small}; \
+         size is not costing anything to hold"
+    );
+}
+
+#[test]
+fn holding_on_costs_energy_and_letting_go_is_free() {
+    // Charged on the force resisted, so the same anchor in still water is free. Without that
+    // asymmetry a holdfast is a flat tax on having built one, and the decision a genome makes
+    // each tick — hold or let go — would not be a decision.
+    fn energy_after(current: CurrentField, effort: i16) -> i32 {
+        let mut world = World::new(walled_slide(16, current)).expect("world");
+        let start = pos(15) + 128;
+        let id = put_cell(&mut world, start, pos(10));
+        anchor(&mut world, id, 200);
+        if let Some(i) = world.cells_mut().index(id) {
+            world.cells_mut().slots_mut(i)[4].control[0] = effort;
+        }
+        for _ in 0..200 {
+            world.step();
+        }
+        world
+            .cells()
+            .index(id)
+            .map_or(0, |i| world.cells().energy[i])
+    }
+
+    let flowing = || CurrentField::Uniform {
+        vx: Q10_ONE / 4,
+        vy: 0,
+    };
+    let holding = energy_after(flowing(), Q10_ONE as i16);
+    let let_go = energy_after(flowing(), 0);
+    let still = energy_after(CurrentField::Still, Q10_ONE as i16);
+
+    assert!(
+        holding < let_go,
+        "holding on ({holding}) cost no more than letting go ({let_go})"
+    );
+    assert!(
+        still >= let_go,
+        "gripping in still water ({still}) cost something; the charge is not on the force \
+         actually resisted"
+    );
 }

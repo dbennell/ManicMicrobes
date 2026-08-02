@@ -1045,6 +1045,37 @@ of which mention filter feeding. It is the sharpest available test of the design
 CLAUDE.md that there are no special-cased organisms: if a sessile filter feeder needs a
 `sessile` flag, the mechanism was wrong.
 
+*The list of four was missing the one that blocks the rest, and junctions are not it.* A hard
+junction ties a cell to another cell, not to the world, so a joined cluster drifts as one — and
+`sensing::step_physics` adds the fluid's velocity straight into every cell's position step
+identically, without reference to mass or radius. **Nothing on the slide could hold station in
+moving water, so nothing could be still, so there was no sessile strategy to select for.** Worse
+for the plan above: a cell and a particulate are carried by the same field at the same rate, so
+the relative velocity between a filter feeder and its food would have been zero and the whole
+mechanism would have measured nothing. Anchoring is a prerequisite for particulate, not a
+companion to it.
+
+The fifth feature is therefore the **holdfast**, catalogue slot 14 (ISA version 3), and it is
+the first thing in the engine that can refuse to be carried:
+
+- It grips a **barrier**, never open water — which is why §17.1's solidity had to land first,
+  and why a holdfast on an unwalled slide is correctly useless.
+- Grip is `control[0]` against `param`, denominated in the same units as cilium thrust so that
+  gripping and swimming are the same currency.
+- **Load rises with the cell's own radius**, because a larger body presents more of itself to
+  the current. This is the term that stops a sponge growing without limit, and it is the same
+  frontal-area reasoning particulate capture will want when it arrives.
+- A cell that cannot grip hard enough **slips proportionally** rather than letting go. A cliff
+  at `grip == load` would be exactly the discontinuity §3 exists to keep out of the landscape.
+- Holding is charged on the force actually resisted, so an anchored cell in still water pays
+  only upkeep. Set at a quarter of what a cilium spends: holding station must be cheaper than
+  swimming against the same current or there is no reason to prefer it, and free is worse in
+  the other direction, because a free anchor is one nothing ever lets go of.
+
+A holdfast plus the hard junctions §8 already has is a colony anchored by whichever of its
+cells is against the wall. Nothing in that sentence is a flag, and nothing in the engine knows
+the word sponge.
+
 It is also a strategy that cannot exist under the current limiter. In a uniform slide with a
 dissolved commons there is no advantage to being still, so nothing is ever still. Motility is
 currently free of any opportunity cost, and a world where staying put can win is a world with
