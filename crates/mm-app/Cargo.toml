@@ -8,6 +8,9 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+# The per-cell seam solve in `slide::frame`, which is embarrassingly parallel and was five
+# times the cost of a whole tick before it was.
+rayon = "1.12"
 mm-core = { path = "../mm-core" }
 mm-asm = { path = "../mm-asm" }
 

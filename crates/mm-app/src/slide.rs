@@ -17,6 +17,8 @@
 //! This is also why the type lives in `mm-app` and not in `mm-core`. `mm-core` does not know
 //! what a frame is, and must not learn.
 
+use rayon::prelude::*;
+
 use mm_core::chem::CHEM_COUNT;
 use mm_core::ecology::TrophicMix;
 use mm_core::fixed::{pos_to_square, POS_ONE, Q10_ONE};
@@ -768,9 +770,32 @@ impl Slide {
             }
         }
 
-        let dots: Vec<CellDot> = cells
-            .iter()
-            .map(|i| {
+        // In parallel, because this is where a frame's time goes and it is embarrassingly
+        // parallel: every cell reads the world and writes only its own dot.
+        //
+        // Measured before doing it, at 40,206 cells: 135ms to take a frame at the packed tier
+        // against 25ms for a whole *tick*. The renderer was five times the simulation, and it
+        // runs on the engine thread holding the slide lock — so it was not only dropping frames,
+        // it was stealing ticks. The cost is `squash_of`, which walks a cell's neighbourhood and
+        // then solves a sixty-four-ray area integral by bisection to work out how far it has to
+        // swell; that is a thousand operations a cell and there were forty thousand cells.
+        //
+        // `collect` into a `Vec` preserves order, so the frame is identical however the work was
+        // split. That matters less here than it does in `mm-core` — a frame is presentation and
+        // cannot reach the simulation (see this module's own note) — but a screenshot that
+        // differed run to run would still be a bug.
+        // Resolved before the parallel loop, because `size_of` compresses paths as it answers
+        // and so wants `&mut`. Cheap to do here: the whole components rebuild measured 0.1ms
+        // against the 135ms this loop was taking.
+        let mut cluster_size = vec![0u32; cells.capacity()];
+        for i in cells.iter() {
+            cluster_size[i] = components.size_of(i);
+        }
+
+        let indices: Vec<usize> = cells.iter().collect();
+        let dots: Vec<CellDot> = indices
+            .par_iter()
+            .map(|&i| {
                 let id = cells.id_at(i);
                 let radius = mm_core::biology::radius(cells, i) as f32 / Q10_ONE as f32;
                 let (squash, area_swell) = if packed {
@@ -790,7 +815,7 @@ impl Slide {
                     } else {
                         Vec::new()
                     },
-                    cluster_size: components.size_of(i),
+                    cluster_size: cluster_size[i],
                     age: cells.age[i],
                     squash,
                     area_swell,

@@ -3096,6 +3096,7 @@ dependencies = [
  "bevy_egui",
  "mm-asm",
  "mm-core",
+ "rayon",
 ]
 
 [[package]]
