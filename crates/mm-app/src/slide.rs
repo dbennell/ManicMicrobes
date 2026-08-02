@@ -529,8 +529,13 @@ impl Slide {
         let mut overlays = [false; CHEM_COUNT];
         // Carbon dioxide by default: it is what the ancestor breathes out, so it is the layer
         // that first shows there is something alive on the slide.
+        // `MM_NO_OVERLAY` turns it off, which is a debugging flag and earned its place the day
+        // it was added: the packing appeared to be leaving mauve wedges between cells, and mauve
+        // is both what a lightly-coloured cell looks like and what the carbon-dioxide overlay
+        // paints the background. With the overlay off the wedges came out black, which settled
+        // in one run whether they were thin cells or holes. They are holes.
         if let Some(on) = overlays.get_mut(11) {
-            *on = true;
+            *on = std::env::var("MM_NO_OVERLAY").is_err();
         }
         Ok(Slide {
             world: World::new(scenario)?,
