@@ -525,7 +525,7 @@ impl World {
                 .rebuild(&self.cells, self.substrate.width(), self.substrate.height());
             report.physics.separated = crate::neighbours::resolve_collisions(
                 &mut self.cells,
-                &self.neighbours,
+                &mut self.neighbours,
                 &mut self.radii,
                 &mut self.crowding,
                 &mut self.pressure,

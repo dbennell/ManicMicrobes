@@ -185,6 +185,25 @@ pub struct NeighbourIndex {
     /// otherwise call it once per neighbour per cell. The same hoist `resolve_collisions`
     /// makes, for the same reason.
     radii: Vec<i32>,
+
+    // --- the Verlet list ---
+    //
+    // Who each cell might collide with, kept across ticks. See [`Self::refresh_pairs`].
+    /// Offsets into `pair_entries`, one per slot plus a terminator.
+    pair_starts: Vec<u32>,
+    /// Candidate partners, only those with a higher slot than the owner — the collision loop
+    /// visits each pair once, from its lower side, so the other half would never be read.
+    pair_entries: Vec<u32>,
+    /// Where every cell was when the list was built, and who it was. Both are what staleness is
+    /// measured against: a cell that moved too far invalidates the list, and so does a slot that
+    /// changed hands, because the list stores slots and a reused slot is a different cell.
+    pair_x: Vec<i32>,
+    pair_y: Vec<i32>,
+    pair_ids: Vec<u64>,
+    /// The margin the list was built with, `POS`. Half of it is the movement budget.
+    pair_skin: i32,
+    /// False until the first build, and after anything that cannot be repaired by moving.
+    pair_valid: bool,
 }
 
 impl NeighbourIndex {
@@ -296,6 +315,152 @@ impl NeighbourIndex {
     /// so a different order here is a different world (I1, I6).
     pub fn around(&self, sx: i32, sy: i32) -> impl Iterator<Item = usize> + '_ {
         self.within(sx, sy, self.search)
+    }
+
+    /// Rebuild the collision pair list if it can no longer be trusted, and say whether it was.
+    ///
+    /// # Why the list outlives the tick
+    ///
+    /// Separation runs [`SEPARATION_PASSES`] times a tick and used to walk the grid on every
+    /// one of them, and the walk is the phase that *is* the tick — at sixty thousand cells the
+    /// phase breakdown put collision separation at more than a whole tick on its own, against
+    /// 0.4% for the VM and 0.0% for the fluid.
+    ///
+    /// This is the Verlet list from molecular dynamics, where the same problem has the same
+    /// answer. Store not the cells within reach but the cells within reach *plus a skin*, and
+    /// the list stays correct until something has moved far enough to cross it. Two cells can
+    /// only close by the sum of what each travelled, so a list built with margin `skin` is still
+    /// a superset while no cell has moved more than `skin / 2`.
+    ///
+    /// That bound is why this is not an approximation and does not weaken anything. The list is
+    /// a *candidate* list; every pair it offers is still distance-tested exactly as before, and
+    /// the guarantee is only that no true contact is absent from it. When the bound is broken
+    /// the list is rebuilt, and the check is integer arithmetic over positions, so which ticks
+    /// rebuild is itself deterministic.
+    ///
+    /// Slots are stored rather than ids, so a slot changing hands invalidates the list as surely
+    /// as movement does — a dead cell's slot reused by a newborn is a different cell at a
+    /// different place, and the ids are compared for exactly that.
+    pub fn refresh_pairs(&mut self, cells: &CellArena) -> bool {
+        if !self.pairs_stale(cells) {
+            return false;
+        }
+        // The buckets are rebuilt too, not just the list drawn from them. A cell that has moved
+        // far enough to invalidate the list has very likely also moved into a different square,
+        // and walking a stale grid to build a fresh list would bake that error in.
+        if self.width > 0 && self.height > 0 {
+            let (w, h) = (self.width as u32, self.height as u32);
+            self.rebuild(cells, w, h);
+        }
+        let cap = cells.capacity();
+        // Sized from what a single pass can do, because that is the gap the check cannot see:
+        // staleness is tested before each pass against where cells were when the list was built,
+        // so the movement it cannot account for is the pass it is about to allow. One pass can
+        // shove a cell `MAX_SHOVE` per contact and it can have `CONTACTS_PER_CELL` of them, so
+        // the skin has to be several times that or the budget goes to nothing and every tick
+        // rebuilds — which is the grid walk again, wearing a list for a hat.
+        //
+        // Larger skins hold longer and cost more on every pass, because each pass distance-tests
+        // every candidate the ring contains. Four passes' worth is the point where a settled
+        // pack goes tens of ticks between rebuilds while the ring stays about one cell thick.
+        let per_pass = MAX_SHOVE.saturating_mul(CONTACTS_PER_CELL as i32);
+        self.pair_skin = self.max_radius.max(per_pass.saturating_mul(4)).max(POS_ONE / 4);
+        // Moved out of `self` for the walk, because `within` borrows the index and these are
+        // being written. Moved back below; the allocation is reused either way.
+        let mut starts = std::mem::take(&mut self.pair_starts);
+        let mut entries = std::mem::take(&mut self.pair_entries);
+        starts.clear();
+        starts.resize(cap + 1, 0);
+        entries.clear();
+
+        for i in 0..cap {
+            starts[i] = entries.len() as u32;
+            if !cells.occupied(i) {
+                continue;
+            }
+            let sx = pos_to_square(cells.x[i]);
+            let sy = pos_to_square(cells.y[i]);
+            let reach = crate::fixed::q10_to_pos(crate::biology::radius(cells, i))
+                .saturating_add(self.max_radius)
+                .saturating_add(self.pair_skin);
+            let k = self.squares_for(reach);
+            for j in self.within(sx, sy, k) {
+                // Only the upper half. `resolve_collisions` visits a pair from its lower slot,
+                // so the mirrored entry would be built, stored and never looked at.
+                if j > i && cells.occupied(j) {
+                    entries.push(j as u32);
+                }
+            }
+        }
+        starts[cap] = entries.len() as u32;
+        self.pair_starts = starts;
+        self.pair_entries = entries;
+
+        self.pair_x.clear();
+        self.pair_y.clear();
+        self.pair_ids.clear();
+        self.pair_x.extend_from_slice(&cells.x[..cap]);
+        self.pair_y.extend_from_slice(&cells.y[..cap]);
+        self.pair_ids.reserve(cap);
+        for i in 0..cap {
+            self.pair_ids.push(if cells.occupied(i) {
+                cells.id_at(i).ordering_key()
+            } else {
+                u64::MAX
+            });
+        }
+        self.pair_valid = true;
+        true
+    }
+
+    /// Whether the pair list has stopped being a superset of the real contacts.
+    fn pairs_stale(&self, cells: &CellArena) -> bool {
+        let cap = cells.capacity();
+        if !self.pair_valid
+            || self.pair_x.len() != cap
+            || self.pair_starts.len() != cap + 1
+        {
+            return true;
+        }
+        // Two cells approach each other at the sum of their speeds, so the budget for one is
+        // half the skin — less what a single separation pass can still move it before the next
+        // check. Separation clamps each contact to `MAX_SHOVE` and a cell can have
+        // `CONTACTS_PER_CELL` of them all pushing the same way, which is the worst a pass can do.
+        let budget = (self.pair_skin / 2)
+            .saturating_sub(MAX_SHOVE.saturating_mul(CONTACTS_PER_CELL as i32))
+            .max(1) as i64;
+        for i in 0..cap {
+            let live = cells.occupied(i);
+            let was = self.pair_ids[i] != u64::MAX;
+            if live != was {
+                return true;
+            }
+            if !live {
+                continue;
+            }
+            if cells.id_at(i).ordering_key() != self.pair_ids[i] {
+                return true;
+            }
+            let dx = (cells.x[i] as i64 - self.pair_x[i] as i64).abs();
+            let dy = (cells.y[i] as i64 - self.pair_y[i] as i64).abs();
+            // Chebyshev rather than Euclidean: cheaper, and erring towards rebuilding early is
+            // erring towards being right.
+            if dx.max(dy) > budget {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The higher-slotted cells cell `i` might be touching. Empty until [`Self::refresh_pairs`].
+    #[must_use]
+    pub fn pairs_of(&self, i: usize) -> &[u32] {
+        let (Some(&a), Some(&b)) = (self.pair_starts.get(i), self.pair_starts.get(i + 1)) else {
+            return &[];
+        };
+        self.pair_entries
+            .get(a as usize..b as usize)
+            .unwrap_or(&[])
     }
 
     /// Every cell a cell of `radius` could possibly be touching, in a fixed order.
@@ -698,11 +863,16 @@ fn separation_sq(cells: &CellArena, i: usize, j: usize) -> i64 {
 /// daughter, and only one whose neighbourhood has nothing left to give does not.
 pub fn resolve_collisions(
     cells: &mut CellArena,
-    index: &NeighbourIndex,
+    index: &mut NeighbourIndex,
     radii: &mut Vec<i32>,
     crowding: &mut Vec<i32>,
     pressure: &mut Vec<i32>,
 ) -> u32 {
+    // Refreshed here rather than by the caller, and that is deliberate. The pair list is an
+    // optimisation with a precondition, and a precondition a caller can forget is a way to get a
+    // world where nothing ever collides — which is not a crash, it is a silently different
+    // simulation. Cheap to ask: on most ticks nothing has moved far enough and this returns
+    // immediately.
     let mut separated = 0u32;
     let width = index.width;
     let height = index.height;
@@ -742,28 +912,30 @@ pub fn resolve_collisions(
     let mut touching: Vec<bool> = vec![false; cells.capacity()];
 
     for pass in 0..SEPARATION_PASSES {
+        // Before every pass, not once per call. The passes themselves move cells, so a list that
+        // was a superset when the tick began need not still be one by the third relaxation —
+        // and a missed contact is a pair that silently stops being separated. The check is a
+        // walk over positions and returns immediately when nothing has moved far enough, which
+        // is the normal case; only the rebuild is expensive, and only that is skipped.
+        index.refresh_pairs(cells);
         for i in 0..cells.capacity() {
             if !cells.occupied(i) {
                 continue;
             }
-            let sx = pos_to_square(cells.x[i]);
-            let sy = pos_to_square(cells.y[i]);
             let ri = radii[i];
 
-            // `around` borrows the index and the push writes to cells, which are different
-            // objects, so the neighbours are walked directly. Collecting them first would be one
-            // heap allocation per cell per tick, which at fifty thousand cells was a third of the
-            // tick on its own.
             //
-            // Sized from *this* cell's radius rather than from twice the largest on the slide,
-            // which is exactly correct here and not an approximation: this pair matters only if
-            // `d < ri + rj`, and `rj` is at most `max_radius`, so a reach of `ri + max_radius`
-            // cannot miss one. What it drops is the half of the old estimate that was about a
-            // hypothetical giant standing where *this* cell is standing.
-            for j in index.around_radius(sx, sy, ri) {
+            // The Verlet list, not the grid. Every pass used to walk the neighbourhood again,
+            // and the pairs barely change from one pass to the next — or from one tick to the
+            // next. See [`NeighbourIndex::refresh_pairs`] for why reading a stale list is safe:
+            // it is a superset, every candidate is still distance-tested below, and it is
+            // rebuilt the moment anything has moved far enough to invalidate the bound.
+            for &j in index.pairs_of(i) {
+                let j = j as usize;
                 // Each pair is handled once, by its lower slot, so the push is applied to both
-                // sides of one decision rather than to two sides of two.
-                if j <= i || !cells.occupied(j) {
+                // sides of one decision rather than to two sides of two. The list only holds
+                // higher slots, so that is already true of everything here.
+                if !cells.occupied(j) {
                     continue;
                 }
                 let want = ri.saturating_add(radii[j]);
@@ -991,6 +1163,109 @@ mod tests {
         (cells, pool)
     }
 
+    #[test]
+    fn the_pair_list_never_loses_a_contact_however_stale_it_is() {
+        // The one thing the Verlet list has to guarantee. It is allowed to be generous — every
+        // candidate is distance-tested anyway — but a pair it *omits* is a pair that silently
+        // stops being separated, and that is not a slower simulation, it is a different one.
+        //
+        // So: build the list, then move cells about underneath it without rebuilding, and check
+        // at every step that every genuinely touching pair is still offered.
+        let mut positions = Vec::new();
+        for gx in 0..6i32 {
+            for gy in 0..6i32 {
+                positions.push((pos(3) + gx * pos(1), pos(3) + gy * pos(1)));
+            }
+        }
+        let (mut cells, _pool) = arena(&positions);
+        let mut index = NeighbourIndex::default();
+        index.rebuild(&cells, 16, 16);
+        index.refresh_pairs(&cells);
+
+        let truth = |cells: &CellArena| -> Vec<(usize, usize)> {
+            let mut out = Vec::new();
+            for i in cells.iter() {
+                for j in cells.iter() {
+                    if j <= i {
+                        continue;
+                    }
+                    let ri = crate::fixed::q10_to_pos(crate::biology::radius(cells, i));
+                    let rj = crate::fixed::q10_to_pos(crate::biology::radius(cells, j));
+                    if separation(cells, i, j) < ri + rj {
+                        out.push((i, j));
+                    }
+                }
+            }
+            out
+        };
+
+        // Nudged by a fraction of the movement budget each round, deterministically and in
+        // different directions, so the list is asked to cover a genuinely shifting population
+        // rather than one drifting as a block.
+        for round in 0..8i32 {
+            for i in 0..cells.capacity() {
+                if !cells.occupied(i) {
+                    continue;
+                }
+                let step = ((i as i32 + round) % 5) - 2;
+                cells.x[i] += step * 3;
+                cells.y[i] += ((i as i32 * 7 + round) % 5 - 2) * 3;
+            }
+            // Deliberately *not* refreshed: this is the stale case the skin exists to cover.
+            for (i, j) in truth(&cells) {
+                assert!(
+                    index.pairs_of(i).contains(&(j as u32)),
+                    "round {round}: the list lost the contact between {i} and {j}"
+                );
+            }
+        }
+
+        // And once something has moved far enough, it says so rather than going on lying.
+        for i in 0..cells.capacity() {
+            if cells.occupied(i) {
+                cells.x[i] += pos(4);
+            }
+        }
+        assert!(
+            index.refresh_pairs(&cells),
+            "a population that jumped four squares did not invalidate the list"
+        );
+        for (i, j) in truth(&cells) {
+            assert!(index.pairs_of(i).contains(&(j as u32)));
+        }
+    }
+
+    #[test]
+    fn a_settled_population_does_not_rebuild_the_pair_list_every_tick() {
+        // The whole point. If it rebuilt every tick it would be the grid walk again, wearing a
+        // list for a hat.
+        let (mut cells, _pool) = arena(&[
+            (pos(5), pos(5)),
+            (pos(5) + pos(1), pos(5)),
+            (pos(5), pos(5) + pos(1)),
+        ]);
+        let mut index = NeighbourIndex::default();
+        index.rebuild(&cells, 16, 16);
+        assert!(index.refresh_pairs(&cells), "the first build is a build");
+        let mut rebuilds = 0;
+        for _ in 0..32 {
+            // A settled pack still jitters by a unit or two a tick.
+            for i in 0..cells.capacity() {
+                if cells.occupied(i) {
+                    cells.x[i] += 1;
+                }
+            }
+            if index.refresh_pairs(&cells) {
+                rebuilds += 1;
+            }
+        }
+        assert!(
+            rebuilds <= 4,
+            "rebuilt {rebuilds} times in 32 ticks of barely moving; the skin is not buying \
+             anything"
+        );
+    }
+
     /// The nine-bucket walk `around` replaced, kept as the thing to measure it against.
     /// The naive bucket-at-a-time walk of the `(2k+1)²` block, which the row runs must match.
     fn block_buckets(index: &NeighbourIndex, sx: i32, sy: i32, k: i32) -> Vec<usize> {
@@ -1192,7 +1467,7 @@ mod tests {
         let mut index = NeighbourIndex::default();
         index.rebuild(&cells, 16, 16);
         let before = separation(&cells, 0, 1);
-        let n = resolve_collisions(&mut cells, &index, &mut Vec::new(), &mut Vec::new(), &mut Vec::new());
+        let n = resolve_collisions(&mut cells, &mut index, &mut Vec::new(), &mut Vec::new(), &mut Vec::new());
         assert_eq!(n, 1);
         assert!(
             separation(&cells, 0, 1) > before,
@@ -1204,7 +1479,7 @@ mod tests {
         index2.rebuild(&far, 16, 16);
         let positions: Vec<(i32, i32)> = far.iter().map(|i| (far.x[i], far.y[i])).collect();
         assert_eq!(
-            resolve_collisions(&mut far, &index2, &mut Vec::new(), &mut Vec::new(), &mut Vec::new()),
+            resolve_collisions(&mut far, &mut index2, &mut Vec::new(), &mut Vec::new(), &mut Vec::new()),
             0
         );
         let after: Vec<(i32, i32)> = far.iter().map(|i| (far.x[i], far.y[i])).collect();
@@ -1221,7 +1496,7 @@ mod tests {
             cells.x[0] = cells.x[0].saturating_add(load);
             cells.x[1] = cells.x[1].saturating_sub(load);
             index.rebuild(&cells, 16, 16);
-            resolve_collisions(&mut cells, &index, &mut Vec::new(), &mut Vec::new(), &mut Vec::new());
+            resolve_collisions(&mut cells, &mut index, &mut Vec::new(), &mut Vec::new(), &mut Vec::new());
         }
         separation(&cells, 0, 1)
     }
@@ -1329,7 +1604,7 @@ mod tests {
         let mut index = NeighbourIndex::default();
         for _ in 0..400 {
             index.rebuild(&cells, 16, 16);
-            resolve_collisions(&mut cells, &index, &mut Vec::new(), &mut Vec::new(), &mut Vec::new());
+            resolve_collisions(&mut cells, &mut index, &mut Vec::new(), &mut Vec::new(), &mut Vec::new());
         }
         let want = 2 * r;
         let core = ((want as i64 * CORE_PERMILLE as i64) / 1000) as i32;
@@ -1355,7 +1630,7 @@ mod tests {
         let (mut apart, _p) = arena(&[(pos(6), pos(6)), (pos(6) + 3 * r, pos(6))]);
         let mut index = NeighbourIndex::default();
         index.rebuild(&apart, 16, 16);
-        resolve_collisions(&mut apart, &index, &mut Vec::new(), &mut crowding, &mut Vec::new());
+        resolve_collisions(&mut apart, &mut index, &mut Vec::new(), &mut crowding, &mut Vec::new());
         assert_eq!(
             crowding.iter().filter(|c| **c > 0).count(),
             0,
@@ -1366,7 +1641,7 @@ mod tests {
         let (mut crushed, _p2) = arena(&[(pos(6), pos(6)), (pos(6) + r / 4, pos(6))]);
         let mut index2 = NeighbourIndex::default();
         index2.rebuild(&crushed, 16, 16);
-        resolve_collisions(&mut crushed, &index2, &mut Vec::new(), &mut crowding, &mut Vec::new());
+        resolve_collisions(&mut crushed, &mut index2, &mut Vec::new(), &mut crowding, &mut Vec::new());
         assert!(
             crowding[0] > 0 && crowding[1] > 0,
             "a crushed pair was not billed: {crowding:?}"
@@ -1388,7 +1663,7 @@ mod tests {
         let mut light = Vec::new();
         resolve_collisions(
             &mut resting,
-            &index,
+            &mut index,
             &mut Vec::new(),
             &mut Vec::new(),
             &mut light,
@@ -1401,7 +1676,7 @@ mod tests {
         let mut heavy = Vec::new();
         resolve_collisions(
             &mut wedged,
-            &index2,
+            &mut index2,
             &mut Vec::new(),
             &mut Vec::new(),
             &mut heavy,
@@ -1427,7 +1702,7 @@ mod tests {
         let mut index = NeighbourIndex::default();
         index.rebuild(&cells, 16, 16);
         for _ in 0..20 {
-            resolve_collisions(&mut cells, &index, &mut Vec::new(), &mut Vec::new(), &mut Vec::new());
+            resolve_collisions(&mut cells, &mut index, &mut Vec::new(), &mut Vec::new(), &mut Vec::new());
             index.rebuild(&cells, 16, 16);
         }
         assert!(
@@ -1442,7 +1717,7 @@ mod tests {
         let mut index = NeighbourIndex::default();
         index.rebuild(&cells, 16, 16);
         for _ in 0..50 {
-            resolve_collisions(&mut cells, &index, &mut Vec::new(), &mut Vec::new(), &mut Vec::new());
+            resolve_collisions(&mut cells, &mut index, &mut Vec::new(), &mut Vec::new(), &mut Vec::new());
             index.rebuild(&cells, 16, 16);
             for i in cells.iter() {
                 assert!(cells.x[i] >= 0 && cells.x[i] < 16 * POS_ONE);
@@ -1463,7 +1738,7 @@ mod tests {
             let mut index = NeighbourIndex::default();
             for _ in 0..10 {
                 index.rebuild(&cells, 16, 16);
-                resolve_collisions(&mut cells, &index, &mut Vec::new(), &mut Vec::new(), &mut Vec::new());
+                resolve_collisions(&mut cells, &mut index, &mut Vec::new(), &mut Vec::new(), &mut Vec::new());
             }
             cells
                 .iter()
