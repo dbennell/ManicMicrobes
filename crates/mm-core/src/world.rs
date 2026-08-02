@@ -391,6 +391,16 @@ impl World {
     }
 
     #[must_use]
+    /// How wedged each cell is, `Q10`. See [`crate::neighbours::resolve_collisions`].
+    ///
+    /// Snapshot state rather than scratch, and the distinction cost a failed round-trip test to
+    /// notice: it is written by the physics phase and read by *the next tick's* division, so a
+    /// world restored without it lets through the first round of divisions the original refused.
+    #[must_use]
+    pub fn pressure(&self) -> &[i32] {
+        &self.pressure
+    }
+
     pub fn impulses(&self) -> (&[i32], &[i32]) {
         (&self.impulse_x, &self.impulse_y)
     }
@@ -1075,6 +1085,7 @@ impl World {
         blocked: Vec<bool>,
         impulse_x: Vec<i32>,
         impulse_y: Vec<i32>,
+        pressure: Vec<i32>,
         chem_totals: [i64; CHEM_COUNT],
         evicted: [i64; CHEM_COUNT],
         energy_in: i64,
@@ -1087,6 +1098,7 @@ impl World {
         self.substrate.restore(planes, light, vx, vy, blocked);
         self.impulse_x = impulse_x;
         self.impulse_y = impulse_y;
+        self.pressure = pressure;
         self.ledger.restore(
             chem_totals,
             evicted,

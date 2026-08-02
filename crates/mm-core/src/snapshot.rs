@@ -35,7 +35,7 @@ use crate::world::World;
 pub const MAGIC: [u8; 8] = *b"MMSNAP\0\x01";
 /// Snapshot format version, distinct from the ISA version. The format may change without
 /// the meaning of a genome changing, and vice versa.
-pub const FORMAT_VERSION: u16 = 7;
+pub const FORMAT_VERSION: u16 = 8;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum SnapshotError {
@@ -452,6 +452,11 @@ impl Snapshot {
         let (ix, iy) = world.impulses();
         w.i32_slice(ix);
         w.i32_slice(iy);
+        // Per-cell, not per-square, and genuinely state: the physics phase writes it and the
+        // *next* tick's division reads it, so a world restored without it lets through the first
+        // round of divisions the original refused. Caught by the round-trip test, which is what
+        // it is for.
+        w.i32_slice(world.pressure());
 
         // The population, slot for slot including the empty ones: a free slot still has to
         // exist or every id after it would shift, and ids are held across saves.
@@ -695,6 +700,7 @@ impl Snapshot {
         let blocked = r.bool_vec()?;
         let ix = r.i32_vec()?;
         let iy = r.i32_vec()?;
+        let pressure = r.i32_vec()?;
         for (name, len) in [
             ("light", light.len()),
             ("vx", vx.len()),
@@ -988,6 +994,7 @@ impl Snapshot {
             blocked,
             ix,
             iy,
+            pressure,
             chem_totals,
             evicted,
             energy_in,
