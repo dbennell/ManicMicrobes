@@ -717,6 +717,21 @@ fn cilia_push_on_the_water_rather_than_on_nothing() {
     let i = world.cells_mut().index(id).unwrap();
     world.cells_mut().slots_mut(i)[1] = Organelle::finished(OrganelleType::Nucleus, 64);
     world.cells_mut().slots_mut(i)[3] = Organelle::finished(OrganelleType::Chloroplast, 50);
+    // A cilium, seeded rather than waited for, and `finished` starts it at full throttle.
+    //
+    // Without it this test was measuring something else entirely. The reaction into the water
+    // used to fire on the whole of `fx`, and Brownian jitter is in `fx` — so the cell shoved
+    // the water on its very first tick just by being jittered about, the assertion below saw a
+    // non-zero impulse straight away, and it passed without any cilium ever beating. Once the
+    // reaction became thrust-only nothing touched the water until some cell on the slide
+    // happened to *evolve* a cilium, which first landed at tick 251 against a debug budget of
+    // 200. Measured, along with the fact that the seeded cell never grew one at all in three
+    // thousand ticks — the impulse was coming from a daughter somewhere else on the slide.
+    //
+    // So the test is given the thing it is about. That is the claim in its name, and waiting on
+    // a genome to produce a cilium tested construction and mutation rates instead, slowly and
+    // at whatever tick they happened to deliver one.
+    world.cells_mut().slots_mut(i)[2] = Organelle::finished(OrganelleType::Cilium, 50);
     world.adopt_current_contents_as_baseline();
 
     // A still slide with one cell on it: any momentum in the water came from that cell.
