@@ -365,6 +365,7 @@ fn phase_breakdown(_c: &mut Criterion) {
             &chem,
             &mut ledger,
             &mut starving,
+            &[],
         ));
     }
     let metabolic = t.elapsed() / n;
