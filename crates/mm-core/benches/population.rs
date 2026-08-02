@@ -267,7 +267,7 @@ fn phase_breakdown(_c: &mut Criterion) {
     for _ in 0..n {
         std::hint::black_box(neighbours::resolve_collisions(
             world.cells_mut(),
-            &index,
+            &mut index,
             &mut radii,
             &mut crowding,
             &mut pressure,
