@@ -21,6 +21,10 @@ struct Stats {
     radii: Vec<f32>,
     occupancy: f32,
     press: Vec<f32>,
+    /// Interior contents as a percentage of interior capacity, per cell.
+    fill: Vec<f32>,
+    /// How many cells carry an active vacuole, which is the only way to raise that capacity.
+    vacuoles: usize,
 }
 
 fn stats(world: &World) -> Stats {
@@ -68,7 +72,27 @@ fn stats(world: &World) -> Stats {
         .map(|(_, p)| *p as f32 / mm_core::Q10_ONE as f32)
         .collect();
     press.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    Stats { population: cells.len(), pairs, deep, worst, radii, occupancy: 100.0 * area / slide, press }
+    // How full a cell's cytoplasm is, against the cap that actually exists.
+    //
+    // The capacity is *per chemical* — `BASE_INTERIOR_CAPACITY` is what a cell may hold of any
+    // one of them — so the fullest chemical is the one that decides whether the cell has stopped
+    // being able to eat. Summing all sixteen against a single-chemical cap reads 1600% for a
+    // cell that is exactly at its limit, which is a measurement of the denominator.
+    let mut fill = Vec::new();
+    let mut vacuoles = 0usize;
+    for i in cells.iter() {
+        let held = cells.interior(i).iter().copied().max().unwrap_or(0) as i64;
+        let cap = mm_core::biology::interior_capacity(cells, i).max(1) as i64;
+        fill.push(100.0 * held as f32 / cap as f32);
+        if cells.slots(i).iter().any(|o| o.kind == OrganelleType::Vacuole && o.is_active()) {
+            vacuoles += 1;
+        }
+    }
+    fill.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    Stats {
+        population: cells.len(), pairs, deep, worst, radii,
+        occupancy: 100.0 * area / slide, press, fill, vacuoles,
+    }
 }
 
 fn report(label: &str, s: &Stats) {
@@ -77,14 +101,17 @@ fn report(label: &str, s: &Stats) {
     };
     println!(
         "PROBE {label:<28} pop {:>5}  pairs {:>5}  deep {:>5} ({:>5.1}%)  worst {:>5.1}%  \
-         r p50 {:.2} max {:.2}  area {:>5.0}% of slide  pressure p50 {:.1} p90 {:.1}",
+         r p50 {:.2}  area {:>5.0}%  pressure p50 {:.1}  fill p50 {:>5.1}% p90 {:>5.1}% max {:>5.1}%  vacuoles {}",
         s.population, s.pairs, s.deep,
         100.0 * s.deep as f32 / s.pairs.max(1) as f32,
         100.0 * s.worst,
-        p(50), p(100),
+        p(50),
         s.occupancy,
         if s.press.is_empty() { 0.0 } else { s.press[s.press.len() / 2] },
-        if s.press.is_empty() { 0.0 } else { s.press[s.press.len() * 9 / 10] },
+        if s.fill.is_empty() { 0.0 } else { s.fill[s.fill.len() / 2] },
+        if s.fill.is_empty() { 0.0 } else { s.fill[s.fill.len() * 9 / 10] },
+        s.fill.last().copied().unwrap_or(0.0),
+        s.vacuoles,
     );
 }
 
