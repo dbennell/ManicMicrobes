@@ -264,6 +264,24 @@ fn phase_breakdown(_c: &mut Criterion) {
 
     eprintln!("\nPhase breakdown at {population} cells ({w}x{h}):");
 
+    // The whole tick first, before anything below has touched the world.
+    //
+    // Every phase measured after this one is called directly and repeatedly, which advances that
+    // phase without advancing the rest — sixty metabolic steps with no fluid to eat from, sixty
+    // physics steps with no collisions to stop them. That is a fair way to time a phase and a
+    // terrible state to leave a world in, and `whole` used to be measured at the end of it, on
+    // the wreckage. Measuring it first is the only way the percentages below mean anything.
+    let rebuilds_before = world.neighbours().pair_rebuilds();
+    let t = Instant::now();
+    world.run(n as u64);
+    let whole = t.elapsed() / n;
+    // How often the Verlet list actually rebuilds in a *real* tick, where the physics moves
+    // cells — as against the isolated collision loop below, where sixty passes with nothing else
+    // running let the pack settle and stop invalidating it. If these differ, the isolated
+    // measurement is flattering separation and the difference is hiding in the remainder.
+    let real_rebuilds =
+        (world.neighbours().pair_rebuilds() - rebuilds_before) as f64 / f64::from(n);
+
     let mut index = NeighbourIndex::default();
     let t = Instant::now();
     for _ in 0..n {
@@ -274,6 +292,7 @@ fn phase_breakdown(_c: &mut Criterion) {
     let mut radii = Vec::new();
     let mut crowding = Vec::new();
     let mut pressure = Vec::new();
+    let collisions_rebuilds_before = index.pair_rebuilds();
     let t = Instant::now();
     for _ in 0..n {
         std::hint::black_box(neighbours::resolve_collisions(
@@ -285,6 +304,17 @@ fn phase_breakdown(_c: &mut Criterion) {
         ));
     }
     let collisions = t.elapsed() / n;
+    let isolated_rebuilds =
+        (index.pair_rebuilds() - collisions_rebuilds_before) as f64 / f64::from(n);
+
+    // What one pair-list rebuild costs, so the difference between those two rates can be turned
+    // into a number instead of a suspicion.
+    let t = Instant::now();
+    for _ in 0..n {
+        index.invalidate_pairs();
+        index.refresh_pairs(world.cells());
+    }
+    let one_rebuild = t.elapsed() / n;
 
     // The VM itself, measured rather than left inside the remainder. It is the phase any
     // proposal to move the simulation onto a GPU would be moving, so what it actually costs
@@ -320,22 +350,147 @@ fn phase_breakdown(_c: &mut Criterion) {
     }
     let execute = t.elapsed() / n;
 
-    // `resolve` needs pieces `World` keeps private, so it stays inside the remainder: whole
-    // tick minus everything measured above and minus the fluid.
+    // --- what used to be "the remainder" ---
+    //
+    // It was 58.6% of the tick and it was a subtraction, not a measurement: whole tick minus the
+    // phases that happened to be easy to call. A number that large with no name on it is not a
+    // finding, it is a place to guess, so each piece is now timed the same way the phases above
+    // are — called directly, repeatedly, on this world.
+    //
+    // The same liberty the collision and execute measurements take: running a phase repeatedly
+    // advances it without advancing the rest, so what is timed is the work per call and not a
+    // trajectory anyone should read anything into.
     let t = Instant::now();
-    world.run(n as u64);
-    let whole = t.elapsed() / n;
+    for _ in 0..n {
+        index.gather_touch(world.cells());
+    }
+    let gather = t.elapsed() / n;
+
+    let mut ledger = mm_core::ledger::Ledger::new();
+    let mut starving = Vec::new();
+    // Cloned, because `step` wants the cells mutably and both of these live in the same `World`.
+    // Outside the timed loops, so it costs the measurement nothing — the same move the substrate
+    // above makes for the same reason.
+    let metabolism = world.biology().metabolism.clone();
+    let chem = world.scenario().chemicals.clone();
+    let ecology_cfg = world.biology().ecology;
+    let t = Instant::now();
+    for _ in 0..n {
+        starving.clear();
+        std::hint::black_box(metabolism.step(
+            world.cells_mut(),
+            &substrate,
+            &chem,
+            &mut ledger,
+            &mut starving,
+        ));
+    }
+    let metabolic = t.elapsed() / n;
+
+    let mut eco_substrate = substrate.clone();
+    let t = Instant::now();
+    for _ in 0..n {
+        std::hint::black_box(mm_core::ecology::step(
+            world.cells_mut(),
+            &mut eco_substrate,
+            &index,
+            &crowding,
+            &ecology_cfg,
+            &chemistry,
+            &mut ledger,
+        ));
+    }
+    let ecology = t.elapsed() / n;
+
+    let mut impulse_x = vec![0i32; substrate.len()];
+    let mut impulse_y = vec![0i32; substrate.len()];
+    let forces = mm_core::sensing::BodyForces {
+        jitter: 0,
+        gravity: 0,
+    };
+    let t = Instant::now();
+    for _ in 0..n {
+        std::hint::black_box(mm_core::sensing::step_physics(
+            world.cells_mut(),
+            &substrate,
+            &mut impulse_x,
+            &mut impulse_y,
+            forces,
+            0,
+            1,
+        ));
+    }
+    let physics = t.elapsed() / n;
+
+    // Intent resolution, which is where the remainder went after the four above turned out to be
+    // small. Fed the buffer `execute` just filled, so it applies a real tick's worth of intents
+    // rather than an empty one.
+    let pool = world.genomes().clone();
+    let config = world.biology().clone();
+    let mut pending = mm_core::intent::Pending::default();
+    let mut resolve_substrate = substrate.clone();
+    let pressure_snapshot = vec![0i32; capacity];
+    let t = Instant::now();
+    for _ in 0..n {
+        pending.births.clear();
+        pending.deaths.clear();
+        std::hint::black_box(mm_core::biology::resolve(
+            world.cells_mut(),
+            &mut resolve_substrate,
+            &pool,
+            &intents,
+            &config,
+            &chem,
+            &mut ledger,
+            &mut pending,
+            &pressure_snapshot,
+            0,
+            1,
+        ));
+    }
+    let resolve = t.elapsed() / n;
+
+
+
+    // The fluid on the *populated* world's substrate, not an empty one.
+    //
+    // This was measured by running an empty slide and calling the result "fluid + bookkeeping",
+    // and it flattered the fluid badly. `sweep` skips chemicals that are not present anywhere,
+    // and an empty slide has only the three the scenario seeded — a slide with fifty thousand
+    // metabolising cells on it has most of the table, because respiration and waste put them
+    // there. So the empty world was diffusing three planes and the real one is diffusing
+    // twelve or more, and the difference was landing in the unnamed remainder.
+    let present = substrate.present().iter().filter(|p| **p).count();
+    let mut fluid_substrate = substrate.clone();
+    let mut scratch = mm_core::fluid::FluidScratch::default();
+    let rates = chem.diffusion_rates();
+    let t = Instant::now();
+    for _ in 0..n {
+        mm_core::fluid::step(&mut fluid_substrate, &rates, &mut scratch);
+    }
+    let fluid = t.elapsed() / n;
 
     let mut empty = World::new(slide(1)).expect("world");
     empty.run(10);
     let t = Instant::now();
     empty.run(n as u64);
-    let fluid = t.elapsed() / n;
+    let empty_tick = t.elapsed() / n;
 
-    let accounted = rebuild * 2 + collisions + fluid + execute;
+    let accounted =
+        rebuild * 2 + collisions + fluid + execute + gather + metabolic + ecology + physics
+            + resolve;
     let rest = whole.saturating_sub(accounted);
     let pct = |d: std::time::Duration| d.as_secs_f64() / whole.as_secs_f64() * 100.0;
     eprintln!("  whole tick            {whole:>10.2?}");
+    eprintln!(
+        "  pair-list rebuilds per tick: {real_rebuilds:.2} in a real tick, \
+         {isolated_rebuilds:.2} in the isolated collision loop"
+    );
+    eprintln!(
+        "  one rebuild costs {one_rebuild:.2?}, so the isolated loop under-reports separation \
+         by about {:.2?} a tick",
+        one_rebuild.mul_f64(real_rebuilds - isolated_rebuilds)
+    );
     eprintln!(
         "  neighbour rebuild x2  {:>10.2?}  {:5.1}%",
         rebuild * 2,
@@ -350,14 +505,36 @@ fn phase_breakdown(_c: &mut Criterion) {
         pct(execute)
     );
     eprintln!(
-        "  fluid + bookkeeping   {fluid:>10.2?}  {:5.1}%",
+        "  fluid ({present:>2} planes)      {fluid:>10.2?}  {:5.1}%   [empty slide: {empty_tick:.2?}]",
         pct(fluid)
     );
     eprintln!(
-        "  resolve + metabolism  {rest:>10.2?}  {:5.1}%  (the remainder)",
+        "  gather touch          {gather:>10.2?}  {:5.1}%",
+        pct(gather)
+    );
+    eprintln!(
+        "  metabolism            {metabolic:>10.2?}  {:5.1}%",
+        pct(metabolic)
+    );
+    eprintln!(
+        "  ecology               {ecology:>10.2?}  {:5.1}%",
+        pct(ecology)
+    );
+    eprintln!(
+        "  physics integration   {physics:>10.2?}  {:5.1}%",
+        pct(physics)
+    );
+    // Still a subtraction, but a much smaller one now: intent resolution, births, deaths,
+    // junctions, phylogeny and the metrics. Named as what is left rather than guessed at.
+    eprintln!(
+        "  intent resolution     {resolve:>10.2?}  {:5.1}%",
+        pct(resolve)
+    );
+    // Births, deaths, junction components, phylogeny and the metrics. Named as what is left.
+    eprintln!(
+        "  births/deaths etc     {rest:>10.2?}  {:5.1}%  (the remainder)",
         pct(rest)
     );
-    eprintln!("    + physics");
 }
 
 /// Per-phase throughput, for finding out *where* a regression went rather than only that one

@@ -204,6 +204,9 @@ pub struct NeighbourIndex {
     pair_skin: i32,
     /// False until the first build, and after anything that cannot be repaired by moving.
     pair_valid: bool,
+    /// How many times the list has been rebuilt, for the benchmark to report. Diagnostics only —
+    /// nothing in the simulation reads it, so it cannot influence an outcome.
+    pair_rebuilds: u64,
 }
 
 impl NeighbourIndex {
@@ -411,7 +414,23 @@ impl NeighbourIndex {
             });
         }
         self.pair_valid = true;
+        self.pair_rebuilds = self.pair_rebuilds.wrapping_add(1);
         true
+    }
+
+    /// Force the next [`Self::refresh_pairs`] to rebuild. Diagnostics only — it exists so the
+    /// benchmark can time a rebuild in isolation, and nothing in the simulation calls it.
+    pub fn invalidate_pairs(&mut self) {
+        self.pair_valid = false;
+    }
+
+    /// How many times the pair list has been rebuilt since this index was created.
+    ///
+    /// A settled pack should rebuild rarely; a moving one every tick, at which point the Verlet
+    /// list is buying nothing and is costing the extra candidates its skin adds.
+    #[must_use]
+    pub fn pair_rebuilds(&self) -> u64 {
+        self.pair_rebuilds
     }
 
     /// Whether the pair list has stopped being a superset of the real contacts.
@@ -428,13 +447,20 @@ impl NeighbourIndex {
         let budget = (self.pair_skin / 2).max(1) as i64;
         for i in 0..cap {
             let live = cells.occupied(i);
-            let was = self.pair_ids[i] != u64::MAX;
-            if live != was {
-                return true;
-            }
             if !live {
+                // A cell that has *died* does not invalidate anything. Its slot is still in
+                // everyone's run and the solver skips it on `occupied`, so the list is still a
+                // superset of the real contacts — which is the only promise it makes.
+                //
+                // This was `live != was`, invalidating on death as well as birth, and it was the
+                // single most expensive line in the simulation. A population of fifty thousand
+                // has turnover every tick, so the list was rebuilt every tick and cached nothing
+                // whatever: measured at 1.13 rebuilds a tick against a rebuild costing 14.98ms,
+                // which is a third of the tick spent maintaining a cache with a hit rate of zero.
                 continue;
             }
+            // A slot that has changed hands *is* a new cell somewhere new, and nobody's run
+            // knows about it.
             if cells.id_at(i).ordering_key() != self.pair_ids[i] {
                 return true;
             }
