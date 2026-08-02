@@ -110,6 +110,11 @@ pub struct Buffers {
     /// How far along seams 4..7 they sit.
     pub squash_faces2: Vec<[f32; 4]>,
     pub squash_faces3: Vec<[f32; 4]>,
+    /// How much this cell was grown to keep its area. See [`Placed::swell`].
+    ///
+    /// One bare `f32` rather than a fifth component on [`Shape`], which is full. Four bytes a
+    /// vertex against the forty-eight another `vec4` would cost, and nothing else needs the room.
+    pub swells: Vec<f32>,
     pub indices: Vec<u32>,
 }
 
@@ -196,6 +201,7 @@ impl Buffers {
             self.squash_faces2.push(faces2);
             self.squash_dirs3.push(dirs3);
             self.squash_faces3.push(faces3);
+            self.swells.push(p.swell);
         }
         self.indices
             .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
@@ -212,6 +218,7 @@ impl Buffers {
         self.squash_faces2.clear();
         self.squash_dirs3.clear();
         self.squash_faces3.clear();
+        self.swells.clear();
         self.indices.clear();
     }
 }
@@ -234,6 +241,12 @@ pub struct Placed {
     /// The sides this blob is flattened along. Default is four seams too far out to bite, so
     /// anything that does not care about squashing — organelles, motes — draws round.
     pub squash: [Squash; SQUASH_PER_CELL],
+    /// How much larger than its unsquashed self this blob is drawn, to keep its area.
+    ///
+    /// `half` already includes it; this says how much of it is there, so the shader can give it
+    /// back along the shared walls. See `slide::area_swell` and the taper in `cell.wgsl`. One for
+    /// anything that was not swollen, which is everything except a clipped cell.
+    pub swell: f32,
 }
 
 /// Build the vertex buffers for a frame.
@@ -305,6 +318,7 @@ mod tests {
                 ..Shape::default()
             },
             squash: Default::default(),
+            swell: dot.area_swell,
         })
     }
 

@@ -34,6 +34,9 @@ struct Vertex {
     @location(7) squash_face2: vec4<f32>,
     @location(8) squash_dir3: vec4<f32>,
     @location(9) squash_face3: vec4<f32>,
+    // How much this cell was grown to keep its area. The quad is already that big; this is what
+    // the outline gives back along the seams. See the taper in the fragment shader.
+    @location(10) swell: f32,
 };
 
 struct Output {
@@ -47,6 +50,7 @@ struct Output {
     @location(6) squash_face2: vec4<f32>,
     @location(7) squash_dir3: vec4<f32>,
     @location(8) squash_face3: vec4<f32>,
+    @location(9) swell: f32,
 };
 
 @vertex
@@ -67,6 +71,7 @@ fn vertex(vertex: Vertex) -> Output {
     out.squash_face2 = vertex.squash_face2;
     out.squash_dir3 = vertex.squash_dir3;
     out.squash_face3 = vertex.squash_face3;
+    out.swell = vertex.swell;
     return out;
 }
 
@@ -96,6 +101,29 @@ fn hash21(p: vec2<f32>) -> f32 {
     var v = fract(vec3<f32>(p.xyx) * 0.1031);
     v += dot(v, v.yzx + 33.33);
     return fract((v.x + v.y) * v.z);
+}
+
+/// How wide the swell tapers out around a facet, in cosine of angle.
+///
+/// Wide enough that the outline arrives at the seam smoothly rather than with a visible kink,
+/// narrow enough to leave the free arc between two facets something to grow into. At 0.25 a
+/// facet spanning ±30° tapers over about the next 20°.
+const TAPER: f32 = 0.25;
+
+/// How much of its swell a cell keeps in direction `dir`, given one seam.
+///
+/// One where the direction is well clear of the facet, falling to zero at the facet's edge and
+/// staying there across it. Inside the facet the seam is doing the cutting and the radius makes
+/// no difference; what has to be exact is the *edge*, because that is the point the two cells
+/// have to agree on.
+///
+/// `face / bare` is the cosine of the half-angle the facet subtends on the unswollen circle. An
+/// unused slot carries a face far outside the circle, so its cosine comes out greater than one,
+/// no direction can reach it, and it tapers nothing — which is why this must not be clamped
+/// into range.
+fn seam_room(dir: vec2<f32>, n: vec2<f32>, face: f32, bare: f32) -> f32 {
+    let edge_cos = face / max(bare, 0.0001);
+    return 1.0 - smoothstep(edge_cos - TAPER, edge_cos, dot(dir, n));
 }
 
 @fragment
@@ -142,6 +170,65 @@ fn fragment(in: Output) -> @location(0) vec4<f32> {
     // cut, so what you see is the wobble and not the wall.
     let pressure = clamp((1.0 - nearest) / 0.25, 0.0, 1.0);
 
+    // --- which way the neighbours are ---
+    //
+    // Unpacked up here rather than down where the field is cut, because the outline needs them
+    // now: how far a cell may swell depends on where its neighbours are.
+    let d0 = unpack2x16snorm(bitcast<u32>(in.squash_dir.x));
+    let d1 = unpack2x16snorm(bitcast<u32>(in.squash_dir.y));
+    let d2 = unpack2x16snorm(bitcast<u32>(in.squash_dir.z));
+    let d3 = unpack2x16snorm(bitcast<u32>(in.squash_dir.w));
+    let d4 = unpack2x16snorm(bitcast<u32>(in.squash_dir2.x));
+    let d5 = unpack2x16snorm(bitcast<u32>(in.squash_dir2.y));
+    let d6 = unpack2x16snorm(bitcast<u32>(in.squash_dir2.z));
+    let d7 = unpack2x16snorm(bitcast<u32>(in.squash_dir2.w));
+    let d8 = unpack2x16snorm(bitcast<u32>(in.squash_dir3.x));
+    let d9 = unpack2x16snorm(bitcast<u32>(in.squash_dir3.y));
+    let d10 = unpack2x16snorm(bitcast<u32>(in.squash_dir3.z));
+    let d11 = unpack2x16snorm(bitcast<u32>(in.squash_dir3.w));
+
+    // --- how much of the swell this direction gets ---
+    //
+    // `area_swell` grows a clipped cell until what survives the cutting is the area it has, and
+    // the growth is meant to go into the free arcs — that is the whole point of it, because the
+    // free arcs are where the gaps between cells are. It did not: the CPU scaled the entire
+    // circle and left the seam planes where they were, so much of the growth went into making
+    // the *shared walls* longer instead.
+    //
+    // Which is what made a big cell's flat run on past the point where its small neighbour
+    // actually touches it. The seam is the plane through the two crossing outlines, and that
+    // gives both cells the same facet by construction — but only while both are drawn at the
+    // radius the plane was computed from. Scale one circle up and it meets the same plane along
+    // a longer chord, and the bigger circle's chord grows faster: at a swell of 1.15 a 2:1 pair
+    // came out a third apart, and with the two swelling by different amounts, more than half.
+    //
+    // So the swell is tapered away across each facet's own angular span. At a facet's edge the
+    // cell is back to the unswollen radius the plane was cut from, so both cells end their flat
+    // at the same point again; between the facets it swells fully, which is where the gaps are
+    // and where the growth was supposed to go in the first place.
+    //
+    // The area is then no longer exactly preserved — the taper gives back growth the solve had
+    // already counted — so a crowded cell comes out slightly under its true area. That is the
+    // approximation. Holding both the area and the facets exactly means putting the seam on the
+    // radical line of the *drawn* circles, which needs each cell to know its neighbour's swell.
+    let swell = max(in.swell, 1.0);
+    // The unswollen radius, in field units: `FIELD_FILL` is the swollen one by construction,
+    // because the quad was sized to it.
+    let bare = 0.65 / swell;
+    let dir = select(vec2<f32>(1.0, 0.0), p / r, r > 0.0001);
+    var room = seam_room(dir, d0, faces.x, bare);
+    room = min(room, seam_room(dir, d1, faces.y, bare));
+    room = min(room, seam_room(dir, d2, faces.z, bare));
+    room = min(room, seam_room(dir, d3, faces.w, bare));
+    room = min(room, seam_room(dir, d4, faces2.x, bare));
+    room = min(room, seam_room(dir, d5, faces2.y, bare));
+    room = min(room, seam_room(dir, d6, faces2.z, bare));
+    room = min(room, seam_room(dir, d7, faces2.w, bare));
+    room = min(room, seam_room(dir, d8, faces3.x, bare));
+    room = min(room, seam_room(dir, d9, faces3.y, bare));
+    room = min(room, seam_room(dir, d10, faces3.z, bare));
+    room = min(room, seam_room(dir, d11, faces3.w, bare));
+
     // --- the outline ---
     //
     // Three harmonics of angle, with amplitudes and phases from the cell's own seed. Small
@@ -173,7 +260,10 @@ fn fragment(in: Output) -> @location(0) vec4<f32> {
     // 0.65 is `cellmesh::FIELD_FILL` and the two must agree. The margin is not slack: the
     // wobble adds up to a fifth, and the fade needs room outside that or it runs off the
     // quad's corners and the cell is drawn as a square.
-    let radius = 0.65 * (1.0 + wobble + wear);
+    //
+    // Swollen only where there is room for it. Between `bare` at a facet's edge and the full
+    // 0.65 out in a free arc, which is the taper above.
+    let radius = mix(bare, 0.65, room) * (1.0 + wobble + wear);
 
     // --- the edge ---
     //
@@ -202,10 +292,6 @@ fn fragment(in: Output) -> @location(0) vec4<f32> {
     // Four unconditionally: the unused ones carry a distance no pixel of this quad can reach,
     // which is cheaper than branching on a count in a fragment shader.
     var field = r - radius;
-    let d0 = unpack2x16snorm(bitcast<u32>(in.squash_dir.x));
-    let d1 = unpack2x16snorm(bitcast<u32>(in.squash_dir.y));
-    let d2 = unpack2x16snorm(bitcast<u32>(in.squash_dir.z));
-    let d3 = unpack2x16snorm(bitcast<u32>(in.squash_dir.w));
     // The shoulder scales with the cell, so a small one is not rounded away entirely and a
     // large one does not get a corner that reads as sharp.
     //
@@ -225,19 +311,11 @@ fn fragment(in: Output) -> @location(0) vec4<f32> {
     // And four more. Six is what a packed monolayer settles on; eight is headroom, because a
     // cell that runs out of seams stops cutting for a neighbour that is still cutting for it,
     // and the two are then drawn one over the other with no shared wall.
-    let d4 = unpack2x16snorm(bitcast<u32>(in.squash_dir2.x));
-    let d5 = unpack2x16snorm(bitcast<u32>(in.squash_dir2.y));
-    let d6 = unpack2x16snorm(bitcast<u32>(in.squash_dir2.z));
-    let d7 = unpack2x16snorm(bitcast<u32>(in.squash_dir2.w));
     field = smax(field, dot(p, d4) - faces2.x, shoulder);
     field = smax(field, dot(p, d5) - faces2.y, shoulder);
     field = smax(field, dot(p, d6) - faces2.z, shoulder);
     field = smax(field, dot(p, d7) - faces2.w, shoulder);
     // And the last four. See `ATTRIBUTE_SQUASH_DIR3`.
-    let d8 = unpack2x16snorm(bitcast<u32>(in.squash_dir3.x));
-    let d9 = unpack2x16snorm(bitcast<u32>(in.squash_dir3.y));
-    let d10 = unpack2x16snorm(bitcast<u32>(in.squash_dir3.z));
-    let d11 = unpack2x16snorm(bitcast<u32>(in.squash_dir3.w));
     field = smax(field, dot(p, d8) - faces3.x, shoulder);
     field = smax(field, dot(p, d9) - faces3.y, shoulder);
     field = smax(field, dot(p, d10) - faces3.z, shoulder);

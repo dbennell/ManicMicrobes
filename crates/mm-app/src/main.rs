@@ -866,6 +866,13 @@ const ATTRIBUTE_SQUASH_FACE3: MeshVertexAttribute = MeshVertexAttribute::new(
     VertexFormat::Float32x4,
 );
 
+/// How much the cell was grown to keep its area, so the shader can hand it back at the seams.
+///
+/// A bare `Float32`: four bytes a vertex rather than the forty-eight a fifth `vec4` would cost,
+/// and `CellShape` has no spare component.
+const ATTRIBUTE_SWELL: MeshVertexAttribute =
+    MeshVertexAttribute::new("CellSwell", 0x6D_6D_5F_63_65_6C_73, VertexFormat::Float32);
+
 /// Embedded at compile time rather than loaded from an `assets/` directory, so the binary runs
 /// from anywhere. The same thing `bevy_sprite` does for its own shaders.
 const CELL_SHADER: Handle<Shader> = uuid_handle!("6d6d5f63-656c-6c5f-7368-616465720001");
@@ -907,6 +914,7 @@ impl Material2d for CellMaterial {
             ATTRIBUTE_SQUASH_FACE2.at_shader_location(7),
             ATTRIBUTE_SQUASH_DIR3.at_shader_location(8),
             ATTRIBUTE_SQUASH_FACE3.at_shader_location(9),
+            ATTRIBUTE_SWELL.at_shader_location(10),
         ])?];
         Ok(())
     }
@@ -1018,6 +1026,7 @@ fn setup(
     cells.insert_attribute(ATTRIBUTE_SQUASH_FACE2, Vec::<[f32; 4]>::new());
     cells.insert_attribute(ATTRIBUTE_SQUASH_DIR3, Vec::<[f32; 4]>::new());
     cells.insert_attribute(ATTRIBUTE_SQUASH_FACE3, Vec::<[f32; 4]>::new());
+    cells.insert_attribute(ATTRIBUTE_SWELL, Vec::<f32>::new());
     cells.insert_indices(Indices::U32(Vec::new()));
     commands.spawn((
         CellMesh,
@@ -1682,6 +1691,11 @@ fn redraw(
                 rounded: if view.rounded { 1.0 } else { 0.0 },
             },
             squash: squash_of(dot),
+            // `body` above is already the swollen size. This is how much of it is swell, so the
+            // shader can hand it back along the shared walls — see the taper in `cell.wgsl`.
+            // The newborn swell is deliberately not included: that one is a cell arriving, and
+            // it should shrink the whole outline, seams and all.
+            swell: dot.area_swell,
         })
     });
     // Organelles, into the same buffers and therefore the same draw call, at the tiers that
@@ -1724,6 +1738,8 @@ fn redraw(
                     // nucleus flattening against the neighbouring *cell* would be drawing a
                     // constraint the simulation does not have.
                     squash: Default::default(),
+                    // And not swollen, so there is nothing to hand back.
+                    swell: 1.0,
                 });
             }
         }
@@ -1751,6 +1767,7 @@ fn redraw(
         mesh.insert_attribute(ATTRIBUTE_SQUASH_FACE2, buffers.squash_faces2.clone());
         mesh.insert_attribute(ATTRIBUTE_SQUASH_DIR3, buffers.squash_dirs3.clone());
         mesh.insert_attribute(ATTRIBUTE_SQUASH_FACE3, buffers.squash_faces3.clone());
+        mesh.insert_attribute(ATTRIBUTE_SWELL, buffers.swells.clone());
         mesh.insert_indices(Indices::U32(buffers.indices.clone()));
     }
 
