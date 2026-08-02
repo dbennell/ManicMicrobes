@@ -1039,6 +1039,10 @@ needs somewhere for them to go, and at the time of writing there is nowhere: sto
 no ceiling, upkeep is a per-cell floor plus a per-organelle charge, and neither scales with what
 a cell is holding or how hard it is being squeezed.
 
+*Written before it was measured, and half of it is wrong — there is a sink, and it is large, and
+it does not help. See "The tax that is already being paid" below, which is the finding that
+matters most in this section.*
+
 This was found by trying to do without it. Two mechanisms were built and measured and both
 failed for the same reason:
 
@@ -1053,28 +1057,150 @@ failed for the same reason:
 Both are the same lesson: with no sink, every mechanism that relieves crowding converts it into
 another form of crowding.
 
-Two sinks are wanted, and they answer different halves of it.
+#### The tax that is already being paid
 
-**Upkeep that scales with pressure.** A crushed cell spends energy resisting deformation, which
-is what turgor costs a real one. It makes being stuck expensive rather than merely futile, and
-that is the difference between a state a lineage waits out and one it has a reason to escape —
-by moving, by lysing a neighbour, by not being there. It is self-limiting: as a crowd thins the
-charge falls. And it does not kill, so it cannot produce the extinctions that a hard cap on
-photosynthesis did when it was tried.
+The paragraph above says there is nowhere for energy to go. That is wrong, and it was worth
+finding out before building somewhere.
 
-**Upkeep that scales with what is stored.** Holding matter and energy should cost, continuously,
-or a full cytoplasm is a free battery. This is the tax that makes a vacuole worth building: at
-present the interior cap is per-chemical and unenforced on conversion, cells run at eight times
-it, and not one cell in any run has ever built one. Storage as a *strategy* requires storage to
-be rationed and expensive; today it is neither.
+`Ledger::dissipate` is called on every conversion the engine runs. Photosynthesis banks half of
+what it absorbs — `photosynthesis_efficiency` is `Q10_ONE / 2` — and respiration banks three
+quarters of what it releases. Upkeep, repair, building, dividing, junction transfer, cilium
+thrust and death all dissipate too. Free energy leaves this world as heat on every conversion,
+exactly as §7.3 says it does, and `gradient_probe::energy_budget` measures the rate: over four
+thousand ticks of a growth slide, `energy_out` is **72.75%** of `energy_in`.
 
-Both must sit above the band a healthy pack lives in. The packing bench, which tiles perfectly,
-runs at pressure p50 4.0 and p90 5.0; a slide that had overfilled ran at 6.1 and 8.1. Anything
-that bites at 4 kills a healthy crowd, and anything that waits until 8 never fires.
+It changes nothing. On the same run, with the population flat at 88–90 cells from tick 1800, the
+median cell's holdings go on climbing — 1,170 energy units at tick 1800, 4,304 at tick 4000 —
+and stored energy across the world reaches 447 million with net income still positive.
+
+The reason is structural, and it is the reason no rate of tax will do. Holdings obey
+`dS/dt = (1 − τ)·I − U`, where `τ` is the fraction taxed and both income `I` and upkeep `U`
+scale with population and throughput. Raising `τ` scales how fast `S` climbs. It does not put a
+fixed point in `S`, because nothing in the expression depends on `S`. **Only a term that scales
+with holdings can bound holdings**, and there is no such term anywhere in the engine: upkeep is
+`metabolic_floor` plus a per-organelle charge, and both are constants of a cell's loadout.
+
+Expressed as a buffer, the pathology is stark. `gradient_probe::energy_budget` reports what each
+cell holds divided by what it spends per tick, which is how many ticks it could coast for:
+
+| phase | tick | pop | min | p10 | p50 | p90 |
+|---|---|---|---|---|---|---|
+| founding | 400 | 11 | 37 | 44 | 189 | 497 |
+| expanding | 800 | 43 | **1** | 12 | 290 | 1,077 |
+| expanding | 1200 | 76 | **2** | 99 | 632 | 1,959 |
+| converged | 2400 | 88 | 2,393 | 3,644 | 4,901 | 6,416 |
+| converged | 4000 | 90 | 4,860 | 7,269 | 9,582 | 11,916 |
+
+During the founding race the poorest cell alive is one tick from starving. In the converged pack
+the poorest cell alive holds nearly five thousand ticks of upkeep. That factor of a few thousand
+is the room a storage charge has to work in, and it is why a charge is safe where the cap of
+experiment 1 was fatal: a rule calibrated to bite at a thousand ticks of buffer is invisible to
+every cell in the top half of this table and inescapable to every cell in the bottom half.
+
+#### Pressure cannot carry a sink, and the band recorded here was wrong
+
+The band below was measured at `761ab7c`, before `38ff420` fixed the deep overlaps. The slide it
+was taken from was 142 cells at 237% occupancy with a fifth of its pairs interpenetrating and a
+worst pair 3% of the way to touching. That is not an overfilled pack, it is a pack the solver
+was failing, and p50 6.1 / p90 8.1 was reading the failure. Re-measured on HEAD by
+`gradient_probe::pressure_band`, with the same scenarios:
+
+| slide | n | p10 | p50 | p90 | max |
+|---|---|---|---|---|---|
+| packing bench, settled (tiles perfectly) | 220 | 2.00 | 3.96 | 5.00 | 6.00 |
+| growth 16, dividing (116% occupancy) | 85 | 2.00 | 3.11 | 4.80 | 5.88 |
+| growth 16, converged | 84 | 2.00 | 3.45 | 5.30 | 6.00 |
+| growth 32, 306 cells | 306 | 2.82 | 4.00 | 5.46 | 6.49 |
+
+**The overfilled slide reads lower than the healthy bench.** There is no band between them —
+they are the same distribution. This is not a calibration that needs redoing; it is what
+`pressure` measures. Each contact contributes `clamp((want − d) / (want − core), 0, Q10_ONE)`,
+which saturates at one unit the moment a pair reaches its core, and the sum over contacts is
+therefore close to a count of neighbours that are touching at all. It tops out near six because
+six is how many neighbours fit around a disc. It cannot tell a crowd resting on each other from
+a crowd crushed into each other, because both saturate — and the bench beats the overfilled
+slide on it for the mundane reason that its cells are smaller and so each has more neighbours.
+
+Upkeep that scales with pressure is therefore struck off, and the reasoning that recommended it
+is struck off with it. Charged against the numbers above, it would bill the healthy pack more
+than the overfilled one. It cannot be rescued by moving the threshold. It could be rescued by
+redefining `pressure` to something unsaturating — total core penetration in `POS`, say, or the
+`crowding` sum that already exists beside it — but that is a change to the division and growth
+gates that currently read it, and those gates work.
+
+**Upkeep that scales with what is stored** is what survives. Holding matter should cost,
+continuously, or a full cytoplasm is a free battery. It is also the only proposal that connects
+the quantity with no bound to the sink that does exist: matter is conserved and can never leave,
+but energy leaves as heat on every conversion, so a rule that makes holding matter *cost energy*
+drains a conserved pool into an unconserved one. That is the thermodynamics the rest of the
+engine already runs on.
+
+This is the tax that makes a vacuole worth building: at present the interior cap is
+per-chemical, unenforced on conversion, and total free solute is not bounded by anything at all.
+`gradient_probe::solute_and_shade` measures it as a multiple of the per-chemical cap — 2.3× at
+the founding, 9.7× at convergence on the 16 slide and 11.6× on the 32, peaking at 28× — and not
+one cell in any run has ever built a vacuole. Storage as a *strategy* requires storage to be
+rationed and expensive; today it is neither.
 
 Rupture — damage rising steeply with pressure until a cell bursts — belongs after these, not
 instead of them. It is a ceiling, and a ceiling on top of an economy with no sink only decides
-who dies of a problem nobody could have avoided.
+who dies of a problem nobody could have avoided. It also cannot be built on `pressure` as
+`pressure` is currently defined, for the reason above.
+
+### 17.8 The pack has no inside
+
+§17.7 is about the economy. This is about the geometry, and it is the other half of why a dense
+pack has no structure: a cell wedged in the middle of one lives in exactly the same medium as a
+cell on the rind, to the last digit.
+
+In a real biofilm or tumour, nutrients diffuse in from the surface and waste diffuses out, both
+distance-limited, so past a couple of hundred microns there is an anoxic acidic core. The pack
+does not rupture, it stratifies: growing rind, dormant middle, dead core. That structure is what
+gives motility a reason to exist and what makes the interior of a crowd a bad place to be.
+
+Three measurements say it cannot happen here.
+
+**Nothing in the fluid knows the population exists.** `fluid::step` takes a `Substrate`, a rate
+table and a scratch buffer, and no `CellArena`. `blocked` is set by scenario barriers and the
+user's drawing tool and by nothing else. There is no porosity term, no occupancy-weighted flux,
+no volume exclusion. `gradient_probe::tracer_through_the_pack` releases an identical tracer spike
+into the middle of a 306-cell pack and into the same square of the same slide with every cell
+removed, and reads the radial profile at eight radii over 120 ticks: the two are **bit-identical
+at every ring and every timestep**. A hundred and seventy-one cells with five or more contacts
+each retard transport by exactly nothing.
+
+**Light is not rival either.** The light plane is prescribed from a closed form every fluid step
+and re-prescribed the next; a chloroplast reads the value at its centre square and does not
+decrement it, so nothing shades anything but a barrier, and absorption is not competed for.
+
+**So no gradient forms**, and `gradient_probe::rind_to_core` confirms it directly. On a 32 slide
+grown to 306 cells, ring by ring out from the pack's centroid, the oxidant varies by 0.02% and
+the structural monomer by 0.3%; the largest variation in any species is the waste at 30%, and it
+peaks in the *middle* rings rather than the core, against a pool three orders of magnitude
+larger. Grouping cells by how many neighbours they touch rather than by radius gives the same
+answer and adds a worse one:
+
+| contacts | n | mass | energy | fill | pressure |
+|---|---|---|---|---|---|
+| 0–2 (rind) | 2 | 15.9 | 2,893 | 633% | 2.00 |
+| 3–4 | 133 | 35.3 | 3,394 | 823% | 3.28 |
+| 5–6 | 158 | 62.7 | 3,988 | 1,105% | 4.67 |
+| 7+ (core) | 13 | 77.3 | 4,237 | 1,295% | 5.45 |
+
+**Being buried is currently the best place to be.** A cell in the core is heavier, richer and
+fuller than one on the rind. Some of that is a cell being large *causing* it to have more
+contacts rather than the reverse, but the direction is the point: there is no penalty anywhere in
+it, and the local chemistry columns of that same table are flat.
+
+The cause is a rate mismatch, not a missing mechanism. Diffusion rates run from `Q10_ONE/64` to
+`Q10_ONE/4` per fluid step, and the fluid steps every tick by default, so the tracer above is
+substantially spread across seven squares within roughly a hundred ticks. Metabolism changes a
+pack over thousands. On the timescale a cell lives at, the fluid is a well-stirred bath. Any
+mechanism that wants stratification has to close that gap: make transport slow relative to
+consumption, and the honest way is to let occupancy impede it, which is the porosity term the
+solver does not have.
+
+### 17.9 What this is all for
 
 ### 17.8 What this is all for
 
