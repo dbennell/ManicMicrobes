@@ -48,8 +48,19 @@ fn slide(seed: u64) -> Scenario {
     Scenario {
         name: "gate".to_string(),
         seed,
-        width: 256,
-        height: 256,
+        // Big enough for fifty thousand cells to be a density the simulation actually produces.
+        //
+        // At 256 it was not. `split_pressure` refuses a division to a cell with nowhere to put
+        // the daughter, and a 256-square slide settles at about sixteen thousand cells — so the
+        // gate could only reach its own target by having that switched off, which made it a
+        // measurement of a world that cannot happen. Measured on 512: fifty thousand around tick
+        // 1,400 and eighty-two thousand by tick 3,000, with every rule on.
+        //
+        // Four times the area for the same target is also four times the *matter*, which is the
+        // point — the old slide was not short of room for the cells so much as short of room for
+        // the cells to be a sensible size in.
+        width: 512,
+        height: 512,
         light: LightRegime::Uniform {
             intensity: mm_core::Q10_ONE,
         },
