@@ -121,6 +121,13 @@ pub fn variant_of(id: u64) -> usize {
 /// `dim` is asked for the vignette at a square, in square coordinates, because where a square
 /// lands on screen depends on the camera and this function has no business knowing about one.
 /// Tests pass a closure that returns 1.
+///
+/// Returns the slide's mean colour *before* the vignette, which is what a defocused cell fades
+/// into. Derived rather than named as a constant because the slide is not a fixed colour: it is
+/// the warm light plus whichever overlays are switched on, so a haze fixed at the unlit brown
+/// would fade cells towards a tone that is nowhere on screen the moment an overlay is enabled.
+/// Accumulated here because this loop is already visiting every texel; asking separately would
+/// be a second pass over the whole plane every frame.
 pub fn paint_field(
     into: &mut [u8],
     width: usize,
@@ -128,10 +135,13 @@ pub fn paint_field(
     light: &[f32],
     layers: &[(&[f32], [f32; 3])],
     dim: &dyn Fn(f32, f32) -> f32,
-) {
+) -> [f32; 3] {
     // Layers add rather than one winning, so two overlays on at once look like two overlays on
     // at once — divided by the count so the sum stays inside the channel.
     let share = (layers.len() as f32).max(1.0);
+    // `f64`, because this runs to a quarter of a million texels at 512×512 and an `f32`
+    // accumulator that has reached the tens of thousands cannot see a 0.1 added to it.
+    let mut sum = [0.0f64; 3];
     for y in 0..height {
         for x in 0..width {
             let i = y * width + x;
@@ -152,6 +162,12 @@ pub fn paint_field(
                     *channel += t * shade / share;
                 }
             }
+            // Summed before the vignette. The cell it hazes is already multiplied by the
+            // vignette at its own position, and a haze that carried the field's average dimming
+            // as well would charge a cell at the centre for darkness at the corners.
+            for k in 0..3 {
+                sum[k] += f64::from(rgb[k]);
+            }
             let d = dim(x as f32 + 0.5, y as f32 + 0.5);
             let at = i * 4;
             let Some(px) = into.get_mut(at..at + 4) else {
@@ -163,6 +179,15 @@ pub fn paint_field(
             px[3] = 255;
         }
     }
+    let texels = (width * height) as f64;
+    if texels == 0.0 {
+        return [0.0; 3];
+    }
+    [
+        (sum[0] / texels) as f32,
+        (sum[1] / texels) as f32,
+        (sum[2] / texels) as f32,
+    ]
 }
 
 /// Cheap deterministic noise in `0..1`, for the grain and the per-variant phases.
@@ -353,6 +378,40 @@ mod tests {
         });
         assert!(buf[0] > 0, "the lit square came out black");
         assert_eq!(buf[4], 0, "the vignetted square was not dimmed");
+    }
+
+    #[test]
+    fn the_haze_is_the_colour_of_the_slide_it_came_from() {
+        // What a defocused cell fades into. It has to follow the overlays: a haze fixed at the
+        // unlit brown would fade cells towards a colour that is nowhere on screen the moment an
+        // overlay is switched on, and they would read as tinted rather than as distant.
+        let (w, h) = (2usize, 1usize);
+        let mut buf = vec![0u8; w * 4];
+        let light = vec![0.0f32; w];
+        let field = vec![1.0f32, 0.0];
+        let haze = paint_field(&mut buf, w, h, &light, &[(&field, [1.0, 0.0, 0.0])], &|_, _| {
+            1.0
+        });
+        // One of the two squares is fully red, so the mean is half red.
+        assert!(
+            (haze[0] - 0.5).abs() < 1e-5,
+            "the haze did not follow the overlay: {haze:?}"
+        );
+        assert_eq!([haze[1], haze[2]], [0.0, 0.0]);
+
+        // And before the vignette, not after. The cell being hazed is already dimmed by the
+        // vignette where *it* stands, so a haze carrying the field's average dimming as well
+        // would charge a cell at the centre of the field for darkness out at the corners.
+        let dimmed = paint_field(&mut buf, w, h, &light, &[(&field, [1.0, 0.0, 0.0])], &|_, _| {
+            0.0
+        });
+        assert_eq!(dimmed, haze, "the vignette leaked into the haze");
+    }
+
+    #[test]
+    fn an_empty_slide_has_a_haze_and_does_not_divide_by_zero() {
+        let haze = paint_field(&mut [], 0, 0, &[], &[], &|_, _| 1.0);
+        assert_eq!(haze, [0.0; 3]);
     }
 
     #[test]

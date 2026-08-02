@@ -288,7 +288,18 @@ fn fragment(in: Output) -> @location(0) vec4<f32> {
     // side. At half this width the two rings read as one line between two cells, which is what
     // a membrane between two cells is; at the width that looked right on a *solitary* cell they
     // stack into a dark band and push the two apart visually.
-    let wall = max(radius * 0.025, edge);
+    //
+    // Floored at the antialiasing width so the ring can never be thinner than the fade that
+    // draws it, which would make it shimmer — but at `fwidth` alone and *not* at `edge`, which
+    // is the same quantity plus `softness`. Flooring on `edge` meant defocus widened the
+    // membrane: at high magnification `radius * 0.025` is about two pixels while a badly
+    // defocused cell's `softness` is three and a half, so the floor won and that cell's wall
+    // came out roughly twice as wide as its neighbour's. Since a shared wall is two half-rings,
+    // the pair's boundary took the thick half from whichever side was further out of focus, and
+    // a cell appeared thick-walled on some sides and thin on others depending only on the
+    // *neighbour's* depth. An out-of-focus edge should lose contrast, not gain weight — so
+    // where the fade is now wider than the wall, the wall correctly dissolves into it.
+    let wall = max(radius * 0.025, fwidth(r) * 1.5);
     let membrane = smoothstep(-wall, -wall * 0.35, field) * integrity;
 
     // Flat-shaded, near enough. The hemisphere normal above is kept for a *hint* of form and for

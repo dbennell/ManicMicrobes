@@ -1414,6 +1414,42 @@ fn collect_simulation(mut sim: ResMut<SlideRes>, mut view: ResMut<View>) {
     }
 }
 
+/// How much of its own colour a cell at the far end of the depth of field gives up to the slide.
+///
+/// The one knob for how strongly depth reads. At 1 a distant cell would be indistinguishable
+/// from the background; the gap below 1 is what keeps it a visible cell.
+const HAZE_MAX: f32 = 0.75;
+
+/// How far into the slide a cell at `depth` has faded, `0..=1`.
+///
+/// One function rather than the arithmetic twice, because a cell and its organelles have to
+/// agree. They did not before — organelles took the vignette and no depth of field at all — and
+/// the result was a distant cell drawn as a dark body with a crisp bright nucleus in it.
+///
+/// A selected cell never hazes. You went looking for it, and the microscope's job at that point
+/// is to show it to you rather than to be tasteful about where it is sitting.
+fn haze_of(optics: &mm_app::optics::Optics, depth: f32, selected: bool) -> f32 {
+    if selected {
+        return 0.0;
+    }
+    HAZE_MAX * (optics.blur(depth) / optics.max_blur.max(f32::EPSILON)).clamp(0.0, 1.0)
+}
+
+/// A colour `t` of the way towards the slide behind it.
+///
+/// `t` of 0 is the thing itself and 1 is the bare slide. Capped well below 1 by the caller, so
+/// even the most defocused cell keeps a trace of its own colour — a cell that faded *completely*
+/// into the background would be a cell that vanished, and the population count would stop
+/// matching what you can see.
+fn haze_into(rgb: [f32; 3], slide: [f32; 3], t: f32) -> [f32; 3] {
+    let t = t.clamp(0.0, 1.0);
+    [
+        rgb[0] + (slide[0] - rgb[0]) * t,
+        rgb[1] + (slide[1] - rgb[1]) * t,
+        rgb[2] + (slide[2] - rgb[2]) * t,
+    ]
+}
+
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn redraw(
     mut commands: Commands,
@@ -1481,6 +1517,11 @@ fn redraw(
 
     let plane = frame.width as usize * frame.height as usize;
 
+    // What an out-of-focus cell fades into, filled in by `paint_field` below. The fallback is
+    // the clear colour, which is genuinely what is behind the cells when there is no field to
+    // paint.
+    let mut haze_rgb = [0.02f32, 0.02, 0.03];
+
     // The chemical fields and the light, as one texture on one quad (M10.5).
     //
     // This was a sprite entity per grid square: 262,144 of them at 512×512, each showing a
@@ -1510,7 +1551,7 @@ fn redraw(
             // `if let`, not `let else`: a field with no pixels is a field that cannot be
             // painted, not a reason to stop drawing the cells.
             if let Some(pixels) = image.data.as_mut() {
-                art::paint_field(
+                haze_rgb = art::paint_field(
                     pixels,
                     frame.width as usize,
                     frame.height as usize,
@@ -1548,10 +1589,27 @@ fn redraw(
         // genuinely softer now — `softness` widens the smoothstep in the shader, which is the
         // one part of the microscope look a texture could not fake.
         let blur = optics.blur(dot.depth);
-        let focus = 1.0 - (blur / optics.max_blur.max(f32::EPSILON)).clamp(0.0, 0.75);
         let selected = sim.selected == Some(dot.id);
-        let [r, g, b] = dot.rgb;
-        let tint = if selected { 1.0 } else { dim * focus };
+        // Defocus fades a cell *into the slide*. It used to multiply the colour by as little as
+        // 0.25, and that is not what being out of focus does to something — an object off the
+        // focal plane loses contrast against the field it sits in, it does not lose brightness.
+        //
+        // Multiplying invented a population. `cell_colour` already spans about 0.30 to 0.50
+        // between a bare cell and one carrying a full loadout, so a four-fold darkening on top
+        // of it put genetically identical sisters seven times apart in brightness purely on a
+        // hash of their ids — and a near-black cell in a crowd of pale ones does not read as
+        // "further away", it reads as a different kind of cell. Which is the one thing the
+        // picture must not say, because what a cell is made of is the only thing colour here is
+        // allowed to mean.
+        //
+        // Fading cannot say that: the far end of the ramp is the slide itself, so a defocused
+        // cell is always somewhere between its own colour and the background it is dissolving
+        // into, and never a colour no cell could have.
+        let haze = haze_of(optics, dot.depth, selected);
+        let [r, g, b] = haze_into(dot.rgb, haze_rgb, haze);
+        // The vignette still multiplies, because that one *is* a brightness: less light reaches
+        // the edge of the field.
+        let tint = if selected { 1.0 } else { dim };
         // Newly divided cells swell into place over their first few ticks rather than
         // appearing at full size.
         //
@@ -1600,10 +1658,14 @@ fn redraw(
             // the picture its solidity: in a clump you saw through the front cell into the one
             // behind, and a mass of cells read as one pane of stained glass.
             //
-            // Nothing is lost by it. Defocus is still carried by `tint`, which darkens, and by
-            // `softness`, which genuinely blurs the outline — and blur is the part a sprite
-            // could never do and the reason the shader exists. What transparency added was the
-            // ability to see through a solid object.
+            // Nothing is lost by it. Defocus is still carried by `haze`, which fades the cell
+            // into the slide, and by `softness`, which genuinely blurs the outline — and blur is
+            // the part a sprite could never do and the reason the shader exists. What
+            // transparency added was the ability to see through a solid object.
+            //
+            // Fading is also why this can stay opaque at all: it reaches the same place
+            // transparency would — the cell approaching the colour behind it — without ever
+            // letting you see the cell that is genuinely behind this one.
             //
             // Safe because the seams partition the overlap exactly: two cells pressed together
             // cut each other along the same plane from either side, so opaque bodies tile with
@@ -1629,11 +1691,16 @@ fn redraw(
     if frame.lod.resolves_organelles() && view.organelles {
         for dot in &frame.cells {
             let dim = optics.vignette(field_radius(to_screen(dot.x, dot.y)));
+            // Hazed with the cell that contains them, which they were not before: organelles
+            // took the vignette but no depth of field at all, so a defocused cell was drawn as a
+            // dark body with a crisp bright nucleus sitting in it. Whatever depth is doing to a
+            // cell it must do to the cell's contents, or the contents read as floating in front.
+            let haze = haze_of(optics, dot.depth, sim.selected == Some(dot.id));
             for (nth, o) in dot.organelles.iter().enumerate() {
                 let at = to_screen(dot.x + o.dx, dot.y + o.dy);
                 let sep = optics.separation(field_radius(at));
                 let size = (o.radius * 2.0 * scale).max(1.0) + sep;
-                let [r, g, b] = o.rgb;
+                let [r, g, b] = haze_into(o.rgb, haze_rgb, haze);
                 let tint = dim * o.built;
                 art_handles.cells.push(cellmesh::Placed {
                     x: at.x,
