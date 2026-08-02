@@ -271,16 +271,9 @@ fn phase_breakdown(_c: &mut Criterion) {
     // physics steps with no collisions to stop them. That is a fair way to time a phase and a
     // terrible state to leave a world in, and `whole` used to be measured at the end of it, on
     // the wreckage. Measuring it first is the only way the percentages below mean anything.
-    let rebuilds_before = world.neighbours().pair_rebuilds();
     let t = Instant::now();
     world.run(n as u64);
     let whole = t.elapsed() / n;
-    // How often the Verlet list actually rebuilds in a *real* tick, where the physics moves
-    // cells — as against the isolated collision loop below, where sixty passes with nothing else
-    // running let the pack settle and stop invalidating it. If these differ, the isolated
-    // measurement is flattering separation and the difference is hiding in the remainder.
-    let real_rebuilds =
-        (world.neighbours().pair_rebuilds() - rebuilds_before) as f64 / f64::from(n);
 
     let mut index = NeighbourIndex::default();
     let t = Instant::now();
@@ -292,29 +285,18 @@ fn phase_breakdown(_c: &mut Criterion) {
     let mut radii = Vec::new();
     let mut crowding = Vec::new();
     let mut pressure = Vec::new();
-    let collisions_rebuilds_before = index.pair_rebuilds();
     let t = Instant::now();
     for _ in 0..n {
         std::hint::black_box(neighbours::resolve_collisions(
             world.cells_mut(),
-            &mut index,
+            &index,
             &mut radii,
             &mut crowding,
             &mut pressure,
         ));
     }
     let collisions = t.elapsed() / n;
-    let isolated_rebuilds =
-        (index.pair_rebuilds() - collisions_rebuilds_before) as f64 / f64::from(n);
 
-    // What one pair-list rebuild costs, so the difference between those two rates can be turned
-    // into a number instead of a suspicion.
-    let t = Instant::now();
-    for _ in 0..n {
-        index.invalidate_pairs();
-        index.refresh_pairs(world.cells());
-    }
-    let one_rebuild = t.elapsed() / n;
 
     // The VM itself, measured rather than left inside the remainder. It is the phase any
     // proposal to move the simulation onto a GPU would be moving, so what it actually costs
@@ -482,15 +464,6 @@ fn phase_breakdown(_c: &mut Criterion) {
     let rest = whole.saturating_sub(accounted);
     let pct = |d: std::time::Duration| d.as_secs_f64() / whole.as_secs_f64() * 100.0;
     eprintln!("  whole tick            {whole:>10.2?}");
-    eprintln!(
-        "  pair-list rebuilds per tick: {real_rebuilds:.2} in a real tick, \
-         {isolated_rebuilds:.2} in the isolated collision loop"
-    );
-    eprintln!(
-        "  one rebuild costs {one_rebuild:.2?}, so the isolated loop under-reports separation \
-         by about {:.2?} a tick",
-        one_rebuild.mul_f64(real_rebuilds - isolated_rebuilds)
-    );
     eprintln!(
         "  neighbour rebuild x2  {:>10.2?}  {:5.1}%",
         rebuild * 2,
