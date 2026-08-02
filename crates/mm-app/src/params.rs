@@ -335,6 +335,23 @@ pub const FIELDS: &[Field] = &[
         note: "turgor, per tick, at one whole interior capacity over the threshold, rising \
                with the square of the excess. Zero switches it off",
     },
+    Field {
+        path: "metabolism.rates.energy_reserve",
+        label: "energy reserve",
+        group: Group::Metabolism,
+        unit: Unit::Q10,
+        note: "energy a cell may bank for nothing. Above it the surplus leaks away as heat, \
+               which is why a full cell is not a free battery",
+    },
+    Field {
+        path: "metabolism.rates.energy_leak",
+        label: "energy leak",
+        group: Group::Metabolism,
+        unit: Unit::Q10,
+        note: "fraction of the surplus over the reserve that leaks each tick. Never more than \
+               the surplus itself, so it drains a cell towards the reserve and cannot starve \
+               one. Zero switches it off",
+    },
     // --- chemistry ---
     Field {
         path: "metabolism.catalogue.metabolism.structural",

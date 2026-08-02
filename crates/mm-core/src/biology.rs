@@ -678,6 +678,8 @@ impl crate::state_hash::StateHash for BiologyConfig {
         h.i32(r.background_damage);
         h.i32(r.osmotic_threshold);
         h.i32(r.osmotic_upkeep);
+        h.i32(r.energy_reserve);
+        h.i32(r.energy_leak);
 
         let c = &self.metabolism.catalogue;
         let chem = c.metabolism;

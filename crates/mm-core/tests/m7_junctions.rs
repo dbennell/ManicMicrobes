@@ -192,6 +192,15 @@ fn cost_of_join(joiner_key: u8, target_key: u8) -> i32 {
 
     let run = |with_target: bool| -> i32 {
         let mut world = still_world(24);
+        // The energy leak is proportional to what a cell is holding, so a cell that has just
+        // paid for a join leaks less than one that has not — by a sixty-fourth of the very cost
+        // this is isolating. The two runs below would then differ by `cost - cost/64` and the
+        // difference of differences would stop cancelling: measured, a 512 join reads as 504.
+        // This is a claim about what a junction costs, not about metabolism, so the leak comes
+        // off rather than being corrected for.
+        let mut biology = world.biology().clone();
+        biology.metabolism.rates.energy_leak = 0;
+        world.set_biology(biology);
         let a = place(&mut world, 10, 10, joiner_key, &genome);
         if with_target {
             place(&mut world, 11, 10, target_key, &[0x2E; 4]);

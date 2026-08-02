@@ -643,13 +643,18 @@ fn poor_and_full() {
 #[test]
 #[ignore = "diagnostic; run with --release --ignored --nocapture"]
 fn persistence() {
-    println!("LONG  turgor   tick    pop   area%   solute p50   buffer p50   vacuoles   births/interval");
-    for charge in [0, mm_core::Q10_ONE / 32] {
-    let tag = if charge == 0 { "off" } else { "on " };
+    println!("LONG  charged     tick    pop   area%   solute p50   energy p50   buffer p50   births/interval");
+    // The ladder, one rung at a time: nothing, matter only, then matter and energy.
+    for (tag, turgor, leak) in [
+        ("neither ", 0, 0),
+        ("turgor  ", mm_core::Q10_ONE / 32, 0),
+        ("both    ", mm_core::Q10_ONE / 32, mm_core::Q10_ONE / 64),
+    ] {
     let mut world = growth_world(16);
     {
         let mut b = world.biology().clone();
-        b.metabolism.rates.osmotic_upkeep = charge;
+        b.metabolism.rates.osmotic_upkeep = turgor;
+        b.metabolism.rates.energy_leak = leak;
         world.set_biology(b);
     }
     let mut last_births = 0u64;
@@ -657,7 +662,7 @@ fn persistence() {
         world.run(4000);
         let cells = world.cells();
         if cells.len() == 0 {
-            println!("LONG  {tag:>6} {:>6}  EXTINCT", (step + 1) * 4000);
+            println!("LONG  {tag} {:>8}  EXTINCT", (step + 1) * 4000);
             break;
         }
         let mut solute: Vec<f32> = cells
@@ -700,16 +705,19 @@ fn persistence() {
             })
             .count();
         let births = world.births_total();
+        let mut energy: Vec<i64> = cells.iter().map(|i| cells.energy[i] as i64).collect();
+        energy.sort_unstable();
         println!(
-            "LONG  {tag:>6} {:>6} {:>6} {:>7.0}% {:>12.1} {:>12} {:>10} {:>17}",
+            "LONG  {tag} {:>8} {:>6} {:>7.0}% {:>12.1} {:>12} {:>12} {:>17}",
             (step + 1) * 4000,
             cells.len(),
             100.0 * area / slide,
             percentile(&solute, 50),
+            energy[energy.len() / 2] / mm_core::Q10_ONE as i64,
             buffer[buffer.len() / 2],
-            vacuoles,
             births - last_births,
         );
+        let _ = vacuoles;
         last_births = births;
     }
     }

@@ -1178,10 +1178,45 @@ today the best reserve in the world is stored energy — free, unbounded, and ne
 at all. The vacuole is answering a question no cell has. It cannot pay for itself until energy is
 rationed too, at which point matter that is out of solution is the only reserve left.
 
-So the storage charge is two mechanisms and only one of them is built. The companion is upkeep
-that scales with *held energy* above a reserve, and the same measurement calibrates it: through
-the founding race the poorest cell alive holds between one and forty ticks of upkeep, and a
-converged pack sits in the tens of thousands.
+The vacuole is not evidence against any of this. It is an evolutionary strategy and one that has
+to be seeded before a twenty-thousand-tick run can be asked whether it pays; expecting it to
+arise unprompted was the wrong test, not the wrong mechanism. What the run does say is that the
+brute-force half was still missing.
+
+#### The leak, which is the other half
+
+Shipped as `metabolism::leak_cost`: energy above `energy_reserve` drains at `energy_leak` a tick,
+dissipated through the ledger like every other loss, so it leaves the world as heat rather than
+moving within it. This is proton leak, futile cycling, and the uncoupling protein whose only job
+is to short the gradient and make heat — waste as standard equipment.
+
+Linear and proportional, deliberately unlike turgor's quadratic, because that buys a property
+worth having. Clamped at `Q10_ONE`, the charge can never exceed the excess it is charged on, so a
+cell that pays it is left holding exactly the reserve: **the leak cannot starve anything, by
+construction rather than by calibration.** It is a leak and not a ceiling, and §17.7's objection
+to hard caps does not reach it. Holdings relax to `reserve + (income − upkeep) / leak` instead of
+climbing, which is the fixed point this section exists to ask for.
+
+The reserve is absolute rather than a multiple of what a cell spends, for the same reason
+`metabolic_floor` is: a reserve proportional to upkeep is one a cell enlarges by carrying more
+machinery, which is one unbounded thing bought with another. Two thousand units, measured — the
+richest cell in the founding race holds about 1,670, and a converged pack starts at 4,300.
+
+The ladder, 48,000 ticks of the growth slide, one rung at a time:
+
+| charged | pop | occupancy | solute p50 | energy p50 |
+|---|---|---|---|---|
+| neither | 90 | 124% | 9.7, flat | 4,304 → **29,566, climbing** |
+| turgor only | 90 | 126% | 9.7 → 3.6 | 1,535 → **22,661, climbing** |
+| both | 90 | 125% | 9.7 → 3.6 | 1,535 → **2,029, and it stops** |
+
+Pinned between 2,029 and 2,032 from tick 8,000 to 48,000, at a reserve of 2,000. Population,
+occupancy and the founding trajectory are untouched in all three columns. That is a cell economy
+with a level in it for the first time — earning, spending, and exporting the surplus as heat,
+which is the dissipative structure §7.2 says the whole simulation exists to display.
+
+**What neither half touches is occupancy**, 124% against 125%. It was never going to: turgor and
+the leak are the economy, and area is geometry. §17.8 is where that goes.
 
 Rupture — damage rising steeply with pressure until a cell bursts — belongs after these, not
 instead of them. It is a ceiling, and a ceiling on top of an economy with no sink only decides

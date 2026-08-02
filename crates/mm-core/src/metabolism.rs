@@ -187,6 +187,40 @@ pub struct MetabolicRates {
     ///
     /// Set to zero to switch turgor off, which is how every test written before it runs.
     pub osmotic_upkeep: i32,
+
+    /// Energy a cell may bank for nothing, `Q10`. Above it, it leaks.
+    ///
+    /// The other half of the storage charge, and the half turgor cannot do. Charging matter and
+    /// not energy pushes matter into energy: respiration turns taxed solute into an untaxed
+    /// scalar with no ceiling, and measured over 48,000 ticks with turgor alone the energy hoard
+    /// went on climbing linearly regardless.
+    ///
+    /// Absolute rather than a multiple of what the cell spends, for the reason
+    /// [`MetabolicRates::metabolic_floor`] is absolute: a reserve proportional to upkeep is a
+    /// reserve a cell can enlarge by carrying more machinery, which is one unbounded thing
+    /// bought with another.
+    ///
+    /// Two thousand units, measured. Through the founding race the richest cell alive holds
+    /// about 1,670, so nothing in it is touched; a converged pack sits at a median of 4,300 and
+    /// climbs into the tens of thousands, so all of that is.
+    pub energy_reserve: i32,
+
+    /// Fraction of the excess over the reserve that leaks away each tick, `Q10`.
+    ///
+    /// Proton leak, futile cycling, and the uncoupling protein whose only job is to short the
+    /// gradient and make heat — waste is standard equipment in a real cell, not a failure mode,
+    /// and this is that. It dissipates through the ledger like every other loss, so the energy
+    /// leaves the world rather than moving within it.
+    ///
+    /// Proportional and linear, which is a deliberate difference from turgor's quadratic and
+    /// buys a property worth having: clamped at `Q10_ONE`, the charge can never exceed the
+    /// excess it is charged on, so a cell that pays it is left holding exactly the reserve and
+    /// **this mechanism cannot starve anything**. It is a leak, not a ceiling. What it does is
+    /// put a fixed point where there was none — holdings relax to
+    /// `reserve + (income - upkeep) / leak` instead of climbing forever.
+    ///
+    /// Set to zero to switch it off, which is how every test written before it runs.
+    pub energy_leak: i32,
 }
 
 impl Default for MetabolicRates {
@@ -231,8 +265,31 @@ impl Default for MetabolicRates {
             // The same as the metabolic floor, so one capacity over the line costs about what
             // being alive costs and four capacities over costs sixteen times that.
             osmotic_upkeep: Q10_ONE / 32,
+            // Measured: above everything the founding race banks, below where a pack converges.
+            energy_reserve: q10(2000),
+            // A time constant of sixty-four ticks: fast enough to bind, slow enough that it is
+            // a leak rather than a cliff.
+            energy_leak: Q10_ONE / 64,
         }
     }
+}
+
+/// Energy a cell loses this tick for banking more than it is allowed to, `Q10`.
+///
+/// Linear in the excess and clamped so the rate cannot exceed one, which together mean the
+/// charge is never larger than the excess itself: a cell that pays it is left holding the
+/// reserve. Nothing here can starve anything, by construction rather than by calibration.
+#[must_use]
+pub fn leak_cost(rates: &MetabolicRates, energy: i32) -> i32 {
+    if rates.energy_leak <= 0 {
+        return 0;
+    }
+    let excess = energy.saturating_sub(rates.energy_reserve.max(0));
+    if excess <= 0 {
+        return 0;
+    }
+    let rate = rates.energy_leak.clamp(0, Q10_ONE) as i64;
+    ((excess as i64 * rate) / Q10_ONE as i64).clamp(0, i32::MAX as i64) as i32
 }
 
 /// Energy a cell pays this tick to hold the solute it is carrying, `Q10`.
@@ -590,7 +647,8 @@ impl Metabolism {
                 .metabolic_floor
                 .max(0)
                 .saturating_add(self.catalogue.upkeep(&cells.loadout(i)))
-                .saturating_add(turgor_cost(&self.rates, crate::biology::osmotic_load(cells, i)));
+                .saturating_add(turgor_cost(&self.rates, crate::biology::osmotic_load(cells, i)))
+                .saturating_add(leak_cost(&self.rates, cells.energy[i]));
             if upkeep > 0 {
                 let paid = cells.energy[i].min(upkeep);
                 cells.energy[i] = cells.energy[i].saturating_sub(paid);
@@ -1335,6 +1393,80 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_cell_below_the_reserve_leaks_nothing() {
+        let rates = MetabolicRates::default();
+        assert_eq!(leak_cost(&rates, 0), 0);
+        assert_eq!(leak_cost(&rates, rates.energy_reserve), 0);
+        assert!(leak_cost(&rates, rates.energy_reserve + q10(1000)) > 0);
+    }
+
+    /// The property the whole mechanism rests on: a leak is not a ceiling.
+    #[test]
+    fn the_leak_can_never_take_more_than_the_surplus() {
+        let mut rates = MetabolicRates::default();
+        for leak in [1, Q10_ONE / 64, Q10_ONE / 2, Q10_ONE, i32::MAX] {
+            for reserve in [i32::MIN, 0, 1, q10(2000), i32::MAX] {
+                rates.energy_leak = leak;
+                rates.energy_reserve = reserve;
+                for energy in [0, 1, q10(1), q10(2000), q10(100_000), i32::MAX] {
+                    let charge = leak_cost(&rates, energy);
+                    assert!(charge >= 0, "leak {leak} reserve {reserve} energy {energy}");
+                    assert!(
+                        charge <= energy,
+                        "a leak that takes more than the cell holds is a cull: \
+                         leak {leak} reserve {reserve} energy {energy} charge {charge}"
+                    );
+                    let surplus = energy.saturating_sub(reserve.max(0)).max(0);
+                    assert!(
+                        charge <= surplus,
+                        "and it may not reach into the reserve: {charge} of {surplus}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The fixed point, demonstrated rather than asserted about: a cell with a fat bank and no
+    /// income falls towards the reserve and stops there instead of emptying.
+    #[test]
+    fn a_hoard_relaxes_to_the_reserve_and_no_further() {
+        let (mut cells, sub, chem, mut ledger, mut met, pool) = world();
+        // No income, no conversions, no wear: the leak is the only thing moving.
+        met.rates.throughput_per_param = 0;
+        met.rates.growth_rate = 0;
+        met.rates.background_damage = 0;
+        met.rates.metabolic_floor = 0;
+        met.rates.osmotic_upkeep = 0;
+        let i = spawn(&mut cells, &pool);
+        cells.slots_mut(i)[0] = Organelle::finished(OrganelleType::Membrane, 0);
+        cells.energy[i] = met.rates.energy_reserve.saturating_mul(8);
+        ledger.absorb(i64::from(cells.energy[i]) * 2);
+
+        let mut starving = Vec::new();
+        for _ in 0..4000 {
+            met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
+        }
+        assert!(starving.is_empty(), "the leak starved a cell, which it must never do");
+        assert!(
+            cells.energy[i] > 0,
+            "it drained the cell to nothing instead of to the reserve"
+        );
+        assert!(
+            cells.energy[i] <= met.rates.energy_reserve + q10(1),
+            "it settled at {} against a reserve of {}",
+            cells.energy[i],
+            met.rates.energy_reserve
+        );
+    }
+
+    #[test]
+    fn the_leak_is_absent_when_the_rate_is_zero() {
+        let mut rates = MetabolicRates::default();
+        rates.energy_leak = 0;
+        assert_eq!(leak_cost(&rates, i32::MAX), 0);
     }
 
     #[test]
