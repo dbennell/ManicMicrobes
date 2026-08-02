@@ -1032,7 +1032,51 @@ dissolved commons there is no advantage to being still, so nothing is ever still
 currently free of any opportunity cost, and a world where staying put can win is a world with
 somewhere new for evolution to go.
 
-### 17.7 What this is all for
+### 17.7 The energy sink, without which none of it works
+
+A cluster that cannot move or grow is a closed system with matter and energy still arriving. It
+needs somewhere for them to go, and at the time of writing there is nowhere: stored energy has
+no ceiling, upkeep is a per-cell floor plus a per-organelle charge, and neither scales with what
+a cell is holding or how hard it is being squeezed.
+
+This was found by trying to do without it. Two mechanisms were built and measured and both
+failed for the same reason:
+
+- **Refusing to grow** bounds occupancy but cannot reduce it. A pack that overshot while there
+  was room stays overshot — twenty thousand ticks with births off left the worst pair at 92.3%
+  against a 95% floor, and occupancy fixed at 116%. Converged, and too dense.
+- **Shrinking under pressure** removes area, and made things worse. Cells gave mass back to
+  their cytoplasm, the room that freed was taken by new cells, and the slide went from 85 cells
+  at 116% to 121 cells at 122%, with the worst pair falling from 86% to 82%. Size became
+  population. Nothing left the system, so nothing improved.
+
+Both are the same lesson: with no sink, every mechanism that relieves crowding converts it into
+another form of crowding.
+
+Two sinks are wanted, and they answer different halves of it.
+
+**Upkeep that scales with pressure.** A crushed cell spends energy resisting deformation, which
+is what turgor costs a real one. It makes being stuck expensive rather than merely futile, and
+that is the difference between a state a lineage waits out and one it has a reason to escape —
+by moving, by lysing a neighbour, by not being there. It is self-limiting: as a crowd thins the
+charge falls. And it does not kill, so it cannot produce the extinctions that a hard cap on
+photosynthesis did when it was tried.
+
+**Upkeep that scales with what is stored.** Holding matter and energy should cost, continuously,
+or a full cytoplasm is a free battery. This is the tax that makes a vacuole worth building: at
+present the interior cap is per-chemical and unenforced on conversion, cells run at eight times
+it, and not one cell in any run has ever built one. Storage as a *strategy* requires storage to
+be rationed and expensive; today it is neither.
+
+Both must sit above the band a healthy pack lives in. The packing bench, which tiles perfectly,
+runs at pressure p50 4.0 and p90 5.0; a slide that had overfilled ran at 6.1 and 8.1. Anything
+that bites at 4 kills a healthy crowd, and anything that waits until 8 never fires.
+
+Rupture — damage rising steeply with pressure until a cell bursts — belongs after these, not
+instead of them. It is a ceiling, and a ceiling on top of an economy with no sink only decides
+who dies of a problem nobody could have avoided.
+
+### 17.8 What this is all for
 
 Each of these is a carrying-capacity term, and that is deliberate. Area is a limit that selects
 for one thing. Light, nutrient influx, barriers, particulate availability and predation
