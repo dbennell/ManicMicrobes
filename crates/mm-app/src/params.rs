@@ -318,6 +318,23 @@ pub const FIELDS: &[Field] = &[
         unit: Unit::Q10,
         note: "upkeep every cell pays for being alive, before its organelles",
     },
+    Field {
+        path: "metabolism.rates.osmotic_threshold",
+        label: "osmotic threshold",
+        group: Group::Metabolism,
+        unit: Unit::Q10,
+        note: "free solute a cell carries for nothing. Above it, holding matter costs energy \
+               every tick — which is what makes a vacuole worth building, because what a \
+               vacuole holds is out of solution and does not count",
+    },
+    Field {
+        path: "metabolism.rates.osmotic_upkeep",
+        label: "osmotic upkeep",
+        group: Group::Metabolism,
+        unit: Unit::Q10,
+        note: "turgor, per tick, at one whole interior capacity over the threshold, rising \
+               with the square of the excess. Zero switches it off",
+    },
     // --- chemistry ---
     Field {
         path: "metabolism.catalogue.metabolism.structural",

@@ -151,6 +151,42 @@ pub struct MetabolicRates {
     /// the carrying capacity of every scenario at once, so it wants measuring rather than
     /// guessing at.
     pub metabolic_floor: i32,
+
+    /// Free solute a cell carries for nothing, `Q10`. See [`crate::biology::osmotic_load`].
+    ///
+    /// Solute in solution pulls water in, the cell swells, and something has to hold it
+    /// together; a plant runs five to ten atmospheres of turgor doing exactly this. Below this
+    /// much a cell is isotonic and pays nothing. Above it, [`MetabolicRates::osmotic_upkeep`]
+    /// charges for the difference.
+    ///
+    /// Four times [`crate::biology::BASE_INTERIOR_CAPACITY`], and the number is measured rather
+    /// than chosen. The danger window for a founding lineage is ticks 400 to 1400 of a growth
+    /// slide, where the poorest cell alive has between one and forty ticks of upkeep in hand;
+    /// across that whole window the poorest decile by energy carries at most 3.6 capacities of
+    /// solute, while the population as a whole is already reaching 12.6. The poor are lean, so
+    /// a threshold at four is invisible to every cell that could be killed by it and bites the
+    /// hoarders. `gradient_probe::poor_and_full` is the measurement.
+    pub osmotic_threshold: i32,
+
+    /// Energy per tick at one whole capacity of solute over the threshold, `Q10`. Quadratic.
+    ///
+    /// This is the sink §17.7 was looking for, and it is the only shape that can be one. A tax
+    /// proportional to throughput — which the engine already levies, at 27% of gross income —
+    /// cannot bound what a cell holds, because holdings obey `dS/dt = (1-t)*I - U` and nothing
+    /// in that depends on `S`. A charge that scales with `S` puts a fixed point in it.
+    ///
+    /// It also connects the two halves of the economy. Matter is conserved and can never leave
+    /// the world; energy leaves as heat on every conversion. Making held matter *cost energy*
+    /// drains the pool that cannot empty into the one that does, which is the thermodynamics
+    /// the rest of the engine already runs on rather than a new rule bolted beside it.
+    ///
+    /// Quadratic so that it is negligible just over the line and severe well past it: at the
+    /// default, a cell one capacity over pays a thirty-second of an energy unit a tick — noise
+    /// against a working loadout's 0.45 — and one at the measured converged median of ten pays
+    /// about a thousand `Q10`, which is more than twice its whole organelle bill.
+    ///
+    /// Set to zero to switch turgor off, which is how every test written before it runs.
+    pub osmotic_upkeep: i32,
 }
 
 impl Default for MetabolicRates {
@@ -189,8 +225,38 @@ impl Default for MetabolicRates {
             // About the same again as a bare membrane's own upkeep, so merely existing costs
             // roughly twice what it did and a working cell barely feels it.
             metabolic_floor: Q10_ONE / 32,
+            // Measured: see the field docs. Four capacities is above everything the founding
+            // race carries and below where a converged pack sits.
+            osmotic_threshold: 4 * crate::biology::BASE_INTERIOR_CAPACITY,
+            // The same as the metabolic floor, so one capacity over the line costs about what
+            // being alive costs and four capacities over costs sixteen times that.
+            osmotic_upkeep: Q10_ONE / 32,
         }
     }
+}
+
+/// Energy a cell pays this tick to hold the solute it is carrying, `Q10`.
+///
+/// Quadratic in whole capacities over [`MetabolicRates::osmotic_threshold`], so the charge rises
+/// far faster than the load does and there is a definite level a lineage cannot profitably hold
+/// past. Integer throughout, and every step is bounded: `ratio` is clamped before it is squared,
+/// which is overflow hygiene rather than a design ceiling — sixty-four capacities over the
+/// threshold already charges four thousand times the unit rate, and nothing survives to reach it.
+#[must_use]
+pub fn turgor_cost(rates: &MetabolicRates, load: i64) -> i32 {
+    if rates.osmotic_upkeep <= 0 {
+        return 0;
+    }
+    let excess = load.saturating_sub(rates.osmotic_threshold.max(0) as i64);
+    if excess <= 0 {
+        return 0;
+    }
+    const UNIT: i64 = crate::biology::BASE_INTERIOR_CAPACITY as i64;
+    const MAX_RATIO: i64 = 64 * Q10_ONE as i64;
+    let ratio = (excess.saturating_mul(Q10_ONE as i64) / UNIT).clamp(0, MAX_RATIO);
+    let once = (rates.osmotic_upkeep as i64).saturating_mul(ratio) / Q10_ONE as i64;
+    let twice = once.saturating_mul(ratio) / Q10_ONE as i64;
+    twice.clamp(0, i32::MAX as i64) as i32
 }
 
 /// Everything the metabolic step needs that is not the world itself.
@@ -509,13 +575,22 @@ impl Metabolism {
 
             // --- upkeep: the cost of being alive ---
             //
-            // The floor first, then what the body costs. A cell that has shed everything still
-            // pays to be a cell.
+            // The floor first, then what the body costs, then what the cytoplasm costs. A cell
+            // that has shed everything still pays to be a cell.
+            //
+            // Turgor goes in here rather than beside it deliberately: a cell that cannot meet
+            // its bill is dying, and there is no reason a bill it ran up by hoarding should be
+            // the one bill that cannot kill. It does not kill *suddenly*, which is the property
+            // that matters — the charge rises smoothly with the load, so a lineage that is
+            // over the line burns down a buffer measured in thousands of ticks and has all of
+            // that time to excrete, build a vacuole, or divide the load in half. What it cannot
+            // do is hold the matter and pay nothing.
             let upkeep = self
                 .rates
                 .metabolic_floor
                 .max(0)
-                .saturating_add(self.catalogue.upkeep(&cells.loadout(i)));
+                .saturating_add(self.catalogue.upkeep(&cells.loadout(i)))
+                .saturating_add(turgor_cost(&self.rates, crate::biology::osmotic_load(cells, i)));
             if upkeep > 0 {
                 let paid = cells.energy[i].min(upkeep);
                 cells.energy[i] = cells.energy[i].saturating_sub(paid);
@@ -1136,6 +1211,130 @@ mod tests {
         let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
         assert_eq!(report.damage, 0);
         assert_eq!(cells.damage[i], 0);
+    }
+
+    /// The cheapest way to hold a cell's whole solute load in one place, for the turgor tests.
+    fn load_with(cells: &mut CellArena, i: usize, capacities: i32) {
+        for c in 0..CHEM_COUNT {
+            cells.interior_mut(i)[c] = 0;
+        }
+        cells.interior_mut(i)[0] = crate::biology::BASE_INTERIOR_CAPACITY.saturating_mul(capacities);
+    }
+
+    /// What a cell pays this tick, isolated by giving it enough to pay with and reading back.
+    fn billed(met: &Metabolism, cells: &mut CellArena, sub: &Substrate, chem: &ChemTable) -> i32 {
+        let i = 0;
+        cells.energy[i] = i32::MAX / 2;
+        let before = cells.energy[i];
+        let mut ledger = Ledger::new();
+        ledger.absorb(i64::from(i32::MAX));
+        let mut starving = Vec::new();
+        met.step(cells, sub, chem, &mut ledger, &mut starving, &[]);
+        assert!(starving.is_empty(), "the fixture is meant to be able to afford itself");
+        before - cells.energy[i]
+    }
+
+    #[test]
+    fn turgor_costs_nothing_below_the_threshold() {
+        let (mut cells, sub, chem, _, mut met, pool) = world();
+        // Nothing else may move the interior while this is being read.
+        met.rates.throughput_per_param = 0;
+        met.rates.growth_rate = 0;
+        met.rates.background_damage = 0;
+        let i = spawn(&mut cells, &pool);
+        assert_eq!(i, 0);
+
+        load_with(&mut cells, i, 3);
+        let lean = billed(&met, &mut cells, &sub, &chem);
+        load_with(&mut cells, i, 4);
+        let brimming = billed(&met, &mut cells, &sub, &chem);
+        assert_eq!(
+            lean, brimming,
+            "a cell at the threshold is isotonic and pays exactly what a lean one pays"
+        );
+        assert_eq!(
+            turgor_cost(&met.rates, crate::biology::osmotic_load(&cells, i)),
+            0
+        );
+    }
+
+    #[test]
+    fn turgor_rises_with_the_square_of_what_is_held() {
+        let rates = MetabolicRates::default();
+        let cap = i64::from(crate::biology::BASE_INTERIOR_CAPACITY);
+        let over = |n: i64| turgor_cost(&rates, i64::from(rates.osmotic_threshold) + n * cap);
+
+        assert_eq!(over(0), 0);
+        let one = over(1);
+        assert!(one > 0, "a whole capacity over the line is not free");
+        // Quadratic, to integer truncation: four times at two over, nine at three.
+        assert!((over(2) - 4 * one).abs() <= 4, "{} against {}", over(2), 4 * one);
+        assert!((over(3) - 9 * one).abs() <= 9, "{} against {}", over(3), 9 * one);
+        // And it is worth paying attention to at the load a converged pack was measured at.
+        assert!(
+            over(6) > rates.metabolic_floor * 30,
+            "six capacities over should dwarf the floor, not tickle it"
+        );
+    }
+
+    #[test]
+    fn a_vacuole_takes_solute_out_of_solution() {
+        let (mut cells, sub, chem, _, mut met, pool) = world();
+        met.rates.throughput_per_param = 0;
+        met.rates.growth_rate = 0;
+        met.rates.background_damage = 0;
+        let i = spawn(&mut cells, &pool);
+        load_with(&mut cells, i, 6);
+
+        let exposed = crate::biology::osmotic_load(&cells, i);
+        let without = billed(&met, &mut cells, &sub, &chem);
+
+        // 64 units of vacuole is one whole `BASE_INTERIOR_CAPACITY` out of solution.
+        cells.slots_mut(i)[2] = Organelle::finished(OrganelleType::Vacuole, 64);
+        let sheltered = crate::biology::osmotic_load(&cells, i);
+        assert_eq!(
+            exposed - sheltered,
+            i64::from(crate::biology::BASE_INTERIOR_CAPACITY),
+            "the polymer is the same matter, and it is not pulling water in"
+        );
+
+        let with = billed(&met, &mut cells, &sub, &chem);
+        let vacuole_upkeep = met
+            .catalogue
+            .spec(OrganelleType::Vacuole)
+            .upkeep_cost(64);
+        assert!(
+            with < without,
+            "the vacuole has to pay for itself: {with} against {without} plus {vacuole_upkeep}"
+        );
+        assert_eq!(
+            cells.interior(i).iter().map(|&v| i64::from(v)).sum::<i64>(),
+            i64::from(crate::biology::BASE_INTERIOR_CAPACITY) * 6,
+            "and it holds exactly as much matter either way"
+        );
+    }
+
+    #[test]
+    fn turgor_is_absent_when_the_rate_is_zero() {
+        let mut rates = MetabolicRates::default();
+        rates.osmotic_upkeep = 0;
+        assert_eq!(turgor_cost(&rates, i64::from(i32::MAX)), 0);
+    }
+
+    /// Nothing a genome can do to its own cytoplasm may overflow the charge.
+    #[test]
+    fn turgor_is_total() {
+        let mut rates = MetabolicRates::default();
+        for upkeep in [0, 1, Q10_ONE / 32, Q10_ONE, i32::MAX] {
+            for threshold in [i32::MIN, -1, 0, 1, 4 * crate::biology::BASE_INTERIOR_CAPACITY, i32::MAX] {
+                rates.osmotic_upkeep = upkeep;
+                rates.osmotic_threshold = threshold;
+                for load in [i64::MIN, -1, 0, 1, i64::from(i32::MAX), i64::from(i32::MAX) * 16] {
+                    let charge = turgor_cost(&rates, load);
+                    assert!(charge >= 0, "upkeep {upkeep} threshold {threshold} load {load}");
+                }
+            }
+        }
     }
 
     #[test]

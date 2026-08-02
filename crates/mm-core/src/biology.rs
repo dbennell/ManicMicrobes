@@ -242,6 +242,34 @@ pub fn interior_capacity(cells: &CellArena, i: usize) -> i32 {
     capacity
 }
 
+/// Free solute in a cell's cytoplasm, `Q10`: everything it holds, less what is out of solution.
+///
+/// The quantity turgor is charged on (`MetabolicRates::osmotic_upkeep`), and the reason it is a
+/// *sum* rather than a maximum. [`interior_capacity`] bounds one chemical at a time, and
+/// [`CellHost::headroom`] checks one at a time against it, so a cell holding a legal amount of
+/// all sixteen is holding sixteen capacities and nothing anywhere says otherwise. Osmotic
+/// pressure does not care which species the particles are, only how many there are.
+///
+/// **A vacuole takes matter out of solution rather than making room for more of it.** This is
+/// the real difference between glucose and glycogen: a thousand units of sugar dissolved is a
+/// thousand particles pulling water in, and the same thousand polymerised into one chain is
+/// one. Storage is not dangerous because it takes up space, it is dangerous because it is
+/// *free*, and a polymer is the trade a cell makes to hold matter that is not.
+///
+/// So a vacuole earns its upkeep here rather than through a raised cap, which is what it had
+/// before and what no cell in any run has ever thought worth building.
+#[must_use]
+pub fn osmotic_load(cells: &CellArena, i: usize) -> i64 {
+    let solute: i64 = cells.interior(i).iter().map(|&v| v as i64).sum();
+    let silent: i64 = cells
+        .slots(i)
+        .iter()
+        .filter(|o| o.kind == OrganelleType::Vacuole && o.is_active())
+        .map(|o| q10(o.param as i32) as i64)
+        .sum();
+    (solute - silent).max(0)
+}
+
 /// How many genome bytes a cell's nuclei can hold.
 #[must_use]
 pub fn nucleus_capacity(cells: &CellArena, i: usize) -> usize {
@@ -648,6 +676,8 @@ impl crate::state_hash::StateHash for BiologyConfig {
         h.i32(r.metabolic_floor);
         h.i32(r.repair_energy_per_unit);
         h.i32(r.background_damage);
+        h.i32(r.osmotic_threshold);
+        h.i32(r.osmotic_upkeep);
 
         let c = &self.metabolism.catalogue;
         let chem = c.metabolism;

@@ -631,3 +631,168 @@ fn poor_and_full() {
         );
     }
 }
+
+/// Does a population under turgor persist, and does it settle somewhere?
+///
+/// The packing probe's "no births" phases stop division by making it unaffordable, which under
+/// a storage charge stops being a way to hold a pack still and becomes a way to kill it: a cell
+/// that may not divide cannot halve its load, and `try_split` spends the copying buffer whether
+/// the division lands or not, so that configuration charges cells twice for something they are
+/// forbidden to do. It is not evidence about the charge. This is: births left alone, run long,
+/// and watch whether the population finds a level or walks to zero.
+#[test]
+#[ignore = "diagnostic; run with --release --ignored --nocapture"]
+fn persistence() {
+    println!("LONG  turgor   tick    pop   area%   solute p50   buffer p50   vacuoles   births/interval");
+    for charge in [0, mm_core::Q10_ONE / 32] {
+    let tag = if charge == 0 { "off" } else { "on " };
+    let mut world = growth_world(16);
+    {
+        let mut b = world.biology().clone();
+        b.metabolism.rates.osmotic_upkeep = charge;
+        world.set_biology(b);
+    }
+    let mut last_births = 0u64;
+    for step in 0..12 {
+        world.run(4000);
+        let cells = world.cells();
+        if cells.len() == 0 {
+            println!("LONG  {tag:>6} {:>6}  EXTINCT", (step + 1) * 4000);
+            break;
+        }
+        let mut solute: Vec<f32> = cells
+            .iter()
+            .map(|i| {
+                mm_core::biology::osmotic_load(cells, i) as f32
+                    / mm_core::biology::interior_capacity(cells, i).max(1) as f32
+            })
+            .collect();
+        solute.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mut buffer: Vec<i64> = cells
+            .iter()
+            .map(|i| {
+                let floor = world.biology().metabolism.rates.metabolic_floor.max(0) as i64;
+                let organelles: i64 = cells
+                    .slots(i)
+                    .iter()
+                    .filter(|o| o.is_present())
+                    .map(|o| {
+                        let s = world.biology().metabolism.catalogue.spec(o.kind);
+                        s.upkeep as i64 + s.upkeep_per_param as i64 * o.param as i64
+                    })
+                    .sum();
+                cells.energy[i] as i64 / (floor + organelles).max(1)
+            })
+            .collect();
+        buffer.sort_unstable();
+        let area: f32 = cells
+            .iter()
+            .map(|i| {
+                let r = q10_to_pos(mm_core::biology::radius(cells, i)) as f32 / POS_ONE as f32;
+                std::f32::consts::PI * r * r
+            })
+            .sum();
+        let slide = (world.substrate().width() * world.substrate().height()) as f32;
+        let vacuoles = cells
+            .iter()
+            .filter(|&i| {
+                cells.slots(i).iter().any(|o| o.kind == OrganelleType::Vacuole && o.is_active())
+            })
+            .count();
+        let births = world.births_total();
+        println!(
+            "LONG  {tag:>6} {:>6} {:>6} {:>7.0}% {:>12.1} {:>12} {:>10} {:>17}",
+            (step + 1) * 4000,
+            cells.len(),
+            100.0 * area / slide,
+            percentile(&solute, 50),
+            buffer[buffer.len() / 2],
+            vacuoles,
+            births - last_births,
+        );
+        last_births = births;
+    }
+    }
+}
+
+/// Does anything ever build a vacuole?
+///
+/// Turgor makes holding solute cost, but a cost alone only teaches a cell to hold less — and
+/// measured under uniform light that is exactly what happens: the load falls to the threshold
+/// and settles there, and not one vacuole is ever built. Nothing in a world of unlimited light
+/// and unlimited waste to fix has any reason to keep a reserve, so the organelle that makes
+/// reserves affordable is answering a question nobody asked.
+///
+/// A reserve is worth something when the lights go out. This runs the same slide under a
+/// day/night cycle against the uniform control, and reports whether a vacuole ever appears.
+#[test]
+#[ignore = "diagnostic; run with --release --ignored --nocapture"]
+fn vacuoles_under_a_night() {
+    println!("NIGHT  regime            ticks   pop   area%   solute p50   vacuoles   ever built");
+    for (label, regime) in [
+        ("uniform", LightRegime::Uniform { intensity: Q10_ONE }),
+        (
+            "day/night 600",
+            LightRegime::DayNight { period_ticks: 600, day: Q10_ONE * 2, night: 0 },
+        ),
+        (
+            "day/night 2000",
+            LightRegime::DayNight { period_ticks: 2000, day: Q10_ONE * 2, night: 0 },
+        ),
+    ] {
+        let mut world = growth_world(16);
+        world.set_light(regime);
+        let mut ever = 0usize;
+        for step in 0..10 {
+            world.run(2000);
+            let cells = world.cells();
+            if cells.len() == 0 {
+                println!("NIGHT  {label:<16} {:>6}  EXTINCT", (step + 1) * 2000);
+                break;
+            }
+            ever = ever.max(
+                cells
+                    .iter()
+                    .filter(|&i| {
+                        cells.slots(i).iter().any(|o| o.kind == OrganelleType::Vacuole && o.is_present())
+                    })
+                    .count(),
+            );
+        }
+        let cells = world.cells();
+        if cells.len() == 0 {
+            continue;
+        }
+        let mut solute: Vec<f32> = cells
+            .iter()
+            .map(|i| {
+                mm_core::biology::osmotic_load(cells, i) as f32
+                    / mm_core::biology::interior_capacity(cells, i).max(1) as f32
+            })
+            .collect();
+        solute.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let area: f32 = cells
+            .iter()
+            .map(|i| {
+                let r = q10_to_pos(mm_core::biology::radius(cells, i)) as f32 / POS_ONE as f32;
+                std::f32::consts::PI * r * r
+            })
+            .sum();
+        let slide = (world.substrate().width() * world.substrate().height()) as f32;
+        let active = cells
+            .iter()
+            .filter(|&i| {
+                cells.slots(i).iter().any(|o| o.kind == OrganelleType::Vacuole && o.is_active())
+            })
+            .count();
+        println!(
+            "NIGHT  {label:<16} {:>6} {:>5} {:>7.0}% {:>12.1} {:>10} {:>12}",
+            20_000,
+            cells.len(),
+            100.0 * area / slide,
+            percentile(&solute, 50),
+            active,
+            ever,
+        );
+    }
+}

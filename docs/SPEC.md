@@ -1142,10 +1142,58 @@ the founding, 9.7× at convergence on the 16 slide and 11.6× on the 32, peaking
 one cell in any run has ever built a vacuole. Storage as a *strategy* requires storage to be
 rationed and expensive; today it is neither.
 
+#### What turgor did when it was built, and what it did not
+
+Shipped as `biology::osmotic_load` and `metabolism::turgor_cost`: total free solute, less what an
+active vacuole holds out of solution, charged quadratically above four interior capacities at the
+metabolic floor per capacity, folded into upkeep. Measured over 48,000 ticks of the growth slide,
+one variable, `osmotic_upkeep` on against off, everything else equal:
+
+| | turgor off | turgor on |
+|---|---|---|
+| population at 48,000 | 90 | 90 |
+| occupancy | 124% | 126% |
+| solute, p50 capacities | 9.7, flat from tick 4,000 | 6.0 → 3.6, still falling |
+| energy buffer, p50 upkeep-ticks | 65,817 and climbing | 50,446 and climbing |
+| vacuoles ever built | 0 | 0 |
+
+**It does the job it was built for.** Solute settles at the threshold instead of at nine and a
+half capacities, which is a level the engine is now *setting* rather than one the matter budget
+of a closed box happened to impose. No extinction: the founding trajectory is unchanged, because
+the threshold was measured against the poorest decile rather than the median, and through the
+whole danger window the poor are lean. Population, occupancy and the deep-overlap count are all
+where they were.
+
+**It is not enough on its own, and the reason is the same shape as everything else in this
+section.** Energy is a separate scalar with no ceiling, and respiration converts solute into it.
+Charging matter therefore pushes matter into the one pool that is still free, and the energy
+buffer goes on climbing linearly in both columns — the charge slows it by under a quarter and
+does not stop it. A sink on half an economy is not a sink.
+
+**And no cell has still ever built a vacuole**, under uniform light or under a day/night cycle at
+either 600 or 2,000 ticks with the nights fully dark. This was the payoff the mechanism was
+supposed to buy and it did not arrive, for a reason worth writing down: a cost alone only teaches
+a cell to hold *less*. For storage to be worth building, holding has to be worth something, and
+today the best reserve in the world is stored energy — free, unbounded, and needing no organelle
+at all. The vacuole is answering a question no cell has. It cannot pay for itself until energy is
+rationed too, at which point matter that is out of solution is the only reserve left.
+
+So the storage charge is two mechanisms and only one of them is built. The companion is upkeep
+that scales with *held energy* above a reserve, and the same measurement calibrates it: through
+the founding race the poorest cell alive holds between one and forty ticks of upkeep, and a
+converged pack sits in the tens of thousands.
+
 Rupture — damage rising steeply with pressure until a cell bursts — belongs after these, not
 instead of them. It is a ceiling, and a ceiling on top of an economy with no sink only decides
 who dies of a problem nobody could have avoided. It also cannot be built on `pressure` as
 `pressure` is currently defined, for the reason above.
+
+One measurement artefact, recorded so it is not mistaken for a result. The packing probe stops
+division by making it unaffordable, and under a storage charge that configuration stops being a
+way to hold a pack still: a cell that may not divide cannot halve its load, and `try_split`
+spends the copying buffer whether the division lands or not, so those cells are charged twice for
+something they are forbidden to do. The pack duly dies back from 82 cells to 4. It says nothing
+about turgor. `gradient_probe::persistence` leaves births alone and is the test that does.
 
 ### 17.8 The pack has no inside
 
@@ -1201,8 +1249,6 @@ consumption, and the honest way is to let occupancy impede it, which is the poro
 solver does not have.
 
 ### 17.9 What this is all for
-
-### 17.8 What this is all for
 
 Each of these is a carrying-capacity term, and that is deliberate. Area is a limit that selects
 for one thing. Light, nutrient influx, barriers, particulate availability and predation
