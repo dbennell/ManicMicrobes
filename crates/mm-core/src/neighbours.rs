@@ -449,6 +449,26 @@ impl NeighbourIndex {
         false
     }
 
+    /// Every living slot, in the order the grid holds them: by square, row-major.
+    ///
+    /// The counting sort that builds the buckets leaves this spatially sorted for free, and it
+    /// is what a separation pass should iterate rather than `0..capacity`. Cells near each other
+    /// on the slide share neighbours, so consecutive entries here re-read the same arena rows
+    /// while they are still in cache, where consecutive *slots* are wherever the free list
+    /// happened to put them.
+    ///
+    /// The half of the space-filling-curve idea that is reachable without reordering the arena
+    /// itself — which cannot be done, because `CellId` carries the slot, so a permutation would
+    /// invalidate every junction, parent and archived reference in the world.
+    ///
+    /// Safe to iterate in any order only because separation is now Jacobi: each cell computes
+    /// its own correction and writes nobody else, so which order the work happens in is not
+    /// something the result can see.
+    #[must_use]
+    pub fn occupants(&self) -> &[u32] {
+        &self.entries
+    }
+
     /// The cells `i` might be touching. Empty until [`Self::refresh_pairs`].
     #[must_use]
     pub fn pairs_of(&self, i: usize) -> &[u32] {
@@ -1086,17 +1106,28 @@ pub fn resolve_collisions(
         // less. That is a good trade here specifically because this solver is deliberately soft
         // already — `CONTACT_STRENGTH` in sixteenths over three passes, a gentle response chosen
         // so a pack rests at contact rather than being driven to zero overlap.
+        // Walked in the grid's own order rather than by slot, which costs nothing and buys
+        // locality: neighbouring cells share neighbours, so consecutive tasks re-read arena rows
+        // that are still warm. Slot order scatters that, because a slot is wherever the free
+        // list put it. Only legal because the pass is Jacobi — see `NeighbourIndex::occupants`.
         let first = pass == 0;
         let arena: &CellArena = cells;
         let radii_ref: &[i32] = radii;
-        let deltas: Vec<Correction> = (0..arena.capacity())
-            .into_par_iter()
-            .map(|i| correction_for(arena, index, radii_ref, i, first))
+        let deltas: Vec<(u32, Correction)> = index
+            .occupants()
+            .par_iter()
+            .map(|&i| {
+                (
+                    i,
+                    correction_for(arena, index, radii_ref, i as usize, first),
+                )
+            })
             .collect();
 
         let max_x = (width as i64 * POS_ONE as i64) - 1;
         let max_y = (height as i64 * POS_ONE as i64) - 1;
-        for (i, c) in deltas.iter().enumerate() {
+        for &(i, ref c) in deltas.iter() {
+            let i = i as usize;
             if !cells.occupied(i) {
                 continue;
             }
