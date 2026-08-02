@@ -298,6 +298,28 @@ impl NeighbourIndex {
         self.within(sx, sy, self.search)
     }
 
+    /// Every cell a cell of `radius` could possibly be touching, in a fixed order.
+    ///
+    /// Two cells interact out to the sum of their radii, so this one has to reach its own
+    /// radius plus the largest on the slide — not *twice* the largest, which is what
+    /// [`Self::around`] assumes because it does not know who is asking.
+    ///
+    /// The difference is not small. A slide is mostly cells of about one size with a handful of
+    /// outliers, and the search is a square: measured on a populated slide the median radius was
+    /// 1.25 squares and the largest 7, so every cell was scanning 961 grid squares when its own
+    /// reach needed 81. That is a twelvefold tax on the phase that *is* the tick — collision
+    /// separation was 113% of a whole tick at sixty thousand cells — levied on the whole
+    /// population by one big cell, four times a tick, because the walk runs once for touch and
+    /// once per separation pass.
+    ///
+    /// Still `max_radius` and not the neighbour's actual radius, because the whole point of an
+    /// index is not to have looked at the neighbour yet. What this removes is the half of the
+    /// overestimate that was never about the caller at all.
+    pub fn around_radius(&self, sx: i32, sy: i32, radius: i32) -> impl Iterator<Item = usize> + '_ {
+        let reach = self.squares_for(radius.saturating_add(self.max_radius));
+        self.within(sx, sy, reach.min(self.search))
+    }
+
     /// Every cell within `k` squares, in a fixed order.
     pub fn within(&self, sx: i32, sy: i32, k: i32) -> impl Iterator<Item = usize> + '_ {
         let k = k.clamp(1, 64);
@@ -732,7 +754,13 @@ pub fn resolve_collisions(
             // objects, so the neighbours are walked directly. Collecting them first would be one
             // heap allocation per cell per tick, which at fifty thousand cells was a third of the
             // tick on its own.
-            for j in index.around(sx, sy) {
+            //
+            // Sized from *this* cell's radius rather than from twice the largest on the slide,
+            // which is exactly correct here and not an approximation: this pair matters only if
+            // `d < ri + rj`, and `rj` is at most `max_radius`, so a reach of `ri + max_radius`
+            // cannot miss one. What it drops is the half of the old estimate that was about a
+            // hypothetical giant standing where *this* cell is standing.
+            for j in index.around_radius(sx, sy, ri) {
                 // Each pair is handled once, by its lower slot, so the push is applied to both
                 // sides of one decision rather than to two sides of two.
                 if j <= i || !cells.occupied(j) {

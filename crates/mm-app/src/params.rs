@@ -129,6 +129,18 @@ pub const FIELDS: &[Field] = &[
         note: "energy a division costs outright",
     },
     Field {
+        path: "max_mass",
+        label: "max mass",
+        group: Group::Division,
+        unit: Unit::Q10,
+        note: "the largest a cell's body may get. Growth from the cytoplasm is already bounded \
+               by the membrane parameter, but building organelles added mass with nothing \
+               stopping it. Radius goes as the square root of mass and the neighbour index \
+               sizes its search from the largest cell on the slide, so one giant multiplies the \
+               collision cost for the whole population — and that is the phase that is the \
+               tick. Zero switches the ceiling off",
+    },
+    Field {
         path: "split_pressure",
         label: "split pressure",
         group: Group::Division,

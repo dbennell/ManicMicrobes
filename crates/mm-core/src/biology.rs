@@ -552,6 +552,15 @@ pub struct BiologyConfig {
     pub division_matter: i32,
     /// Energy a division costs outright, `Q10`.
     pub division_energy: i32,
+    /// The largest a cell's body may get, `Q10`. Zero switches the ceiling off.
+    ///
+    /// Not a tidiness rule. `radius` goes as the square root of mass, and the neighbour index
+    /// sizes its search from the largest cell on the slide and applies it to every cell — so a
+    /// single giant multiplies the cost of the collision phase for the whole population, and
+    /// that phase is the tick. At `q10(400)` a cell can reach a radius of 2.75 squares, which is
+    /// comfortably above the 1.50 that a populated slide put at the ninety-ninth percentile and
+    /// well under the 7.00 one cell had reached.
+    pub max_mass: i32,
     /// How wedged a cell may be and still bud, `Q10`, against the per-cell pressure
     /// [`crate::neighbours::resolve_collisions`] records: one unit per neighbour that has
     /// bottomed out on its core, nothing for a neighbour merely resting against it.
@@ -601,6 +610,7 @@ impl crate::state_hash::StateHash for BiologyConfig {
         h.i32(self.division_matter);
         h.i32(self.division_energy);
         h.i32(self.split_pressure);
+        h.i32(self.max_mass);
         h.u64(self.structural_chemical as u64);
         h.i32(self.copy_energy_per_byte);
 
@@ -687,6 +697,7 @@ impl Default for BiologyConfig {
             mutation: MutationRates::default(),
             division_matter: q10(4),
             division_energy: q10(20),
+            max_mass: q10(400),
             // Three neighbours' worth of bottomed-out contact. A cell in a settled monolayer
             // has about six contacts, so this refuses one whose neighbourhood is half solid
             // while leaving an ordinary crowd free to keep growing outward. Measured rather
@@ -799,6 +810,25 @@ pub fn resolve(
                     let matter = spec.matter_cost(param);
                     let sc = config.structural_chemical % CHEM_COUNT;
                     if cells.interior(i)[sc] < matter || cells.energy[i] < spec.build_energy {
+                        continue;
+                    }
+                    // And a ceiling on how big a body can get. Growth from the cytoplasm is
+                    // already bounded — `metabolism` grows towards a target set by the membrane
+                    // parameter — but building organelles adds structural mass with nothing
+                    // stopping it, and that was the path a cell took to becoming a giant.
+                    //
+                    // The reason to care is not that giants look odd. The neighbour search is
+                    // sized from the largest cell on the slide, so one of them widens the walk
+                    // for the entire population, and the walk is the phase that *is* the tick.
+                    // Measured on a populated slide: median radius 1.25 squares, p99 1.50, and
+                    // one cell at 7.00 — which put the search at 961 grid squares per cell where
+                    // 81 would have done.
+                    //
+                    // The matter simply stays in the interior, where it is still the cell's and
+                    // still counted. Refusing to build is not destroying anything (I4).
+                    if config.max_mass > 0
+                        && cells.mass[i].saturating_add(matter) > config.max_mass
+                    {
                         continue;
                     }
                     // Structural matter moves from the interior into the cell's mass. It has
