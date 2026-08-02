@@ -86,6 +86,16 @@ pub struct MetabolicRates {
     /// every generation and stop dividing after five or six — which is exactly what happened
     /// before this existed, and it looked like a carrying capacity rather than like a bug.
     pub growth_rate: i32,
+    /// How wedged a cell may be and still enlarge, `Q10`, against the same per-cell pressure
+    /// `BiologyConfig::split_pressure` reads: one unit per neighbour bottomed out on its core.
+    ///
+    /// A cell with nowhere to put a daughter also has nowhere to put more of itself, and until
+    /// this existed only the first of those was true. A slide with a bounded population still
+    /// filled to 125% of its own area, because division stopped and growth did not — and above
+    /// 100% the packing is not something any solver can fix.
+    ///
+    /// Zero switches it off, for a scenario that wants growth unconstrained.
+    pub growth_pressure: i32,
     /// Damage a cell repairs per tick, `Q10`. A rate, not a fraction.
     ///
     /// Fixed capacity rather than a proportion, and the difference decides whether anything
@@ -152,6 +162,8 @@ impl Default for MetabolicRates {
             throughput_per_param: Q10_ONE / 16,
             latent_per_substrate: 64,
             growth_rate: q10(1) / 4,
+            // The same threshold division uses, because it is the same question.
+            growth_pressure: q10(1),
             toxicity_threshold: q10(8),
             repair_per_tick: 100,
             // Chosen by measurement, in a soup at 40,000 ticks. The first value tried was 64,
@@ -250,6 +262,7 @@ impl Metabolism {
         chem: &ChemTable,
         ledger: &mut Ledger,
         starving: &mut Vec<crate::cell::CellId>,
+        pressure: &[i32],
     ) -> MetabolicReport {
         let m = self.catalogue.metabolism;
         let mut report = MetabolicReport::default();
@@ -401,7 +414,23 @@ impl Metabolism {
                 let target =
                     q10(membrane.param as i32).saturating_add((membrane.control[1] as i32).max(0));
                 let room = target.saturating_sub(cells.mass[i]);
-                if room > 0 {
+                // And somewhere to put it. A cell wedged among neighbours cannot get bigger
+                // any more than it can bud, and for the same reason.
+                //
+                // Growth was gated on nothing at all, which is how a slide with a bounded
+                // *population* still ended up with 125% of its area covered in cells: division
+                // stopped, and then every cell went on enlarging towards a target set by its
+                // membrane parameter whether or not there was room. Overlap at that density is
+                // not something a solver can fix — no arrangement of those cells has them clear
+                // of each other, so the core floor cannot be honoured at any price.
+                //
+                // The matter simply stays in the cytoplasm, which is where it came from. That is
+                // conserving, and it is not free storage either: the interior has a capacity
+                // (see `biology::interior_capacity`), so a cell that cannot spend what it has
+                // stops being able to take any more in.
+                let wedged = self.rates.growth_pressure > 0
+                    && pressure.get(i).copied().unwrap_or(0) > self.rates.growth_pressure;
+                if room > 0 && !wedged {
                     let sc = m.structural % CHEM_COUNT;
                     let available = cells.interior(i)[sc];
                     let grown = self.rates.growth_rate.min(room).min(available);

@@ -269,6 +269,18 @@ pub const FIELDS: &[Field] = &[
         note: "how much of a toxin a cell tolerates before it takes damage",
     },
     Field {
+        path: "metabolism.rates.growth_pressure",
+        label: "growth pressure",
+        group: Group::Metabolism,
+        unit: Unit::Q10,
+        note: "how wedged a cell may be and still enlarge, against the same pressure division \
+               reads. A cell with nowhere to put a daughter has nowhere to put more of itself \
+               either, and until this existed only the first was true — a slide with a bounded \
+               population still filled to 125% of its own area, and above 100% the packing is \
+               not something a solver can fix. The matter stays in the cytoplasm, which is \
+               bounded in its own right. Zero switches it off",
+    },
+    Field {
         path: "metabolism.rates.growth_rate",
         label: "growth rate",
         group: Group::Metabolism,

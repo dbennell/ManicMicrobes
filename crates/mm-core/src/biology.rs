@@ -643,6 +643,7 @@ impl crate::state_hash::StateHash for BiologyConfig {
         h.i32(r.latent_per_substrate);
         h.i32(r.toxicity_threshold);
         h.i32(r.growth_rate);
+        h.i32(r.growth_pressure);
         h.i32(r.repair_per_tick);
         h.i32(r.metabolic_floor);
         h.i32(r.repair_energy_per_unit);

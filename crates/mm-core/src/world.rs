@@ -578,6 +578,7 @@ impl World {
                 &self.scenario.chemicals,
                 &mut self.ledger,
                 &mut self.starving,
+                &self.pressure,
             );
             self.pending.deaths.append(&mut self.starving);
             // 6b. Ecology: spikes wound, lysosomes digest (M8). Before deaths, so a cell
