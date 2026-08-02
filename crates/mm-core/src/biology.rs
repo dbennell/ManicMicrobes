@@ -698,11 +698,31 @@ impl Default for BiologyConfig {
             division_matter: q10(4),
             division_energy: q10(20),
             max_mass: q10(400),
-            // Three neighbours' worth of bottomed-out contact. A cell in a settled monolayer
-            // has about six contacts, so this refuses one whose neighbourhood is half solid
-            // while leaving an ordinary crowd free to keep growing outward. Measured rather
-            // than guessed — see the pressure histogram in `crowding_bounds_a_population`.
-            split_pressure: q10(3),
+            // One neighbour's worth of bottomed-out contact.
+            //
+            // Three was reasoned from the six contacts a settled monolayer has, and it is far
+            // too permissive, because the gate is per cell and the overshoot is collective. A
+            // cell at the edge of a colony reads low pressure and is right to — but its daughter
+            // goes inward, and the colony as a whole sails past what the slide can hold. Grown
+            // from one founder on a sixteen-square slide, the cells' combined area reached 243%
+            // of the slide, which is not a packing problem the solver can fix: no arrangement of
+            // those cells has them 95% apart.
+            //
+            // Swept, with the packing bench as the control:
+            //
+            // ```text
+            //   threshold   pop   area   deep overlaps   worst pair
+            //         3.0   145   243%          23.4%         6.1%
+            //         2.0   104   162%          14.1%         7.8%
+            //         1.5    79   128%           0.6%        75.2%
+            //         1.0    79   125%           0.0%        83.1%
+            //         0.6    70   121%           0.0%        87.1%
+            // ```
+            //
+            // Deep overlaps collapse between 2.0 and 1.5 and are gone by 1.0, at no cost in
+            // population against 1.5. It costs about 45% of the cells against 3.0, which is the
+            // honest price of them not being inside each other.
+            split_pressure: q10(1),
             structural_chemical: 4,
             copy_energy_per_byte: Q10_ONE / 64,
             junctions: crate::junction::JunctionConfig::default(),

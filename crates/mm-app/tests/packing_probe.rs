@@ -190,6 +190,65 @@ fn stop_division(world: &mut World) {
     world.set_biology(b);
 }
 
+/// What `split_pressure` has to be for the slide not to overfill.
+///
+/// The gate is per cell and the overshoot is collective: a cell at the edge of the colony reads
+/// low pressure and is right to, but its daughter goes inward, and the colony as a whole sails
+/// past what the slide can hold. One variable, the bench numbers as the target.
+#[test]
+#[ignore = "diagnostic; run with --release --ignored --nocapture"]
+fn split_pressure_sweep() {
+    println!("SWEEP  threshold   pop   area%   deep%   worst");
+    for tenths in [30u32, 20, 15, 10, 6] {
+        let mut w = growth_world(16);
+        let mut b = w.biology().clone();
+        b.split_pressure = (mm_core::Q10_ONE as i64 * tenths as i64 / 10) as i32;
+        w.set_biology(b);
+        w.run(2400);
+        let s = stats(&w);
+        println!(
+            "SWEEP {:>10.1} {:>5} {:>7.0}% {:>7.1}% {:>7.1}%",
+            tenths as f32 / 10.0,
+            s.population,
+            s.occupancy,
+            100.0 * s.deep as f32 / s.pairs.max(1) as f32,
+            100.0 * s.worst,
+        );
+    }
+    println!("SWEEP  (bench control: 220 cells, 24% area, 0.0% deep, worst 94.3%)");
+}
+
+/// When did the slide go over 100%, and what was happening at the time?
+///
+/// Occupancy starts near zero with one cell, so something drove it to 237% — and the endpoint
+/// cannot say whether that was division multiplying cells or metabolism enlarging them. This
+/// walks the trajectory and reports both, with the births in the interval beside them.
+#[test]
+#[ignore = "diagnostic; run with --release --ignored --nocapture"]
+fn occupancy_trajectory() {
+    let mut w = growth_world(16);
+    let mut last_births = 0u64;
+    println!("TRAJ  tick   pop  births/interval   area%   r p50   deep%   pressure p50");
+    for step in 0..24 {
+        w.run(100);
+        let s = stats(&w);
+        let births = w.births_total();
+        let p50 = if s.radii.is_empty() { 0.0 } else { s.radii[s.radii.len() / 2] };
+        let press = if s.press.is_empty() { 0.0 } else { s.press[s.press.len() / 2] };
+        println!(
+            "TRAJ {:>5} {:>5} {:>16} {:>7.0}% {:>7.2} {:>7.1}% {:>10.1}",
+            (step + 1) * 100,
+            s.population,
+            births - last_births,
+            s.occupancy,
+            p50,
+            100.0 * s.deep as f32 / s.pairs.max(1) as f32,
+            press,
+        );
+        last_births = births;
+    }
+}
+
 #[test]
 #[ignore = "diagnostic; run with --release --ignored --nocapture"]
 fn packing_probe() {
