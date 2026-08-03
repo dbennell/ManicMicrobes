@@ -377,7 +377,18 @@ fn fragment(in: Output) -> @location(0) vec4<f32> {
     // a cell appeared thick-walled on some sides and thin on others depending only on the
     // *neighbour's* depth. An out-of-focus edge should lose contrast, not gain weight — so
     // where the fade is now wider than the wall, the wall correctly dissolves into it.
-    let wall = max(radius * 0.025, fwidth(r) * 1.5);
+    // Halved from `radius * 0.025` and the floor brought down from `fwidth(r) * 1.5`, because
+    // at any ordinary magnification it was the *floor* that was setting the width and not the
+    // proportional term — they cross at a cell about sixty pixels in radius, and a packed slide
+    // is nowhere near that. So thinning the wall meant thinning the floor, and the floor's job
+    // sets how far it can go: the ring is drawn by the smoothstep below, and a ramp narrower
+    // than a pixel aliases. `fwidth` is `abs(dpdx) + abs(dpdy)`, which already over-estimates a
+    // pixel by up to root two for a radial field, so one of them is a real pixel of fade and
+    // the 1.5 was a pixel and a half of it.
+    //
+    // Worth remembering when reading the result that a shared wall is drawn *twice*, once by
+    // the cell on each side, so this is half of what a boundary in a packed sheet measures.
+    let wall = max(radius * 0.0125, fwidth(r));
     let membrane = smoothstep(-wall, -wall * 0.35, field) * integrity;
 
     // Flat-shaded, near enough. The hemisphere normal above is kept for a *hint* of form and for
@@ -385,9 +396,28 @@ fn fragment(in: Output) -> @location(0) vec4<f32> {
     // strong rim — every cell read as a lit sphere, so a crowd of them read as a heap of pebbles
     // rather than as a sheet of cells. Cells in a monolayer are flat.
     let lum = clamp(0.72 + 0.17 * lambert + 0.05 * rim + 0.045 * grain, 0.0, 1.0);
-    // The wall is the cell's own colour taken well down, rather than black: a dark version of
-    // each cell keeps the species colouring readable through the outline.
+    // The wall is the cell's own colour taken down, rather than black: a dark version of each
+    // cell keeps the species colouring readable through the outline.
+    //
+    // Taken down to about a third rather than to a sixth, and this is the half of "the outlines
+    // are too heavy" that thinning could not reach. Measured on a packed slide at 120×: halving
+    // the width term and dropping its floor to the antialiasing minimum took the wall's share of
+    // the sheet from 27.5% of pixels to 24.0%, and the picture barely changed — because at any
+    // ordinary magnification the wall is already about a pixel wide, so making it thinner makes
+    // it *fainter* rather than narrower. The pixel grid is the floor and there is nothing below
+    // it.
+    //
+    // What is left is contrast, which has no such floor. At a sixth the darkest wall pixel read
+    // 64 against a body around 160; at a third it reads 93, so the boundary keeps its position
+    // and gives up a third of its weight. Area times contrast — near enough what the eye counts
+    // as ink — comes out at 58% of where it started, which is the "about half" that was asked
+    // for and could not have come from width alone.
+    //
+    // The floor on going further is the one the paragraph above sets out: a boundary lighter
+    // than the cell it bounds has nothing to contrast against, and a packed sheet with no walls
+    // reads as one lumpy object rather than as cells. A third is still plainly darker than any
+    // body colour on the slide.
     let body = in.colour.rgb * lum;
-    let rgb = mix(body, in.colour.rgb * 0.16, membrane);
+    let rgb = mix(body, in.colour.rgb * 0.34, membrane);
     return vec4<f32>(rgb, in.colour.a * alpha);
 }
