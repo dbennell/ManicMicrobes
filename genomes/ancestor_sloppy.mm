@@ -110,21 +110,32 @@
 
 ; ---------------------------------------------------------------- divide
 ;
-; The replication loop of SPEC §5.2, guarded by an energy check. A cell that divides when it
-; cannot afford to wastes the copy and gets nothing, so the guard is worth its instructions.
+; The replication loop of SPEC §5.2, guarded by an energy check that now works.
+;
+; It used to read `JMPNZ enough / HALT / HALT / enough:`, and it guarded nothing. `HALT` yields
+; the rest of the *tick* and the instruction pointer has already moved past it, so the two HALTs
+; delayed a division by two ticks and then it happened anyway, at any energy at all. Measured on
+; `predator.mm`: dividing at 46 energy against its own bar of 200, every fifty-one ticks, each
+; one stripping the parent and producing a daughter too poor to build a body. Every shipped
+; genome had this, under a comment claiming the guard was worth its instructions.
+;
+; A forward `JMPZ` over the whole block is the fix. Sleeping is still cheap and still happens —
+; the top-level `HALT` after the last `EXPRESS` does it, and did it all along.
+;
+; The threshold went from 200 to 100 with it, because 200 was never a real number: the branch it
+; gated was dead, so nothing ever tested whether the economy could clear it. It cannot. With the
+; guard working there is a cliff between 140 and 100 — one founder on `soup.ron` reaches 2 cells
+; at 140 and 1,070 at 100.
 
         GENE    #divide
         ONE
         ZERO
         OGET                    ; membrane slot 0, reading 1: energy
-        IMM     200
+        IMM     100
         CMP                     ; -1 if poor, 0 or 1 if it can afford to divide
         ONE
         ADD                     ; 0 if poor, non-zero if not
-        JMPNZ   enough
-        HALT                    ; not yet; sleeping is cheap
-        HALT
-enough:
+        JMPZ    lean            ; too poor — skip the whole copy, do not sleep through it
         GLEN
         SETLN
         GLEN
@@ -138,4 +149,5 @@ loop:
         COPYB
         LOOPLN  loop
         SPLIT
+lean:
         RET

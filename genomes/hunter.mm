@@ -93,14 +93,11 @@
         ONE
         ZERO
         OGET
-        IMM     200
+        IMM     100
         CMP
         ONE
         ADD
-        JMPNZ   enough
-        HALT
-        HALT
-enough:
+        JMPZ    lean            ; too poor — skip the whole copy, do not sleep through it
         GLEN
         SETLN
         GLEN
@@ -114,4 +111,5 @@ loop:
         COPYB
         LOOPLN  loop
         SPLIT
+lean:
         RET

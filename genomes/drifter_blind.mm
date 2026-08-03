@@ -113,14 +113,11 @@
         ONE
         ZERO
         OGET                    ; membrane slot 0, reading 1: energy
-        IMM     200
+        IMM     100
         CMP                     ; -1 if poor, 0 or 1 if it can afford to divide
         ONE
         ADD                     ; 0 if poor, non-zero if not
-        JMPNZ   enough
-        HALT                    ; not yet; sleeping is cheap
-        HALT
-enough:
+        JMPZ    lean            ; too poor — skip the whole copy, do not sleep through it
         GLEN
         SETLN
         GLEN
@@ -134,4 +131,5 @@ loop:
         COPYB
         LOOPLN  loop
         SPLIT
+lean:
         RET

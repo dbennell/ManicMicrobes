@@ -633,8 +633,20 @@ mod tests {
     #[test]
     fn a_damaged_daughter_still_counts_for_its_side() {
         // The property the fix rests on: descent survives a genome that no longer matches.
+        //
+        // `mutator.mm` rather than `ancestor_sloppy.mm`, and the swap is a repair rather than a
+        // relaxation — the assertion below is unchanged. The sloppy strain exists to poison
+        // itself and die, which is what M2's selection test measures it for, and a test that
+        // requires *both* sides standing after four hundred ticks had no business seeding one
+        // of them with a strain designed not to be. It passed only because the divide guard
+        // was broken: a cell dividing on its instruction cycle regardless of energy kept a
+        // dying side populated while it died. With a guard that guards, a poisoned cell never
+        // reaches the bar, never divides, and the side is gone by tick four hundred.
+        //
+        // A mutator is the better fixture anyway. The claim is about descent surviving copy
+        // damage, and this is the strain that makes the most of it.
         let left = Entry::new("tidy", assemble("ancestor.mm"));
-        let right = Entry::new("sloppy", assemble("ancestor_sloppy.mm"));
+        let right = Entry::new("mutator", assemble("mutator.mm"));
         let mut world = setup(&quick(), &left, &right).expect("setup");
         let (lr, rr) = roots(&world, &left, &right);
         assert_ne!(lr, u32::MAX, "the left entry founded no species");

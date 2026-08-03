@@ -888,3 +888,34 @@ fn a_predator_that_gives_up_the_sun() {
         );
     }
 }
+
+/// What division threshold the *ancestor's* economy supports, now that the guard works.
+///
+/// The 200 in every shipped genome was never calibrated, because until the guard was fixed the
+/// branch it gated was dead — a cell divided on its instruction cycle whatever it held. With a
+/// guard that guards, 200 is a real bar and the ancestor cannot clear it often enough to grow.
+#[test]
+fn what_bar_the_ancestor_can_clear() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../genomes/ancestor.mm");
+    let source = std::fs::read_to_string(&path).expect("genome source");
+    eprintln!("\nancestor divide threshold, one founder, soup.ron:");
+    eprintln!("{:>10} {:>10} {:>10} {:>9}", "threshold", "pop @2400", "pop @6000", "energy");
+    for threshold in [200u32, 140, 100, 70, 50, 30] {
+        let src = source.replace(
+            "        IMM     200\n        CMP",
+            &format!("        IMM     {threshold}\n        CMP"),
+        );
+        let bytes = mm_asm::assemble(&src).expect("assembles").bytes;
+        let mut world = World::new(scenario("soup.ron")).expect("world");
+        let _ = seed(&mut world, &bytes);
+        world.run(2400);
+        let at_2400 = world.cells().len();
+        world.run(3600);
+        let cells = world.cells();
+        eprintln!(
+            "{threshold:>10} {at_2400:>10} {:>10} {:>9}",
+            cells.len(),
+            cells.iter().next().map_or(0, |i| cells.energy[i] / Q10_ONE)
+        );
+    }
+}

@@ -114,10 +114,7 @@
         ZERO                    ; touch sensor, output 0 — how many contacts
         IMM     5
         OGET
-        JMPNZ   touching
-        HALT                    ; nothing to work with; sleeping is cheap
-        HALT
-touching:
+        JMPZ    idle            ; nothing to work with — skip the attempt entirely
         RAND
         IMM     127
         AND                     ; one guess at its receptor key, 0-127
@@ -127,6 +124,7 @@ touching:
         OGET
         JOIN
         DROP                    ; one bit comes back, and one bit is all it is worth
+idle:
         RET
 connected:
         GLEN
@@ -163,14 +161,11 @@ pump:
         ONE
         ZERO
         OGET
-        IMM     200
+        IMM     100
         CMP
         ONE
         ADD
-        JMPNZ   enough
-        HALT
-        HALT
-enough:
+        JMPZ    lean            ; too poor — skip the whole copy, do not sleep through it
         GLEN
         SETLN
         GLEN
@@ -184,4 +179,5 @@ loop:
         COPYB
         LOOPLN  loop
         SPLIT
+lean:
         RET
