@@ -429,7 +429,7 @@ fn a_predator_standing_on_its_food() {
                             );
                             world
                                 .ledger_mut()
-                                .record_injected(mm_core::ecology::CARRION, added);
+                                .record_injected(mm_core::ecology::CARRION, i64::from(added));
                             let after = world.substrate().chem_at(mm_core::ecology::CARRION, x, y);
                             let _ = (before, added, after);
                         }
@@ -899,7 +899,10 @@ fn what_bar_the_ancestor_can_clear() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../genomes/ancestor.mm");
     let source = std::fs::read_to_string(&path).expect("genome source");
     eprintln!("\nancestor divide threshold, one founder, soup.ron:");
-    eprintln!("{:>10} {:>10} {:>10} {:>9}", "threshold", "pop @2400", "pop @6000", "energy");
+    eprintln!(
+        "{:>10} {:>10} {:>10} {:>9}",
+        "threshold", "pop @2400", "pop @6000", "energy"
+    );
     for threshold in [200u32, 140, 100, 70, 50, 30] {
         let src = source.replace(
             "        IMM     200\n        CMP",

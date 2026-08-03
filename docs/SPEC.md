@@ -1372,6 +1372,59 @@ spends the copying buffer whether the division lands or not, so those cells are 
 something they are forbidden to do. The pack duly dies back from 82 cells to 4. It says nothing
 about turgor. `gradient_probe::persistence` leaves births alone and is the test that does.
 
+#### Matter has a boundary too, and a source alone will not do
+
+Everything above is about energy. Matter has the same question and it turned out to have a
+cleaner answer, because matter's fixed point is one an outflow can actually put there.
+
+A slide has been closed to matter and open only to light. That is one habitat and not the only
+interesting one — a deep-sea vent is a slide in the dark with inorganic matter welling up
+through it, marine snow is a slide in the dark with organic matter falling through, and a
+channel is a slide with both ends open. `Scenario::flux` is a list of `Source` and `Drain`
+rectangles applied once per fluid step, and it is what makes those three describable.
+
+**A source without a drain is a slow count up to the quantity cap.** Matter that arrives and
+never leaves accumulates until `MAX_QUANTITY` stops it, and a population under a ceiling set by
+arithmetic is not a population under a carrying capacity — it is the same degenerate answer the
+energy economy gives above, arrived at from the other side. With both ends, the standing stock
+has a fixed point *in the stock itself*: a drain is specified as a `Q10` fraction per step
+rather than an amount, so what leaves scales with what is there, which is exactly the `S`-
+dependent term §17.7 shows the energy economy lacks. Measured on `the_drift.ron`: detritus
+starts at 909M, influx is steady at 336M per thousand ticks, efflux falls from 445M to 330M as
+the channel drains down, and the stock settles at **733M** and stays. Population peaks at 89 and
+settles at 58.
+
+Being a fraction also means a drain can never take what is not there and can never scour a
+channel dry, which is why it is not an amount.
+
+Both directions go through the ledger in both currencies, because both invariants are identities
+and not approximations:
+
+- **Matter (I4).** What `Substrate::add_chem` reports as *actually* moved is what is recorded, so
+  a source aimed at a barrier, off the edge of the slide, or at a square already at the cap
+  records what it managed rather than what it intended. Rectangles are clamped to the slide
+  rather than wrapped — `Substrate::index` reduces modulo the grid, so an inlet running off the
+  right-hand edge would otherwise reappear on the left, at the outflow.
+- **Energy (I5).** Matter that is a metabolic substrate carries its latent energy with it. An
+  inflow of sulphide that did not say so would appear as stored energy nobody let in and the
+  next tick's check would fail. `Metabolism::latent_in` weighs a parcel by the same rule
+  `recompute_stored` weighs the world, so the two cannot disagree; detritus and carrion weigh
+  nothing, because they have to be taken apart before they are worth anything.
+
+Energy arriving this way is attributed to a fourth `TrophicSource::Influx` rather than folded
+into `Light`, or a vent slide in the dark would report a photosynthetic economy. It is not a way
+of life and nothing eats it — it is the world's own income, the counterpart of the tick-zero
+standing stock being attributed to light.
+
+**Energy leaving with matter is not dissipation**, and the two are counted apart. `energy_out`
+carries both; `energy_exported` is the part that left latent in matter, and `Sample::dissipation`
+subtracts it. A budget panel that showed food washing off the downstream end as the world getting
+warmer would be describing a different world.
+
+Neither end touches cells. A cell that swims into an outflow is not deleted, because "the current
+washed it off the slide" and "it was eaten by the edge of the world" are different claims and
+only one of them is one this engine should make.
+
 ### 17.8 The pack has no inside
 
 §17.7 is about the economy. This is about the geometry, and it is the other half of why a dense

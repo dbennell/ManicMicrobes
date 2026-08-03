@@ -35,7 +35,7 @@ use crate::world::World;
 pub const MAGIC: [u8; 8] = *b"MMSNAP\0\x01";
 /// Snapshot format version, distinct from the ISA version. The format may change without
 /// the meaning of a genome changing, and vice versa.
-pub const FORMAT_VERSION: u16 = 8;
+pub const FORMAT_VERSION: u16 = 9;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum SnapshotError {
@@ -531,9 +531,17 @@ impl Snapshot {
         for v in l.evicted() {
             w.i64(v);
         }
+        for v in l.injected() {
+            w.i64(v);
+        }
+        for v in l.drained() {
+            w.i64(v);
+        }
         w.i64(l.energy_in());
         w.i64(l.energy_out());
         w.i64(l.energy_stored());
+        w.i64(l.energy_imported());
+        w.i64(l.energy_exported());
         w.i64(l.converted());
         for v in l.income() {
             w.i64(v);
@@ -850,9 +858,19 @@ impl Snapshot {
         for slot in evicted.iter_mut() {
             *slot = r.i64()?;
         }
+        let mut injected = [0i64; CHEM_COUNT];
+        for slot in injected.iter_mut() {
+            *slot = r.i64()?;
+        }
+        let mut drained = [0i64; CHEM_COUNT];
+        for slot in drained.iter_mut() {
+            *slot = r.i64()?;
+        }
         let energy_in = r.i64()?;
         let energy_out = r.i64()?;
         let energy_stored = r.i64()?;
+        let energy_imported = r.i64()?;
+        let energy_exported = r.i64()?;
         let converted = r.i64()?;
         let mut income = [0i64; mm_income_len()];
         for slot in income.iter_mut() {
@@ -995,13 +1013,19 @@ impl Snapshot {
             ix,
             iy,
             pressure,
-            chem_totals,
-            evicted,
-            energy_in,
-            energy_out,
-            energy_stored,
-            converted,
-            income,
+            crate::ledger::LedgerState {
+                chem: chem_totals,
+                evicted,
+                injected,
+                drained,
+                energy_in,
+                energy_out,
+                energy_stored,
+                energy_imported,
+                energy_exported,
+                converted,
+                income,
+            },
         );
         {
             let archive = world.archive_mut();

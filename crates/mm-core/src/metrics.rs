@@ -39,6 +39,24 @@ pub struct Sample {
     pub energy_in: i64,
     pub energy_out: i64,
     pub energy_stored: i64,
+    /// Matter that arrived from off-slide since the last sample, across every chemical.
+    ///
+    /// A rate, like `dissipation` and `absorbed` and for the same reason. `influx - efflux` is
+    /// the world's net material income, and a flow-through slide has found its level when that
+    /// crosses zero and stays — which is the material half of the same statement `absorbed -
+    /// dissipation` makes about energy.
+    pub influx: i64,
+    /// Matter that left the slide since the last sample, across every chemical.
+    pub efflux: i64,
+    /// Energy that arrived latent in matter, cumulative. Part of `energy_in`.
+    pub energy_imported: i64,
+    /// Energy that left latent in matter, cumulative. Part of `energy_out`, and *not* part of
+    /// `dissipation` — matter washing off the slide is not the world getting warmer.
+    pub energy_exported: i64,
+    /// Matter in, cumulative. `influx` is this differenced.
+    pub matter_in: i64,
+    /// Matter out, cumulative. `efflux` is this differenced.
+    pub matter_out: i64,
 
     pub mean_age: i64,
     pub mean_energy: i64,
@@ -139,8 +157,24 @@ impl Sample {
 
         let chemicals = world.total_matter();
         let ledger = world.ledger();
+        let matter_in: i64 = ledger.injected().iter().sum();
+        let matter_out: i64 = ledger.drained().iter().sum();
+        // Heat, and only heat. `energy_out` also carries energy that left latent in matter
+        // crossing the boundary, and reporting an outflow of food as dissipation would say the
+        // world was warming when it was being washed out.
         let dissipation = match previous {
-            Some(p) => ledger.energy_out() - p.energy_out,
+            Some(p) => {
+                (ledger.energy_out() - ledger.energy_exported())
+                    - (p.energy_out - p.energy_exported)
+            }
+            None => 0,
+        };
+        let influx = match previous {
+            Some(p) => matter_in - p.matter_in,
+            None => 0,
+        };
+        let efflux = match previous {
+            Some(p) => matter_out - p.matter_out,
             None => 0,
         };
         let absorbed = match previous {
@@ -160,6 +194,12 @@ impl Sample {
             energy_in: ledger.energy_in(),
             energy_out: ledger.energy_out(),
             energy_stored: ledger.energy_stored(),
+            influx,
+            efflux,
+            energy_imported: ledger.energy_imported(),
+            energy_exported: ledger.energy_exported(),
+            matter_in,
+            matter_out,
             mean_age: age / n,
             mean_energy: energy / n,
             mean_mass: mass / n,
@@ -189,6 +229,7 @@ impl Sample {
             concat!(
                 r#"{{"tick":{},"population":{},"births":{},"deaths":{},"#,
                 r#""dissipation":{},"absorbed":{},"energy_in":{},"energy_out":{},"energy_stored":{},"#,
+                r#""influx":{},"efflux":{},"energy_imported":{},"energy_exported":{},"#,
                 r#""mean_age":{},"mean_energy":{},"mean_mass":{},"mean_genome_len":{},"#,
                 r#""distinct_genomes":{},"distinct_loadouts":{},"mean_fidelity":{},"#,
                 r#""no_nucleus":{},"trophic_light":{},"producers":{},"scavengers":{},"#,
@@ -205,6 +246,10 @@ impl Sample {
             self.energy_in,
             self.energy_out,
             self.energy_stored,
+            self.influx,
+            self.efflux,
+            self.energy_imported,
+            self.energy_exported,
             self.mean_age,
             self.mean_energy,
             self.mean_mass,
@@ -348,6 +393,10 @@ mod tests {
         // The line is built from one long format string, so a field added to the struct and
         // forgotten here is a silent hole in every export. Naming them makes that a failure.
         for key in [
+            "influx",
+            "efflux",
+            "energy_imported",
+            "energy_exported",
             "population",
             "births",
             "deaths",

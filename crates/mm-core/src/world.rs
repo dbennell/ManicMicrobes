@@ -174,6 +174,96 @@ impl PartialEq for World {
 
 impl Eq for World {}
 
+/// Move one fluid step's worth of matter across the boundary of the slide.
+///
+/// Everything here goes through the ledger, in both currencies, because both invariants are
+/// identities rather than approximations. Matter (I4): what `add_chem` reports as *actually*
+/// moved is what is recorded, so a source aimed at a barrier, or at a square already at the
+/// quantity cap, records what it managed rather than what it intended. Energy (I5): matter that
+/// is a metabolic substrate carries its latent energy with it, and an inflow of sulphide that
+/// did not say so would show up as stored energy nobody let in.
+///
+/// A free function rather than a method so that the scenario can be read while the substrate is
+/// written.
+fn apply_flux(
+    flux: &[crate::Flux],
+    substrate: &mut Substrate,
+    ledger: &mut Ledger,
+    chem: &crate::chem::ChemTable,
+    metabolism: &crate::metabolism::Metabolism,
+) {
+    let (w, h) = (substrate.width(), substrate.height());
+    // Clamped to the slide rather than wrapped. `Substrate::index` reduces modulo the grid, so
+    // a rectangle running off the right-hand edge would otherwise reappear on the left and put
+    // an inlet at the outflow.
+    let bounds = |x: u32, y: u32, width: u32, height: u32| {
+        (
+            x.min(w),
+            y.min(h),
+            x.saturating_add(width).min(w),
+            y.saturating_add(height).min(h),
+        )
+    };
+    for f in flux {
+        match f {
+            crate::Flux::Source {
+                chemical,
+                x,
+                y,
+                width,
+                height,
+                per_tick,
+            } => {
+                if *per_tick <= 0 {
+                    continue;
+                }
+                let c = chemical % CHEM_COUNT;
+                let (x0, y0, x1, y1) = bounds(*x, *y, *width, *height);
+                let mut moved = 0i64;
+                for yy in y0..y1 {
+                    for xx in x0..x1 {
+                        moved += i64::from(substrate.add_chem(c, xx as i32, yy as i32, *per_tick));
+                    }
+                }
+                if moved > 0 {
+                    ledger.record_injected(c, moved);
+                    ledger.import(metabolism.latent_in(chem, c, moved));
+                }
+            }
+            crate::Flux::Drain {
+                chemical,
+                x,
+                y,
+                width,
+                height,
+                rate,
+            } => {
+                if *rate <= 0 {
+                    continue;
+                }
+                let c = chemical % CHEM_COUNT;
+                let rate = (*rate).min(crate::fixed::Q10_ONE);
+                let (x0, y0, x1, y1) = bounds(*x, *y, *width, *height);
+                let mut moved = 0i64;
+                for yy in y0..y1 {
+                    for xx in x0..x1 {
+                        let here = substrate.chem_at(c, xx as i32, yy as i32);
+                        // At least one unit where there is anything at all, so a drain at a low
+                        // rate is an outflow rather than a rounding error that never fires.
+                        let take = crate::fixed::q10_scale(here, rate).max(i32::from(here > 0));
+                        moved -=
+                            i64::from(substrate.add_chem(c, xx as i32, yy as i32, -take.min(here)));
+                    }
+                }
+                if moved > 0 {
+                    ledger.record_drained(c, moved);
+                    ledger.export(metabolism.latent_in(chem, c, moved));
+                }
+            }
+        }
+    }
+}
+
 impl World {
     /// Build a world from a scenario: allocate the grid, raise the barriers, seed the
     /// chemistry, and take the ledger's baseline.
@@ -303,6 +393,29 @@ impl World {
             .substrate
             .set_blocked_deferred(x as i32, y as i32, true);
         self.ledger.record_evicted(&evicted);
+    }
+
+    /// One fluid step's worth of matter across the edge of the slide. See [`crate::Flux`].
+    fn step_flux(&mut self) {
+        if self.scenario.flux.is_empty() {
+            return;
+        }
+        // Destructured rather than called through `&mut self`: the borrow checker's objection
+        // is to the whole of `self` at once, and these are four disjoint fields.
+        let World {
+            scenario,
+            substrate,
+            ledger,
+            biology,
+            ..
+        } = self;
+        apply_flux(
+            &scenario.flux,
+            substrate,
+            ledger,
+            &scenario.chemicals,
+            &biology.metabolism,
+        );
     }
 
     fn seed_chemistry(&mut self) {
@@ -573,6 +686,10 @@ impl World {
         if self.tick.is_multiple_of(interval) {
             self.refresh_light();
             self.refresh_velocity();
+            // Matter across the boundary before the water moves it, so a source at the head of
+            // a channel is carried away on the same step it arrives rather than sitting in the
+            // inlet for one.
+            self.step_flux();
             fluid::step(&mut self.substrate, &self.fluid_rates, &mut self.scratch);
             self.decay_fluid();
             if self.active_impulses > 0 {
@@ -1219,28 +1336,14 @@ impl World {
         impulse_x: Vec<i32>,
         impulse_y: Vec<i32>,
         pressure: Vec<i32>,
-        chem_totals: [i64; CHEM_COUNT],
-        evicted: [i64; CHEM_COUNT],
-        energy_in: i64,
-        energy_out: i64,
-        energy_stored: i64,
-        converted: i64,
-        income: [i64; crate::ledger::TrophicSource::COUNT],
+        ledger: crate::ledger::LedgerState,
     ) {
         self.tick = tick;
         self.substrate.restore(planes, light, vx, vy, blocked);
         self.impulse_x = impulse_x;
         self.impulse_y = impulse_y;
         self.pressure = pressure;
-        self.ledger.restore(
-            chem_totals,
-            evicted,
-            energy_in,
-            energy_out,
-            energy_stored,
-            converted,
-            income,
-        );
+        self.ledger.restore(ledger);
         // The light and velocity fields came from the snapshot, so neither may be overwritten
         // by a fresh evaluation on the next step.
         self.light_written = true;

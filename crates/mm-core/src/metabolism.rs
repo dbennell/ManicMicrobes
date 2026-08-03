@@ -373,6 +373,22 @@ impl Metabolism {
         }
     }
 
+    /// The energy latent in `quantity` of chemical `c`, or zero if nothing metabolises it.
+    ///
+    /// The single-parcel counterpart of [`recompute_stored`], and it has to agree with it
+    /// exactly: `recompute_stored` counts each *distinct* pathway substrate, so a chemical
+    /// outside that set carries no energy however much of it moves, and one inside it carries
+    /// precisely this much. Matter crossing the boundary of the slide is weighed with this, so
+    /// that I5 stays an identity rather than becoming an estimate.
+    #[must_use]
+    pub(crate) fn latent_in(&self, chem: &ChemTable, c: usize, quantity: i64) -> i64 {
+        let c = c % CHEM_COUNT;
+        if quantity == 0 || !self.catalogue.metabolism.substrates().contains(&c) {
+            return 0;
+        }
+        (quantity * self.latent_of(chem, c) as i64) / Q10_ONE as i64
+    }
+
     /// Run one tick of metabolism over the whole population.
     ///
     /// Cells are visited in slot order, which is id order (I6). Nothing here depends on how
@@ -647,7 +663,10 @@ impl Metabolism {
                 .metabolic_floor
                 .max(0)
                 .saturating_add(self.catalogue.upkeep(&cells.loadout(i)))
-                .saturating_add(turgor_cost(&self.rates, crate::biology::osmotic_load(cells, i)))
+                .saturating_add(turgor_cost(
+                    &self.rates,
+                    crate::biology::osmotic_load(cells, i),
+                ))
                 .saturating_add(leak_cost(&self.rates, cells.energy[i]));
             if upkeep > 0 {
                 let paid = cells.energy[i].min(upkeep);
@@ -1276,7 +1295,8 @@ mod tests {
         for c in 0..CHEM_COUNT {
             cells.interior_mut(i)[c] = 0;
         }
-        cells.interior_mut(i)[0] = crate::biology::BASE_INTERIOR_CAPACITY.saturating_mul(capacities);
+        cells.interior_mut(i)[0] =
+            crate::biology::BASE_INTERIOR_CAPACITY.saturating_mul(capacities);
     }
 
     /// What a cell pays this tick, isolated by giving it enough to pay with and reading back.
@@ -1288,7 +1308,10 @@ mod tests {
         ledger.absorb(i64::from(i32::MAX));
         let mut starving = Vec::new();
         met.step(cells, sub, chem, &mut ledger, &mut starving, &[]);
-        assert!(starving.is_empty(), "the fixture is meant to be able to afford itself");
+        assert!(
+            starving.is_empty(),
+            "the fixture is meant to be able to afford itself"
+        );
         before - cells.energy[i]
     }
 
@@ -1326,8 +1349,18 @@ mod tests {
         let one = over(1);
         assert!(one > 0, "a whole capacity over the line is not free");
         // Quadratic, to integer truncation: four times at two over, nine at three.
-        assert!((over(2) - 4 * one).abs() <= 4, "{} against {}", over(2), 4 * one);
-        assert!((over(3) - 9 * one).abs() <= 9, "{} against {}", over(3), 9 * one);
+        assert!(
+            (over(2) - 4 * one).abs() <= 4,
+            "{} against {}",
+            over(2),
+            4 * one
+        );
+        assert!(
+            (over(3) - 9 * one).abs() <= 9,
+            "{} against {}",
+            over(3),
+            9 * one
+        );
         // And it is worth paying attention to at the load a converged pack was measured at.
         assert!(
             over(6) > rates.metabolic_floor * 30,
@@ -1357,10 +1390,7 @@ mod tests {
         );
 
         let with = billed(&met, &mut cells, &sub, &chem);
-        let vacuole_upkeep = met
-            .catalogue
-            .spec(OrganelleType::Vacuole)
-            .upkeep_cost(64);
+        let vacuole_upkeep = met.catalogue.spec(OrganelleType::Vacuole).upkeep_cost(64);
         assert!(
             with < without,
             "the vacuole has to pay for itself: {with} against {without} plus {vacuole_upkeep}"
@@ -1384,12 +1414,29 @@ mod tests {
     fn turgor_is_total() {
         let mut rates = MetabolicRates::default();
         for upkeep in [0, 1, Q10_ONE / 32, Q10_ONE, i32::MAX] {
-            for threshold in [i32::MIN, -1, 0, 1, 4 * crate::biology::BASE_INTERIOR_CAPACITY, i32::MAX] {
+            for threshold in [
+                i32::MIN,
+                -1,
+                0,
+                1,
+                4 * crate::biology::BASE_INTERIOR_CAPACITY,
+                i32::MAX,
+            ] {
                 rates.osmotic_upkeep = upkeep;
                 rates.osmotic_threshold = threshold;
-                for load in [i64::MIN, -1, 0, 1, i64::from(i32::MAX), i64::from(i32::MAX) * 16] {
+                for load in [
+                    i64::MIN,
+                    -1,
+                    0,
+                    1,
+                    i64::from(i32::MAX),
+                    i64::from(i32::MAX) * 16,
+                ] {
                     let charge = turgor_cost(&rates, load);
-                    assert!(charge >= 0, "upkeep {upkeep} threshold {threshold} load {load}");
+                    assert!(
+                        charge >= 0,
+                        "upkeep {upkeep} threshold {threshold} load {load}"
+                    );
                 }
             }
         }
@@ -1449,7 +1496,10 @@ mod tests {
         for _ in 0..4000 {
             met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
         }
-        assert!(starving.is_empty(), "the leak starved a cell, which it must never do");
+        assert!(
+            starving.is_empty(),
+            "the leak starved a cell, which it must never do"
+        );
         assert!(
             cells.energy[i] > 0,
             "it drained the cell to nothing instead of to the reserve"

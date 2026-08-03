@@ -57,6 +57,18 @@ pub struct Ledger {
     /// other things — is the measure that says whether a food web exists, and it is only
     /// answerable if income is attributed as it arrives rather than guessed at afterwards.
     income: [i64; TrophicSource::COUNT],
+    /// Matter that arrived from off-slide, cumulative, per chemical.
+    injected: [i64; CHEM_COUNT],
+    /// Matter that left the slide, cumulative, per chemical.
+    drained: [i64; CHEM_COUNT],
+    /// Energy that arrived latent in that matter, cumulative.
+    energy_imported: i64,
+    /// Energy that left latent in matter crossing the boundary, cumulative.
+    ///
+    /// Part of `energy_out` and tracked apart from it, so that "dissipation" can go on meaning
+    /// heat. A budget panel that reported an outflow of food as the world getting warmer would
+    /// be describing a different world.
+    energy_exported: i64,
 }
 
 /// Where a unit of energy came into the world.
@@ -69,10 +81,17 @@ pub enum TrophicSource {
     Scavenging = 1,
     /// Eating something that was alive (M8).
     Predation = 2,
+    /// Energy latent in matter arriving from off-slide.
+    ///
+    /// Not a way of life and nothing eats it — it is the world's own income, the counterpart of
+    /// the tick-zero standing stock being attributed to light. It is here rather than folded
+    /// into `Light` because a vent slide in the dark would otherwise report a photosynthetic
+    /// economy, which is the opposite of what it is.
+    Influx = 3,
 }
 
 impl TrophicSource {
-    pub const COUNT: usize = 3;
+    pub const COUNT: usize = 4;
 
     #[must_use]
     pub const fn name(self) -> &'static str {
@@ -80,6 +99,7 @@ impl TrophicSource {
             TrophicSource::Light => "light",
             TrophicSource::Scavenging => "scavenging",
             TrophicSource::Predation => "predation",
+            TrophicSource::Influx => "influx",
         }
     }
 }
@@ -129,6 +149,22 @@ impl std::fmt::Display for LedgerBreach {
 }
 
 impl std::error::Error for LedgerBreach {}
+
+/// Every counter in a [`Ledger`], for snapshot restoration. See [`Ledger::restore`].
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub(crate) struct LedgerState {
+    pub chem: [i64; CHEM_COUNT],
+    pub evicted: [i64; CHEM_COUNT],
+    pub injected: [i64; CHEM_COUNT],
+    pub drained: [i64; CHEM_COUNT],
+    pub energy_in: i64,
+    pub energy_out: i64,
+    pub energy_stored: i64,
+    pub energy_imported: i64,
+    pub energy_exported: i64,
+    pub converted: i64,
+    pub income: [i64; TrophicSource::COUNT],
+}
 
 impl Ledger {
     #[must_use]
@@ -214,9 +250,69 @@ impl Ledger {
     ///
     /// Not something the simulation does to itself. If a mechanism ever needs this, that
     /// mechanism is creating matter, and the question is whether it should be.
-    pub fn record_injected(&mut self, chemical: usize, amount: i32) {
+    pub fn record_injected(&mut self, chemical: usize, amount: i64) {
         let c = chemical % CHEM_COUNT;
-        self.chem[c] = self.chem[c].saturating_add(amount as i64);
+        self.chem[c] = self.chem[c].saturating_add(amount);
+        self.injected[c] = self.injected[c].saturating_add(amount);
+    }
+
+    /// Matter that left the world — an outflow at the end of a channel, a tool taking it away.
+    ///
+    /// The other half of [`Ledger::record_injected`], and the reason a slide with a source on it
+    /// can settle rather than fill: without somewhere for matter to go, an inflow is a slow
+    /// count up to the quantity cap and every question about carrying capacity has the same
+    /// answer.
+    pub fn record_drained(&mut self, chemical: usize, amount: i64) {
+        let c = chemical % CHEM_COUNT;
+        self.chem[c] = self.chem[c].saturating_sub(amount);
+        self.drained[c] = self.drained[c].saturating_add(amount);
+    }
+
+    /// Matter in from off-slide, cumulative, per chemical.
+    #[must_use]
+    pub fn injected(&self) -> [i64; CHEM_COUNT] {
+        self.injected
+    }
+
+    /// Matter out over the boundary, cumulative, per chemical.
+    #[must_use]
+    pub fn drained(&self) -> [i64; CHEM_COUNT] {
+        self.drained
+    }
+
+    /// Energy that arrived latent in matter, cumulative.
+    #[must_use]
+    pub fn energy_imported(&self) -> i64 {
+        self.energy_imported
+    }
+
+    /// Energy that left latent in matter, cumulative. Part of [`Ledger::energy_out`].
+    #[must_use]
+    pub fn energy_exported(&self) -> i64 {
+        self.energy_exported
+    }
+
+    /// Energy arriving latent in matter from off-slide (SPEC §13).
+    ///
+    /// Matter carrying a metabolic substrate carries its energy with it, and I5 is an identity
+    /// rather than an approximation: an inflow of sulphide that did not say so would show up as
+    /// stored energy nobody let in, and the next tick's check would fail.
+    pub fn import(&mut self, amount: i64) {
+        if amount <= 0 {
+            return;
+        }
+        self.energy_imported = self.energy_imported.saturating_add(amount);
+        self.absorb_from(amount, TrophicSource::Influx);
+    }
+
+    /// Energy leaving latent in matter that has left the slide.
+    ///
+    /// Clamped to what is stored and returns what actually left, like [`Ledger::dissipate`] —
+    /// but counted apart from it, because dissipation means heat.
+    pub fn export(&mut self, amount: i64) -> i64 {
+        let actual = self.take_energy(amount);
+        self.energy_exported = self.energy_exported.saturating_add(actual);
+        actual
     }
 
     /// Energy absorbed from light by a chloroplast. Enters the accounts and is stored.
@@ -260,6 +356,11 @@ impl Ledger {
     /// hold — and the amount actually dissipated is returned, because the caller has to
     /// deduct the same figure from whichever cell paid it.
     pub fn dissipate(&mut self, amount: i64) -> i64 {
+        self.take_energy(amount)
+    }
+
+    /// Energy off the books, whatever the reason. The one place `energy_out` grows.
+    fn take_energy(&mut self, amount: i64) -> i64 {
         if amount <= 0 {
             return 0;
         }
@@ -270,24 +371,23 @@ impl Ledger {
     }
 
     /// Overwrite every field, for snapshot restoration.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn restore(
-        &mut self,
-        chem: [i64; CHEM_COUNT],
-        evicted: [i64; CHEM_COUNT],
-        energy_in: i64,
-        energy_out: i64,
-        energy_stored: i64,
-        converted: i64,
-        income: [i64; TrophicSource::COUNT],
-    ) {
-        self.chem = chem;
-        self.evicted = evicted;
-        self.energy_in = energy_in;
-        self.energy_out = energy_out;
-        self.energy_stored = energy_stored;
-        self.converted = converted;
-        self.income = income;
+    ///
+    /// A struct rather than a row of positional arguments, and for the reason `FluidRates` is
+    /// one: four of these are `[i64; CHEM_COUNT]` and two of the four are adjacent, so a
+    /// transposition would compile, restore silently, and be visible only as a conservation
+    /// check failing several thousand ticks into a resumed run.
+    pub(crate) fn restore(&mut self, state: LedgerState) {
+        self.chem = state.chem;
+        self.evicted = state.evicted;
+        self.injected = state.injected;
+        self.drained = state.drained;
+        self.energy_in = state.energy_in;
+        self.energy_out = state.energy_out;
+        self.energy_stored = state.energy_stored;
+        self.energy_imported = state.energy_imported;
+        self.energy_exported = state.energy_exported;
+        self.converted = state.converted;
+        self.income = state.income;
     }
 
     /// Attribute a baseline to light, so the shares start somewhere defensible.
@@ -350,8 +450,16 @@ impl StateHash for Ledger {
         for v in self.evicted {
             h.u64(v as u64);
         }
+        for v in self.injected {
+            h.u64(v as u64);
+        }
+        for v in self.drained {
+            h.u64(v as u64);
+        }
         h.u64(self.energy_in as u64);
         h.u64(self.energy_out as u64);
+        h.u64(self.energy_imported as u64);
+        h.u64(self.energy_exported as u64);
         h.u64(self.energy_stored as u64);
         h.u64(self.converted as u64);
         for v in self.income {

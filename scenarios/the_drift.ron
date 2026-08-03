@@ -17,10 +17,11 @@
 // No `--genome` needed: the slide says who lives on it. Pass one anyway to override, which is
 // the way to ask what some other strategy makes of a channel.
 //
-// There is no source: the detritus seeded here is all there will ever be, so the interesting
-// window is while it lasts. An influx that keeps a channel supplied is the next thing this
-// slide wants, and it needs the energy ledger to learn about matter arriving from off-slide
-// before it can exist.
+// It is a flow-through slide rather than a closed one: detritus arrives at the upstream end and
+// whatever reaches the downstream end leaves. That pairing is the point. A source without a
+// drain is a slow count up to the quantity cap, and a population under a ceiling set by
+// arithmetic is not a population under a carrying capacity — with both, the standing stock finds
+// a level, and the level is a thing the sponges are competing over.
 (
     name: "the drift",
     seed: 20260802,
@@ -46,8 +47,23 @@
         Uniform(chemical: 4, per_square: 204800),
 
         // The particulate. Half what the dissolved chemicals get, because it is meant to be
-        // worth catching rather than unavoidable.
+        // worth catching rather than unavoidable. This is only the starting charge — the
+        // channel is fed continuously from `flux` below.
         Uniform(chemical: 12, per_square: 102400),
+    ],
+
+    // The supply, and the drain that keeps it from becoming a pile.
+    //
+    // Detritus enters in a column two squares wide at the upstream end and leaves through the
+    // last six, at a rate rather than an amount so the outflow can never scour the channel dry
+    // and settles into balance with whatever reaches it instead.
+    //
+    // The outflow is wider than the inlet on purpose. Detritus advects at a third of the water's
+    // speed, so it arrives at the far wall more slowly than the water does and would bank up
+    // against it — which looks like an interesting gradient and is really a boundary condition.
+    flux: [
+        Source(chemical: 12, x: 0, y: 34, width: 2, height: 28, per_tick: 6000),
+        Drain(chemical: 12, x: 90, y: 0, width: 6, height: 96, rate: 128),
     ],
 
     // Sponges, because that is what this slide is for — `sponge.mm` builds a holdfast and no

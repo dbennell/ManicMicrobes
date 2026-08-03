@@ -49,6 +49,59 @@ pub enum Seeding {
     },
 }
 
+/// Matter crossing the boundary of the slide, every fluid step.
+///
+/// A slide has been closed to matter and open only to light. That is one habitat, and it is not
+/// the only interesting one: a deep-sea vent is a slide in the dark with inorganic matter
+/// welling up through it, and marine snow is a slide in the dark with organic matter falling
+/// through. Both need matter to arrive from somewhere that is not the slide.
+///
+/// **A source needs a drain, or the only question a slide can answer is "how long until it is
+/// full".** Matter that arrives and never leaves counts up to the quantity cap and stays there,
+/// and a population under a ceiling set by arithmetic is not a population under a carrying
+/// capacity. The pair is what makes a slide a *flow-through* system, which is where an
+/// equilibrium between energy in, energy spent and space available can actually sit.
+///
+/// Both go through the ledger, in both directions and in both currencies. Matter is exact (I4):
+/// what `Substrate::add_chem` reports as actually moved is what is recorded, so a source
+/// pointed at a barrier or at a square already full records what it managed rather than what it
+/// intended. Energy is exact too (I5): matter carrying a metabolic substrate carries its latent
+/// energy with it, so an inflow of sulphide that did not say so would appear as stored energy
+/// nobody let in and the next tick's check would fail.
+///
+/// Neither touches cells. A cell that swims into an outflow is not deleted — a drain removes
+/// dissolved matter from the water and nothing else, because "the current washed it off the
+/// slide" and "it was eaten by the edge of the world" are different claims and only one of them
+/// is one this engine should make.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum Flux {
+    /// Matter arriving in every square of a rectangle, per fluid step.
+    ///
+    /// A vent is a small rectangle, marine snow is one covering the slide, and the inlet of a
+    /// channel is a column one square wide at the upstream edge.
+    Source {
+        chemical: usize,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        per_tick: i32,
+    },
+    /// A fraction of whatever is in a rectangle leaves the slide, `Q10` per fluid step.
+    ///
+    /// A fraction rather than an amount, so a drain cannot take what is not there and an
+    /// outflow settles into balance with whatever reaches it instead of scouring the last of
+    /// it away.
+    Drain {
+        chemical: usize,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        rate: i32,
+    },
+}
+
 /// Who to put on the slide, and how many.
 ///
 /// A scenario has always described a *world* and never its inhabitants, so opening one produced
@@ -144,6 +197,10 @@ pub struct Scenario {
     #[serde(default)]
     pub inhabitants: Vec<Inhabitant>,
 
+    /// Matter crossing the edge of the slide every fluid step. See [`Flux`].
+    #[serde(default)]
+    pub flux: Vec<Flux>,
+
     pub vm: VmConfig,
 
     /// Costs, rates, mutation, junctions, ecology and the organelle catalogue (M10.2).
@@ -178,6 +235,7 @@ impl Default for Scenario {
             seeding: Vec::new(),
             barriers: Vec::new(),
             inhabitants: Vec::new(),
+            flux: Vec::new(),
             vm: VmConfig::DEFAULT,
             biology: crate::biology::BiologyConfig::default(),
         }
@@ -338,6 +396,7 @@ impl StateHash for Scenario {
             h.bytes(i.genome.as_bytes());
             h.u32(i.count);
         }
+        h.u64(self.flux.len() as u64);
         self.biology.hash_state(h);
         for c in 0..CHEM_COUNT {
             h.i32(self.chemicals.get(c).diffusion);
