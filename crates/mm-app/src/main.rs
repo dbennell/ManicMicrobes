@@ -380,6 +380,10 @@ fn arrange(spec: &str, sim: &mut SlideRes, view: &mut View) {
             "nocells" => view.organelles = false,
             // The flow overlay is off by default, so a screenshot of it has to ask.
             "flow" => sim.engine.set_flow(true),
+            // Every overlay at once, for photographing the "all" state.
+            "alloverlays" => sim
+                .engine
+                .set_overlays(ui::all_overlays(sim.chem_names.len())),
             // Open a scenario by library label, so a screenshot can photograph one.
             "open" => {
                 let want = sub.replace('_', " ");
@@ -4012,12 +4016,21 @@ fn legend_body(ui: &mut egui::Ui, sim: &SlideRes, view: &View, frame: &Frame) {
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("overlays").strong());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui
-                .small_button("none")
-                .on_hover_text("bare slide, which is a reading too")
-                .clicked()
-            {
-                sim.engine.set_overlays(0);
+            // One button, both directions, labelled with the one it will do. "none" while
+            // anything is showing, so it is always the way out of what you are looking at;
+            // "all" only from a bare slide, where there is nothing to be surprised by.
+            let mask = sim.engine.overlays();
+            let (label, hint) = if mask == 0 {
+                (
+                    "all",
+                    "every chemical at once — where there is anything at all",
+                )
+            } else {
+                ("none", "bare slide, which is a reading too")
+            };
+            if ui.small_button(label).on_hover_text(hint).clicked() {
+                sim.engine
+                    .set_overlays(ui::toggle_all(mask, sim.chem_names.len()));
             }
             if ui
                 .small_button("]")

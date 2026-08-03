@@ -621,6 +621,21 @@ slide is a reading too: it is the one that says which of what you are looking at
 and which is the water. `ui::step_solo` is a pure function over the mask, so the cycle is a
 table of cases rather than something you have to hold a key down to check.
 
+**One button does all and none**, labelled with whichever it will do. It says `none` while
+anything is showing, so it is always the way *out* of what you are looking at and never a
+surprise that turns sixteen layers on when you meant to turn one off; it says `all` only from a
+bare slide, where there is nothing to be surprised by.
+
+`all` turns out to be a census rather than a picture. Sixteen layers each contribute a
+sixteenth, so the plate is a muddy wash — but the legend beside it lists every chemical with its
+peak, and the ones reading `0.0` are the ones nothing in the world is using. It answers "which
+of the sixteen does this scenario actually touch" in one click, which is a question `docs/CHEMISTRY.md`
+had to be written to answer.
+
+It costs what it looks like it costs: `Frame::overlays` carries a normalised plane per switched-on
+chemical, so all sixteen at 512² is 16.8 MB a frame against 1.0 MB for one. Fine for a look,
+and not a thing to leave on.
+
 The menu stays. It is the discoverable path and it lists the keys; the legend is the fast one.
 
 ### The flow overlay

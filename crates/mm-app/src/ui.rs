@@ -228,6 +228,34 @@ pub fn step_solo(mask: u32, count: usize, step: i32) -> u32 {
     }
 }
 
+/// Every overlay switched on, as a bit per chemical.
+///
+/// Clamped at 32 because the mask is a `u32`, and written as a branch rather than
+/// `(1 << n) - 1` because that shift is undefined at 32 and this is reached from a chemical
+/// count that comes out of a scenario file.
+#[must_use]
+pub fn all_overlays(count: usize) -> u32 {
+    match count.min(32) {
+        32 => u32::MAX,
+        n => (1u32 << n) - 1,
+    }
+}
+
+/// All of them, or none of them, whichever the mask is not.
+///
+/// One button for both directions, because they are the same intention seen from either side:
+/// clear what is on the plate, or put everything on it. Anything on at all means the button
+/// clears — so it is always the way *out* of whatever you were looking at, and never a surprise
+/// that turns sixteen layers on when you meant to turn one off.
+#[must_use]
+pub fn toggle_all(mask: u32, count: usize) -> u32 {
+    if mask == 0 {
+        all_overlays(count)
+    } else {
+        0
+    }
+}
+
 /// Narrowest and widest a barrier brush may be, in squares.
 pub const BRUSH_MIN: u32 = 1;
 pub const BRUSH_MAX: u32 = 10;
@@ -889,5 +917,42 @@ mod overlay_tests {
                 assert!(m.count_ones() <= 1);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod all_none_tests {
+    use super::*;
+
+    #[test]
+    fn nothing_on_turns_everything_on() {
+        assert_eq!(toggle_all(0, 16), 0b1111_1111_1111_1111);
+        assert_eq!(toggle_all(0, 4), 0b1111);
+    }
+
+    #[test]
+    fn anything_on_clears_the_lot() {
+        // Any at all, not just a full set — the button is always the way out of whatever is on
+        // the plate, so one overlay showing does not turn the other fifteen on.
+        assert_eq!(toggle_all(0b0001, 16), 0);
+        assert_eq!(toggle_all(0b1010_0000, 16), 0);
+        assert_eq!(toggle_all(all_overlays(16), 16), 0);
+    }
+
+    #[test]
+    fn it_round_trips() {
+        for count in [1usize, 4, 9, 16] {
+            let all = toggle_all(0, count);
+            assert_eq!(all.count_ones() as usize, count);
+            assert_eq!(toggle_all(all, count), 0);
+        }
+    }
+
+    #[test]
+    fn a_count_at_or_past_the_width_of_the_mask_does_not_shift_off_the_end() {
+        // `1 << 32` is undefined, and the count comes out of a scenario file.
+        assert_eq!(all_overlays(32), u32::MAX);
+        assert_eq!(all_overlays(999), u32::MAX);
+        assert_eq!(all_overlays(0), 0);
     }
 }
