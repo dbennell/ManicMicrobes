@@ -157,3 +157,73 @@ fn drawing_a_barrier_changes_what_the_next_frame_shows() {
         "erasing the last wall left a mask behind"
     );
 }
+
+#[test]
+fn a_brush_stroke_lays_a_wall_of_the_width_it_says() {
+    // The tool path, end to end: a stroke's worth of squares gathered the way `handle_mouse`
+    // gathers them, applied through the batched world call, and measured off the frame.
+    let mut scenario = Scenario {
+        width: 32,
+        height: 32,
+        light: LightRegime::Uniform { intensity: 0 },
+        ..Scenario::default()
+    };
+    scenario.barriers.clear();
+    let mut slide = Slide::new(scenario).expect("slide");
+
+    // A horizontal stroke across the middle, five squares wide.
+    let mut squares: Vec<(u32, u32)> = Vec::new();
+    for centre in mm_app::ui::line_squares((8, 16), (24, 16)) {
+        for (x, y) in mm_app::ui::brush_squares(centre, 5) {
+            if x >= 0 && y >= 0 {
+                squares.push((x as u32, y as u32));
+            }
+        }
+    }
+    slide.world_mut().set_barriers(&squares, true);
+
+    let frame = slide.frame();
+    let at = |x: u32, y: u32| frame.barriers[(y * frame.width + x) as usize];
+    // Five squares deep through the middle of the run, and open either side of that.
+    for dy in 0..5u32 {
+        assert!(
+            at(16, 14 + dy),
+            "the wall is thinner than five at row {}",
+            14 + dy
+        );
+    }
+    assert!(!at(16, 13) && !at(16, 19), "the wall is thicker than five");
+    // And solid along its length rather than a row of discs with gaps between them.
+    for x in 9..=23u32 {
+        assert!(at(x, 16), "the stroke has a hole at x={x}");
+    }
+}
+
+#[test]
+fn the_eraser_can_take_back_what_the_pen_drew() {
+    // Same width both ways, which is the point of one setting covering both: an eraser
+    // narrower than the pen cannot undo its own stroke without repainting the gaps.
+    let mut scenario = Scenario {
+        width: 32,
+        height: 32,
+        ..Scenario::default()
+    };
+    scenario.barriers.clear();
+    let mut slide = Slide::new(scenario).expect("slide");
+
+    let stroke: Vec<(u32, u32)> = mm_app::ui::line_squares((6, 16), (26, 16))
+        .into_iter()
+        .flat_map(|c| mm_app::ui::brush_squares(c, 7))
+        .filter(|(x, y)| *x >= 0 && *y >= 0)
+        .map(|(x, y)| (x as u32, y as u32))
+        .collect();
+
+    slide.world_mut().set_barriers(&stroke, true);
+    assert!(!slide.frame().barriers.is_empty(), "the pen drew nothing");
+
+    slide.world_mut().set_barriers(&stroke, false);
+    assert!(
+        slide.frame().barriers.is_empty(),
+        "the eraser left some of the wall behind"
+    );
+}

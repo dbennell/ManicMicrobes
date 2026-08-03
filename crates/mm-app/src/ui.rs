@@ -192,6 +192,43 @@ pub fn line_squares(from: (i32, i32), to: (i32, i32)) -> Vec<(i32, i32)> {
     }
 }
 
+/// Narrowest and widest a barrier brush may be, in squares.
+pub const BRUSH_MIN: u32 = 1;
+pub const BRUSH_MAX: u32 = 10;
+
+/// What a barrier brush is by default, in squares.
+///
+/// Three rather than one. One square is a line the fluid can still see round — and now that a
+/// stroke is dragged rather than clicked, the common thing to want is a wall, not a pixel. It
+/// is also the narrowest brush that makes a *diagonal* stroke solid: at one square a diagonal
+/// run touches only at its corners, which the barrier mask treats as two separate walls with a
+/// gap between them, and the gap is exactly wide enough for a cell.
+pub const BRUSH_DEFAULT: u32 = 3;
+
+/// Every square a brush of the given width covers when stamped on one square.
+///
+/// A disc, not a box, because a box brush leaves mitred corners wherever a freehand stroke
+/// changes direction and the eye reads those as mistakes. `width` is the diameter, so 1 is the
+/// single square under the pointer and 10 is a disc ten squares across.
+///
+/// The test is `4 * (dx² + dy²) <= width²`, which is the disc of that diameter in integers —
+/// no square roots and no rounding to argue about. Widths are clamped into
+/// `BRUSH_MIN..=BRUSH_MAX` rather than trusted, because this is reached from a saved setting.
+#[must_use]
+pub fn brush_squares(centre: (i32, i32), width: u32) -> Vec<(i32, i32)> {
+    let w = width.clamp(BRUSH_MIN, BRUSH_MAX) as i32;
+    let reach = w / 2;
+    let mut out = Vec::new();
+    for dy in -reach..=reach {
+        for dx in -reach..=reach {
+            if 4 * (dx * dx + dy * dy) <= w * w {
+                out.push((centre.0.saturating_add(dx), centre.1.saturating_add(dy)));
+            }
+        }
+    }
+    out
+}
+
 /// Where the camera must move so that the point under the pointer stays under the pointer.
 ///
 /// The difference between zooming a microscope and operating a slider. `offset` is the
@@ -649,5 +686,99 @@ mod stroke_tests {
         let line = line_squares((i32::MIN, 0), (i32::MAX, 0));
         assert_eq!(line.len(), MAX_STROKE);
         assert_eq!(line.first(), Some(&(i32::MIN, 0)));
+    }
+}
+
+#[cfg(test)]
+mod brush_tests {
+    use super::*;
+
+    fn width_at_row(squares: &[(i32, i32)], row: i32) -> i32 {
+        let xs: Vec<i32> = squares
+            .iter()
+            .filter(|(_, y)| *y == row)
+            .map(|(x, _)| *x)
+            .collect();
+        match (xs.iter().min(), xs.iter().max()) {
+            (Some(lo), Some(hi)) => hi - lo + 1,
+            _ => 0,
+        }
+    }
+
+    #[test]
+    fn a_brush_of_one_is_the_square_under_the_pointer() {
+        assert_eq!(brush_squares((5, 9), 1), vec![(5, 9)]);
+    }
+
+    #[test]
+    fn a_brush_is_as_wide_as_it_says_through_its_middle() {
+        for width in BRUSH_MIN..=BRUSH_MAX {
+            let s = brush_squares((0, 0), width);
+            let across = width_at_row(&s, 0);
+            // Even widths cannot be centred on a square, so they come out one wider through the
+            // middle. Odd ones are exact, and those are the ones the default sits among.
+            let want = if width % 2 == 0 { width + 1 } else { width } as i32;
+            assert_eq!(
+                across, want,
+                "a brush of {width} is {across} squares across"
+            );
+        }
+    }
+
+    #[test]
+    fn a_brush_is_a_disc_and_not_a_box() {
+        // A box brush mitres every corner of a freehand stroke. At ten across, a disc drops the
+        // extreme corners; a box would keep them.
+        let s = brush_squares((0, 0), 10);
+        assert!(!s.contains(&(5, 5)), "the corner is in it, so it is a box");
+        assert!(
+            s.contains(&(5, 0)) && s.contains(&(0, 5)),
+            "the axes are missing"
+        );
+        // And it is symmetric, or a stroke would drift as it is stamped.
+        for &(x, y) in &s {
+            assert!(
+                s.contains(&(-x, y)) && s.contains(&(x, -y)),
+                "({x},{y}) is not mirrored"
+            );
+        }
+    }
+
+    #[test]
+    fn a_brush_is_solid_with_no_holes_in_it() {
+        // A wall with a hole is not a wall. Every row the brush touches must be one unbroken
+        // run, or the fluid and the cells go through the gap.
+        for width in BRUSH_MIN..=BRUSH_MAX {
+            let s = brush_squares((0, 0), width);
+            let rows: std::collections::BTreeSet<i32> = s.iter().map(|(_, y)| *y).collect();
+            for row in rows {
+                let mut xs: Vec<i32> = s
+                    .iter()
+                    .filter(|(_, y)| *y == row)
+                    .map(|(x, _)| *x)
+                    .collect();
+                xs.sort_unstable();
+                for pair in xs.windows(2) {
+                    assert_eq!(pair[1] - pair[0], 1, "brush {width} row {row} has a gap");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_width_out_of_range_is_clamped_rather_than_believed() {
+        // Reached from a saved setting, so it cannot assume the caller was reasonable.
+        assert_eq!(brush_squares((0, 0), 0), brush_squares((0, 0), BRUSH_MIN));
+        assert_eq!(
+            brush_squares((0, 0), 9_999),
+            brush_squares((0, 0), BRUSH_MAX)
+        );
+    }
+
+    #[test]
+    fn a_brush_at_the_edge_of_the_world_does_not_overflow() {
+        // The caller drops the negatives; getting here must not panic on the way.
+        let s = brush_squares((i32::MIN, i32::MAX), BRUSH_MAX);
+        assert!(!s.is_empty());
     }
 }

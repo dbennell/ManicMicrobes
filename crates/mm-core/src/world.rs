@@ -276,14 +276,21 @@ impl World {
                 }
             }
         }
+        // Once, now that every square is placed. `block` defers it.
+        self.substrate.rebuild_edge_masks();
     }
 
-    /// Raise a barrier and tell the ledger about anything it destroyed.
+    /// Raise one scenario barrier square, deferring the edge-mask rebuild.
+    ///
+    /// `raise_barriers` rebuilds once when it has finished. This had the same cost as the
+    /// drawing tool did — the archipelago blocks a few hundred squares and rebuilt a whole
+    /// slide's masks for each of them — and nobody noticed only because it happens once, at
+    /// construction, before there is anything to watch.
     fn block(&mut self, x: u32, y: u32) {
         if x >= self.substrate.width() || y >= self.substrate.height() {
             return;
         }
-        let evicted = self.substrate.set_blocked(x as i32, y as i32, true);
+        let evicted = self.substrate.set_blocked_deferred(x as i32, y as i32, true);
         self.ledger.record_evicted(&evicted);
     }
 
@@ -997,7 +1004,34 @@ impl World {
     /// because the ledger would blame the fluid. They go to the neighbours, and whatever will
     /// not fit is written off through the ledger so the books still balance exactly.
     pub fn set_barrier(&mut self, x: u32, y: u32, blocked: bool) {
-        let evicted = self.substrate.set_blocked(x as i32, y as i32, blocked);
+        self.set_barriers(&[(x, y)], blocked);
+    }
+
+    /// Draw or erase many barrier squares as one edit.
+    ///
+    /// The same thing [`World::set_barrier`] does, `n` times, with the fluid's edge masks
+    /// rebuilt **once** at the end rather than once per square. That rebuild walks the whole
+    /// slide, so the per-square version costs `n * width * height` — fine for the one square a
+    /// click used to draw, and a stall of seconds for a brush ten squares across dragged over a
+    /// 512×512 slide.
+    ///
+    /// Squares already in the asked-for state cost nothing: the deferred setter returns before
+    /// it touches anything, which is what makes overlapping brush stamps along a stroke cheap.
+    ///
+    /// Order is the caller's and it matters for the books rather than for the result: blocking
+    /// a square spills its contents into its neighbours, so a neighbour blocked later in the
+    /// same batch spills what it was just given as well. Matter is conserved either way.
+    pub fn set_barriers(&mut self, squares: &[(u32, u32)], blocked: bool) {
+        for &(x, y) in squares {
+            self.place_barrier(x, y, blocked);
+        }
+        self.substrate.rebuild_edge_masks();
+    }
+
+    fn place_barrier(&mut self, x: u32, y: u32, blocked: bool) {
+        let evicted = self
+            .substrate
+            .set_blocked_deferred(x as i32, y as i32, blocked);
         let mut unplaced = [0i32; CHEM_COUNT];
         for (c, amount) in evicted.iter().enumerate() {
             if *amount <= 0 {

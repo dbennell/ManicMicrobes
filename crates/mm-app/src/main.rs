@@ -936,6 +936,9 @@ struct View {
     /// for the left. Separate from `focus` because both buttons can be down at once and a pan
     /// that wandered over a rail must not also cancel the wall being drawn.
     tool_focus: ui::Focus,
+    /// How wide a barrier stroke is, in squares. Covers drawing and erasing alike — an eraser
+    /// narrower than the wall it is trying to remove is a tool that cannot undo its own work.
+    brush: u32,
     /// The last square a barrier stroke painted, or `None` when no stroke is in progress.
     ///
     /// The pointer is sampled once a frame, so a hand moving at any speed skips squares between
@@ -977,6 +980,7 @@ impl Default for View {
             drag_distance: 0.0,
             tool: Tool::Select,
             tool_focus: ui::Focus::default(),
+            brush: ui::BRUSH_DEFAULT,
             paint_from: None,
             species: None,
             ecology: Ecology::Tree,
@@ -1612,15 +1616,33 @@ fn handle_mouse(
             let from = view.paint_from.unwrap_or(to);
             if view.paint_from != Some(to) {
                 let draw = view.tool == Tool::DrawBarrier;
-                let held = sim.engine.handle();
-                let mut slide = held.slide();
-                let world = slide.world_mut();
-                // One lock for the whole stroke segment rather than one per square.
-                for (x, y) in ui::line_squares(from, to) {
-                    if x >= 0 && y >= 0 {
-                        let event = tools::set_barrier(world, x as u32, y as u32, draw);
-                        sim.last_tool = Some(event);
+                // The whole stroke segment, brush and all, gathered before the lock is taken:
+                // `World::set_barriers` rebuilds the fluid's edge masks once for the batch, and
+                // that rebuild walks every square on the slide. Per square it would be a
+                // quarter of a million operations each at 512×512, eighty times over for one
+                // stamp of a ten-wide brush.
+                let mut squares: Vec<(u32, u32)> = Vec::new();
+                for centre in ui::line_squares(from, to) {
+                    for (x, y) in ui::brush_squares(centre, view.brush) {
+                        if x >= 0 && y >= 0 {
+                            squares.push((x as u32, y as u32));
+                        }
                     }
+                }
+                if !squares.is_empty() {
+                    let held = sim.engine.handle();
+                    held.slide().world_mut().set_barriers(&squares, draw);
+                    sim.last_tool = Some(if draw {
+                        tools::ToolEvent::BarrierDrawn {
+                            x: to.0.max(0) as u32,
+                            y: to.1.max(0) as u32,
+                        }
+                    } else {
+                        tools::ToolEvent::BarrierErased {
+                            x: to.0.max(0) as u32,
+                            y: to.1.max(0) as u32,
+                        }
+                    });
                 }
                 view.paint_from = Some(to);
             }
@@ -2594,6 +2616,19 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                         ui.close();
                     }
                 }
+                ui.separator();
+                // Not closed on change, unlike the buttons above: a width is something you
+                // adjust and look at, and a menu that shut on the first drag would have to be
+                // reopened for every squares' worth.
+                ui.add(
+                    egui::Slider::new(&mut view.brush, ui::BRUSH_MIN..=ui::BRUSH_MAX)
+                        .text("thickness"),
+                )
+                .on_hover_text(
+                    "how wide a stroke of the wall and erase tools is, in substrate \
+                     squares. The eraser is the same width as the pen, so it can always \
+                     take back what the pen just drew.",
+                );
             });
 
             ui.menu_button("Help", |ui| {
@@ -2676,7 +2711,13 @@ fn status_bar(
                 ui.label(format!("largest organism {}", frame.largest_cluster));
             }
             ui.separator();
-            ui.label(format!("tool: {}", view.tool.name()));
+            ui.label(match view.tool {
+                // Only where it means something. A width beside "select" is noise.
+                Tool::DrawBarrier | Tool::EraseBarrier => {
+                    format!("tool: {} ×{}", view.tool.name(), view.brush)
+                }
+                _ => format!("tool: {}", view.tool.name()),
+            });
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Magnification is reported the way the objective would: relative to the base

@@ -128,6 +128,8 @@ Tools     Select                  F1
           Remove                  F3
           Draw barrier            F4
           Erase barrier           F5
+          ──
+          Thickness  ──○────      1–10, default 3   how wide a wall stroke is
 
 Help      Keys
           ISA reference
@@ -544,6 +546,21 @@ one: opaque, cool against a slide whose every other colour is warm light or a ch
 and ignoring both the light and the overlays, because a blocked square genuinely has nothing in
 it to paint. The mask is empty rather than all-false on a slide with no barriers, so such a
 slide pays neither the copy nor the per-texel branch.
+
+**A stroke has a width**, `1..=10` and 3 by default, set by a slider in the Tools menu and
+reported in the status bar beside the tool. One setting covers drawing *and* erasing, because
+an eraser narrower than the pen cannot take back its own stroke. The brush is a disc rather
+than a box — a box mitres every corner of a freehand curve and the eye reads those as mistakes
+— and three is the default because it is the narrowest brush that makes a *diagonal* stroke
+solid: at one square a diagonal run touches only at its corners, and the barrier mask treats
+that as two walls with a gap between them exactly wide enough for a cell.
+
+Drawing a wide stroke made a batched write necessary in `mm-core`. `Substrate::set_blocked`
+rebuilds the fluid's edge masks, which walks the whole slide, so blocking `n` squares cost
+`n × width × height` — invisible at one square per click and a stall of seconds for a ten-wide
+brush dragged across 512×512. `World::set_barriers` takes the whole stroke and rebuilds once;
+`set_barrier` is now one call to it, and scenario setup uses the same deferred path, where it
+had been rebuilding the masks once per square of every wall it raised.
 
 **Barriers are a second texture, and the reason is the sampler.** They were a layer of the
 field texture for exactly one commit and came out visibly blurred — at high magnification a

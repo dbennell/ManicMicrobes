@@ -438,6 +438,36 @@ impl Substrate {
         evicted
     }
 
+    /// [`Substrate::set_blocked`] without the edge-mask rebuild.
+    ///
+    /// The rebuild walks every square on the slide, so doing it per square makes blocking `n`
+    /// squares cost `n * width * height` — a quarter of a million operations each at 512×512.
+    /// That was invisible while a barrier was one square per click and stops being invisible
+    /// the moment a brush stamps eighty of them at a time.
+    ///
+    /// **The caller must call [`Substrate::rebuild_edge_masks`] before the next fluid step**,
+    /// or the solver will keep fluxing across an edge that is now a wall. Nothing here can
+    /// enforce that, which is why this is not the one to reach for: use `World::set_barriers`,
+    /// which batches and rebuilds for you and is the only thing in the crate that calls this.
+    pub fn set_blocked_deferred(&mut self, x: i32, y: i32, blocked: bool) -> [i32; CHEM_COUNT] {
+        let i = self.index(x, y);
+        let mut evicted = [0i32; CHEM_COUNT];
+        if self.blocked[i] == blocked {
+            return evicted;
+        }
+        self.blocked[i] = blocked;
+        if blocked {
+            for (c, plane) in self.chem.iter_mut().enumerate() {
+                evicted[c] = plane[i];
+                plane[i] = 0;
+            }
+            self.vx[i] = 0;
+            self.vy[i] = 0;
+            self.edge_velocity_stale = true;
+        }
+        evicted
+    }
+
     /// Recompute the edge masks from the barrier layout. Call after any bulk change to
     /// `blocked`.
     pub fn rebuild_edge_masks(&mut self) {
