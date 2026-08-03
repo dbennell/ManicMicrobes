@@ -767,6 +767,18 @@ impl Slide {
             .collect()
     }
 
+    /// Each chemical's overlay colour, in index order.
+    ///
+    /// From the scenario for the same reason the names are: the table is authored per scenario
+    /// (SPEC §7.1), so a colour written down in the front end would be the wrong colour for any
+    /// world that posed its own chemistry.
+    #[must_use]
+    pub fn chemical_colours(&self) -> Vec<[u8; 3]> {
+        (0..CHEM_COUNT)
+            .map(|c| self.world.scenario().chemicals.get(c).colour)
+            .collect()
+    }
+
     /// What the wiki calls this species, or a placeholder if the archive has not named it yet.
     #[must_use]
     pub fn species_name(&self, species: u32) -> String {

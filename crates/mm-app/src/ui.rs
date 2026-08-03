@@ -291,14 +291,21 @@ pub enum Ecology {
     Timeline,
     /// The parameter changes on the timeline, field by field.
     Interventions,
+    /// The world's books: energy in against energy out, and where the matter is.
+    ///
+    /// In the ecology pane rather than in a pane of its own because it is the same question
+    /// the other three ask from different sides — the tree is who is here, the web is who eats
+    /// whom, and this is what the whole thing is running on.
+    Budget,
 }
 
 impl Ecology {
-    pub const ALL: [Ecology; 4] = [
+    pub const ALL: [Ecology; 5] = [
         Ecology::Tree,
         Ecology::Web,
         Ecology::Timeline,
         Ecology::Interventions,
+        Ecology::Budget,
     ];
 
     #[must_use]
@@ -308,6 +315,7 @@ impl Ecology {
             Ecology::Web => "food web",
             Ecology::Timeline => "timeline",
             Ecology::Interventions => "interventions",
+            Ecology::Budget => "budget",
         }
     }
 }

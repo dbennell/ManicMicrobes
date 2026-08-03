@@ -27,6 +27,15 @@ pub struct Sample {
     /// Energy converted to heat since the last sample. The most direct statement of "life as
     /// a dissipative structure" (SPEC §13).
     pub dissipation: i64,
+    /// Energy that entered the world since the last sample — the other side of the same
+    /// account, and the one that says whether the books are balancing.
+    ///
+    /// A *rate*, differenced here rather than in a panel, for the reason `dissipation` is: the
+    /// history samples every `n` ticks and `n` is configurable, so anything that differenced
+    /// the cumulative counters itself would report an income that changed when you changed how
+    /// often you looked at it. `absorbed - dissipation` is the world's net energy income, and
+    /// where that crosses zero and stays is where the energy economy has found its level.
+    pub absorbed: i64,
     pub energy_in: i64,
     pub energy_out: i64,
     pub energy_stored: i64,
@@ -134,6 +143,10 @@ impl Sample {
             Some(p) => ledger.energy_out() - p.energy_out,
             None => 0,
         };
+        let absorbed = match previous {
+            Some(p) => ledger.energy_in() - p.energy_in,
+            None => 0,
+        };
 
         let mix = crate::ecology::TrophicMix::of(cells);
 
@@ -143,6 +156,7 @@ impl Sample {
             births: report.biology.births as u64,
             deaths: report.biology.deaths as u64,
             dissipation,
+            absorbed,
             energy_in: ledger.energy_in(),
             energy_out: ledger.energy_out(),
             energy_stored: ledger.energy_stored(),
@@ -174,7 +188,7 @@ impl Sample {
         format!(
             concat!(
                 r#"{{"tick":{},"population":{},"births":{},"deaths":{},"#,
-                r#""dissipation":{},"energy_in":{},"energy_out":{},"energy_stored":{},"#,
+                r#""dissipation":{},"absorbed":{},"energy_in":{},"energy_out":{},"energy_stored":{},"#,
                 r#""mean_age":{},"mean_energy":{},"mean_mass":{},"mean_genome_len":{},"#,
                 r#""distinct_genomes":{},"distinct_loadouts":{},"mean_fidelity":{},"#,
                 r#""no_nucleus":{},"trophic_light":{},"producers":{},"scavengers":{},"#,
@@ -187,6 +201,7 @@ impl Sample {
             self.births,
             self.deaths,
             self.dissipation,
+            self.absorbed,
             self.energy_in,
             self.energy_out,
             self.energy_stored,

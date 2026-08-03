@@ -508,6 +508,28 @@ layered graph, level on the vertical, edge width from flow, the recycling back-e
 The existing `foodweb_panel` renders it as text and should keep doing so behind a toggle —
 the numbers are useful and a graph hides them.
 
+**Budget.** *Added after the scenario files, because setting an experiment up and watching what
+it does are one loop.* The world's books, in two halves that answer different questions.
+
+**Energy is a flow** and the question is whether it balances: income against dissipation, with
+the *net* called out, because a world that has found its level has a net of about zero — as much
+leaving as heat as is arriving. Away from zero, something is still filling or still draining.
+Both are rates differenced in `Sample::take` and **not** in the panel: the history samples every
+`n` ticks and `n` is configurable, so anything differencing the cumulative counters itself would
+report an income that changed when you changed how often you looked. `dissipation` already
+worked that way; `absorbed` was added beside it.
+
+**Matter is a stock** and the question is where it went: the total can never move (I4), so every
+change is a redistribution between the fluid, the cells and the dead. A bar per chemical in its
+own overlay colour, because a stacked plot of sixteen series is unreadable and a table of sixteen
+numbers says nothing about proportion.
+
+Almost none of this was new instrumentation. `mm_core::metrics::Sample` carries twenty-odd fields
+into the history buffer — the whole per-chemical mass budget among them — and the metrics rail
+drew seven. The rest was being measured and thrown away, including a `carrion` field whose own
+doc comment reads "a number that climbs and stays climbed means nothing is eating the dead",
+which is a plot description for a plot nobody had drawn.
+
 **Timeline.** The existing timeline, full drawer width instead of 26 pixels in a corner.
 Scrubbable, first-occurrence events as flags, mass extinctions as bands, **and interventions
 from §4 in a distinct colour**, because "the population crashed" and "you tripled the repair

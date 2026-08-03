@@ -361,6 +361,8 @@ fn arrange(spec: &str, sim: &mut SlideRes, view: &mut View) {
                 view.ecology = match sub {
                     "web" => Ecology::Web,
                     "timeline" => Ecology::Timeline,
+                    "interventions" => Ecology::Interventions,
+                    "budget" => Ecology::Budget,
                     _ => Ecology::Tree,
                 };
             }
@@ -500,6 +502,8 @@ struct SlideRes {
     /// Chemical names, cached at load. They come from the scenario and never change, and
     /// fetching them each frame would be a lock for a constant.
     chem_names: Vec<String>,
+    /// Each chemical's colour, so the budget's bars match the overlay legend.
+    chem_colours: Vec<[u8; 3]>,
     /// The cell the inspector is pointed at, if any.
     selected: Option<CellId>,
     /// The genome editor (M6).
@@ -599,6 +603,7 @@ impl SlideRes {
         let mut slide = Slide::new(petri()).expect("default scenario");
         seed_ancestors(&mut slide, slide_size(), 16);
         let chem_names = slide.chemical_names();
+        let chem_colours = slide.chemical_colours();
         let latest = Published {
             frame: slide.frame(),
             selection: None,
@@ -614,6 +619,7 @@ impl SlideRes {
             engine: Engine::start(slide, Rate::times(1)),
             latest,
             chem_names,
+            chem_colours,
             selected: None,
             editor: Editor::new(),
             breakpoints: Breakpoints::new(),
@@ -3236,6 +3242,126 @@ fn token_colour(kind: mm_asm::highlight::TokenKind) -> egui::Color32 {
     }
 }
 
+/// The world's books: what energy comes in against what leaves, and where the matter is.
+///
+/// Almost all of this was already being measured and thrown away. `mm_core::metrics::Sample`
+/// carries twenty-odd fields into the history buffer every few hundred ticks — the whole
+/// per-chemical mass budget among them — and the metrics rail drew seven of them. This is not
+/// new instrumentation; it is drawing what the instrument already records.
+///
+/// Two halves, because they answer different questions. **Energy** is a flow and the question
+/// is whether it balances: income against dissipation, and where those two lines meet is where
+/// the economy has found its level. **Matter** is a stock and the question is where it has
+/// gone: the total can never move (I4), so every change is a redistribution between the fluid,
+/// the cells and the dead.
+fn budget_view(ui: &mut egui::Ui, sim: &SlideRes) {
+    let history = &sim.latest.history;
+    let Some(now) = history.latest().cloned() else {
+        ui.weak("nothing sampled yet");
+        return;
+    };
+
+    egui::ScrollArea::vertical()
+        .id_salt("budget")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.heading("energy");
+            ui.small(
+                "Energy is not conserved — it degrades. It enters as light and leaves as heat \
+                 on every conversion, and what is left over is what the world is holding.",
+            );
+            ui.add_space(4.0);
+
+            // The rates, both differenced at sample time rather than here — see
+            // `Sample::absorbed` for why a panel must not difference the cumulative counters
+            // itself.
+            let income = history.series(|s| s.absorbed);
+            let heat = history.series(|s| s.dissipation);
+            let net = now.absorbed - now.dissipation;
+            ui.horizontal(|ui| {
+                ui.label("income");
+                ui.weak(format!("{}", now.absorbed));
+                ui.separator();
+                ui.label("to heat");
+                ui.weak(format!("{}", now.dissipation));
+                ui.separator();
+                ui.label("net");
+                // The number this pane exists for. A world that has found its level has a net
+                // of about zero: everything coming in is going straight back out as heat, and
+                // nothing is accumulating. Away from zero and something is still filling or
+                // still draining.
+                let colour = if net.abs() * 8 < now.absorbed.max(1) {
+                    egui::Color32::from_rgb(140, 220, 150)
+                } else {
+                    egui::Color32::from_rgb(240, 200, 120)
+                };
+                ui.colored_label(colour, format!("{net:+}"));
+            })
+            .response
+            .on_hover_text(
+                "per sample, not per tick. Net near zero means the energy economy has \
+                 equilibrated — as much is leaving as heat as is arriving.",
+            );
+            ui.small("income");
+            sparkline(ui, &income.normalised());
+            ui.small("dissipated as heat");
+            sparkline(ui, &heat.normalised());
+            ui.small(format!("held by living things — now {}", now.energy_stored));
+            sparkline(ui, &history.series(|s| s.energy_stored).normalised());
+
+            ui.add_space(8.0);
+            ui.separator();
+            ui.heading("matter");
+            ui.small(format!(
+                "{} in total, and that number must never move (I4). Everything below is the \
+                 same matter in different places.",
+                now.total_matter
+            ));
+            ui.add_space(4.0);
+
+            // A bar per chemical in its own colour, against the largest. A stacked plot of
+            // sixteen series is unreadable and a table of sixteen numbers says nothing about
+            // proportion; what the question "where is my matter" wants is the shape.
+            let peak = now.chemicals.iter().copied().max().unwrap_or(1).max(1);
+            egui::Grid::new("budget_matter")
+                .num_columns(3)
+                .striped(true)
+                .show(ui, |ui| {
+                    for (c, amount) in now.chemicals.iter().enumerate() {
+                        let name = sim
+                            .chem_names
+                            .get(c)
+                            .cloned()
+                            .unwrap_or_else(|| format!("{c}"));
+                        ui.label(name);
+                        ui.weak(format!("{amount}"));
+                        let (rect, _) = ui.allocate_exact_size(
+                            egui::vec2(ui.available_width().max(40.0), 10.0),
+                            egui::Sense::hover(),
+                        );
+                        let share = (*amount as f64 / peak as f64).clamp(0.0, 1.0) as f32;
+                        let rgb = sim.chem_colours.get(c).copied().unwrap_or([160, 160, 160]);
+                        ui.painter().rect_filled(
+                            egui::Rect::from_min_size(
+                                rect.min,
+                                egui::vec2(rect.width() * share, rect.height()),
+                            ),
+                            1.0,
+                            egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]),
+                        );
+                        ui.end_row();
+                    }
+                });
+
+            ui.add_space(6.0);
+            ui.small(format!(
+                "carrion in the fluid {} — a number that climbs and stays climbed means \
+                 nothing is eating the dead",
+                now.carrion
+            ));
+        });
+}
+
 /// The parameter editor (M10.2, `docs/UI.md` §4).
 ///
 /// Every cost, rate and mutation the living half of the world runs on. Until M10.2 these were
@@ -4468,6 +4594,7 @@ fn ecology_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
                 Ecology::Web => foodweb_body(ui, sim),
                 Ecology::Timeline => timeline_view(ui, sim, view),
                 Ecology::Interventions => interventions_view(ui, sim),
+                Ecology::Budget => budget_view(ui, sim),
             });
         });
         ui.separator();
