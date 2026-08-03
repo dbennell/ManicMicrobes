@@ -15,8 +15,8 @@ fn main() {
         + 2 * size_of::<i32>()
         + size_of::<u32>()
         + size_of::<i32>()
-        + 16 * size_of::<i32>()
-        + 16 * size_of::<Organelle>()
+        + mm_core::chem::CHEM_COUNT * size_of::<i32>()
+        + mm_core::organelle::SLOT_COUNT * size_of::<Organelle>()
         + 4 * size_of::<Junction>()
         + vm
         + 8
