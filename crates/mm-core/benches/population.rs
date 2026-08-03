@@ -316,6 +316,8 @@ fn phase_breakdown(_c: &mut Criterion) {
     let substrate = world.substrate().clone();
     let capacity = world.cells().capacity();
     let mut intents = mm_core::intent::IntentBuffer::new();
+    let slip = vec![0i32; capacity];
+    let mut slip_scratch: Vec<i32> = Vec::new();
     let t = Instant::now();
     for _ in 0..n {
         intents.begin_tick(capacity);
@@ -379,6 +381,7 @@ fn phase_breakdown(_c: &mut Criterion) {
             &mut eco_substrate,
             &index,
             &crowding,
+            &slip,
             &ecology_cfg,
             &chemistry,
             &mut ledger,
@@ -400,6 +403,7 @@ fn phase_breakdown(_c: &mut Criterion) {
             &mut impulse_x,
             &mut impulse_y,
             forces,
+            &mut slip_scratch,
             0,
             1,
         ));

@@ -467,6 +467,22 @@ pub const FIELDS: &[Field] = &[
                would be worth more than the cell that made it",
     },
     Field {
+        path: "ecology.capture_efficiency",
+        label: "capture efficiency",
+        group: Group::Ecology,
+        unit: Unit::Fraction,
+        note: "filtered detritus that becomes structural matter. The rest is waste, or a grain \
+               would be worth more to the cell that caught it than it was to the world",
+    },
+    Field {
+        path: "ecology.capture_rate",
+        label: "capture rate",
+        group: Group::Ecology,
+        unit: Unit::Fraction,
+        note: "how much of a square's detritus one unit of filter takes per unit of flow going \
+               past it. The one number that decides whether staying still is a living",
+    },
+    Field {
         path: "ecology.crowding_damage",
         label: "crowding damage",
         group: Group::Ecology,

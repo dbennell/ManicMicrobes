@@ -101,6 +101,10 @@ pub struct World {
     /// every physics phase like `crowding`, and read by division a phase later — a cell that was
     /// wedged last tick is still wedged, and the alternative is running the collision pass twice.
     pressure: Vec<i32>,
+    /// How fast the water is going past each cell, `Q10`. Written by the physics phase and read
+    /// by filtering a phase later. Scratch like `crowding` and `pressure`: derived every tick,
+    /// so excluded from equality, hashing and snapshots.
+    slip: Vec<i32>,
 
     /// The population.
     cells: CellArena,
@@ -216,6 +220,7 @@ impl World {
             radii: Vec::new(),
             crowding: Vec::new(),
             pressure: Vec::new(),
+            slip: Vec::new(),
             cells: CellArena::new(),
             genomes: GenomePool::new(),
             biology,
@@ -502,6 +507,7 @@ impl World {
                     jitter: self.scenario.jitter,
                     gravity: self.scenario.gravity,
                 },
+                &mut self.slip,
                 tick,
                 seed,
             );
@@ -607,6 +613,7 @@ impl World {
                 &mut self.substrate,
                 &self.neighbours,
                 &self.crowding,
+                &self.slip,
                 &self.biology.ecology,
                 &self.biology.metabolism.catalogue.metabolism,
                 &mut self.ledger,

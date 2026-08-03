@@ -41,6 +41,14 @@ use crate::substrate::Substrate;
 /// to mean something else.
 pub const CARRION: usize = 15;
 
+/// Particulate: solid matter suspended in a square (SPEC §17.4).
+///
+/// A chemical rather than an object, for the reason carrion is one — the substrate already
+/// diffuses, decays and conserves every species exactly, so anything expressed as a chemical
+/// inherits all of that and inherits it correctly. What is new is not the matter, it is the way
+/// out of it: see [`captured`].
+pub const DETRITUS: usize = 12;
+
 /// What predation and digestion cost and yield.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -116,6 +124,20 @@ pub struct EcologyConfig {
     /// scenario's ancestor settles at, so the existing calibration is what a normal cell sees and
     /// the term only bites on the ones that have given up size to fit.
     pub crowding_reference_radius: i32,
+
+    /// Fraction of captured detritus that becomes structural matter, `Q10`. The rest is waste.
+    ///
+    /// Below one, like digestion's, and for the same reason: a grain must never be worth more
+    /// to the cell that caught it than it was to the world.
+    pub capture_efficiency: i32,
+    /// How much of a square's detritus one unit of filter can take per unit of flow past it.
+    ///
+    /// The coefficient on the flux in [`captured`], and the one number that says whether
+    /// filtering is worth an organelle. Set so that a filter at full size in a brisk current
+    /// takes a useful fraction of what passes rather than all of it — a sponge that stripped
+    /// its own square to zero every tick would be limited by the flow and not by itself, and
+    /// then its size would not matter.
+    pub capture_rate: i32,
 }
 
 impl Default for EcologyConfig {
@@ -136,6 +158,8 @@ impl Default for EcologyConfig {
             // `biology::radius` of a cell of about thirty units of mass, which is what the
             // ancestors are seeded at: a quarter of a square plus five eighths.
             crowding_reference_radius: (Q10_ONE * 7) / 8,
+            capture_efficiency: (Q10_ONE * 3) / 4,
+            capture_rate: Q10_ONE / 4,
         }
     }
 }
@@ -156,6 +180,8 @@ pub struct EcologyReport {
     /// Membrane damage dealt by crowding, `Q10`. The measure of how much of the population is
     /// being kept in check by having nowhere to go.
     pub crushed: i64,
+    /// Detritus taken out of the water by filters, `Q10`. The size of the sessile trade.
+    pub filtered: i64,
 }
 
 /// A cell's total spike extension, `0..` — zero if it has none.
@@ -206,6 +232,78 @@ pub fn digestive_capacity_by_pathway(
     total
 }
 
+/// How much detritus a filter takes from its square this tick, `Q10`.
+///
+/// # Why this is not a slower `EAT`
+///
+/// SPEC §17.4 justifies particulate by contrasting "a dissolved resource is a commons" with
+/// "a particulate is a thing you can be standing on", and that contrast is not true of the code:
+/// `EAT` already reads the cell's own centre square, already takes what it likes, and costs
+/// nothing. The commons is one square wide and free. So particulate feeding written as a slower
+/// `EAT` would be a *worse* `EAT`, and nothing would ever evolve to use it.
+///
+/// What makes filtering a different living is that it is a **flux** and not a helping. What a
+/// cell can take is what goes *past* it:
+///
+/// ```text
+///     concentration  ×  relative speed  ×  frontal area  ×  filter
+/// ```
+///
+/// Three properties fall out of that, and all three are the point.
+///
+/// **It is zero for a cell drifting with the water.** Relative speed, not the water's speed —
+/// a cell carried along by a current sees still water and catches nothing. So this can never
+/// collapse into a second `EAT`, and *holding station* becomes worth something, which is what
+/// the holdfast was built for and had no payoff for until now.
+///
+/// **It is symmetric, so swimming is the other way to do it.** `|v_water − v_cell|` does not
+/// care which of the two is moving. A cell anchored in a current and a cell swimming through
+/// still water get the same reading from the same expression, so ram feeding is not a second
+/// mechanism — it is this one, read from the other end. Which of the two pays depends on
+/// whether the water is already moving, and that is a trade rather than a right answer.
+///
+/// **Size finally earns something.** Frontal area goes with the radius, so a bigger body
+/// intercepts more. Everywhere else in this engine being large is a bill — more upkeep, more
+/// neighbours, more matter tied up — and this is the first place it is an income.
+#[must_use]
+pub fn captured(
+    concentration: i32,
+    relative_speed: i32,
+    radius: i32,
+    filter: i32,
+    rate: i32,
+) -> i32 {
+    if concentration <= 0 || relative_speed <= 0 || filter <= 0 {
+        return 0;
+    }
+    let flux = q10_scale(concentration, relative_speed);
+    let intercepted = q10_scale(flux, radius);
+    q10_scale(q10_scale(intercepted, filter), rate)
+        .min(concentration)
+        .max(0)
+}
+
+/// The filtering strength of a cell's holdfasts, `Q10`.
+///
+/// The same `control[0]` that sets the grip, deliberately: a holdfast held out hard both holds
+/// on hard and strains hard, because it is one surface doing one thing. Splitting them would be
+/// two dials for a cell that has no way to want them different.
+#[must_use]
+pub fn filter_strength(cells: &CellArena, i: usize) -> i32 {
+    let mut total = 0i32;
+    for o in cells.slots(i) {
+        if o.kind != OrganelleType::Holdfast || !o.is_active() {
+            continue;
+        }
+        let effort = (o.control[0] as i32).clamp(0, Q10_ONE);
+        // `param` as a fraction of its own range, so a full-size holdfast at full effort is
+        // one whole unit of filter and the coefficient in `EcologyConfig` carries the units.
+        let size = (o.param as i32).saturating_mul(Q10_ONE) / 255;
+        total = total.saturating_add(q10_scale(size, effort));
+    }
+    total
+}
+
 /// Spikes wound whatever their owner is touching, and lysosomes digest what they are standing
 /// in (SPEC §6.2).
 ///
@@ -227,6 +325,8 @@ pub fn step(
     substrate: &mut Substrate,
     neighbours: &crate::neighbours::NeighbourIndex,
     crowding: &[i32],
+    // How fast the water is going past each cell, `Q10`, from the physics phase.
+    slip: &[i32],
     config: &EcologyConfig,
     chemistry: &crate::organelle::MetabolicChemistry,
     ledger: &mut Ledger,
@@ -305,6 +405,69 @@ pub fn step(
                     cells.damage[j] = cells.damage[j].saturating_add(damage);
                     report.damage_dealt += damage as i64;
                     report.wounded = report.wounded.saturating_add(1);
+                }
+            }
+        }
+
+        // --- filters ---
+        //
+        // What goes past, not what is here. See [`captured`] for why that is the whole design
+        // and not a detail of it.
+        let filter = filter_strength(cells, i);
+        if filter > 0 {
+            let (sx, sy) = (
+                crate::fixed::pos_to_square(cells.x[i]),
+                crate::fixed::pos_to_square(cells.y[i]),
+            );
+            let here = substrate.chem_at(DETRITUS, sx, sy);
+            if here > 0 {
+                // From the physics phase, because it is the only place the answer exists: a
+                // cell being carried by a current and a cell holding station against one both
+                // have a velocity of zero and both stand in the same moving water, and no field
+                // on either tells them apart. What does is how much of the drift the holdfast
+                // refused, and that is decided in `sensing::step_physics` and recorded there.
+                let speed = slip.get(i).copied().unwrap_or(0);
+                let radius = crate::biology::radius(cells, i);
+                let want = captured(here, speed, radius, filter, config.capture_rate);
+                let taken = -substrate.add_chem(DETRITUS, sx, sy, -want);
+                if taken > 0 {
+                    // Detritus becomes structural matter, lossily, and the loss becomes waste.
+                    // Both are chemicals inside the conserved total, so this is two balanced
+                    // reactions and goes through the ledger — an unaccounted transmutation is
+                    // indistinguishable from a conservation bug (I4).
+                    let recovered = q10_scale(taken, config.capture_efficiency);
+                    let wasted = taken.saturating_sub(recovered);
+                    let structural = chemistry.structural % CHEM_COUNT;
+                    let waste_chem = chemistry.pathway(0).waste % CHEM_COUNT;
+                    let room = crate::biology::interior_capacity(cells, i)
+                        .saturating_sub(cells.interior(i)[structural])
+                        .max(0);
+                    let into_cell = recovered.min(room);
+                    if into_cell > 0 {
+                        cells.interior_mut(i)[structural] =
+                            cells.interior(i)[structural].saturating_add(into_cell);
+                        ledger.convert(DETRITUS, structural, into_cell as i64);
+                    }
+                    // What the cell had no room for goes back out with the waste, rather than
+                    // being destroyed: a full cell stops profiting from filtering, it does not
+                    // start leaking matter out of the world.
+                    let spilled = (recovered - into_cell).saturating_add(wasted);
+                    if spilled > 0 {
+                        let placed = substrate.add_chem(waste_chem, sx, sy, spilled);
+                        ledger.convert(DETRITUS, waste_chem, placed as i64);
+                        let unplaced = spilled - placed;
+                        if unplaced > 0 {
+                            // Nowhere to put it. Back where it came from rather than gone.
+                            let returned = substrate.add_chem(DETRITUS, sx, sy, unplaced);
+                            let lost = unplaced - returned;
+                            if lost > 0 {
+                                let mut evicted = [0i32; CHEM_COUNT];
+                                evicted[DETRITUS] = lost;
+                                ledger.record_evicted(&evicted);
+                            }
+                        }
+                    }
+                    report.filtered = report.filtered.saturating_add(taken as i64);
                 }
             }
         }
@@ -480,6 +643,57 @@ mod tests {
     }
 
     #[test]
+    fn a_cell_drifting_with_the_water_catches_nothing() {
+        // The property that stops this being a second `EAT`. Relative speed, not the water's:
+        // a cell carried along by a current sees still water.
+        assert_eq!(captured(q10(100), 0, Q10_ONE, Q10_ONE, Q10_ONE), 0);
+        assert!(captured(q10(100), Q10_ONE / 8, Q10_ONE, Q10_ONE, Q10_ONE) > 0);
+    }
+
+    #[test]
+    fn swimming_and_anchoring_are_the_same_reading() {
+        // `|v_water - v_cell|` does not care which of the two is moving, so ram feeding is not
+        // a second mechanism. The caller takes the difference; this asserts the rate law treats
+        // the result identically however it arose.
+        let anchored = captured(q10(100), Q10_ONE / 8, Q10_ONE, Q10_ONE, Q10_ONE);
+        let swimming = captured(q10(100), Q10_ONE / 8, Q10_ONE, Q10_ONE, Q10_ONE);
+        assert_eq!(anchored, swimming);
+    }
+
+    #[test]
+    fn a_bigger_cell_intercepts_more() {
+        // The first place in this engine where being large is an income rather than a bill.
+        let small = captured(q10(100), Q10_ONE / 8, Q10_ONE / 2, Q10_ONE, Q10_ONE);
+        let large = captured(q10(100), Q10_ONE / 8, Q10_ONE * 2, Q10_ONE, Q10_ONE);
+        assert!(
+            large > small,
+            "size bought nothing: {large} against {small}"
+        );
+    }
+
+    #[test]
+    fn a_filter_cannot_take_more_than_is_there() {
+        // Everything about the rate law scales up; the square does not.
+        let here = q10(3);
+        let got = captured(here, Q10_ONE, Q10_ONE * 8, Q10_ONE * 8, Q10_ONE);
+        assert!(got <= here, "took {got} from a square holding {here}");
+    }
+
+    #[test]
+    fn nothing_silly_gets_past_the_rate_law() {
+        for c in [i32::MIN, -1, 0, 1, i32::MAX] {
+            for v in [i32::MIN, -1, 0, Q10_ONE, i32::MAX] {
+                let got = captured(c, v, Q10_ONE, Q10_ONE, Q10_ONE);
+                assert!(got >= 0, "negative capture from ({c}, {v})");
+                assert!(
+                    got <= c.max(0),
+                    "capture exceeded what was there from ({c}, {v})"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_small_cell_suffers_more_for_the_same_relative_squeeze() {
         // The term that stops a crowded population escaping by shrinking. `depth` is a ratio —
         // compression over radius — so without this it read identically for a slide of big
@@ -514,13 +728,19 @@ mod tests {
         };
 
         let index = crate::neighbours::NeighbourIndex::default();
+        let still = vec![0i32; cells.capacity()];
         step(
             &mut cells,
             &mut substrate,
             &index,
             &crowding,
+            &still,
             &config,
-            &Scenario::stress(16, 16).biology.metabolism.catalogue.metabolism,
+            &Scenario::stress(16, 16)
+                .biology
+                .metabolism
+                .catalogue
+                .metabolism,
             &mut ledger,
         );
         assert!(
@@ -549,6 +769,7 @@ mod tests {
             &mut cells,
             &mut substrate,
             &index,
+            &[],
             &[],
             &EcologyConfig::default(),
             &crate::organelle::MetabolicChemistry::default(),
@@ -583,6 +804,7 @@ mod tests {
             &mut substrate,
             &index,
             &[],
+            &[],
             &EcologyConfig::default(),
             &crate::organelle::MetabolicChemistry::default(),
             &mut ledger,
@@ -607,6 +829,7 @@ mod tests {
             &mut cells,
             &mut substrate,
             &index,
+            &[],
             &[],
             &EcologyConfig::default(),
             &crate::organelle::MetabolicChemistry::default(),
@@ -635,6 +858,7 @@ mod tests {
             &mut cells,
             &mut substrate,
             &index,
+            &[],
             &[],
             &EcologyConfig::default(),
             &crate::organelle::MetabolicChemistry::default(),
@@ -666,6 +890,7 @@ mod tests {
             &mut substrate,
             &index,
             &[],
+            &[],
             &EcologyConfig::default(),
             &crate::organelle::MetabolicChemistry::default(),
             &mut ledger,
@@ -692,6 +917,7 @@ mod tests {
             &mut cells,
             &mut substrate,
             &index,
+            &[],
             &[],
             &EcologyConfig::default(),
             &crate::organelle::MetabolicChemistry::default(),

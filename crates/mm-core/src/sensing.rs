@@ -399,11 +399,26 @@ pub fn step_physics(
     impulse_x: &mut [i32],
     impulse_y: &mut [i32],
     forces: BodyForces,
+    // Written, not read: the speed of the water *past* each cell, `Q10`.
+    //
+    // It has to be computed here because nowhere else can. A cell's velocity through the water
+    // is not `vx` and it is not the fluid's velocity either — the drift is added to the
+    // position step without ever touching `vx`, so a cell being carried along has a velocity of
+    // zero and sees a full current, and a cell holding station against one has a velocity of
+    // zero and sees the same. The two are opposite situations with identical fields, and the
+    // only place the difference exists is here, where the holdfast decides how much of the
+    // drift the cell actually takes.
+    //
+    // Scratch in the same sense as `crowding` and `pressure`: derived fresh every tick from
+    // positions and organelles, so it is excluded from equality, hashing and snapshots.
+    slip: &mut Vec<i32>,
     tick: u64,
     seed: u64,
 ) -> PhysicsReport {
     let BodyForces { jitter, gravity } = forces;
     let mut report = PhysicsReport::default();
+    slip.clear();
+    slip.resize(cells.capacity(), 0);
     let w = substrate.width() as i32;
     let h = substrate.height() as i32;
     // Empty on a slide with no barriers, which makes `touches_barrier` a single branch and a
@@ -534,6 +549,23 @@ pub fn step_physics(
                 drift_x = drift_x.saturating_sub(q10_scale(drift_x, held));
                 drift_y = drift_y.saturating_sub(q10_scale(drift_y, held));
             }
+        }
+
+        // What the water is doing past this cell, which is the whole of whether it can filter.
+        //
+        // The water moves at the field's velocity; the cell moves at its own velocity plus
+        // whatever share of the drift it did not refuse. The difference is the two subtracted,
+        // and it comes out right in all three cases without any of them being special-cased: a
+        // cell carried along reads zero, a cell gripping reads the full current, and a cell
+        // swimming through still water reads its own speed.
+        let water_x = svx.get(sq).copied().unwrap_or(0);
+        let water_y = svy.get(sq).copied().unwrap_or(0);
+        let past_x = water_x.saturating_sub(cells.vx[i]).saturating_sub(drift_x);
+        let past_y = water_y.saturating_sub(cells.vy[i]).saturating_sub(drift_y);
+        if let Some(slot) = slip.get_mut(i) {
+            *slot = past_x
+                .saturating_abs()
+                .saturating_add(past_y.saturating_abs());
         }
 
         // Velocity is `Q10` squares per tick; position is `POS` within a square.
@@ -781,7 +813,19 @@ mod tests {
 
         let before_x = cells.x[0];
         let before_energy = cells.energy[0];
-        let report = step_physics(&mut cells, &substrate, &mut ix, &mut iy, BodyForces { jitter: 0, gravity: 0 }, 0, 1);
+        let report = step_physics(
+            &mut cells,
+            &substrate,
+            &mut ix,
+            &mut iy,
+            BodyForces {
+                jitter: 0,
+                gravity: 0,
+            },
+            &mut Vec::new(),
+            0,
+            1,
+        );
 
         assert!(cells.x[0] > before_x, "the cell did not move");
         assert!(cells.energy[0] < before_energy, "swimming was free");
@@ -803,7 +847,19 @@ mod tests {
         let mut iy = vec![0i32; substrate.len()];
         let (x, y) = (cells.x[0], cells.y[0]);
         for tick in 0..100 {
-            step_physics(&mut cells, &substrate, &mut ix, &mut iy, BodyForces { jitter: 0, gravity: 0 }, tick, 1);
+            step_physics(
+                &mut cells,
+                &substrate,
+                &mut ix,
+                &mut iy,
+                BodyForces {
+                    jitter: 0,
+                    gravity: 0,
+                },
+                &mut Vec::new(),
+                tick,
+                1,
+            );
         }
         assert_eq!((cells.x[0], cells.y[0]), (x, y));
     }
@@ -820,13 +876,37 @@ mod tests {
         let mut iy = vec![0i32; substrate.len()];
 
         let mut rich = one_cell(&pool, &[(6, cilium)]);
-        step_physics(&mut rich, &substrate, &mut ix, &mut iy, BodyForces { jitter: 0, gravity: 0 }, 0, 1);
+        step_physics(
+            &mut rich,
+            &substrate,
+            &mut ix,
+            &mut iy,
+            BodyForces {
+                jitter: 0,
+                gravity: 0,
+            },
+            &mut Vec::new(),
+            0,
+            1,
+        );
 
         let mut poor = one_cell(&pool, &[(6, cilium)]);
         poor.energy[0] = 1;
         let mut ix2 = vec![0i32; substrate.len()];
         let mut iy2 = vec![0i32; substrate.len()];
-        step_physics(&mut poor, &substrate, &mut ix2, &mut iy2, BodyForces { jitter: 0, gravity: 0 }, 0, 1);
+        step_physics(
+            &mut poor,
+            &substrate,
+            &mut ix2,
+            &mut iy2,
+            BodyForces {
+                jitter: 0,
+                gravity: 0,
+            },
+            &mut Vec::new(),
+            0,
+            1,
+        );
 
         assert!(
             poor.x[0] < rich.x[0],
@@ -844,7 +924,19 @@ mod tests {
         let mut ix = vec![0i32; substrate.len()];
         let mut iy = vec![0i32; substrate.len()];
         for tick in 0..20 {
-            step_physics(&mut cells, &substrate, &mut ix, &mut iy, BodyForces { jitter: 0, gravity: 0 }, tick, 1);
+            step_physics(
+                &mut cells,
+                &substrate,
+                &mut ix,
+                &mut iy,
+                BodyForces {
+                    jitter: 0,
+                    gravity: 0,
+                },
+                &mut Vec::new(),
+                tick,
+                1,
+            );
         }
         assert_eq!(cells.vx[0], 0, "the cell coasted");
     }
@@ -860,7 +952,19 @@ mod tests {
         let mut ix = vec![0i32; substrate.len()];
         let mut iy = vec![0i32; substrate.len()];
         for tick in 0..500 {
-            step_physics(&mut cells, &substrate, &mut ix, &mut iy, BodyForces { jitter: 0, gravity: 0 }, tick, 1);
+            step_physics(
+                &mut cells,
+                &substrate,
+                &mut ix,
+                &mut iy,
+                BodyForces {
+                    jitter: 0,
+                    gravity: 0,
+                },
+                &mut Vec::new(),
+                tick,
+                1,
+            );
             assert!(cells.x[0] >= 0, "left the slide at tick {tick}");
             assert!(cells.x[0] < 16 * POS_ONE);
         }
@@ -878,7 +982,19 @@ mod tests {
         let (mut ix, mut iy) = (vec![0i32; substrate.len()], vec![0i32; substrate.len()]);
         let before = (cells.x[0], cells.y[0]);
         for tick in 0..64u64 {
-            step_physics(&mut cells, &substrate, &mut ix, &mut iy, BodyForces { jitter: 0, gravity: 64 }, tick, 1);
+            step_physics(
+                &mut cells,
+                &substrate,
+                &mut ix,
+                &mut iy,
+                BodyForces {
+                    jitter: 0,
+                    gravity: 64,
+                },
+                &mut Vec::new(),
+                tick,
+                1,
+            );
         }
         assert!(
             cells.x[0] > before.0 && cells.y[0] > before.1,
@@ -900,7 +1016,19 @@ mod tests {
             let mut ix = vec![0i32; substrate.len()];
             let mut iy = vec![0i32; substrate.len()];
             for tick in 0..200 {
-                step_physics(&mut cells, &substrate, &mut ix, &mut iy, BodyForces { jitter: 64, gravity: 0 }, tick, seed);
+                step_physics(
+                    &mut cells,
+                    &substrate,
+                    &mut ix,
+                    &mut iy,
+                    BodyForces {
+                        jitter: 64,
+                        gravity: 0,
+                    },
+                    &mut Vec::new(),
+                    tick,
+                    seed,
+                );
             }
             net_x += (cells.x[0] - pos(32)) as i64;
         }
@@ -920,7 +1048,19 @@ mod tests {
             let mut ix = vec![0i32; substrate.len()];
             let mut iy = vec![0i32; substrate.len()];
             for tick in 0..200 {
-                step_physics(&mut cells, &substrate, &mut ix, &mut iy, BodyForces { jitter: 32, gravity: 0 }, tick, 7);
+                step_physics(
+                    &mut cells,
+                    &substrate,
+                    &mut ix,
+                    &mut iy,
+                    BodyForces {
+                        jitter: 32,
+                        gravity: 0,
+                    },
+                    &mut Vec::new(),
+                    tick,
+                    7,
+                );
             }
             (cells.x[0], cells.y[0])
         };

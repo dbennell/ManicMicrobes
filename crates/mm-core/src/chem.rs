@@ -212,7 +212,37 @@ impl ChemTable {
             substrate("lipid", 1536, [230, 190, 120]),
             substrate("sulphide", 768, [200, 210, 120]),
             waste("carbon_dioxide", [140, 120, 130]),
-            waste("ammonia", [160, 140, 190]),
+            // Detritus: the particulate (SPEC §17.4), in the slot `CHEMISTRY.md` §2 listed as
+            // "ammonia — filler". Nothing read it, nothing made it, and no pathway named it.
+            //
+            // Solid, expressed as behaviour rather than as a category, which is what §17.4 asks
+            // for — and the behaviour that makes it particulate is the *advection*, not the
+            // diffusion. It is carried by the flow at a third of the water's speed, so it lags a
+            // current, drops out of a plume, and piles up where the dissolved fraction does not,
+            // which is what makes somewhere worth sitting. It breaks down very slowly into the
+            // structural chemical, so a grain nobody eats still becomes building material in the
+            // end, a few hundred thousand ticks later.
+            //
+            // It diffuses *more* than carrion, which is the correction to the first version of
+            // this entry. Detritus is suspended and travelling — that is the whole idea — while
+            // a corpse is a deposit that stays where it fell and is worth swimming to. Making
+            // the travelling one the least mobile thing in the table had them the wrong way
+            // round, and `m8_ecology` said so.
+            //
+            // Not `structural` itself, for the reason carrion is not: a cell cannot build itself
+            // out of a lump it has not taken apart. Getting the carbon out of it early is what a
+            // filter is for, and that is the whole trade — wait for it to rot, or catch it.
+            ChemicalDef {
+                name: "detritus".to_string(),
+                diffusion: Q10_ONE / 32,
+                toxicity: 0,
+                energy_yield: 0,
+                structural: false,
+                colour: [190, 170, 130],
+                decay_to: Some(4),
+                decay_rate: Q10_ONE / 2048,
+                advection: Q10_ONE / 3,
+            },
             // Respiration's byproduct. Toxic, so a cell has to get rid of it or take
             // damage; unstable, so what it gets rid of finds its way back into the loop
             // instead of being a permanent matter sink. Both halves matter — without the

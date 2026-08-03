@@ -1009,6 +1009,39 @@ route: slower per unit, available only where the particulate physically is, and 
 every other cell in the square the way a dissolved pool is. That difference is the point. A
 dissolved resource is a commons; a particulate is a thing you can be standing on.
 
+*The distinction as written above is not true of the code, and building it found out why.* `EAT`
+already reads the cell's own centre square, already takes what it likes, and costs nothing — the
+commons is one square wide and free. So "slower per unit, available where it is" describes a
+**worse `EAT`**, and nothing would ever have evolved to use it.
+
+What makes filtering a different living is that it is a **flux**, not a helping. What a cell can
+take is what goes *past* it: `concentration × relative speed × frontal area × filter`. Three
+things follow, and they are the whole of why it is worth having.
+
+- **It is zero for a cell drifting with the water.** Relative speed, not the water's speed. So it
+  cannot collapse into a second `EAT`, and holding station becomes worth something — which is
+  what §17.1's holdfast was built for and had no payoff for until now.
+- **Swimming is the same mechanism read from the other end.** `|v_water − v_cell|` does not care
+  which of the two is moving, so ram feeding needed no second mechanism: a cell anchored in a
+  current and a cell swimming through still water get the same reading from the same expression.
+  Which pays depends on whether the water is already moving, and that is a trade.
+- **Size is an income.** Frontal area goes with the radius. Everywhere else in this engine being
+  large is a bill; this is the first place it earns.
+
+**The relative speed had to be computed in the physics phase**, and that is the part that was not
+obvious. A cell carried along by a current and a cell holding station against one both have a
+velocity of zero and both stand in the same moving water: no field on either tells them apart,
+because the drift is added to the position step without ever touching `vx`. The difference is how
+much of the drift the holdfast refused, which is known only where it is decided. It is recorded
+there as `slip`, scratch in the same sense as `crowding` and `pressure`.
+
+Detritus is chemical 12 — the slot `CHEMISTRY.md` §2 listed as "ammonia: filler". It is *not*
+`structural`, for the reason carrion is not: a cell cannot build itself out of a lump it has not
+taken apart. And it diffuses **more** than carrion, not less, which is the correction the first
+attempt needed: detritus is suspended and travelling, a corpse is a deposit that stays where it
+fell, and the behaviour that makes detritus particulate is its advection rather than its
+diffusion.
+
 `ChemicalDef` grows a `particulate: bool` — or more precisely a settling rate and a breakdown
 rate, since "solid" is a behaviour and not a category.
 
