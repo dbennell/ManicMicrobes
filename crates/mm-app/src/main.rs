@@ -425,6 +425,19 @@ struct EcologyView {
 /// somebody reads it.
 const ECOLOGY_STALE_AFTER: u64 = 120;
 
+/// The world's environment: what falls on it and what moves through it.
+///
+/// Held apart from [`BiologyConfig`] because that is what the *living* half runs on and these
+/// are `Scenario` fields — the slide's weather rather than its physiology. `World::set_light`
+/// and `World::set_current` have existed since M8 and had no caller in `mm-app` at all, so
+/// every one of the six light regimes and five current fields was reachable only by hand-
+/// writing a `.ron` and running `mm-cli`, which cannot draw a picture.
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct Environment {
+    light: mm_core::light::LightRegime,
+    current: mm_core::light::CurrentField,
+}
+
 /// The parameter editor's state while it is open.
 struct Draft {
     /// What will be applied.
@@ -433,6 +446,14 @@ struct Draft {
     live: BiologyConfig,
     /// What the scenario says, so a value that has drifted from the file can be marked.
     founding: BiologyConfig,
+    /// The environment being edited, and what is in force.
+    ///
+    /// Drafted rather than applied on each keystroke for a reason that is not only consistency
+    /// with the rest of the pane: `set_current` invalidates the whole prescribed velocity
+    /// field, so a strength dragged through a slider would rebuild it on every frame of the
+    /// drag.
+    env: Environment,
+    env_live: Environment,
 }
 
 impl SlideRes {
@@ -911,6 +932,16 @@ struct View {
     drag_distance: f32,
     /// Which laboratory tool the mouse is holding.
     tool: Tool,
+    /// Who owns the right button for the duration of a tool drag, latched like [`Focus`] does
+    /// for the left. Separate from `focus` because both buttons can be down at once and a pan
+    /// that wandered over a rail must not also cancel the wall being drawn.
+    tool_focus: ui::Focus,
+    /// The last square a barrier stroke painted, or `None` when no stroke is in progress.
+    ///
+    /// The pointer is sampled once a frame, so a hand moving at any speed skips squares between
+    /// samples. Keeping where the stroke was lets the next sample fill the gap — see
+    /// [`ui::line_squares`].
+    paint_from: Option<(i32, i32)>,
     /// Which species page is open.
     species: Option<mm_core::phylogeny::SpeciesId>,
     /// Which of the ecology pane's three views is showing (M10.4).
@@ -945,6 +976,8 @@ impl Default for View {
             genome_scrolled_to: None,
             drag_distance: 0.0,
             tool: Tool::Select,
+            tool_focus: ui::Focus::default(),
+            paint_from: None,
             species: None,
             ecology: Ecology::Tree,
             tree_floor: 2,
@@ -1282,6 +1315,18 @@ fn handle_input(
         view.drag_distance = 0.0;
         view.focus.press(live);
     }
+    // The right button latches too, so a wall being dragged towards the edge of the plate is
+    // not abandoned the moment the pointer touches a rail. Same rule as the pan, and the same
+    // reason: losing the gesture halfway is worse than the thing it protects against.
+    if buttons.just_pressed(MouseButton::Right) {
+        view.tool_focus.press(live);
+    }
+    if buttons.just_released(MouseButton::Right) {
+        view.tool_focus.release();
+        // A stroke ends when the button comes up, so the next one starts a fresh line rather
+        // than drawing a wall from wherever the last one happened to stop.
+        view.paint_from = None;
+    }
     let target = view.focus.resolve(live);
 
     // Typing in the editor must not toggle panels. `p` opened the metrics rail from inside a
@@ -1299,6 +1344,7 @@ fn handle_input(
         &mut sim,
         &window,
         target,
+        live,
         pointer,
     );
 }
@@ -1427,6 +1473,9 @@ fn handle_mouse(
     sim: &mut SlideRes,
     window: &Query<&Window, With<PrimaryWindow>>,
     target: Target,
+    // Who is under the pointer *now*, before the left button's latch is applied. The tool
+    // drag has its own latch and needs the unlatched answer to resolve against.
+    live_target: Target,
     pointer: Option<(f32, f32)>,
 ) {
     // The events are drained whoever owns them — an unread `EventReader` accumulates, and a
@@ -1507,9 +1556,40 @@ fn handle_mouse(
         view.focus.release();
     }
 
+    // The barrier tools paint for as long as the button is down, filling the gap between one
+    // frame's sample and the next. Everything else fires once on the press.
+    //
+    // Drawing a wall was one square per click, which meant the dividing wall in
+    // `archipelago.ron` — about a hundred and fifty squares — was a hundred and fifty separate
+    // right-clicks, each taking the simulation lock and each re-running the ring eviction that
+    // pushes the square's chemistry outwards. It was the single reason the tool was unusable.
+    let painting = matches!(view.tool, Tool::DrawBarrier | Tool::EraseBarrier);
+    let tool_target = view.tool_focus.resolve(live_target);
+    if painting && buttons.pressed(MouseButton::Right) && tool_target == Target::Slide {
+        if let Some((slide_x, slide_y)) = pointer_on_slide(window, view, scale) {
+            let to = (slide_x.floor() as i32, slide_y.floor() as i32);
+            // From wherever the stroke was, or from here if it has only just begun.
+            let from = view.paint_from.unwrap_or(to);
+            if view.paint_from != Some(to) {
+                let draw = view.tool == Tool::DrawBarrier;
+                let held = sim.engine.handle();
+                let mut slide = held.slide();
+                let world = slide.world_mut();
+                // One lock for the whole stroke segment rather than one per square.
+                for (x, y) in ui::line_squares(from, to) {
+                    if x >= 0 && y >= 0 {
+                        let event = tools::set_barrier(world, x as u32, y as u32, draw);
+                        sim.last_tool = Some(event);
+                    }
+                }
+                view.paint_from = Some(to);
+            }
+        }
+    }
+
     // Right-click applies the current tool. `Select` is the default and is the only one that
     // cannot change the world; the rest write, which is why the tool is chosen explicitly.
-    if buttons.just_pressed(MouseButton::Right) && target == Target::Slide {
+    if !painting && buttons.just_pressed(MouseButton::Right) && target == Target::Slide {
         if let Some((slide_x, slide_y)) = pointer_on_slide(window, view, scale) {
             let square = (slide_x.floor() as i32, slide_y.floor() as i32);
             let held = sim.engine.handle();
@@ -1536,17 +1616,8 @@ fn handle_mouse(
                         }
                     }
                 }
-                Tool::DrawBarrier | Tool::EraseBarrier => {
-                    if square.0 >= 0 && square.1 >= 0 {
-                        let event = tools::set_barrier(
-                            held.slide().world_mut(),
-                            square.0 as u32,
-                            square.1 as u32,
-                            view.tool == Tool::DrawBarrier,
-                        );
-                        sim.last_tool = Some(event);
-                    }
-                }
+                // Painted above, for as long as the button is held, rather than once here.
+                Tool::DrawBarrier | Tool::EraseBarrier => {}
             }
         }
     }
@@ -1770,6 +1841,7 @@ fn redraw(
                     frame.height as usize,
                     &frame.light,
                     &layers,
+                    &frame.barriers,
                     // The vignette, which used to be applied per sprite and now has to be painted
                     // in. Asked per square, in square coordinates, because where a square lands on
                     // screen is the camera's business and not the painter's.
@@ -2731,16 +2803,26 @@ fn parameters_body(ui: &mut egui::Ui, sim: &mut SlideRes) {
         let held = sim.engine.handle();
         let slide = held.slide();
         let live = slide.world().biology().clone();
+        // `set_light` and `set_current` write straight into the running scenario, so the
+        // scenario *is* what is in force. There is no separate founding value to revert an
+        // environment to, which is why it has no "back to the scenario" of its own.
+        let env = Environment {
+            light: slide.world().scenario().light.clone(),
+            current: slide.world().scenario().current.clone(),
+        };
         sim.draft = Some(Draft {
             editing: live.clone(),
             live,
             founding: slide.world().scenario().biology.clone(),
+            env: env.clone(),
+            env_live: env,
         });
     }
     let Some(mut draft) = sim.draft.take() else {
         return;
     };
     let mut apply = false;
+    let mut apply_env = false;
 
     let dirty = draft.editing != draft.live;
     ui.horizontal(|ui| {
@@ -2784,6 +2866,11 @@ fn parameters_body(ui: &mut egui::Ui, sim: &mut SlideRes) {
         .id_salt("parameters")
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            egui::CollapsingHeader::new("environment")
+                .default_open(true)
+                .show(ui, |ui| {
+                    environment_editor(ui, &mut draft, &mut apply_env);
+                });
             for group in params::Group::ALL {
                 egui::CollapsingHeader::new(group.title())
                     .default_open(group == params::Group::Metabolism)
@@ -2824,7 +2911,293 @@ fn parameters_body(ui: &mut egui::Ui, sim: &mut SlideRes) {
         held.slide().world_mut().set_biology(draft.editing.clone());
         draft.live = draft.editing.clone();
     }
+    if apply_env {
+        let held = sim.engine.handle();
+        let mut slide = held.slide();
+        let world = slide.world_mut();
+        world.set_light(draft.env.light.clone());
+        world.set_current(draft.env.current.clone());
+        draft.env_live = draft.env.clone();
+    }
     sim.draft = Some(draft);
+}
+
+/// The light falling on the slide and the water moving under it.
+///
+/// # Why this is not part of the intervention record, and why that is a problem
+///
+/// `set_biology` folds a change into the scenario at tick 0 and records an `Intervention`
+/// after it, so `(scenario, seed, interventions)` still reproduces the run — `docs/UI.md` §4
+/// chose that over refusing mid-run edits precisely so a world could be nudged and watched.
+///
+/// `set_light` and `set_current` write straight into the running scenario and record nothing,
+/// so a light regime changed at tick 40,000 is indistinguishable on reload from one the
+/// scenario always had. A `.mmslide` is unaffected — it carries the world's state and its
+/// current scenario, so it resumes correctly — but replaying the original `.ron` no longer
+/// reproduces the run. The barrier tools have had the same hole since M6.
+///
+/// Closing it means `Intervention` growing beyond `BiologyConfig`, which bumps the snapshot
+/// format and touches the diff view that reconstructs "what changed". That is its own change;
+/// this one says so in the interface rather than leaving it to be discovered.
+fn environment_editor(ui: &mut egui::Ui, draft: &mut Draft, apply: &mut bool) {
+    use mm_core::light::{CurrentField, LightRegime};
+
+    ui.small(
+        "The weather. Light is what enters the world and the current is what carries \
+         everything through it — including cells, which drift with the water unless \
+         something holds them.",
+    );
+    ui.add_space(4.0);
+
+    let q10 = |v: &mut i32, ui: &mut egui::Ui, label: &str| {
+        ui.add(
+            egui::DragValue::new(v)
+                .speed(8.0)
+                .prefix(format!("{label} ")),
+        );
+    };
+
+    ui.horizontal(|ui| {
+        ui.label("light");
+        let mut kind = light_kind(&draft.env.light);
+        egui::ComboBox::from_id_salt("light regime")
+            .selected_text(kind)
+            .show_ui(ui, |ui| {
+                for name in LIGHT_KINDS {
+                    ui.selectable_value(&mut kind, name, name);
+                }
+            });
+        if kind != light_kind(&draft.env.light) {
+            draft.env.light = default_light(kind);
+        }
+    });
+    ui.horizontal_wrapped(|ui| match &mut draft.env.light {
+        LightRegime::Uniform { intensity } => q10(intensity, ui, "intensity"),
+        LightRegime::DayNight {
+            period_ticks,
+            day,
+            night,
+        } => {
+            ui.add(
+                egui::DragValue::new(period_ticks)
+                    .speed(16.0)
+                    .prefix("period "),
+            );
+            q10(day, ui, "day");
+            q10(night, ui, "night");
+        }
+        LightRegime::Directional { bright, dark, from } => {
+            q10(bright, ui, "bright");
+            q10(dark, ui, "dark");
+            let mut which = edge_index(*from);
+            egui::ComboBox::from_id_salt("bright edge")
+                .selected_text(EDGES[which].0)
+                .show_ui(ui, |ui| {
+                    for (i, (name, _)) in EDGES.iter().enumerate() {
+                        ui.selectable_value(&mut which, i, *name);
+                    }
+                });
+            *from = EDGES[which.min(EDGES.len() - 1)].1;
+        }
+        LightRegime::PointSource {
+            x,
+            y,
+            intensity,
+            half_life_squares,
+        } => {
+            ui.add(egui::DragValue::new(x).prefix("x "));
+            ui.add(egui::DragValue::new(y).prefix("y "));
+            q10(intensity, ui, "intensity");
+            ui.add(egui::DragValue::new(half_life_squares).prefix("half-life "));
+        }
+        LightRegime::SlowDecline {
+            start,
+            end,
+            over_ticks,
+        } => {
+            q10(start, ui, "start");
+            q10(end, ui, "end");
+            ui.add(
+                egui::DragValue::new(over_ticks)
+                    .speed(1000.0)
+                    .prefix("over "),
+            );
+        }
+        LightRegime::Seasonal {
+            day_ticks,
+            year_ticks,
+            summer_day,
+            winter_day,
+            night,
+        } => {
+            ui.add(egui::DragValue::new(day_ticks).speed(16.0).prefix("day "));
+            ui.add(
+                egui::DragValue::new(year_ticks)
+                    .speed(1000.0)
+                    .prefix("year "),
+            );
+            q10(summer_day, ui, "summer");
+            q10(winter_day, ui, "winter");
+            q10(night, ui, "night");
+        }
+    });
+
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label("current");
+        let mut kind = current_kind(&draft.env.current);
+        egui::ComboBox::from_id_salt("current field")
+            .selected_text(kind)
+            .show_ui(ui, |ui| {
+                for name in CURRENT_KINDS {
+                    ui.selectable_value(&mut kind, name, name);
+                }
+            });
+        if kind != current_kind(&draft.env.current) {
+            draft.env.current = default_current(kind);
+        }
+    });
+    ui.horizontal_wrapped(|ui| match &mut draft.env.current {
+        CurrentField::Still => {
+            ui.weak("no flow");
+        }
+        CurrentField::Uniform { vx, vy } => {
+            q10(vx, ui, "vx");
+            q10(vy, ui, "vy");
+        }
+        CurrentField::Rotational { strength }
+        | CurrentField::Shear { strength }
+        | CurrentField::Convergent { strength } => q10(strength, ui, "strength"),
+    });
+    ui.small(format!(
+        "velocity is Q10 squares per fluid step; the solver clamps at {} \
+         (a quarter of a square).",
+        mm_core::fixed::Q10_ONE / 4
+    ));
+
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        let dirty = draft.env != draft.env_live;
+        if ui
+            .add_enabled(dirty, egui::Button::new("apply environment"))
+            .on_hover_text(
+                "change the light and the flow on the running world. NOT recorded as an \
+                 intervention — a slide file resumes correctly, but replaying the original \
+                 scenario will not reproduce this run.",
+            )
+            .clicked()
+        {
+            *apply = true;
+        }
+        if ui
+            .add_enabled(dirty, egui::Button::new("discard"))
+            .clicked()
+        {
+            draft.env = draft.env_live.clone();
+        }
+        if dirty {
+            ui.colored_label(egui::Color32::from_rgb(240, 200, 120), "not applied");
+        } else {
+            ui.weak("in force");
+        }
+    });
+}
+
+const LIGHT_KINDS: [&str; 6] = [
+    "uniform",
+    "day/night",
+    "directional",
+    "point source",
+    "slow decline",
+    "seasonal",
+];
+
+const CURRENT_KINDS: [&str; 5] = ["still", "uniform", "rotational", "shear", "convergent"];
+
+const EDGES: [(&str, mm_core::light::Edge); 4] = [
+    ("left", mm_core::light::Edge::Left),
+    ("right", mm_core::light::Edge::Right),
+    ("top", mm_core::light::Edge::Top),
+    ("bottom", mm_core::light::Edge::Bottom),
+];
+
+fn edge_index(e: mm_core::light::Edge) -> usize {
+    EDGES.iter().position(|(_, v)| *v == e).unwrap_or(0)
+}
+
+fn light_kind(r: &mm_core::light::LightRegime) -> &'static str {
+    use mm_core::light::LightRegime as L;
+    match r {
+        L::Uniform { .. } => LIGHT_KINDS[0],
+        L::DayNight { .. } => LIGHT_KINDS[1],
+        L::Directional { .. } => LIGHT_KINDS[2],
+        L::PointSource { .. } => LIGHT_KINDS[3],
+        L::SlowDecline { .. } => LIGHT_KINDS[4],
+        L::Seasonal { .. } => LIGHT_KINDS[5],
+    }
+}
+
+fn current_kind(c: &mm_core::light::CurrentField) -> &'static str {
+    use mm_core::light::CurrentField as C;
+    match c {
+        C::Still => CURRENT_KINDS[0],
+        C::Uniform { .. } => CURRENT_KINDS[1],
+        C::Rotational { .. } => CURRENT_KINDS[2],
+        C::Shear { .. } => CURRENT_KINDS[3],
+        C::Convergent { .. } => CURRENT_KINDS[4],
+    }
+}
+
+/// A usable starting point for each variant, so choosing one from the list produces a world
+/// that visibly does the thing rather than a set of zeroes that does nothing.
+fn default_light(kind: &str) -> mm_core::light::LightRegime {
+    use mm_core::light::{Edge, LightRegime as L};
+    let full = mm_core::fixed::Q10_ONE;
+    match kind {
+        k if k == LIGHT_KINDS[1] => L::DayNight {
+            period_ticks: 2_000,
+            day: full,
+            night: 0,
+        },
+        k if k == LIGHT_KINDS[2] => L::Directional {
+            bright: full,
+            dark: 0,
+            from: Edge::Top,
+        },
+        k if k == LIGHT_KINDS[3] => L::PointSource {
+            x: 32,
+            y: 32,
+            intensity: full,
+            half_life_squares: 8,
+        },
+        k if k == LIGHT_KINDS[4] => L::SlowDecline {
+            start: full,
+            end: 0,
+            over_ticks: 1_000_000,
+        },
+        k if k == LIGHT_KINDS[5] => L::Seasonal {
+            day_ticks: 2_000,
+            year_ticks: 100_000,
+            summer_day: full,
+            winter_day: full / 4,
+            night: 0,
+        },
+        _ => L::Uniform { intensity: full },
+    }
+}
+
+/// Half the solver's ceiling, which is brisk enough to see and slow enough that a cell with a
+/// holdfast can still hold against it.
+fn default_current(kind: &str) -> mm_core::light::CurrentField {
+    use mm_core::light::CurrentField as C;
+    let brisk = mm_core::fixed::Q10_ONE / 8;
+    match kind {
+        k if k == CURRENT_KINDS[1] => C::Uniform { vx: brisk, vy: 0 },
+        k if k == CURRENT_KINDS[2] => C::Rotational { strength: brisk },
+        k if k == CURRENT_KINDS[3] => C::Shear { strength: brisk },
+        k if k == CURRENT_KINDS[4] => C::Convergent { strength: brisk },
+        _ => C::Still,
+    }
 }
 
 /// One labelled parameter: its value, its reading, and whether it has been moved.

@@ -455,6 +455,18 @@ pub struct Frame {
     pub overlays: Vec<OverlayLayer>,
     /// Incident light, normalised. Rendered as a warm luminance layer (SPEC §14).
     pub light: Vec<f32>,
+    /// The barrier mask, one entry per square, or empty on a slide with no barriers.
+    ///
+    /// Until this existed the renderer was never told where the walls were, so a barrier was
+    /// visible only as an *absence*: `set_blocked` evicts the square's chemistry to its
+    /// neighbours and the light regime shadows behind it, which reads as a dark patch and is
+    /// indistinguishable from a square that merely has nothing in it. On an unlit slide — the
+    /// vent, or a night — it read as nothing at all. A wall is a thing, and drawing it as a
+    /// hole is why drawing one did not feel like drawing one.
+    ///
+    /// Empty rather than all-false when there are no barriers, so a slide without them pays
+    /// neither the copy nor the per-texel branch.
+    pub barriers: Vec<bool>,
     pub population: usize,
     /// Detail tier this frame was built at.
     pub lod: Lod,
@@ -760,6 +772,12 @@ impl Slide {
             .map(|v| (*v as f32 / Q10_ONE as f32).clamp(0.0, 1.0))
             .collect();
 
+        let barriers: Vec<bool> = if substrate.has_barriers() {
+            substrate.blocked().to_vec()
+        } else {
+            Vec::new()
+        };
+
         // Two questions, not one. Cutting cells against their neighbours starts a long way
         // before there is a cell big enough to have a visible inside — see [`Lod`].
         let packed = self.lod.resolves_packing();
@@ -990,6 +1008,7 @@ impl Slide {
             cells: dots,
             overlays,
             light,
+            barriers,
             population: cells.len(),
             lod: self.lod,
             motes: crate::optics::motes(&self.optics, self.world.tick_count()),

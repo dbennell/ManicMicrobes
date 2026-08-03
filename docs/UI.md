@@ -272,6 +272,33 @@ Two properties fall out of (b) that make it more than a compromise:
 The acceptance test is exact and cheap: run with interventions, save, reload, run on — state
 hash identical to the uninterrupted run. It is M1's serialisation test with a new field.
 
+### The environment: what falls on the slide and what moves through it
+
+*Added after M10.2, because the list below turned out to be missing the half that decides what
+kind of world it is.*
+
+`World::set_light` and `World::set_current` have existed since M8 and had **no caller in
+`mm-app` at all**. Every one of the six light regimes and five current fields was reachable
+only by hand-writing a `.ron` and running `mm-cli`, which cannot draw a picture. So the
+microscope could show a world with a day/night cycle or a stirred beaker and could not be used
+to make one, and the whole of §17.6 in `SPEC.md` — cells holding station in flowing water —
+was unwatchable in the instrument built for watching.
+
+They are now the first group in the parameter drawer: a variant picker each, the chosen
+variant's fields beside it, and their own apply. Drafted rather than live because
+`set_current` invalidates the entire prescribed velocity field, so a strength dragged through
+a slider would rebuild it once per frame of the drag.
+
+**They are not on the intervention record, and that is a known hole rather than an oversight.**
+`Intervention` is `{ tick, biology }`, so it cannot carry them; `set_light` and `set_current`
+write straight into the running scenario and record nothing. A `.mmslide` resumes correctly —
+it carries the world's state and its current scenario — but replaying the original `.ron` no
+longer reproduces the run. **The barrier tools have had exactly this hole since M6**, and
+neither is visible to the user unless the interface says so, which is why the apply button
+says it. Closing it means `Intervention` growing beyond `BiologyConfig`, which bumps the
+snapshot format and touches the diff view that reconstructs "what changed"; that is its own
+piece of work and it is the next one this section owes.
+
 ### The parameter editor
 
 One `Parameters…` view, grouped (world · chemistry · light · VM · metabolism ·
@@ -504,8 +531,30 @@ Three problems, in order of severity:
 ### The plan
 
 **Fields become one texture.** A `512×512` RGBA8 texture (or a small texture array, one layer
-per active chemical, blended in the shader), written from `Frame::overlays` and `Frame::light`
-each frame and drawn as one quad under everything. A megabyte of upload per frame is nothing;
+per active chemical, blended in the shader), written from `Frame::overlays`, `Frame::light`
+and `Frame::barriers` each frame and drawn as one quad under everything.
+
+*`Frame::barriers` was added after M10.5.* Until then the renderer was never told where the
+walls were: `Frame` carried cells, overlays, light, motes and junctions, and `blocked` appeared
+nowhere in `mm-app` outside `tools.rs`. A barrier was visible only as an **absence** —
+`set_blocked` evicts the square's chemistry to its neighbours and the light regime shadows
+behind it, so a wall read as a dark patch indistinguishable from a square that merely has
+nothing in it, and on an unlit slide as nothing at all. A wall is a thing and is now painted as
+one: opaque, cool against a slide whose every other colour is warm light or a chemical tint,
+and ignoring both the light and the overlays, because a blocked square genuinely has nothing in
+it to paint. The mask is empty rather than all-false on a slide with no barriers, so such a
+slide pays neither the copy nor the per-texel branch.
+
+**Drawing one is a drag, not a click.** It was one square per right-click, edge-triggered, with
+no stored last square and no fill between samples — so the dividing wall in `archipelago.ron`,
+about a hundred and fifty squares, was a hundred and fifty separate clicks, each taking the
+simulation lock and each re-running the ring eviction. The stroke now paints for as long as the
+button is down and fills the gap between one frame's sample and the next with
+`ui::line_squares`, because the pointer is sampled once a frame and a hand moving at any speed
+skips squares — and a barrier with gaps in it is not a barrier, since the fluid and now the
+cells both go straight through the holes. The right button latches its owner like the left one
+does, so a wall dragged towards the edge of the plate is not abandoned when the pointer touches
+a rail. A megabyte of upload per frame is nothing;
 262,143 entities are not. `Frame` already carries exactly the right data — `field: Vec<f32>`
 normalised, per-layer `rgb` and `peak` — so this is a change of destination, not of content.
 The `sqrt` presentation curve moves into the shader where it belongs.

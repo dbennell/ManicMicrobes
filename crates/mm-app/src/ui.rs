@@ -143,6 +143,55 @@ impl Focus {
     }
 }
 
+/// The most squares one drag sample may paint.
+///
+/// A guard rail rather than a design choice. The pointer's slide coordinate is unbounded — a
+/// zoomed-out camera and a pointer at the window edge can produce a square index far outside
+/// any grid — and the fill below walks one square at a time. The largest legitimate line on
+/// the largest slide the New-slide dialog offers is about 1,450 squares, so anything past this
+/// is a coordinate that has gone wrong and the honest response is to stop walking rather than
+/// to spend a second on it.
+pub const MAX_STROKE: usize = 4096;
+
+/// Every square on the line between two, inclusive of both ends.
+///
+/// Integer Bresenham, and the reason a barrier tool needs it at all: the pointer is sampled
+/// once a frame, so a hand moving at any speed skips squares between one sample and the next.
+/// Painting only where the pointer *was* leaves a dotted line with gaps that get wider the
+/// faster you draw — and a barrier with gaps in it is not a barrier, because the fluid and now
+/// the cells both go straight through the holes.
+///
+/// Arithmetic in `i64` so that two far-apart coordinates cannot overflow the difference, with
+/// [`MAX_STROKE`] bounding the walk. Pure, so the interesting cases are a table rather than a
+/// thing you have to draw with a mouse to check.
+#[must_use]
+pub fn line_squares(from: (i32, i32), to: (i32, i32)) -> Vec<(i32, i32)> {
+    let (mut x, mut y) = (i64::from(from.0), i64::from(from.1));
+    let (x1, y1) = (i64::from(to.0), i64::from(to.1));
+    let dx = (x1 - x).abs();
+    // Negative, which is what lets one error term serve both axes.
+    let dy = -(y1 - y).abs();
+    let sx = if x < x1 { 1 } else { -1 };
+    let sy = if y < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+    let mut out = Vec::new();
+    loop {
+        out.push((x as i32, y as i32));
+        if (x == x1 && y == y1) || out.len() >= MAX_STROKE {
+            return out;
+        }
+        let e2 = 2 * err;
+        if e2 >= dy {
+            err += dy;
+            x += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y += sy;
+        }
+    }
+}
+
 /// Where the camera must move so that the point under the pointer stays under the pointer.
 ///
 /// The difference between zooming a microscope and operating a slider. `offset` is the
@@ -531,5 +580,74 @@ mod tests {
                 _ => assert_eq!(dock, Dock::Drawer, "{} is not in the drawer", panel.title()),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod stroke_tests {
+    use super::*;
+
+    #[test]
+    fn a_single_square_is_its_own_line() {
+        assert_eq!(line_squares((4, 7), (4, 7)), vec![(4, 7)]);
+    }
+
+    #[test]
+    fn a_straight_run_has_no_gaps_in_it() {
+        // The failure this exists to prevent: a barrier with holes is not a barrier, because
+        // both the fluid and now the cells go straight through them.
+        let run = line_squares((0, 3), (5, 3));
+        assert_eq!(run, vec![(0, 3), (1, 3), (2, 3), (3, 3), (4, 3), (5, 3)]);
+
+        let down = line_squares((2, 0), (2, 4));
+        assert_eq!(down, vec![(2, 0), (2, 1), (2, 2), (2, 3), (2, 4)]);
+    }
+
+    #[test]
+    fn a_diagonal_is_contiguous_and_ends_where_it_was_told_to() {
+        let d = line_squares((0, 0), (4, 4));
+        assert_eq!(d.first(), Some(&(0, 0)));
+        assert_eq!(d.last(), Some(&(4, 4)));
+        // Every step moves by one square in at least one axis and never more than one in
+        // either, which is what "contiguous" means for a wall.
+        for pair in d.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            assert!(
+                (a.0 - b.0).abs() <= 1 && (a.1 - b.1).abs() <= 1,
+                "{a:?} to {b:?} jumps"
+            );
+        }
+    }
+
+    #[test]
+    fn it_runs_in_every_direction() {
+        // Backwards and upwards are the cases an off-by-one in the sign gets wrong, and a
+        // barrier tool is dragged in all four.
+        for (from, to) in [
+            ((5, 5), (0, 5)),
+            ((5, 5), (5, 0)),
+            ((5, 5), (0, 0)),
+            ((0, 5), (5, 0)),
+        ] {
+            let line = line_squares(from, to);
+            assert_eq!(line.first(), Some(&from), "{from:?} -> {to:?}");
+            assert_eq!(line.last(), Some(&to), "{from:?} -> {to:?}");
+        }
+    }
+
+    #[test]
+    fn a_shallow_line_steps_the_long_axis_every_square() {
+        // Two along for one down. The long axis must not stall, or the wall gets a gap.
+        let line = line_squares((0, 0), (6, 2));
+        let xs: Vec<i32> = line.iter().map(|p| p.0).collect();
+        assert_eq!(xs, vec![0, 1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn a_wild_coordinate_stops_rather_than_hanging() {
+        // The pointer's slide coordinate is unbounded; the walk must not be.
+        let line = line_squares((i32::MIN, 0), (i32::MAX, 0));
+        assert_eq!(line.len(), MAX_STROKE);
+        assert_eq!(line.first(), Some(&(i32::MIN, 0)));
     }
 }
