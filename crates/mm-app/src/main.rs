@@ -130,6 +130,14 @@ use mm_core::{CellId, LightRegime, MutationRates, Organelle, OrganelleType, Scen
 /// before, which is a proxy for wall-clock and therefore for how fast the build happened to be; `MM_SHOT_ZOOM` and `MM_SHOT_FLAT` set the camera and the cell style up front,
 /// because a run that exits after one photograph has nobody to drive it.
 ///
+/// **The frame rate in a `MM_SHOT` run means nothing.** Bevy's default `WinitSettings` waits a
+/// second between redraws while the window is unfocused, and a run driven from a script never
+/// has focus — so the status bar reads exactly `1 fps` however fast the renderer is. Measured
+/// rather than assumed: 120 frames in 120.34 seconds, which is 0.997, and no workload lands
+/// within a third of a percent of exactly one. The simulation is unaffected and keeps its own
+/// rate, so `MM_SHOT_TICK` still photographs the state it says it does. To time the renderer,
+/// focus the window and read it there.
+///
 /// **It photographs the slide and not the panels.** Bevy 0.15 moved where the screenshot is
 /// taken relative to the egui pass, so what comes out is the render this crate is responsible
 /// for and none of the interface drawn over it. That is the half worth photographing anyway,
@@ -310,19 +318,15 @@ fn open_scenario(sim: &mut SlideRes, view: &mut View, path: &std::path::Path) {
         let held = sim.engine.handle();
         held.slide().set_world(world);
     }
-    // Seed it. A `Scenario` describes a world and not its inhabitants — there is no field
-    // for which genome to start from or how many — so `the_vent.ron` says in its own header
-    // to be run with `--genome genomes/ancestor.mm`, and `mm-cli` takes that as a flag. Opened
-    // here with nothing added, the library hands you a beautifully authored empty dish.
-    //
-    // So the founders from the New-slide control are seeded on top, and the note below says so.
-    // The right fix is a seeding block in `Scenario` itself, which is a `mm-core` schema change
-    // and its own piece of work.
-    let founders = view.new_founders;
-    if founders > 0 {
+    // Seed it. A scenario that names its own inhabitants gets those and the New-slide founder
+    // count is ignored, because a slide written around a strategy knows better than a spinner
+    // does who belongs on it. One that names nobody still gets ancestors, because the library
+    // handing you a beautifully authored empty dish is the behaviour this replaced.
+    let seeded = {
         let held = sim.engine.handle();
-        seed_into(&mut held.slide(), size, founders);
-    }
+        let mut slide = held.slide();
+        seed_into(&mut slide, view.new_founders)
+    };
 
     // Everything that pointed into the old world. A selection is a slot in an arena that no
     // longer exists, and a breakpoint is an offset into a genome nobody is running.
@@ -334,8 +338,8 @@ fn open_scenario(sim: &mut SlideRes, view: &mut View, path: &std::path::Path) {
     view.centre = Vec2::splat(size as f32 / 2.0);
     view.zoom = (BASE_SCALE * 6.0 / size as f32).clamp(0.05, 40.0);
     view.file_path = path.display().to_string();
-    view.file_note = Some(Ok(if founders > 0 {
-        format!("opened {name}, seeded {founders}")
+    view.file_note = Some(Ok(if seeded > 0 {
+        format!("opened {name}, seeded {seeded}")
     } else {
         format!("opened {name}")
     }));
@@ -904,22 +908,22 @@ fn seed_ancestors(slide: &mut Slide, size: u32, founders: u32) {
 /// that and the copies had drifted apart. What is left here is the part needing a filesystem and
 /// an assembler, and the choice of *who*: the scenario's own inhabitants when it names any, and
 /// the ancestor when it does not, because a slide that opens empty is not one anybody wants.
-fn seed_into(slide: &mut Slide, founders: u32) {
+fn seed_into(slide: &mut Slide, founders: u32) -> u32 {
     let wanted = slide.world().scenario().inhabitants.clone();
     if wanted.is_empty() {
-        if let Some(bytes) = ancestor_genome() {
-            slide.world_mut().place_founders(&bytes, founders);
-        }
-        return;
+        return match ancestor_genome() {
+            Some(bytes) => slide.world_mut().place_founders(&bytes, founders),
+            None => 0,
+        };
     }
+    let mut placed = 0;
     for who in &wanted {
         match genome_bytes(&who.genome) {
-            Some(bytes) => {
-                slide.world_mut().place_founders(&bytes, who.count);
-            }
+            Some(bytes) => placed += slide.world_mut().place_founders(&bytes, who.count),
             None => eprintln!("scenario asks for {}, which did not assemble", who.genome),
         }
     }
+    placed
 }
 
 /// How wide and tall the default slide is, in substrate squares.
