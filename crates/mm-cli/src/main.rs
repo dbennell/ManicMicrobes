@@ -427,7 +427,13 @@ fn cmd_run(opts: &Options) -> Result<(), String> {
             }
         }
     }
-    emit(&world, &mut previous)?;
+    // Only if the loop has not just done it. A run whose length is a multiple of `--every`
+    // ends on a sampled tick, and emitting again there wrote a duplicate row differenced
+    // against itself — so every aligned run finished with a line reading zero dissipation, zero
+    // influx, zero births, which is the most misleading thing a metrics file can end with.
+    if opts.ticks == 0 || !opts.ticks.is_multiple_of(opts.every.max(1)) {
+        emit(&world, &mut previous)?;
+    }
 
     if let Some(w) = out.as_mut() {
         w.flush()
