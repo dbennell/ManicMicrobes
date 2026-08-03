@@ -151,6 +151,9 @@ fn screenshot(
     mut frames: Local<u32>,
     mut done: Local<Option<u32>>,
     mut shot: Local<u32>,
+    // Whether `MM_SHOT_VIEW` has been applied. Once only — `arrange` toggles rather than sets
+    // for some of what it touches, so running it twice would switch things back off.
+    mut arranged: Local<bool>,
 ) {
     use bevy::render::view::screenshot::{save_to_disk, Screenshot};
     *frames += 1;
@@ -194,7 +197,23 @@ fn screenshot(
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(600);
-    if *frames + 1 == after {
+    // Arranged ahead of the photograph, on whichever trigger is in force.
+    //
+    // This used to key off the frame counter alone, so `MM_SHOT_VIEW` silently did nothing
+    // whenever `MM_SHOT_TICK` was the trigger — the arrangement landed at frame 600 and the
+    // photograph had been taken hundreds of frames earlier. Nothing reported it; the picture
+    // just came out in the default state, which looks exactly like a panel that failed to draw.
+    //
+    // `ARRANGE_LEAD` frames of grace rather than one, because some of what `arrange` switches
+    // on is not visible in the very next frame: a sprite pool grows through `commands`, which
+    // are applied after the system that queued them, so the flow overlay's arrows exist one
+    // frame later and carry a size and a colour the frame after that.
+    let arrange_at = match want_tick {
+        Some(want) => sim.engine.tick_count() + u64::from(ARRANGE_LEAD) >= want,
+        None => u64::from(*frames + ARRANGE_LEAD) >= u64::from(after),
+    };
+    if arrange_at && !*arranged {
+        *arranged = true;
         if let Ok(spec) = std::env::var("MM_SHOT_VIEW") {
             arrange(&spec, &mut sim, &mut view);
         }
@@ -296,6 +315,8 @@ fn arrange(spec: &str, sim: &mut SlideRes, view: &mut View) {
                 view.panels.legend = false;
             }
             "nocells" => view.organelles = false,
+            // The flow overlay is off by default, so a screenshot of it has to ask.
+            "flow" => sim.engine.set_flow(true),
             // For asking whether the *picture* is stable: with the world stopped, two frames
             // that differ differ because of the renderer and nothing else.
             "pause" => {
@@ -307,8 +328,47 @@ fn arrange(spec: &str, sim: &mut SlideRes, view: &mut View) {
     }
 }
 
+/// Frames of grace between arranging the interface and photographing it.
+///
+/// Three, because a sprite pool takes two to come up: `commands.spawn` is applied after the
+/// system that queued it, so an overlay switched on this frame has entities next frame and a
+/// size and colour on the one after. Photographed any sooner and the overlay is missing from
+/// the picture for a reason that has nothing to do with whether it works.
+const ARRANGE_LEAD: u32 = 3;
+
 /// Pixels per substrate square at zoom 1.
 const BASE_SCALE: f32 = 8.0;
+
+/// Roughly how far apart flow arrows land, in screen pixels.
+///
+/// The lattice is chosen in screen space rather than in substrate squares so the field reads
+/// the same at every zoom. At whole-slide magnification a substrate-spaced lattice is a solid
+/// hedge; at full magnification it is one arrow somewhere off the edge of the window.
+const ARROW_PITCH: f32 = 46.0;
+
+/// Shortest and longest an arrow is drawn, as a fraction of [`ARROW_PITCH`].
+///
+/// Length reads *speed relative to the solver's ceiling* rather than a literal distance the
+/// water covers in some number of steps. The literal version was tried first and is unreadable:
+/// at a gentle eighth of a square per step and six pixels to the square, eight steps of travel
+/// is six pixels, so the whole field came out as a lattice of identical dashes with no length
+/// to compare and no direction to see. Scaling against `FLOW_FULL` instead means the longest
+/// arrow on screen is water at the engine's maximum and the shortest is barely moving, which is
+/// the comparison somebody looking at a flow field actually wants to make.
+const ARROW_SHORT: f32 = 0.35;
+const ARROW_LONG: f32 = 1.05;
+
+/// Speed below which no arrow is drawn, in squares per fluid step.
+///
+/// Still water gets nothing rather than a dot, which is what makes a channel legible: the
+/// arrows are where the water is going, so a bare region means it is not going anywhere.
+const FLOW_FLOOR: f32 = 0.002;
+
+/// Speed at which an arrow is drawn at full brightness, in squares per fluid step.
+///
+/// A quarter of a square per step is `fluid::MAX_VELOCITY`, the fastest the solver allows, so
+/// the brightest arrow on screen is water at the engine's own ceiling.
+const FLOW_FULL: f32 = 0.25;
 
 fn main() {
     let mut app = App::new();
@@ -1022,6 +1082,10 @@ struct MoteSprite(usize);
 #[derive(Component)]
 struct JunctionSprite(usize);
 
+/// One arrow of the flow overlay: a shaft stretched along the local velocity.
+#[derive(Component)]
+struct FlowArrow(usize);
+
 /// The per-cell data the shader reads, beyond position, corner and colour.
 ///
 /// The id is arbitrary but must be stable and must not collide with Bevy's own attributes,
@@ -1449,6 +1513,9 @@ fn keyboard(keys: &ButtonInput<KeyCode>, view: &mut View, sim: &mut SlideRes) {
     if keys.just_pressed(KeyCode::KeyO) {
         sim.engine.set_optics(!sim.engine.optics_enabled());
     }
+    if keys.just_pressed(KeyCode::KeyV) {
+        sim.engine.set_flow(!sim.engine.flow_enabled());
+    }
     if keys.just_pressed(KeyCode::KeyC) {
         view.rounded = !view.rounded;
     }
@@ -1791,6 +1858,7 @@ fn redraw(
             Without<BarrierQuad>,
             Without<MoteSprite>,
             Without<JunctionSprite>,
+            Without<FlowArrow>,
         ),
     >,
     mut barrier_quad: Query<
@@ -1800,6 +1868,7 @@ fn redraw(
             Without<FieldQuad>,
             Without<MoteSprite>,
             Without<JunctionSprite>,
+            Without<FlowArrow>,
         ),
     >,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -1810,6 +1879,7 @@ fn redraw(
             Without<FieldQuad>,
             Without<BarrierQuad>,
             Without<JunctionSprite>,
+            Without<FlowArrow>,
         ),
     >,
     mut junctions: Query<
@@ -1818,6 +1888,16 @@ fn redraw(
             Without<FieldQuad>,
             Without<BarrierQuad>,
             Without<MoteSprite>,
+            Without<FlowArrow>,
+        ),
+    >,
+    mut arrows: Query<
+        (&FlowArrow, &mut Sprite, &mut Transform),
+        (
+            Without<FieldQuad>,
+            Without<BarrierQuad>,
+            Without<MoteSprite>,
+            Without<JunctionSprite>,
         ),
     >,
 ) {
@@ -1968,6 +2048,94 @@ fn redraw(
         // Above the field, below the junctions at 0.5 and the cells above them: a wall is part
         // of the slide, and everything alive sits on top of it.
         transform.translation = ((a + b) / 2.0).with_z(0.25);
+    }
+
+    // The flow overlay: an arrow per lattice point, over the field and under everything alive.
+    //
+    // Drawn on a *screen*-spaced lattice rather than a substrate-spaced one, so the field reads
+    // the same at every zoom: `Frame::flow` is sampled every `FLOW_STRIDE` squares and this
+    // takes every nth of those, choosing n so the arrows land roughly `ARROW_PITCH` pixels
+    // apart. Without that, whole-slide zoom is a solid hedge of arrows and full magnification
+    // is one arrow somewhere off screen.
+    // Rebuilt each frame; a few hundred entries at most, because the lattice is chosen in
+    // screen space and the window is only so big.
+    let mut arrow_slots: Vec<(Vec3, [f32; 2], f32)> = Vec::new();
+    let arrow_count = if frame.flow.is_empty() || frame.flow_cols == 0 {
+        0
+    } else {
+        let cols = frame.flow_cols as usize;
+        let rows = frame.flow.len() / cols.max(1);
+        // Squares per arrow, then how many of the sampled lattice that skips.
+        let square_px = scale.max(0.0001);
+        let skip = ((ARROW_PITCH / (square_px * slide::FLOW_STRIDE as f32)).ceil() as usize).max(1);
+        let mut n = 0usize;
+        for row in (0..rows).step_by(skip) {
+            for col in (0..cols).step_by(skip) {
+                let Some(v) = frame.flow.get(row * cols + col) else {
+                    continue;
+                };
+                let speed = (v[0] * v[0] + v[1] * v[1]).sqrt();
+                // Still water gets no arrow at all, which is what makes a channel legible:
+                // the arrows *are* where the water is going, so an empty region means still.
+                if speed < FLOW_FLOOR {
+                    continue;
+                }
+                let mid = slide::FLOW_STRIDE as f32 / 2.0;
+                let at = to_screen(
+                    col as f32 * slide::FLOW_STRIDE as f32 + mid,
+                    row as f32 * slide::FLOW_STRIDE as f32 + mid,
+                );
+                if at.x < cull.min_x || at.x > cull.max_x || at.y < cull.min_y || at.y > cull.max_y
+                {
+                    continue;
+                }
+                arrow_slots.push((at, *v, speed));
+                n += 1;
+            }
+        }
+        n
+    };
+    // Two sprites per arrow — a shaft and a head — from one pool, even indices being shafts.
+    // One pool rather than two so the whole overlay is a single marker component and a single
+    // query; two would mean another `Without` on every other sprite query in this system.
+    for i in arrows.iter().count()..arrow_count * 2 {
+        commands.spawn((
+            FlowArrow(i),
+            Sprite {
+                color: Color::NONE,
+                custom_size: Some(Vec2::splat(1.0)),
+                ..default()
+            },
+        ));
+    }
+    for (marker, mut sprite, mut transform) in &mut arrows {
+        let head = marker.0 % 2 == 1;
+        let Some((at, v, speed)) = arrow_slots.get(marker.0 / 2).copied() else {
+            // Surplus from a frame that had more arrows than this one. Hidden rather than
+            // despawned, the way the junction pool does it: a pool that shrinks and regrows
+            // costs a spawn every time the camera moves.
+            sprite.color = Color::NONE;
+            continue;
+        };
+        let share = (speed / FLOW_FULL).clamp(0.0, 1.0);
+        let length = ARROW_PITCH * (ARROW_SHORT + (ARROW_LONG - ARROW_SHORT) * share);
+        let dim = optics.vignette(field_radius(at));
+        // Cool, and pale enough to read over both the mauve field and the cells without
+        // competing with them: an overlay that shouts is one you turn off and never turn on.
+        let bright = (0.45 + 0.55 * share) * dim;
+        sprite.color = Color::srgba(0.60 * bright, 0.84 * bright, 1.0 * bright, 0.85);
+        // Anchored at the sample point and extending *downstream*, rather than centred on it,
+        // so which way the water is going is readable from a still picture. A lattice of
+        // centred dashes is a texture; offset ones with a head are a direction.
+        let dir = Vec2::new(v[0], -v[1]).normalize_or_zero();
+        let along = if head { length } else { length / 2.0 };
+        if head {
+            sprite.custom_size = Some(Vec2::splat(3.5));
+        } else {
+            sprite.custom_size = Some(Vec2::new(length, 1.5));
+        }
+        transform.translation = (at + (dir * along).extend(0.0)).with_z(0.3);
+        transform.rotation = Quat::from_rotation_z(dir.y.atan2(dir.x));
     }
 
     // Cells: the whole population as one mesh, one material, one draw call (M10.5).
@@ -2572,6 +2740,21 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                 {
                     sim.engine.set_optics(!sim.engine.optics_enabled());
                 }
+                if ui
+                    .add(
+                        egui::Button::new("Flow")
+                            .shortcut_text("V")
+                            .selected(sim.engine.flow_enabled()),
+                    )
+                    .on_hover_text(
+                        "which way the water is going, and how fast. Arrows point \
+                         downstream and are drawn only where the water is actually moving, \
+                         so bare slide means still.",
+                    )
+                    .clicked()
+                {
+                    sim.engine.set_flow(!sim.engine.flow_enabled());
+                }
                 ui.separator();
                 if ui
                     .add(
@@ -2639,6 +2822,7 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                     (".", "step one tick"),
                     ("0 - = ⌫", "speed"),
                     ("1–9", "chemical overlays"),
+                    ("v", "flow field"),
                     ("F1–F5", "tools"),
                     ("drag", "pan the slide"),
                     ("wheel", "zoom about the pointer"),

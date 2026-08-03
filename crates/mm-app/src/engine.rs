@@ -215,6 +215,9 @@ struct Shared {
     /// One bit per chemical.
     overlays: AtomicU32,
     optics: AtomicBool,
+    /// Whether the frame should carry the flow field. An instrument reading rather than part
+    /// of the picture, so it is off until asked for and costs a pass over the grid when on.
+    flow: AtomicBool,
 }
 
 /// How long the simulation thread waits before checking again whether the front end has
@@ -332,6 +335,7 @@ impl Engine {
             camera_half_h: AtomicU32::new(f32::INFINITY.to_bits()),
             overlays: AtomicU32::new(overlays),
             optics: AtomicBool::new(optics),
+            flow: AtomicBool::new(false),
         });
         let worker = Arc::clone(&shared);
         let thread = thread::Builder::new()
@@ -403,6 +407,15 @@ impl Engine {
     #[must_use]
     pub fn optics_enabled(&self) -> bool {
         self.shared.optics.load(Ordering::Relaxed)
+    }
+
+    pub fn set_flow(&self, on: bool) {
+        self.shared.flow.store(on, Ordering::Relaxed);
+    }
+
+    #[must_use]
+    pub fn flow_enabled(&self) -> bool {
+        self.shared.flow.load(Ordering::Relaxed)
     }
 
     pub fn set_rate(&self, rate: Rate) {
@@ -527,6 +540,7 @@ fn run(shared: &Shared) {
                 );
                 slide.set_overlay_mask(shared.overlays.load(Ordering::Relaxed));
                 slide.optics.enabled = shared.optics.load(Ordering::Relaxed);
+                slide.show_flow = shared.flow.load(Ordering::Relaxed);
 
                 let inspection = selected.and_then(|id| slide.inspect(id));
                 Published {

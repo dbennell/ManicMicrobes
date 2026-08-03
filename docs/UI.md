@@ -118,6 +118,7 @@ View      Panels                  ▸           cell · metrics · legend · gen
                                               parameters · editor · debugger
                                                                        (each a checkbox)
           Overlays                ▸           one per chemical, 1–9
+          Flow                    V           which way the water is going
           Optics                  O           vignette, defocus, dust
           ──
           Follow selection        T
@@ -546,6 +547,33 @@ one: opaque, cool against a slide whose every other colour is warm light or a ch
 and ignoring both the light and the overlays, because a blocked square genuinely has nothing in
 it to paint. The mask is empty rather than all-false on a slide with no barriers, so such a
 slide pays neither the copy nor the per-texel branch.
+
+### The flow overlay
+
+`Frame` carries the velocity field, coarsened to one sample per `slide::FLOW_STRIDE` squares
+each way and gathered only when the overlay is on — the full field is two `i32` planes, two
+megabytes a frame at 512×512, to draw a few hundred arrows from. Each sample is the **mean** of
+its block rather than one square of it, so an arrow says what the water in that block is doing.
+
+Arrows are laid on a lattice chosen in **screen** space, not in substrate squares, so the field
+reads the same at every zoom: a substrate-spaced lattice is a solid hedge at whole-slide
+magnification and one arrow somewhere off the window at full. Each is anchored at its sample
+point and extends *downstream* with a head at the tip, because a lattice of centred dashes is a
+texture and only an offset one with a head is a direction. Length reads speed **relative to
+`fluid::MAX_VELOCITY`** rather than a literal distance travelled — the literal version was built
+first and is unreadable, since a gentle eighth of a square per step at six pixels to the square
+is a six-pixel dash whatever the flow is doing. Nothing is drawn below a floor, so a bare
+region means still water rather than an arrow too small to see.
+
+**What the overlay shows about channels is not what one might expect, and it is the engine
+being honest.** SPEC §7.4 has no pressure projection and no incompressibility solve, by an
+explicit scope decision. `CurrentField` is *prescribed*: it writes a velocity at every square
+from a closed form and zeroes it inside barriers. So walls stop flux across their edges — the
+fluid does not cross them — but they do **not** steer or accelerate the flow around them. Put
+two walls a channel's width apart and set a uniform current, and the water inside the channel
+moves at exactly the speed the water outside it does. There is no venturi and there is no
+wake. A channel is therefore a place cells and particulate cannot leave, and not a place the
+flow is faster. Anything that wants the second needs the projection §7.4 declined to build.
 
 **A stroke has a width**, `1..=10` and 3 by default, set by a slider in the Tools menu and
 reported in the status bar beside the tool. One setting covers drawing *and* erasing, because

@@ -455,6 +455,17 @@ pub struct Frame {
     pub overlays: Vec<OverlayLayer>,
     /// Incident light, normalised. Rendered as a warm luminance layer (SPEC §14).
     pub light: Vec<f32>,
+    /// The prescribed flow plus whatever cilia have stirred into it, coarsened to one sample
+    /// per [`FLOW_STRIDE`] squares each way, in squares per fluid step. Empty when the overlay
+    /// is off, which is the usual case and costs nothing.
+    ///
+    /// Coarsened rather than carried whole because the full field is two `i32` planes — two
+    /// megabytes a frame at 512×512 — to draw a few hundred arrows from. Averaged over each
+    /// block rather than point-sampled, so an arrow is what the water in that block is doing
+    /// and not what one square of it happens to be doing.
+    pub flow: Vec<[f32; 2]>,
+    /// Samples across, so the renderer can index `flow` without recomputing the division.
+    pub flow_cols: u32,
     /// The barrier mask, one entry per square, or empty on a slide with no barriers.
     ///
     /// Until this existed the renderer was never told where the walls were, so a barrier was
@@ -504,12 +515,23 @@ pub struct OverlayLayer {
     pub total: i64,
 }
 
+/// How many squares each flow sample covers, each way.
+///
+/// Four. The arrows are drawn on a lattice and want to be sparse enough to read as a field
+/// rather than as a hedge; four squares is finer than any spacing the renderer actually draws
+/// at, so the renderer is free to skip samples for the screen density it wants and never has
+/// to interpolate between them.
+pub const FLOW_STRIDE: u32 = 4;
+
 /// The simulation, and the only thing the front-end is allowed to hold.
 pub struct Slide {
     world: World,
     /// Which chemical overlays are switched on. Individually toggleable (M4), so this is a
     /// set and not a choice.
     overlays: [bool; CHEM_COUNT],
+    /// Whether to gather the flow field into the frame. Off by default: it is an instrument
+    /// reading rather than part of the picture, and gathering it costs a pass over the grid.
+    pub show_flow: bool,
     /// Detail tier the next frame will be built at.
     lod: Lod,
     /// The microscope's look.
@@ -554,6 +576,7 @@ impl Slide {
             flows: crate::foodweb::Flows::default(),
             flows_filling: crate::foodweb::Flows::default(),
             overlays,
+            show_flow: false,
             lod: Lod::Dots,
             // Off to begin with, and on from the View menu.
             //
@@ -771,6 +794,33 @@ impl Slide {
             .iter()
             .map(|v| (*v as f32 / Q10_ONE as f32).clamp(0.0, 1.0))
             .collect();
+
+        // The flow, coarsened, and only when someone is looking at it.
+        let (flow, flow_cols) = if self.show_flow {
+            let (w, h) = (substrate.width(), substrate.height());
+            let (svx, svy) = substrate.velocity();
+            let cols = w.div_ceil(FLOW_STRIDE);
+            let rows = h.div_ceil(FLOW_STRIDE);
+            let mut out = Vec::with_capacity((cols * rows) as usize);
+            for by in 0..rows {
+                for bx in 0..cols {
+                    let (mut sx, mut sy, mut n) = (0i64, 0i64, 0i64);
+                    for y in by * FLOW_STRIDE..((by + 1) * FLOW_STRIDE).min(h) {
+                        for x in bx * FLOW_STRIDE..((bx + 1) * FLOW_STRIDE).min(w) {
+                            let i = (y * w + x) as usize;
+                            sx += i64::from(svx.get(i).copied().unwrap_or(0));
+                            sy += i64::from(svy.get(i).copied().unwrap_or(0));
+                            n += 1;
+                        }
+                    }
+                    let d = n.max(1) as f32 * Q10_ONE as f32;
+                    out.push([sx as f32 / d, sy as f32 / d]);
+                }
+            }
+            (out, cols)
+        } else {
+            (Vec::new(), 0)
+        };
 
         let barriers: Vec<bool> = if substrate.has_barriers() {
             substrate.blocked().to_vec()
@@ -1008,6 +1058,8 @@ impl Slide {
             cells: dots,
             overlays,
             light,
+            flow,
+            flow_cols,
             barriers,
             population: cells.len(),
             lod: self.lod,
