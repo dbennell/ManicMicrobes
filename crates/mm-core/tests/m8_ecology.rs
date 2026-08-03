@@ -998,6 +998,64 @@ fn the_library_list_is_the_scenarios_directory() {
     }
 }
 
+/// A scenario that names a genome it cannot have is a slide that opens empty and says nothing.
+///
+/// The failure mode this exists for is silent: `seed_into` complains to stderr and carries on,
+/// which in the front end means a slide that simply has nobody on it, and the natural reading of
+/// that is "the scenario is broken" rather than "the genome was renamed".
+#[test]
+fn every_genome_a_scenario_asks_for_exists_and_assembles() {
+    let mut asked = 0;
+    for name in LIBRARY.iter().chain(NOT_CURATED.iter()) {
+        for who in &scenario(name).inhabitants {
+            assert!(who.count > 0, "{name} asks for 0 of {}", who.genome);
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../genomes")
+                .join(&who.genome);
+            let src = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{name} asks for {}: {e}", who.genome));
+            mm_asm::assemble(&src).unwrap_or_else(|e| {
+                panic!(
+                    "{name} asks for {}, which does not assemble: {e}",
+                    who.genome
+                )
+            });
+            asked += 1;
+        }
+    }
+    assert!(
+        asked > 0,
+        "no scenario names an inhabitant, so this checks nothing"
+    );
+}
+
+/// A scenario that says who lives there puts them there, without a `--genome` in sight.
+#[test]
+fn a_scenario_that_names_its_inhabitants_gets_them() {
+    let s = scenario("the_drift.ron");
+    let who = s
+        .inhabitants
+        .first()
+        .expect("the drift names its own")
+        .clone();
+    let mut world = World::new(s).expect("the drift");
+    assert_eq!(world.cells().len(), 0, "a world arrives empty");
+    let src = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../genomes")
+            .join(&who.genome),
+    )
+    .expect("the genome");
+    let bytes = mm_asm::assemble(&src).expect("it assembles").bytes;
+    let placed = world.place_founders(&bytes, who.count);
+    assert_eq!(placed, who.count, "not everyone asked for was placed");
+    assert_eq!(world.cells().len(), who.count as usize);
+    world.run(200);
+    world
+        .check_invariants()
+        .expect("seeding a scenario's own inhabitants broke an invariant");
+}
+
 #[test]
 fn every_scenario_in_the_library_loads_and_runs() {
     for name in LIBRARY {

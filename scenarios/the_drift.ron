@@ -12,7 +12,10 @@
 // zero if it is drifting along with the water — so the holdfast is worth its upkeep and
 // `genomes/sponge.mm` is worth trying against `genomes/drifter.mm`:
 //
-//   mm-cli run scenarios/the_drift.ron --genome genomes/sponge.mm --ticks 50000 --check
+//   mm-cli run scenarios/the_drift.ron --ticks 50000 --check
+//
+// No `--genome` needed: the slide says who lives on it. Pass one anyway to override, which is
+// the way to ask what some other strategy makes of a channel.
 //
 // There is no source: the detritus seeded here is all there will ever be, so the interesting
 // window is while it lasts. An influx that keeps a channel supplied is the next thing this
@@ -45,6 +48,14 @@
         // The particulate. Half what the dissolved chemicals get, because it is meant to be
         // worth catching rather than unavoidable.
         Uniform(chemical: 12, per_square: 102400),
+    ],
+
+    // Sponges, because that is what this slide is for — `sponge.mm` builds a holdfast and no
+    // cilia, so where it lands is where it lives. Twelve rather than sixteen: the founders are
+    // spread over a square grid and a channel is not square, so some of them would land in the
+    // walls.
+    inhabitants: [
+        (genome: "sponge.mm", count: 12),
     ],
 
     // The channel: two walls thirty-two squares apart, open at both ends so the current runs

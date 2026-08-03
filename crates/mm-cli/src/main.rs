@@ -20,11 +20,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use mm_core::biology::BiologyConfig;
-use mm_core::cell::{CellId, CellSeed};
-use mm_core::fixed::{pos, q10};
 use mm_core::metrics::Sample;
 use mm_core::mutation::RATE_SCALE;
-use mm_core::organelle::{Organelle, OrganelleType};
 use mm_core::{MutationRates, Scenario, Snapshot, World};
 
 const USAGE: &str = "\
@@ -335,62 +332,43 @@ fn build(opts: &Options) -> Result<World, String> {
 
     if let Some(genome_path) = &opts.genome {
         seed_population(&mut world, genome_path, opts.population)?;
+    } else {
+        seed_inhabitants(&mut world, &genome_root())?;
     }
     Ok(world)
 }
 
-/// Assemble an ancestor and put `n` copies of it on the slide.
+/// Assemble a genome and put `n` copies of it on the slide.
 ///
-/// Spread over a grid rather than piled in one square: a clonal bloom that all starts in one
-/// place spends its first thousand ticks competing with itself for one square's chemistry,
-/// which is a fact about the seeding rather than about the genome.
+/// Placement, the starting loadout and the ledger rebaseline all live in
+/// `World::place_founders` — this is the half that needs a filesystem and an assembler, which
+/// is the half `mm-core` will not have.
 fn seed_population(world: &mut World, genome_path: &Path, n: u32) -> Result<(), String> {
     let src = std::fs::read_to_string(genome_path)
         .map_err(|e| format!("cannot read {}: {e}", genome_path.display()))?;
     let assembled = mm_asm::assemble(&src)
         .map_err(|e| format!("{} does not assemble:\n{e}", genome_path.display()))?;
-
-    let w = world.substrate().width();
-    let h = world.substrate().height();
-    let across = (n as f64).sqrt().ceil().max(1.0) as u32;
-    let step_x = (w / (across + 1)).max(1);
-    let step_y = (h / (across + 1)).max(1);
-
-    for k in 0..n {
-        let genome = world
-            .genomes()
-            .intern(assembled.bytes.clone())
-            .map_err(|e| e.to_string())?;
-        let x = step_x * (1 + k % across);
-        let y = step_y * (1 + k / across);
-        let id = world.spawn_cell(CellSeed {
-            x: pos(x as i32),
-            y: pos(y as i32),
-            mass: q10(30),
-            energy: q10(400),
-            membrane: 24,
-            key: 11,
-            species: 0,
-            parent: CellId::NONE,
-            birth_tick: 0,
-            genome,
-        });
-        // A founder starts with the machinery its build gene would otherwise take many ticks
-        // to afford. Bootstrapping from a bare membrane is a scenario in its own right, not
-        // something every run should have to survive first.
-        if let Some(i) = world.cells_mut().index(id) {
-            world.cells_mut().slots_mut(i)[1] = Organelle::finished(OrganelleType::Nucleus, 40);
-            world.cells_mut().slots_mut(i)[2] =
-                Organelle::finished(OrganelleType::Mitochondrion, 50);
-            world.cells_mut().slots_mut(i)[3] = Organelle::finished(OrganelleType::Chloroplast, 60);
-            world.cells_mut().interior_mut(i)[11] = q10(40);
-            world.cells_mut().interior_mut(i)[14] = q10(40);
-        }
-    }
-    // Filling a cytoplasm by hand adds matter to the world, which is what setting a scenario
-    // up means. Said out loud here rather than left for the conservation check to trip over.
-    world.adopt_current_contents_as_baseline();
+    world.place_founders(&assembled.bytes, n);
     Ok(())
+}
+
+/// Put the scenario's own inhabitants on the slide.
+///
+/// What a scenario says about who lives on it, honoured. `--genome` overrides it entirely
+/// rather than adding to it, because the point of passing a genome on the command line is
+/// usually to ask what *that* one does here.
+fn seed_inhabitants(world: &mut World, root: &Path) -> Result<(), String> {
+    let wanted = world.scenario().inhabitants.clone();
+    for who in &wanted {
+        let path = root.join(&who.genome);
+        seed_population(world, &path, who.count)?;
+    }
+    Ok(())
+}
+
+/// Where a scenario's genome names resolve to.
+fn genome_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../genomes")
 }
 
 fn cmd_run(opts: &Options) -> Result<(), String> {
@@ -621,6 +599,8 @@ fn cmd_sweep(opts: &mut Options) -> Result<(), String> {
         world.set_biology(biology);
         if let Some(genome) = &opts.genome {
             seed_population(&mut world, genome, opts.population)?;
+        } else {
+            seed_inhabitants(&mut world, &genome_root())?;
         }
 
         let mut peak = 0u64;

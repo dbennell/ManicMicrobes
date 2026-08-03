@@ -49,6 +49,26 @@ pub enum Seeding {
     },
 }
 
+/// Who to put on the slide, and how many.
+///
+/// A scenario has always described a *world* and never its inhabitants, so opening one produced
+/// an empty dish that the caller had to populate by hand — `mm-cli` with `--genome`, the front
+/// end by seeding the ancestor whatever the file said. Which meant a scenario written around a
+/// strategy could not say so: `the_drift.ron` is a channel built for filter feeders, and opening
+/// it seeded photosynthesisers that had no use for it.
+///
+/// The genome is a **path and not bytes**, and it is resolved by the caller rather than here.
+/// `mm-core` has no filesystem and no assembler by design and is not getting either; what a
+/// scenario carries is the declaration, and turning a name into a program is a job for whoever
+/// has `mm-asm` linked. So this is data that `World::new` deliberately does not act on.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Inhabitant {
+    /// A genome source file, resolved relative to `genomes/`.
+    pub genome: String,
+    /// How many founders to place.
+    pub count: u32,
+}
+
 /// Where barriers go.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Barrier {
@@ -120,6 +140,10 @@ pub struct Scenario {
     pub seeding: Vec<Seeding>,
     pub barriers: Vec<Barrier>,
 
+    /// Who lives here. See [`Inhabitant`] — the caller resolves and places these, not `World`.
+    #[serde(default)]
+    pub inhabitants: Vec<Inhabitant>,
+
     pub vm: VmConfig,
 
     /// Costs, rates, mutation, junctions, ecology and the organelle catalogue (M10.2).
@@ -153,6 +177,7 @@ impl Default for Scenario {
             gravity: 0,
             seeding: Vec::new(),
             barriers: Vec::new(),
+            inhabitants: Vec::new(),
             vm: VmConfig::DEFAULT,
             biology: crate::biology::BiologyConfig::default(),
         }
@@ -309,6 +334,10 @@ impl StateHash for Scenario {
         h.u16(self.vm.promoter_bind_threshold);
         h.u64(self.seeding.len() as u64);
         h.u64(self.barriers.len() as u64);
+        for i in &self.inhabitants {
+            h.bytes(i.genome.as_bytes());
+            h.u32(i.count);
+        }
         self.biology.hash_state(h);
         for c in 0..CHEM_COUNT {
             h.i32(self.chemicals.get(c).diffusion);
@@ -326,6 +355,39 @@ mod tests {
         let text = s.to_ron().unwrap();
         let back = Scenario::from_ron(&text).unwrap();
         assert_eq!(back, s);
+    }
+
+    #[test]
+    fn who_lives_here_survives_the_round_trip() {
+        let s = Scenario {
+            inhabitants: vec![
+                Inhabitant {
+                    genome: "sponge.mm".to_string(),
+                    count: 12,
+                },
+                Inhabitant {
+                    genome: "drifter.mm".to_string(),
+                    count: 4,
+                },
+            ],
+            ..Scenario::default()
+        };
+        let back = Scenario::from_ron(&s.to_ron().unwrap()).unwrap();
+        assert_eq!(back.inhabitants, s.inhabitants);
+    }
+
+    /// The field is `#[serde(default)]`, so every scenario written before it existed still
+    /// loads — and says, correctly, that nobody in particular lives there.
+    #[test]
+    fn a_scenario_written_before_anyone_lived_here_still_loads() {
+        let mut text = Scenario::default().to_ron().unwrap();
+        text = text
+            .lines()
+            .filter(|l| !l.contains("inhabitants"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let back = Scenario::from_ron(&text).expect("an older file should still parse");
+        assert!(back.inhabitants.is_empty());
     }
 
     #[test]

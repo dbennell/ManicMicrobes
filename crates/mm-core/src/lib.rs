@@ -86,7 +86,7 @@ pub use organelle::{
     MembraneReading, Organelle, OrganelleCatalogue, OrganelleType, MEMBRANE_SLOT, SLOT_COUNT,
 };
 pub use rng::{mix64, Purpose, RandCtx};
-pub use scenario::{Barrier, Scenario, ScenarioError, Seeding};
+pub use scenario::{Barrier, Inhabitant, Scenario, ScenarioError, Seeding};
 pub use sensing::{ChemReading, PhysicsReport, TouchReading};
 pub use snapshot::{Snapshot, SnapshotError};
 pub use state_hash::{StateHash, StateHasher};

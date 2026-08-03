@@ -855,6 +855,88 @@ impl World {
         id
     }
 
+    /// Place `count` founders of one genome, spread over the slide. Returns how many landed.
+    ///
+    /// Both front ends had their own copy of this and the copies had drifted: `mm-cli` placed
+    /// founders on a `w / (across + 1)` lattice with an empty cytoplasm, `mm-app` on a centred
+    /// one with build material in it. The centred lattice is the better of the two — one
+    /// founder lands in the middle of the slide rather than a quarter of the way into it — and
+    /// the build material is not a nicety: without structural matter in the cytoplasm every
+    /// `BUILD` is silently skipped, so a seeded cell runs the organelles it was given forever
+    /// and a genome that works looks like a genome that does not.
+    ///
+    /// Spread rather than piled, and not only to look even. Sixteen founders far enough apart
+    /// to grow independently for a while are sixteen experiments; sixteen in a heap are one,
+    /// because they interbreed and compete from the first tick.
+    ///
+    /// The starting loadout is a policy and it is stated here rather than at each call site: a
+    /// founder gets the organelles its build gene would otherwise spend many ticks affording,
+    /// because bootstrapping from a bare membrane is a scenario in its own right and not
+    /// something every run should have to survive first.
+    ///
+    /// Adopts the result as the ledger's baseline, because dressing a cytoplasm by hand adds
+    /// matter to the world — that is what setting a scenario up means, and it is said out loud
+    /// here rather than left for the conservation check to trip over.
+    pub fn place_founders(&mut self, genome: &[u8], count: u32) -> u32 {
+        if count == 0 {
+            return 0;
+        }
+        let structural = self.biology.structural_chemical;
+        let (w, h) = (
+            self.substrate.width() as i32,
+            self.substrate.height() as i32,
+        );
+        let across = {
+            // Integer ceil-sqrt: no floats in `mm-core`, and `(n as f64).sqrt().ceil()` is what
+            // both front ends were doing.
+            let mut a = 1u32;
+            while a * a < count {
+                a += 1;
+            }
+            a
+        };
+        let mut placed = 0;
+        for k in 0..count {
+            let Ok(genome) = self.genomes.intern(genome.to_vec()) else {
+                continue;
+            };
+            let at = |n: u32, extent: i32| {
+                crate::fixed::pos(extent * (2 * n as i32 + 1) / (2 * across as i32))
+            };
+            let id = self.spawn_cell(CellSeed {
+                x: at(k % across, w),
+                y: at(k / across, h),
+                mass: crate::fixed::q10(30),
+                energy: crate::fixed::q10(400),
+                membrane: 24,
+                key: 11,
+                species: 0,
+                parent: CellId::NONE,
+                birth_tick: self.tick,
+                genome,
+            });
+            let Some(i) = self.cells.index(id) else {
+                continue;
+            };
+            self.cells.slots_mut(i)[1] =
+                crate::organelle::Organelle::finished(crate::organelle::OrganelleType::Nucleus, 40);
+            self.cells.slots_mut(i)[2] = crate::organelle::Organelle::finished(
+                crate::organelle::OrganelleType::Mitochondrion,
+                50,
+            );
+            self.cells.slots_mut(i)[3] = crate::organelle::Organelle::finished(
+                crate::organelle::OrganelleType::Chloroplast,
+                60,
+            );
+            self.cells.interior_mut(i)[structural] = crate::fixed::q10(200);
+            self.cells.interior_mut(i)[11] = crate::fixed::q10(40);
+            self.cells.interior_mut(i)[14] = crate::fixed::q10(40);
+            placed += 1;
+        }
+        self.adopt_current_contents_as_baseline();
+        placed
+    }
+
     /// Connected components over hard junctions, rebuilt from the current junctions.
     ///
     /// Takes `&mut self` because the union-find compresses paths as it answers, which is what

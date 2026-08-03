@@ -637,11 +637,7 @@ impl SlideRes {
         let opened = std::env::var("MM_OPEN").is_ok();
         let mut slide = Slide::new(petri()).expect("opening scenario");
         if opened {
-            let (w, h) = {
-                let s = slide.world().substrate();
-                (s.width(), s.height())
-            };
-            seed_into(&mut slide, w.min(h), 16);
+            seed_into(&mut slide, 16);
         } else {
             seed_ancestors(&mut slide, slide_size(), 16);
         }
@@ -898,69 +894,32 @@ fn seed_ancestors(slide: &mut Slide, size: u32, founders: u32) {
         mutation: MutationRates::default(),
         ..BiologyConfig::default()
     });
-    seed_into(slide, size, founders);
+    seed_into(slide, founders);
 }
 
 /// Put founders on whatever world is already on the slide.
 ///
-/// Split out of [`seed_ancestors`] for the scenario library. A `Scenario` describes a world and
-/// not its inhabitants — there is no field naming a genome or a founder count — so an authored
-/// `.ron` opened on its own is an empty dish, and `the_vent.ron` says as much in its own header
-/// by telling you to pass `--genome` to `mm-cli`. This is what the front end does instead.
-fn seed_into(slide: &mut Slide, size: u32, founders: u32) {
-    let Some(bytes) = ancestor_genome() else {
+/// Split out of [`seed_ancestors`] for the scenario library. Placement, the starting loadout and
+/// the ledger rebaseline are `World::place_founders` — both front ends kept their own copy of
+/// that and the copies had drifted apart. What is left here is the part needing a filesystem and
+/// an assembler, and the choice of *who*: the scenario's own inhabitants when it names any, and
+/// the ancestor when it does not, because a slide that opens empty is not one anybody wants.
+fn seed_into(slide: &mut Slide, founders: u32) {
+    let wanted = slide.world().scenario().inhabitants.clone();
+    if wanted.is_empty() {
+        if let Some(bytes) = ancestor_genome() {
+            slide.world_mut().place_founders(&bytes, founders);
+        }
         return;
-    };
-    {
-        let world = slide.world_mut();
-        let structural = world.biology().structural_chemical;
-        for k in 0..founders {
-            let Ok(genome) = world.genomes().intern(bytes.clone()) else {
-                continue;
-            };
-            // A four-by-four grid spread across whatever size the slide is, rather than at
-            // fixed coordinates that huddled in one corner the moment the slide grew.
-            //
-            // Spread on purpose, and not only to look even. Sixteen founders far enough apart
-            // to grow independently for a while are sixteen experiments; sixteen founders in a
-            // heap are one, because they interbreed and compete from the first tick. Standing
-            // diversity is the thing the crowding bound costs, and this is some of it back.
-            // A square grid sized to however many founders there are, so one lands in the
-            // middle and sixteen spread across the slide as before.
-            let across = (founders as f64).sqrt().ceil().max(1.0) as u32;
-            let size = size as i32;
-            let cell_of = |n: u32| pos(size * (2 * n as i32 + 1) / (2 * across as i32));
-            let id = world.spawn_cell(CellSeed {
-                x: cell_of(k % across),
-                y: cell_of(k / across),
-                mass: q10(30),
-                energy: q10(400),
-                membrane: 24,
-                key: 11,
-                species: 0,
-                parent: CellId::NONE,
-                birth_tick: 0,
-                genome,
-            });
-            if let Some(i) = world.cells_mut().index(id) {
-                let cells = world.cells_mut();
-                // The organelles its build gene would otherwise take many ticks to afford, so
-                // there is something metabolising to look at straight away.
-                cells.slots_mut(i)[1] = Organelle::finished(OrganelleType::Nucleus, 40);
-                cells.slots_mut(i)[2] = Organelle::finished(OrganelleType::Mitochondrion, 50);
-                cells.slots_mut(i)[3] = Organelle::finished(OrganelleType::Chloroplast, 60);
-                // Including build material. Without it a seeded cell can never build anything
-                // — every `BUILD` is silently skipped for want of structural matter — so the
-                // slide would run its four given organelles forever and differentiation would
-                // look like a genome that does not work.
-                cells.interior_mut(i)[structural] = q10(200);
-                cells.interior_mut(i)[11] = q10(40);
-                cells.interior_mut(i)[14] = q10(40);
+    }
+    for who in &wanted {
+        match genome_bytes(&who.genome) {
+            Some(bytes) => {
+                slide.world_mut().place_founders(&bytes, who.count);
             }
+            None => eprintln!("scenario asks for {}, which did not assemble", who.genome),
         }
     }
-    // Filling a cytoplasm by hand creates matter, which is what scenario setup is for.
-    slide.world_mut().adopt_current_contents_as_baseline();
 }
 
 /// How wide and tall the default slide is, in substrate squares.
@@ -1060,7 +1019,14 @@ fn petri_of(size: u32) -> Scenario {
 /// Returns rather than panics: a missing genome file should open an empty slide with a
 /// complaint on stderr, not refuse to start the microscope.
 fn ancestor_genome() -> Option<Vec<u8>> {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../genomes/ancestor.mm");
+    genome_bytes("ancestor.mm")
+}
+
+/// Assemble a genome from `genomes/`, or `None` with a complaint on stderr.
+fn genome_bytes(name: &str) -> Option<Vec<u8>> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../genomes")
+        .join(name);
     let src = match std::fs::read_to_string(&path) {
         Ok(src) => src,
         Err(e) => {
