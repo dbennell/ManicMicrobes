@@ -728,6 +728,26 @@ impl Slide {
         &self.history
     }
 
+    /// Put a different world on the slide, and throw away everything derived from the old one.
+    ///
+    /// The derived state is the point. `history`, `flows` and `flows_filling` are all summaries
+    /// of a world that no longer exists, and assigning through `world_mut` leaves every one of
+    /// them in place — so opening a scenario left the metrics rail plotting the population of
+    /// the slide you had just replaced, complete with its curve, and the food web describing
+    /// flows between species that were gone. Reseeding and the packing bench did the same, and
+    /// nobody noticed because those keep the slide's *size*, so a stale population curve looks
+    /// like a continuous one.
+    ///
+    /// Not `Default`-ing the whole `Slide`: the overlays, the optics, the camera and the flow
+    /// toggle are the *viewer's* settings and belong to the person, not to the world. Opening a
+    /// scenario must not switch off the overlay you were watching.
+    pub fn set_world(&mut self, world: World) {
+        self.world = world;
+        self.history = MetricHistory::new(self.history.capacity());
+        self.flows = crate::foodweb::Flows::default();
+        self.flows_filling = crate::foodweb::Flows::default();
+    }
+
     /// A reading of one cell, for the inspector panel.
     #[must_use]
     pub fn inspect(&self, id: mm_core::CellId) -> Option<crate::inspector::Inspection> {
@@ -1172,6 +1192,12 @@ pub struct MetricHistory {
 }
 
 impl MetricHistory {
+    /// How many samples it will keep.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
     #[must_use]
     pub fn new(capacity: usize) -> MetricHistory {
         MetricHistory {

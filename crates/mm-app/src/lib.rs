@@ -37,6 +37,7 @@ pub mod editor;
 pub mod engine;
 pub mod foodweb;
 pub mod inspector;
+pub mod library;
 pub mod optics;
 pub mod params;
 pub mod slide;

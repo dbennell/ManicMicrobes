@@ -100,6 +100,7 @@ use mm_app::debugger::{Breakpoint, Breakpoints, Sandbox};
 use mm_app::editor::Editor;
 use mm_app::engine::{Engine, Published, Rate};
 use mm_app::inspector::Inspection;
+use mm_app::library;
 use mm_app::params;
 use mm_app::slide::{self, Frame, Lod, Slide};
 use mm_app::tools::{self, ToolEvent};
@@ -274,6 +275,66 @@ fn screenshot(
     *done = Some(*frames);
 }
 
+/// Replace the running world with a scenario from a file.
+///
+/// The whole of "open a scenario", in one place so that the library menu and the path field
+/// cannot drift apart. A failure leaves the slide exactly as it was — the world is only touched
+/// once the file has parsed and `World::new` has accepted it, so a typo costs you nothing.
+///
+/// The camera follows, for the same reason `New slide` moves it: opening a sixteen-square vent
+/// while parked over the middle of a five-hundred-square soup leaves you staring at open water
+/// with no clue that anything happened.
+fn open_scenario(sim: &mut SlideRes, view: &mut View, path: &std::path::Path) {
+    let scenario = match library::load(path) {
+        Ok(s) => s,
+        Err(e) => {
+            view.file_note = Some(Err(e.to_string()));
+            return;
+        }
+    };
+    let (name, size) = (scenario.name.clone(), scenario.width.max(scenario.height));
+    let world = match mm_core::World::new(scenario) {
+        Ok(w) => w,
+        Err(e) => {
+            view.file_note = Some(Err(format!("{} will not start: {e:?}", path.display())));
+            return;
+        }
+    };
+    {
+        let held = sim.engine.handle();
+        held.slide().set_world(world);
+    }
+    // Seed it. A `Scenario` describes a world and not its inhabitants — there is no field
+    // for which genome to start from or how many — so `the_vent.ron` says in its own header
+    // to be run with `--genome genomes/ancestor.mm`, and `mm-cli` takes that as a flag. Opened
+    // here with nothing added, the library hands you a beautifully authored empty dish.
+    //
+    // So the founders from the New-slide control are seeded on top, and the note below says so.
+    // The right fix is a seeding block in `Scenario` itself, which is a `mm-core` schema change
+    // and its own piece of work.
+    let founders = view.new_founders;
+    if founders > 0 {
+        let held = sim.engine.handle();
+        seed_into(&mut held.slide(), size, founders);
+    }
+
+    // Everything that pointed into the old world. A selection is a slot in an arena that no
+    // longer exists, and a breakpoint is an offset into a genome nobody is running.
+    sim.selected = None;
+    sim.engine.select(None);
+    sim.sandbox = None;
+    sim.breakpoints.rearm();
+    sim.draft = None;
+    view.centre = Vec2::splat(size as f32 / 2.0);
+    view.zoom = (BASE_SCALE * 6.0 / size as f32).clamp(0.05, 40.0);
+    view.file_path = path.display().to_string();
+    view.file_note = Some(Ok(if founders > 0 {
+        format!("opened {name}, seeded {founders}")
+    } else {
+        format!("opened {name}")
+    }));
+}
+
 /// Put the interface into a named state, for a screenshot of it.
 ///
 /// A comma-separated list of panels, so one run photographs one arrangement:
@@ -317,6 +378,13 @@ fn arrange(spec: &str, sim: &mut SlideRes, view: &mut View) {
             "nocells" => view.organelles = false,
             // The flow overlay is off by default, so a screenshot of it has to ask.
             "flow" => sim.engine.set_flow(true),
+            // Open a scenario by library label, so a screenshot can photograph one.
+            "open" => {
+                let want = sub.replace('_', " ");
+                if let Some(e) = library::scenarios().into_iter().find(|e| e.label == want) {
+                    open_scenario(sim, view, &e.path);
+                }
+            }
             // For asking whether the *picture* is stable: with the world stopped, two frames
             // that differ differ because of the renderer and nothing else.
             "pause" => {
@@ -686,7 +754,7 @@ fn seed_packing(slide: &mut Slide) {
         seeding: vec![],
         ..Scenario::default()
     };
-    *slide.world_mut() = mm_core::World::new(scenario).expect("packing scenario");
+    slide.set_world(mm_core::World::new(scenario).expect("packing scenario"));
 
     // Nothing lives, nothing dies, nothing grows. Every rate that could change a cell is zero,
     // so the population is a constant and the only thing left in motion is geometry.
@@ -776,11 +844,21 @@ fn seed_packing(slide: &mut Slide) {
 
 /// Replace whatever is on the slide with a fresh petri dish and sixteen ancestors.
 fn seed_ancestors(slide: &mut Slide, size: u32, founders: u32) {
-    *slide.world_mut() = mm_core::World::new(petri_of(size)).expect("default scenario");
+    slide.set_world(mm_core::World::new(petri_of(size)).expect("default scenario"));
     slide.world_mut().set_biology(BiologyConfig {
         mutation: MutationRates::default(),
         ..BiologyConfig::default()
     });
+    seed_into(slide, size, founders);
+}
+
+/// Put founders on whatever world is already on the slide.
+///
+/// Split out of [`seed_ancestors`] for the scenario library. A `Scenario` describes a world and
+/// not its inhabitants — there is no field naming a genome or a founder count — so an authored
+/// `.ron` opened on its own is an empty dish, and `the_vent.ron` says as much in its own header
+/// by telling you to pass `--genome` to `mm-cli`. This is what the front end does instead.
+fn seed_into(slide: &mut Slide, size: u32, founders: u32) {
     let Some(bytes) = ancestor_genome() else {
         return;
     };
@@ -1014,6 +1092,12 @@ struct View {
     tree_floor: u32,
     /// Where the timeline's cursor is, in permille, or `None` when nobody has scrubbed.
     scrub: Option<u32>,
+    /// The path in the open/save fields. One field for both, because you are almost always
+    /// saving next to what you opened.
+    file_path: String,
+    /// What the last file operation said, kept until the next one so a menu that closed on
+    /// the click still gets to report what happened.
+    file_note: Option<Result<String, String>>,
 }
 
 impl Default for View {
@@ -1046,6 +1130,8 @@ impl Default for View {
             ecology: Ecology::Tree,
             tree_floor: 2,
             scrub: None,
+            file_path: String::new(),
+            file_note: None,
         }
     }
 }
@@ -2564,8 +2650,31 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                         ui.close();
                     }
                 });
-                soon(ui, "Scenario library", "", LATER);
-                soon(ui, "Open scenario…", "", LATER);
+                ui.menu_button("Scenario library", |ui| {
+                    let found = library::scenarios();
+                    if found.is_empty() {
+                        ui.weak("no scenarios/ directory here");
+                    }
+                    for entry in found {
+                        if ui
+                            .button(&entry.label)
+                            .on_hover_text(entry.path.display().to_string())
+                            .clicked()
+                        {
+                            open_scenario(sim, view, &entry.path);
+                            ui.close();
+                        }
+                    }
+                });
+                ui.menu_button("Open scenario…", |ui| {
+                    ui.label("a .ron, by path");
+                    ui.text_edit_singleline(&mut view.file_path);
+                    if ui.button("Open").clicked() {
+                        let path = std::path::PathBuf::from(view.file_path.trim());
+                        open_scenario(sim, view, &path);
+                        ui.close();
+                    }
+                });
                 if ui
                     .add(
                         egui::Button::new("Parameters…")
@@ -2578,7 +2687,28 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                     view.panels.toggle(Panel::Parameters);
                     ui.close();
                 }
-                soon(ui, "Save parameters as…", "", LATER);
+                ui.menu_button("Save parameters as…", |ui| {
+                    ui.label("the running world's scenario, back out as a .ron");
+                    ui.small(
+                        "every parameter as it stands now, including anything changed \
+                         mid-run — which is how a setting you tuned by hand becomes a \
+                         scenario you can start ten runs from.",
+                    );
+                    ui.text_edit_singleline(&mut view.file_path);
+                    if ui.button("Save").clicked() {
+                        let path = std::path::PathBuf::from(view.file_path.trim());
+                        let scenario = {
+                            let held = sim.engine.handle();
+                            let mut slide = held.slide();
+                            slide.world().scenario().clone()
+                        };
+                        view.file_note = Some(match library::save(&path, &scenario) {
+                            Ok(written) => Ok(format!("wrote {}", written.display())),
+                            Err(e) => Err(e.to_string()),
+                        });
+                        ui.close();
+                    }
+                });
                 ui.separator();
                 if ui
                     .add(egui::Button::new("Reseed").shortcut_text("R"))
@@ -2895,6 +3025,17 @@ fn status_bar(
                 ui.label(format!("largest organism {}", frame.largest_cluster));
             }
             ui.separator();
+            // What the last file operation said. In the status bar rather than in the menu that
+            // triggered it, because that menu closed on the click — and an error nobody sees is
+            // an error that looks like nothing happening.
+            if let Some(note) = &view.file_note {
+                match note {
+                    Ok(m) => ui.weak(m.clone()),
+                    Err(m) => ui.colored_label(egui::Color32::from_rgb(240, 140, 120), m.clone()),
+                }
+                .on_hover_text("the last file this session opened or wrote");
+                ui.separator();
+            }
             ui.label(match view.tool {
                 // Only where it means something. A width beside "select" is noise.
                 Tool::DrawBarrier | Tool::EraseBarrier => {

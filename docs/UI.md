@@ -97,10 +97,8 @@ File      New slide…              Ctrl+N      from a scenario
           ──
           Quit                    Ctrl+Q
 
-Slide     Scenario library        ▸           soup · photosynthesis or die · the long dusk ·
-                                              predator introduction · archipelago ·
-                                              archipelago control · seasons · the vent
-          Open scenario…                      .ron
+Slide     Scenario library        ▸           whatever is in scenarios/, by name
+          Open scenario…                      .ron, by path
           Parameters…             ,           the editor described in §4
           Save parameters as…                 the running world's config, back out as .ron
           ──
@@ -274,6 +272,37 @@ Two properties fall out of (b) that make it more than a compromise:
 
 The acceptance test is exact and cheap: run with interventions, save, reload, run on — state
 hash identical to the uninterrupted run. It is M1's serialisation test with a new field.
+
+### Scenario files, and what a scenario does not say
+
+*Built after M10.4.* Every file item was a disabled `soon()` button and the nine authored
+scenarios could be run by `mm-cli` and by nothing that draws a picture, which made the setting-up
+half of the loop — pick a world, tweak it, keep it — impossible inside the instrument.
+
+It needed no new dependency. `Scenario::from_ron` and `to_ron` have been in `mm-core` since
+M10.2, ISA check included, so this is `std::fs` and two calls. The interesting parts live in
+`mm_app::library`, away from `main.rs` so they can be tested: where the library looks (working
+directory first, then the source tree, so an installed binary gets an empty library rather than
+an error), and what to say when a file is not what it claims — a missing file and a file that is
+not a scenario report differently, because the first is a typo and the second means the file is
+something else. One test loads every scenario in the library, which is the only thing that would
+notice one going stale against an ISA bump or a renamed field.
+
+**A `Scenario` describes a world and not its inhabitants.** There is no field naming a genome or
+a founder count; `the_vent.ron` says in its own header to be run with `--genome
+genomes/ancestor.mm`, and `mm-cli` takes that as a flag. Opened on its own it is a beautifully
+authored empty dish. The front end seeds the New-slide founder count on top and says so in the
+status bar, which is a patch rather than a fix — the fix is a seeding block in `Scenario`, and it
+is a `mm-core` schema change of its own.
+
+**Replacing a world means throwing away what was derived from the old one.** `Slide::set_world`
+exists because assigning through `world_mut` does not: `history`, `flows` and `flows_filling` are
+summaries of a world that no longer exists, so opening a scenario left the metrics rail plotting
+the population of the slide it had just replaced. Reseed and the packing bench had the same bug
+and nobody had noticed, because those keep the slide's size and a stale population curve looks
+like a continuous one. What `set_world` deliberately does *not* reset is the overlays, the
+optics, the camera and the flow toggle — those are the viewer's settings and belong to the
+person, not to the world.
 
 ### The environment: what falls on the slide and what moves through it
 
