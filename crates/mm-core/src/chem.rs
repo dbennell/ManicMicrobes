@@ -322,14 +322,13 @@ impl ChemTable {
         &self.defs
     }
 
-    /// Diffusion rates in index order, for the fluid solver's inner loop.
-    #[must_use]
     /// Each species' coupling to the flow, in index order. See [`ChemicalDef::advection`].
     #[must_use]
     pub fn advection_rates(&self) -> [i32; CHEM_COUNT] {
         std::array::from_fn(|c| self.defs[c].advection.clamp(0, Q10_ONE))
     }
 
+    /// Diffusion rates in index order, for the fluid solver's inner loop.
     #[must_use]
     pub fn diffusion_rates(&self) -> [i32; CHEM_COUNT] {
         std::array::from_fn(|i| self.defs[i].diffusion)

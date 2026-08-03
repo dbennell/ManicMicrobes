@@ -408,7 +408,6 @@ impl World {
         &self.scenario
     }
 
-    #[must_use]
     /// How wedged each cell is, `Q10`. See [`crate::neighbours::resolve_collisions`].
     ///
     /// Snapshot state rather than scratch, and the distinction cost a failed round-trip test to

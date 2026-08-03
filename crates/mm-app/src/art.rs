@@ -255,6 +255,80 @@ pub fn paint_field(
     ]
 }
 
+/// How long a speck of suspended particulate is followed before it starts again, in ticks.
+///
+/// Long enough that the motion reads as a current rather than a shimmer; short enough that a
+/// speck never travels far from the block whose velocity it was given, which is the whole
+/// approximation here — a speck is carried by the water where it *started*, not integrated
+/// through the field it crosses.
+pub const SPECK_LIFE: u64 = 84;
+
+/// One speck of suspended particulate, offset from its lattice point in squares.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Speck {
+    pub dx: f32,
+    pub dy: f32,
+    /// `0..1`, and never 1 at the ends of a life.
+    pub alpha: f32,
+}
+
+/// Where one speck is at `tick`, or `None` if the water there is too clear to show it.
+///
+/// **A speck is not a thing.** There is no particle in the simulation it corresponds to, and
+/// there must never be one: detritus is a chemical field, and the only honest reading of this
+/// picture is *density* — how many specks are in a region is what the concentration says, and
+/// which speck is which means nothing. So they cannot be clicked, selected, counted or
+/// followed, and nothing in `Frame` gives them identity beyond the index that shuffles them.
+///
+/// A pure function of `(index, tick)`, like `optics::motes`, and for the same reason: the
+/// alternative is a pile of positions the renderer has to integrate and keep, which drifts out
+/// of step with the simulation the moment a frame is dropped, has to be rebuilt whenever the
+/// camera or the slide changes, and would be the one piece of the view with a memory.
+///
+/// The speck starts at its lattice point, is carried along the local velocity for
+/// [`SPECK_LIFE`] ticks, then begins again — fading in and out across that life so the restart
+/// is not a jump. `conc` is the block's share of the busiest block, `0..1`, and gates the speck
+/// against a threshold fixed per index: as the concentration rises past a speck's threshold it
+/// fades up rather than appearing, so a gradient reads as a gradient and not as a set of rings.
+#[must_use]
+pub fn speck(index: u64, tick: u64, vel: [f32; 2], stride: f32, conc: f32) -> Option<Speck> {
+    let h = mix(index);
+    // Fixed per speck: which of them are visible at a given concentration never shuffles, so
+    // rising concentration adds specks to the ones already there instead of redrawing the lot.
+    let threshold = (h >> 40) as f32 / 16_777_216.0;
+    let over = (conc - threshold) * SPECK_EDGE;
+    if over <= 0.0 {
+        return None;
+    }
+    let life = SPECK_LIFE.max(1);
+    // Staggered, or every speck on the slide would restart on the same tick.
+    let t = (tick.wrapping_add(h % life) % life) as f32;
+    let u = t / life as f32;
+    // A parabola rather than a triangle: zero at both ends with no kink in the middle, so a
+    // speck neither appears nor snaps.
+    let fade = 1.0 - (u * 2.0 - 1.0) * (u * 2.0 - 1.0);
+    // Somewhere in its block rather than exactly on the lattice point, or the specks are a grid.
+    let jx = ((h >> 8) & 0xFFFF) as f32 / 65_536.0 - 0.5;
+    let jy = ((h >> 24) & 0xFFFF) as f32 / 65_536.0 - 0.5;
+    Some(Speck {
+        dx: jx * stride + vel[0] * t,
+        dy: jy * stride + vel[1] * t,
+        alpha: fade * over.min(1.0),
+    })
+}
+
+/// How sharply a speck fades in once the concentration passes its threshold: `1/SPECK_EDGE` of
+/// the range is spent fading rather than popping.
+const SPECK_EDGE: f32 = 6.0;
+
+fn mix(mut x: u64) -> u64 {
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xC4CE_B9FE_1A85_EC53);
+    x ^ (x >> 33)
+}
+
 /// Cheap deterministic noise in `0..1`, for the grain and the per-variant phases.
 fn hash01(mut x: u64) -> f32 {
     x ^= x >> 33;
@@ -370,6 +444,113 @@ fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// The property that makes this a picture of the field rather than a picture of particles.
+    #[test]
+    fn clear_water_shows_nothing_and_thick_water_shows_most_of_it() {
+        let vel = [0.0, 0.0];
+        let count = |conc| {
+            (0..2000u64)
+                .filter(|&i| speck(i, 0, vel, 1.0, conc).is_some())
+                .count()
+        };
+        assert_eq!(count(0.0), 0, "clear water drew specks");
+        let (thin, thick) = (count(0.2), count(0.8));
+        assert!(
+            thin < thick,
+            "density did not follow concentration: {thin} against {thick}"
+        );
+        // Proportional, because that is the reading the picture invites: a region twice as
+        // speckled should be about twice as concentrated. Thresholds are uniform over `0..1`,
+        // so the share visible at `c` is `c`, and this checks the hash is flat enough to
+        // deliver that rather than merely monotone.
+        for conc in [0.2, 0.5, 0.8] {
+            let share = count(conc) as f32 / 2000.0;
+            assert!(
+                (share - conc).abs() < 0.04,
+                "at concentration {conc} the share drawn was {share}"
+            );
+        }
+    }
+
+    /// Which specks are visible must not reshuffle as the concentration changes, or a smooth
+    /// gradient crawls.
+    #[test]
+    fn a_speck_that_is_visible_stays_visible_as_the_water_thickens() {
+        for i in 0..500u64 {
+            if speck(i, 0, [0.0, 0.0], 1.0, 0.4).is_some() {
+                assert!(
+                    speck(i, 0, [0.0, 0.0], 1.0, 0.9).is_some(),
+                    "speck {i} vanished when there was more of it"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn still_water_leaves_a_speck_where_it_is() {
+        let a = speck(7, 0, [0.0, 0.0], 4.0, 1.0).expect("visible");
+        let b = speck(7, 40, [0.0, 0.0], 4.0, 1.0).expect("visible");
+        assert_eq!((a.dx, a.dy), (b.dx, b.dy), "it moved in still water");
+        assert!(
+            a.dx.abs() <= 2.0 && a.dy.abs() <= 2.0,
+            "jitter left its block"
+        );
+    }
+
+    #[test]
+    fn moving_water_carries_it_downstream_at_the_speed_of_the_water() {
+        let vel = [0.05, -0.02];
+        let mut seen = Vec::new();
+        for tick in 0..SPECK_LIFE {
+            let s = speck(3, tick, vel, 0.0, 1.0).expect("visible");
+            seen.push((s.dx, s.dy));
+        }
+        // One speck's whole life, in order, starting from wherever its stagger puts it.
+        let (x0, y0) = seen[0];
+        let t0 = (x0 / vel[0]).round();
+        for (n, (x, y)) in seen.iter().enumerate() {
+            let t = t0 + n as f32;
+            let t = if t >= SPECK_LIFE as f32 {
+                t - SPECK_LIFE as f32
+            } else {
+                t
+            };
+            assert!((x - vel[0] * t).abs() < 1e-3, "x wrong at {n}: {x}");
+            assert!((y - vel[1] * t).abs() < 1e-3, "y wrong at {n}: {y}");
+        }
+    }
+
+    /// The restart has to be invisible, which means every speck passes through nothing at both
+    /// ends of its life however bright it gets in the middle.
+    #[test]
+    fn every_speck_fades_out_at_both_ends_of_its_life() {
+        for i in 0..200u64 {
+            let mut dimmest = 1.0f32;
+            for tick in 0..SPECK_LIFE {
+                if let Some(s) = speck(i, tick, [0.01, 0.0], 1.0, 1.0) {
+                    dimmest = dimmest.min(s.alpha);
+                }
+            }
+            assert!(dimmest < 0.01, "speck {i} never faded out: {dimmest}");
+        }
+    }
+
+    /// A speck only just over its threshold is *meant* to be faint — that is the fade-in, and
+    /// it means the rarest specks in a thick patch are the dim ones. What must not happen is
+    /// that everything is dim: a speck well clear of its threshold reaches full brightness.
+    #[test]
+    fn a_speck_well_clear_of_its_threshold_reaches_full_brightness() {
+        let brightest = (0..200u64)
+            .flat_map(|i| (0..SPECK_LIFE).filter_map(move |t| speck(i, t, [0.01, 0.0], 1.0, 1.0)))
+            .fold(0.0f32, |m, s| m.max(s.alpha));
+        assert!(
+            brightest > 0.99,
+            "nothing reached full brightness: {brightest}"
+        );
+    }
+
     use super::*;
 
     fn pixel(pixels: &[u8], variant: usize, x: usize, y: usize) -> [u8; 4] {

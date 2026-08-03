@@ -780,6 +780,45 @@ one segment each.
 Expected result: three or four draw calls for the whole slide instead of a third of a million
 entities, and a look that is a large step closer to the reference.
 
+### The particulate stipple
+
+Detritus is drawn as a scatter of small sandy specks drifting in the water, and **it is not an
+overlay.** There is no checkbox for it and it is not in the legend, because it is not an
+instrument reading: the particulate is *there*, the way cells are there, and a slide with
+detritus flowing down it that looked like clear water would be lying about what is on it. The
+chemical overlay for detritus still exists and still answers "how much" by washing each square
+in colour — that one is a reading, and it is a question a stipple should not be asked.
+
+**A speck is not a particle**, and nothing must ever make it one. Detritus is a chemical field;
+the specks are a way of drawing a scalar that reads as suspended matter rather than as fog. So
+they carry no identity, cannot be clicked, selected, counted or followed, and `Frame` gives them
+nothing but the lattice index that shuffles them. What the picture means is *density*: how many
+specks are in a region is what the concentration says there, and which speck is which means
+nothing at all. `art::speck` is a pure function of `(index, tick)` for the same reason
+`optics::motes` is — the alternative is a pile of positions the renderer integrates and keeps,
+which drifts out of step with the simulation the moment a frame is dropped, has to be rebuilt
+whenever the camera or the slide changes, and would be the one piece of the view with a memory.
+
+Each speck starts at its lattice point, is carried along the local velocity for `SPECK_LIFE`
+ticks and then begins again, fading in and out across that life so the restart is invisible.
+The velocity is the water's **geared down by the species' advection coupling**, which matters:
+detritus travels at a third of the current, that lag is the whole of what makes it particulate
+rather than dissolved, and specks drawn at the water's speed would say the flow carries food
+three times faster than it does.
+
+Density is set from two directions and needs both. `skip` thins the lattice when blocks crowd
+together on screen, exactly as the arrows do. But `skip` can only ever make a lattice coarser,
+so the lattice is a *floor* on density: at high magnification a block is wider than the pitch,
+one speck in it is all there is, and the first version of this had the stipple thinning out as
+the view zoomed in — precisely backwards, since magnifying should reveal more of the water and
+not less of it. So `per_side` fills a block when it spreads. Only one of the pair is ever above
+one, and speck indices are stable across the change so zooming adds specks to those already on
+screen rather than dealing a new hand.
+
+The gather is gated on `Substrate::present()`, the fluid solver's own per-plane emptiness flag.
+Without it, every slide in existence pays a full pass over a quarter of a million squares each
+published frame to discover that it has no particulate on it.
+
 ### Bevy version
 
 *Done: 0.14.2 → 0.19, in five commits, one per version, each verified by rendering a frame.*

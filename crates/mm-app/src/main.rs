@@ -164,16 +164,22 @@ fn screenshot(
         // settle into, and at tick zero they have not settled into anything.
         if std::env::var("MM_SHOT_BENCH").is_ok() {
             sim.bench();
-            // From the world, not from `latest`: the engine publishes frames on its own
-            // schedule, so the newest one still describes the slide that was just replaced.
-            let (w, h) = {
-                let held = sim.engine.handle();
-                let slide = held.slide();
-                let s = slide.world().substrate();
-                (s.width(), s.height())
-            };
-            view.centre = Vec2::new(w as f32 / 2.0, h as f32 / 2.0);
         }
+        // Centre on whatever slide is actually loaded, always — not only after the bench has
+        // replaced it. The camera opens on the middle of the *default* slide, so `MM_SLIDE` or
+        // `MM_OPEN` with anything smaller photographed a patch of empty water off one side of
+        // it, which reads as "the feature draws nothing" rather than as "the camera is
+        // elsewhere".
+        //
+        // From the world rather than from `latest`: the engine publishes frames on its own
+        // schedule, so the newest one still describes the slide that was just replaced.
+        let (w, h) = {
+            let held = sim.engine.handle();
+            let slide = held.slide();
+            let s = slide.world().substrate();
+            (s.width(), s.height())
+        };
+        view.centre = Vec2::new(w as f32 / 2.0, h as f32 / 2.0);
         if let Ok(zoom) = std::env::var("MM_SHOT_ZOOM") {
             view.zoom = zoom.parse().unwrap_or(view.zoom);
         }
@@ -444,6 +450,24 @@ const FLOW_FLOOR: f32 = 0.002;
 /// the brightest arrow on screen is water at the engine's own ceiling.
 const FLOW_FULL: f32 = 0.25;
 
+/// Roughly how far apart the specks of suspended particulate are drawn, in pixels.
+///
+/// Sparser than it could be, on purpose. A dense stipple reads as fog — a property of the
+/// water — where a sparse one reads as things *in* the water, which is what detritus is.
+const SPECK_PITCH: f32 = 27.0;
+
+/// The specks' colour, matching `detritus` in the chemical table.
+///
+/// A constant rather than a lookup because the stipple is drawn whether or not the chemical
+/// overlay that would show that colour is switched on.
+const SPECK_RGB: [f32; 3] = [0.745, 0.667, 0.510];
+
+/// Most specks drawn per lattice block along one axis, so the square of it per block.
+///
+/// A ceiling on the work rather than a look: eight a side is sixty-four specks in one block of
+/// water, which only happens at magnifications where a block fills a good part of the window.
+const SPECK_MAX_SIDE: u64 = 8;
+
 fn main() {
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -604,8 +628,23 @@ impl SlideRes {
         // Loading a *chosen* scenario is M6's slide save/load and is still not here. This is
         // the built-in default: the same petri dish M2's tests use, seeded with the ancestor
         // from `genomes/`, which divides and fills it within a few thousand ticks.
-        let mut slide = Slide::new(petri()).expect("default scenario");
-        seed_ancestors(&mut slide, slide_size(), 16);
+        //
+        // `MM_OPEN` takes a different path from the built-in dish, and it has to: `seed_ancestors`
+        // *replaces* the world it is handed with a fresh `petri_of`, which is right when the
+        // point is a clean slide of a given size and silently discards an authored one — walls,
+        // flow, chemistry and all — when it is not. An opened scenario keeps its world and is
+        // only given inhabitants, because that is the one thing a `.ron` cannot describe.
+        let opened = std::env::var("MM_OPEN").is_ok();
+        let mut slide = Slide::new(petri()).expect("opening scenario");
+        if opened {
+            let (w, h) = {
+                let s = slide.world().substrate();
+                (s.width(), s.height())
+            };
+            seed_into(&mut slide, w.min(h), 16);
+        } else {
+            seed_ancestors(&mut slide, slide_size(), 16);
+        }
         let chem_names = slide.chemical_names();
         let chem_colours = slide.chemical_colours();
         let latest = Published {
@@ -946,12 +985,24 @@ fn seed_into(slide: &mut Slide, size: u32, founders: u32) {
 /// — and this is only what the app opens on when nobody has said otherwise.
 const DEFAULT_SLIDE: u32 = 512;
 
-/// The slide size to open on, from `MM_SLIDE` or [`DEFAULT_SLIDE`].
+/// The slide to open on: `MM_OPEN=scenarios/the_drift.ron` for one off the shelf, or a bare
+/// dish at `MM_SLIDE` squares.
 ///
-/// Clamped rather than trusted. A zero-square slide has nowhere to put a cell and fails
-/// scenario validation, and the upper bound is where the substrate stops being something a
-/// machine can diffuse sixty times a second.
+/// `MM_OPEN` exists because the File menu is the only other way in, and a scenario that has to
+/// be opened by hand cannot be photographed by `MM_SHOT` or opened twice the same way.
 fn petri() -> Scenario {
+    match std::env::var("MM_OPEN") {
+        Ok(path) => match library::load(std::path::Path::new(&path)) {
+            Ok(scenario) => {
+                eprintln!("opened {path}: {}", scenario.name);
+                return scenario;
+            }
+            // Complain and open the default rather than refuse to start, the same way a
+            // missing `ancestor.mm` does: a typo in a path should not cost the microscope.
+            Err(e) => eprintln!("cannot open {path}: {e:?}"),
+        },
+        Err(_) => {}
+    }
     petri_of(slide_size())
 }
 
@@ -1179,6 +1230,11 @@ struct MoteSprite(usize);
 struct JunctionSprite(usize);
 
 /// One arrow of the flow overlay: a shaft stretched along the local velocity.
+/// One speck of suspended particulate. Presentation only — see [`art::speck`] for why these
+/// are not particles and must never become clickable.
+#[derive(Component)]
+struct Suspended(usize);
+
 #[derive(Component)]
 struct FlowArrow(usize);
 
@@ -1725,7 +1781,10 @@ fn handle_mouse(
     // And where it is looking, so the frame builder can skip the expensive per-cell work for
     // cells nobody can see. Half-extents in substrate squares: what fits on screen at this zoom.
     {
-        let win = window.single().map(|w| (w.width(), w.height())).unwrap_or((1280.0, 720.0));
+        let win = window
+            .single()
+            .map(|w| (w.width(), w.height()))
+            .unwrap_or((1280.0, 720.0));
         sim.engine.set_camera(
             view.centre.x,
             view.centre.y,
@@ -1966,6 +2025,7 @@ fn redraw(
             Without<MoteSprite>,
             Without<JunctionSprite>,
             Without<FlowArrow>,
+            Without<Suspended>,
         ),
     >,
     mut barrier_quad: Query<
@@ -1976,6 +2036,7 @@ fn redraw(
             Without<MoteSprite>,
             Without<JunctionSprite>,
             Without<FlowArrow>,
+            Without<Suspended>,
         ),
     >,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -1987,6 +2048,7 @@ fn redraw(
             Without<BarrierQuad>,
             Without<JunctionSprite>,
             Without<FlowArrow>,
+            Without<Suspended>,
         ),
     >,
     mut junctions: Query<
@@ -1996,6 +2058,7 @@ fn redraw(
             Without<BarrierQuad>,
             Without<MoteSprite>,
             Without<FlowArrow>,
+            Without<Suspended>,
         ),
     >,
     mut arrows: Query<
@@ -2005,6 +2068,17 @@ fn redraw(
             Without<BarrierQuad>,
             Without<MoteSprite>,
             Without<JunctionSprite>,
+            Without<Suspended>,
+        ),
+    >,
+    mut specks: Query<
+        (&Suspended, &mut Sprite, &mut Transform),
+        (
+            Without<FieldQuad>,
+            Without<BarrierQuad>,
+            Without<MoteSprite>,
+            Without<JunctionSprite>,
+            Without<FlowArrow>,
         ),
     >,
 ) {
@@ -2245,6 +2319,96 @@ fn redraw(
         transform.rotation = Quat::from_rotation_z(dir.y.atan2(dir.x));
     }
 
+    // The particulate itself: a stipple of specks carried by the water, over the field and
+    // under everything solid.
+    //
+    // Not an overlay and not switchable, because it is not an instrument reading. The detritus
+    // is *there*, the way cells are there, and a slide with particulate flowing through it that
+    // looked empty would be lying about what is on it. The switchable thing is the chemical
+    // overlay that washes each square in colour — that one is a reading, and it answers "how
+    // much", which is a question a stipple should not be asked.
+    let mut speck_slots: Vec<(Vec3, f32)> = Vec::new();
+    if !frame.detritus.is_empty() && frame.flow_cols > 0 {
+        let cols = frame.flow_cols as usize;
+        let rows = frame.detritus.len() / cols.max(1);
+        let stride = slide::FLOW_STRIDE as f32;
+        let square_px = scale.max(0.0001);
+        // The arrows' trick: a substrate lattice thinned in screen space, so the stipple stays
+        // about as dense at every magnification. Substrate-spaced rather than screen-spaced so
+        // that a speck keeps its place on the slide when the view is panned across it.
+        //
+        // Thinning alone is not enough, and the first version of this had only that. `skip` can
+        // make the lattice coarser and never finer, so the lattice itself is a *floor* on the
+        // density: at high magnification a block is wider than the pitch and one speck in it is
+        // all there is, which had the stipple thinning out as the view zoomed in — precisely
+        // backwards, since magnifying should reveal more of the water and not less of it. So
+        // the two halves are here: `skip` drops blocks when they crowd, `per_side` fills them
+        // when they spread. Only one of the pair is ever above 1.
+        let block_px = square_px * stride;
+        let skip = ((SPECK_PITCH / block_px).ceil() as usize).max(1);
+        let per_side = ((block_px / SPECK_PITCH).round() as u64).clamp(1, SPECK_MAX_SIDE);
+        let mid = stride / 2.0;
+        for row in (0..rows).step_by(skip) {
+            for col in (0..cols).step_by(skip) {
+                let i = row * cols + col;
+                let conc = frame.detritus.get(i).copied().unwrap_or(0.0);
+                // The water's velocity, geared down to the speed the particulate in it
+                // actually travels: detritus lags the current, and specks drawn at the water's
+                // speed would say it does not.
+                let water = frame.flow.get(i).copied().unwrap_or([0.0, 0.0]);
+                let vel = [
+                    water[0] * frame.detritus_drift,
+                    water[1] * frame.detritus_drift,
+                ];
+                for k in 0..per_side * per_side {
+                    // Distinct per speck *and* stable as `per_side` changes, so that zooming in
+                    // adds specks to the ones already on screen rather than dealing a new hand.
+                    let index = i as u64 * SPECK_MAX_SIDE * SPECK_MAX_SIDE + k;
+                    let Some(sp) = art::speck(index, frame.tick, vel, stride, conc) else {
+                        continue;
+                    };
+                    let at = to_screen(
+                        col as f32 * stride + mid + sp.dx,
+                        row as f32 * stride + mid + sp.dy,
+                    );
+                    if at.x < cull.min_x
+                        || at.x > cull.max_x
+                        || at.y < cull.min_y
+                        || at.y > cull.max_y
+                    {
+                        continue;
+                    }
+                    speck_slots.push((at, sp.alpha * optics.vignette(field_radius(at))));
+                }
+            }
+        }
+    }
+    for i in specks.iter().count()..speck_slots.len() {
+        commands.spawn((
+            Suspended(i),
+            Sprite {
+                color: Color::NONE,
+                custom_size: Some(Vec2::splat(1.0)),
+                ..default()
+            },
+        ));
+    }
+    // Grains grow with magnification, because unlike an arrow a speck is meant to read as
+    // something in the water rather than as a mark on the picture of it.
+    let speck_px = (scale * 0.5).clamp(1.5, 5.0);
+    for (marker, mut sprite, mut transform) in &mut specks {
+        let Some((at, alpha)) = speck_slots.get(marker.0).copied() else {
+            // Surplus from a busier frame, hidden rather than despawned, like the arrows.
+            sprite.color = Color::NONE;
+            continue;
+        };
+        sprite.color = Color::srgba(SPECK_RGB[0], SPECK_RGB[1], SPECK_RGB[2], alpha * 0.85);
+        sprite.custom_size = Some(Vec2::splat(speck_px));
+        // Above the field and below the walls at 0.25: the particulate is in the water, and
+        // the water is under everything solid.
+        transform.translation = at.with_z(0.2);
+    }
+
     // Cells: the whole population as one mesh, one material, one draw call (M10.5).
     //
     // This was a sprite entity per cell — fifty thousand `Transform`s and `Sprite`s at the
@@ -2314,13 +2478,8 @@ fn redraw(
         // Drawn a fifth larger than the simulation's radius, and cut back by the seams where
         // a neighbour is in the way — see `slide::PACKING`. Cells rest at exactly touching,
         // and touching circles leave a hole between every three of them.
-        let body = (dot.radius * 2.0 * scale * slide::PACKING * dot.area_swell * swell).max(
-            if selected {
-                12.0
-            } else {
-                1.5
-            },
-        );
+        let body = (dot.radius * 2.0 * scale * slide::PACKING * dot.area_swell * swell)
+            .max(if selected { 12.0 } else { 1.5 });
         Some(cellmesh::Placed {
             x: at.x,
             y: at.y,
@@ -2720,7 +2879,7 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                         let path = std::path::PathBuf::from(view.file_path.trim());
                         let scenario = {
                             let held = sim.engine.handle();
-                            let mut slide = held.slide();
+                            let slide = held.slide();
                             slide.world().scenario().clone()
                         };
                         view.file_note = Some(match library::save(&path, &scenario) {

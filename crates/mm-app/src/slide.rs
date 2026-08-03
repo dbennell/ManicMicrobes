@@ -466,6 +466,19 @@ pub struct Frame {
     pub flow: Vec<[f32; 2]>,
     /// Samples across, so the renderer can index `flow` without recomputing the division.
     pub flow_cols: u32,
+    /// Detritus on the same lattice as `flow`, as a fraction of the busiest block.
+    ///
+    /// The suspended particulate, for drawing it as the swarm of specks it looks like rather
+    /// than as a colour wash. Normalised against the frame's own peak, like an overlay layer,
+    /// because what the picture is saying is *where* the particulate is rather than how much of
+    /// it there is — the budget pane is where the number lives.
+    pub detritus: Vec<f32>,
+    /// How much of the water's speed the particulate actually travels at, `0..1`.
+    ///
+    /// Detritus is coupled to the flow at a fraction of it — that lag is what makes it
+    /// particulate rather than dissolved — so specks drawn at the water's speed would be a
+    /// picture of the wrong thing, and would say the current carries food faster than it does.
+    pub detritus_drift: f32,
     /// The barrier mask, one entry per square, or empty on a slide with no barriers.
     ///
     /// Until this existed the renderer was never told where the walls were, so a barrier was
@@ -827,12 +840,50 @@ impl Slide {
             .map(|v| (*v as f32 / Q10_ONE as f32).clamp(0.0, 1.0))
             .collect();
 
-        // The flow, coarsened, and only when someone is looking at it.
-        let (flow, flow_cols) = if self.show_flow {
-            let (w, h) = (substrate.width(), substrate.height());
+        // Detritus on the flow lattice, and the flow with it.
+        //
+        // The particulate is gathered first and decides whether the flow is: the specks need
+        // both — the concentration says where to draw them and the velocity says which way they
+        // go — so a slide with particulate on it pays for the velocity samples whether or not
+        // the arrows are switched on, and a slide with none pays for neither. One pass over one
+        // plane also answers "is there any", which saves scanning for it separately.
+        let (w, h) = (substrate.width(), substrate.height());
+        let cols = w.div_ceil(FLOW_STRIDE);
+        let rows = h.div_ceil(FLOW_STRIDE);
+        // `present` is the fluid solver's own per-plane emptiness flag, and it is what keeps
+        // this free on every slide that has no particulate on it: without it the gather is a
+        // full pass over a quarter of a million squares each published frame, paid by everyone,
+        // to discover that the answer is nothing.
+        let detritus: Vec<f32> = if !substrate.present()[mm_core::ecology::DETRITUS] {
+            Vec::new()
+        } else {
+            let plane = substrate.chem_plane(mm_core::ecology::DETRITUS);
+            let mut out = Vec::with_capacity((cols * rows) as usize);
+            let mut peak = 0i64;
+            for by in 0..rows {
+                for bx in 0..cols {
+                    let mut sum = 0i64;
+                    for y in by * FLOW_STRIDE..((by + 1) * FLOW_STRIDE).min(h) {
+                        for x in bx * FLOW_STRIDE..((bx + 1) * FLOW_STRIDE).min(w) {
+                            sum += i64::from(plane.get((y * w + x) as usize).copied().unwrap_or(0));
+                        }
+                    }
+                    peak = peak.max(sum);
+                    out.push(sum as f32);
+                }
+            }
+            if peak == 0 {
+                Vec::new()
+            } else {
+                for v in &mut out {
+                    *v /= peak as f32;
+                }
+                out
+            }
+        };
+
+        let (flow, flow_cols) = if self.show_flow || !detritus.is_empty() {
             let (svx, svy) = substrate.velocity();
-            let cols = w.div_ceil(FLOW_STRIDE);
-            let rows = h.div_ceil(FLOW_STRIDE);
             let mut out = Vec::with_capacity((cols * rows) as usize);
             for by in 0..rows {
                 for bx in 0..cols {
@@ -1024,14 +1075,20 @@ impl Slide {
                         moved.0 /= c.max(1.0);
                     }
                 }
-                if last.as_ref().is_none_or(|(t, _)| *t != self.world.tick_count()) {
+                if last
+                    .as_ref()
+                    .is_none_or(|(t, _)| *t != self.world.tick_count())
+                {
                     *last = Some((self.world.tick_count(), now));
                 }
             }
             let (svx, svy) = substrate.velocity();
             // Mean distance from the middle of the slide: the one number that says whether a
             // crowd under an inward force is actually coming in.
-            let (cx, cy) = (substrate.width() as f32 / 2.0, substrate.height() as f32 / 2.0);
+            let (cx, cy) = (
+                substrate.width() as f32 / 2.0,
+                substrate.height() as f32 / 2.0,
+            );
             let mut radius_sum = 0.0f32;
             // The whole velocity field, not just where cells happen to be: is the fluid moving
             // at all when the current is `Still`?
@@ -1092,6 +1149,9 @@ impl Slide {
             light,
             flow,
             flow_cols,
+            detritus,
+            detritus_drift: table.advection_rates()[mm_core::ecology::DETRITUS] as f32
+                / Q10_ONE as f32,
             barriers,
             population: cells.len(),
             lod: self.lod,

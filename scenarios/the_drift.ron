@@ -1,0 +1,56 @@
+// The drift — a channel with particulate flowing down it.
+//
+// The slide filter feeding was built for, and the one place on the shelf where staying still is
+// a way to make a living. Two walls make a channel, a gentle uniform current runs along it, and
+// the water carries detritus: a chemical that advects at a third of the water's speed, so it
+// lags the flow, piles up against obstructions and does not simply arrive everywhere at once
+// the way a dissolved pool does.
+//
+// What makes this different from every other scenario is that food *goes past*. Everywhere else
+// a cell's next meal is in the square it is standing in, so position is worth nothing and
+// nothing has ever evolved to hold one. Here what a cell can take is what flows by it, which is
+// zero if it is drifting along with the water — so the holdfast is worth its upkeep and
+// `genomes/sponge.mm` is worth trying against `genomes/drifter.mm`:
+//
+//   mm-cli run scenarios/the_drift.ron --genome genomes/sponge.mm --ticks 50000 --check
+//
+// There is no source: the detritus seeded here is all there will ever be, so the interesting
+// window is while it lasts. An influx that keeps a channel supplied is the next thing this
+// slide wants, and it needs the energy ledger to learn about matter arriving from off-slide
+// before it can exist.
+(
+    name: "the drift",
+    seed: 20260802,
+    width: 96,
+    height: 96,
+
+    // Lit, because a sponge that could not photosynthesise would starve waiting for its first
+    // grain. The filter is a second income, not a replacement for the first.
+    light: Uniform(intensity: 1024),
+
+    // Gentle: an eighth of a square per step. Fast enough that a cell holding station has real
+    // water going past it, slow enough that a cell which lets go is not immediately at the far
+    // wall. Speed is most of what decides whether filtering pays, so this is the number to move
+    // first when asking whether it does.
+    current: Uniform(vx: 128, vy: 0),
+    fluid_interval: 1,
+
+    seeding: [
+        // The ordinary chemistry of being alive: something to fix, something to breathe,
+        // something to build a body from.
+        Uniform(chemical: 11, per_square: 409600),
+        Uniform(chemical: 14, per_square: 409600),
+        Uniform(chemical: 4, per_square: 204800),
+
+        // The particulate. Half what the dissolved chemicals get, because it is meant to be
+        // worth catching rather than unavoidable.
+        Uniform(chemical: 12, per_square: 102400),
+    ],
+
+    // The channel: two walls thirty-two squares apart, open at both ends so the current runs
+    // through rather than into them.
+    barriers: [
+        Rect(x: 6, y: 32, width: 84, height: 2),
+        Rect(x: 6, y: 62, width: 84, height: 2),
+    ],
+)
