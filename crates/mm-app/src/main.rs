@@ -1608,6 +1608,17 @@ fn keyboard(keys: &ButtonInput<KeyCode>, view: &mut View, sim: &mut SlideRes) {
     if keys.just_pressed(KeyCode::KeyV) {
         sim.engine.set_flow(!sim.engine.flow_enabled());
     }
+    // Step one overlay at a time, on its own. The gesture for comparing two chemical fields:
+    // same place, same zoom, one then the other, with nothing covering the plate. Keys 1-9
+    // toggle and only reach nine of sixteen; these reach all of them and hold the picture to
+    // one at a time, which is what "compare" needs.
+    for (key, step) in [(KeyCode::BracketRight, 1i32), (KeyCode::BracketLeft, -1)] {
+        if keys.just_pressed(key) {
+            let n = sim.chem_names.len();
+            sim.engine
+                .set_overlays(ui::step_solo(sim.engine.overlays(), n, step));
+        }
+    }
     if keys.just_pressed(KeyCode::KeyC) {
         view.rounded = !view.rounded;
     }
@@ -2958,6 +2969,7 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                     (".", "step one tick"),
                     ("0 - = ⌫", "speed"),
                     ("1–9", "chemical overlays"),
+                    ("[ ]", "step one overlay at a time"),
                     ("v", "flow field"),
                     ("F1–F5", "tools"),
                     ("drag", "pan the slide"),
@@ -3997,26 +4009,87 @@ fn interventions_view(ui: &mut egui::Ui, sim: &SlideRes) {
 
 /// The legend: what the colours on the slide mean, and what they are scaled against.
 fn legend_body(ui: &mut egui::Ui, sim: &SlideRes, view: &View, frame: &Frame) {
-    ui.label(egui::RichText::new("legend").strong());
-    if frame.overlays.is_empty() {
-        ui.weak("no overlays — press 1–9");
-    }
-    for layer in &frame.overlays {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("overlays").strong());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .small_button("none")
+                .on_hover_text("bare slide, which is a reading too")
+                .clicked()
+            {
+                sim.engine.set_overlays(0);
+            }
+            if ui
+                .small_button("]")
+                .on_hover_text("next, on its own")
+                .clicked()
+            {
+                let n = sim.chem_names.len();
+                sim.engine
+                    .set_overlays(ui::step_solo(sim.engine.overlays(), n, 1));
+            }
+            if ui
+                .small_button("[")
+                .on_hover_text("previous, on its own")
+                .clicked()
+            {
+                let n = sim.chem_names.len();
+                sim.engine
+                    .set_overlays(ui::step_solo(sim.engine.overlays(), n, -1));
+            }
+        });
+    });
+
+    // Every chemical, always, one click each.
+    //
+    // This was a read-only list of whatever happened to be on, and switching one meant
+    // View ▸ Overlays ▸ item — three levels of menu, with the menu itself covering the part of
+    // the plate you were trying to look at. The legend is already in the rail, already open, and
+    // already knows the colours; making its rows the control removes the menu from the loop
+    // rather than adding a second way to do the same thing.
+    //
+    // The peak is on the rows that are *on*, and it is not decoration: each layer is normalised
+    // against its own maximum, so the colours are legible and meaningless without it.
+    let peaks: std::collections::BTreeMap<usize, (i32, i64)> = frame
+        .overlays
+        .iter()
+        .map(|l| (l.chemical, (l.peak, l.total)))
+        .collect();
+    for (c, name) in sim.chem_names.iter().enumerate() {
+        let on = sim.engine.overlay_enabled(c);
+        let rgb = sim.chem_colours.get(c).copied().unwrap_or([160, 160, 160]);
+        let swatch = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
         ui.horizontal(|ui| {
-            let [r, g, b] = layer.rgb;
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-            ui.painter().rect_filled(
-                rect,
-                2.0,
-                egui::Color32::from_rgb((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8),
-            );
-            // The peak matters: each layer is normalised against its own maximum, so without
-            // this the colours are legible but meaningless.
-            ui.label(format!(
-                "{}  peak {:.1}",
-                layer.name,
-                layer.peak as f32 / mm_core::Q10_ONE as f32
-            ));
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(11.0, 11.0), egui::Sense::hover());
+            // Filled when it is on, outlined when it is not, so the state reads at a glance
+            // down the column rather than needing the highlight to be noticed.
+            if on {
+                ui.painter().rect_filled(rect, 2.0, swatch);
+            } else {
+                ui.painter().rect_stroke(
+                    rect,
+                    2.0,
+                    egui::Stroke::new(1.0, swatch),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            let label = match peaks.get(&c) {
+                Some((peak, _)) => {
+                    format!("{name}   {:.1}", *peak as f32 / mm_core::Q10_ONE as f32)
+                }
+                None => name.clone(),
+            };
+            let hint = if c < 9 {
+                format!(
+                    "key {}. Click to toggle; [ and ] step one at a time.",
+                    c + 1
+                )
+            } else {
+                "Click to toggle; [ and ] step one at a time.".to_string()
+            };
+            if ui.selectable_label(on, label).on_hover_text(hint).clicked() {
+                sim.engine.toggle_overlay(c);
+            }
         });
     }
     if let Some(event) = &sim.last_tool {

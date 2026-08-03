@@ -400,6 +400,20 @@ impl Engine {
         chemical < 32 && self.shared.overlays.load(Ordering::Relaxed) & (1u32 << chemical) != 0
     }
 
+    /// Every overlay at once, as a bit per chemical.
+    ///
+    /// What the legend's rows and the solo keys write through. Toggling sixteen overlays one
+    /// `toggle_overlay` at a time works but cannot express "only this one", which is the whole
+    /// of comparing two fields against each other.
+    pub fn set_overlays(&self, mask: u32) {
+        self.shared.overlays.store(mask, Ordering::Relaxed);
+    }
+
+    #[must_use]
+    pub fn overlays(&self) -> u32 {
+        self.shared.overlays.load(Ordering::Relaxed)
+    }
+
     pub fn set_optics(&self, on: bool) {
         self.shared.optics.store(on, Ordering::Relaxed);
     }

@@ -116,6 +116,7 @@ View      Panels                  ▸           cell · metrics · legend · gen
                                               parameters · editor · debugger
                                                                        (each a checkbox)
           Overlays                ▸           one per chemical, 1–9
+                                              (the fast path is the legend, see §4)
           Flow                    V           which way the water is going
           Optics                  O           vignette, defocus, dust
           ──
@@ -598,6 +599,29 @@ one: opaque, cool against a slide whose every other colour is warm light or a ch
 and ignoring both the light and the overlays, because a blocked square genuinely has nothing in
 it to paint. The mask is empty rather than all-false on a slide with no barriers, so such a
 slide pays neither the copy nor the per-texel branch.
+
+### Overlay visibility lives in the legend, not in a menu
+
+Switching a chemical overlay was View ▸ Overlays ▸ item — **three levels of menu**, with the
+menu itself covering the part of the plate you were trying to look at, and keys 1–9 reaching
+only nine of the sixteen. Comparing two fields means seeing one, then the other, in the same
+place at the same zoom, and that gesture was three levels deep and twice over.
+
+The legend is already in the right rail, already open by default, and already knows every
+chemical's colour. **Its rows are the control now**: all sixteen listed, one click each, swatch
+filled when the overlay is on and outlined when it is off so the state reads down the column at
+a glance. The peak stays on the rows that are on, because each layer is normalised against its
+own maximum and the colours are legible and meaningless without it.
+
+The comparison gesture is `[` and `]`, and it **solos** rather than toggling: whatever was on
+goes off and exactly one thing comes on, so holding a key steps through the chemicals one at a
+time and the picture only ever shows one of them. The cycle includes an **off** position, which
+makes it a loop rather than a wall — sixteen chemicals then bare slide, and round again. Bare
+slide is a reading too: it is the one that says which of what you are looking at is the cells
+and which is the water. `ui::step_solo` is a pure function over the mask, so the cycle is a
+table of cases rather than something you have to hold a key down to check.
+
+The menu stays. It is the discoverable path and it lists the keys; the legend is the fast one.
 
 ### The flow overlay
 

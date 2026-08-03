@@ -192,6 +192,42 @@ pub fn line_squares(from: (i32, i32), to: (i32, i32)) -> Vec<(i32, i32)> {
     }
 }
 
+/// Step the overlay selection to the next chemical shown *on its own*.
+///
+/// The gesture the menu could not offer. Comparing two chemical fields means looking at one,
+/// then the other, in the same place at the same zoom — and doing that through
+/// View ▸ Overlays ▸ item means three levels of menu twice per comparison, with the plate
+/// hidden behind the menu while you aim at it.
+///
+/// So this is *solo*, not toggle: whatever was on goes off and exactly one thing comes on, so
+/// holding a key steps through the chemicals one at a time and the picture is only ever showing
+/// one of them. `step` of 1 goes forwards, -1 back.
+///
+/// The cycle includes an **off** position, which is what makes it a loop rather than a wall —
+/// sixteen chemicals and then bare slide, and round again. Bare slide is a reading too: it is
+/// the one that says which of what you are looking at is the cells and which is the water.
+///
+/// A mask with several bits set has no single "current", so stepping from one starts the cycle
+/// at the lowest chemical that is on rather than pretending to know which you meant.
+#[must_use]
+pub fn step_solo(mask: u32, count: usize, step: i32) -> u32 {
+    let count = count.min(32).max(1) as i32;
+    // Where the cycle is now: `0..count` for a chemical, `count` for off.
+    let current = if mask == 0 {
+        count
+    } else {
+        mask.trailing_zeros() as i32
+    };
+    // One past the last chemical is the off position, so the ring is `count + 1` long.
+    let ring = count + 1;
+    let next = (current + step).rem_euclid(ring);
+    if next == count {
+        0
+    } else {
+        1u32 << next
+    }
+}
+
 /// Narrowest and widest a barrier brush may be, in squares.
 pub const BRUSH_MIN: u32 = 1;
 pub const BRUSH_MAX: u32 = 10;
@@ -788,5 +824,70 @@ mod brush_tests {
         // The caller drops the negatives; getting here must not panic on the way.
         let s = brush_squares((i32::MIN, i32::MAX), BRUSH_MAX);
         assert!(!s.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod overlay_tests {
+    use super::*;
+
+    #[test]
+    fn stepping_forward_walks_the_chemicals_and_then_goes_dark() {
+        let mut mask = 0u32;
+        // Off -> the first chemical.
+        mask = step_solo(mask, 4, 1);
+        assert_eq!(mask, 0b0001);
+        mask = step_solo(mask, 4, 1);
+        assert_eq!(mask, 0b0010);
+        mask = step_solo(mask, 4, 1);
+        assert_eq!(mask, 0b0100);
+        mask = step_solo(mask, 4, 1);
+        assert_eq!(mask, 0b1000);
+        // Past the last one is bare slide, which is a reading and not a dead end.
+        mask = step_solo(mask, 4, 1);
+        assert_eq!(mask, 0, "the cycle has no off position");
+        mask = step_solo(mask, 4, 1);
+        assert_eq!(mask, 0b0001, "the cycle did not come round");
+    }
+
+    #[test]
+    fn stepping_back_is_the_exact_reverse() {
+        for count in 1..=16usize {
+            let mut mask = 0u32;
+            for _ in 0..count + 1 {
+                mask = step_solo(mask, count, 1);
+            }
+            let forward = mask;
+            let back = step_solo(step_solo(forward, count, 1), count, -1);
+            assert_eq!(back, forward, "count {count} does not step back cleanly");
+        }
+    }
+
+    #[test]
+    fn it_solos_rather_than_toggling() {
+        // Three on at once; one step leaves exactly one on. Comparing two fields means seeing
+        // one at a time, and a step that added to the set would never get you there.
+        let next = step_solo(0b1011, 8, 1);
+        assert_eq!(
+            next.count_ones(),
+            1,
+            "stepping left more than one overlay on"
+        );
+    }
+
+    #[test]
+    fn a_mask_with_several_bits_starts_from_the_lowest() {
+        // No single "current" to advance from, so it picks the lowest rather than guessing.
+        assert_eq!(step_solo(0b1010, 8, 1), 1 << 2);
+    }
+
+    #[test]
+    fn a_silly_count_does_not_panic_or_shift_off_the_end() {
+        for count in [0usize, 1, 32, 999] {
+            for step in [-1i32, 1] {
+                let m = step_solo(0, count, step);
+                assert!(m.count_ones() <= 1);
+            }
+        }
     }
 }
