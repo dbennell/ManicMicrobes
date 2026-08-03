@@ -237,7 +237,7 @@ fn a_world_that_says_nothing_about_pathways_behaves_as_it_always_did() {
     let chemistry = MetabolicChemistry::default();
     assert_eq!(chemistry.pathway(0), chemistry.primary());
     assert_eq!(chemistry.primary().substrate, 8, "sugar");
-    assert_eq!(chemistry.primary().oxidant, 14, "brine");
+    assert_eq!(chemistry.primary().oxidant, 14, "oxygen");
     assert_eq!(chemistry.primary().waste, 11, "carbon dioxide");
     assert_eq!(chemistry.primary().reactive, 13, "peroxide");
     assert_eq!(chemistry.structural, 4, "carbon");

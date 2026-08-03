@@ -717,7 +717,7 @@ pub fn recompute_stored(
     let in_fluid = substrate.total_chem();
 
     // Every *distinct* substrate, each at its own yield. Distinct because two pathways may
-    // share one — the default set runs three of the four on brine as oxidant and two of them
+    // share one — the default set runs three of the four on oxygen as oxidant and two of them
     // on sugar — and counting a shared substrate twice would inflate the world's stored energy
     // by exactly the amount that makes I5 fail.
     let latent: i64 = m

@@ -198,7 +198,31 @@ impl ChemTable {
                 decay_to: Some(11),
                 decay_rate: Q10_ONE / 64,
             },
-            ChemicalDef::inert("brine"),
+            // The oxidant, and the only reason it is not obvious is that it used to be called
+            // `brine`. It is `ChemicalDef::inert` because it needs no engine semantics of its
+            // own — no yield, no toxicity, not structural — but *inert* describes its
+            // definition and not its role: `MetabolicChemistry::default` names index 14 as the
+            // oxidant of all four pathways and as what photosynthesis produces alongside the
+            // substrate, so it is load-bearing in every reaction this world runs.
+            //
+            // The name cost real time. Asked which chemical slots were free, the honest reading
+            // of `inert("brine")` beside a comment calling it filler is "that one" — and taking
+            // it would have broken every way of making a living on the slide. A thing named for
+            // what it is cannot be mistaken for a thing named for what it lacks.
+            //
+            // Values are unchanged from the entry it replaces apart from the colour: `inert`
+            // paints everything the same grey, which was fine when nothing listed the whole
+            // table and is not now that the legend does.
+            ChemicalDef {
+                name: "oxygen".to_string(),
+                diffusion: Q10_ONE / 8,
+                toxicity: 0,
+                energy_yield: 0,
+                structural: false,
+                colour: [150, 205, 225],
+                decay_to: None,
+                decay_rate: 0,
+            },
             // What a dead cell leaves behind (SPEC §7.2, M8). A chemical rather than an
             // object, so it is conserved, diffuses and decays through machinery that already
             // exists — but barely diffuses, so a corpse stays where it fell and is worth

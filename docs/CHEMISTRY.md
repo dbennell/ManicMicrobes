@@ -45,7 +45,7 @@ Six have engine semantics. `MetabolicChemistry::default` names them:
 
 ```rust
 substrate: 8,   // sugar
-oxidant: 14,    // brine — "an inert filler standing in for dissolved oxygen"
+oxidant: 14,    // oxygen (called `brine` until it was renamed for being mistaken for filler)
 waste: 11,      // carbon_dioxide
 byproduct: 14,  // the same filler back again
 structural: 4,  // carbon

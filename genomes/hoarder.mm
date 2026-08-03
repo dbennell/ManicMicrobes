@@ -20,7 +20,7 @@
 ;   4  carbon      structural
 ;   8  sugar       the energy substrate, and what this one banks
 ;   11 carbon_dioxide   the waste, and photosynthesis's input
-;   14 brine       standing in for dissolved oxygen
+;   14 oxygen      the oxidant every pathway breathes
 
         EXPRESS #build
         EXPRESS #feed

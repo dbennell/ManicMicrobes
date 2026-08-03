@@ -15,7 +15,7 @@
 ;   4  carbon      structural, what a body is built out of
 ;   8  sugar       the energy substrate
 ;   11 carbon_dioxide   the waste
-;   14 brine       standing in for dissolved oxygen
+;   14 oxygen      the oxidant every pathway breathes
 ;
 ; Organelle slots this ancestor uses:
 ;   0  membrane   (always)

@@ -402,7 +402,7 @@ impl Default for MetabolicChemistry {
         // nothing about chemistry behaves exactly as it did.
         //
         // The other three are the substrates the default table has always carried yields for
-        // and nothing could ever eat: lipid at 1536, sulphide at 768. All four share brine as
+        // and nothing could ever eat: lipid at 1536, sulphide at 768. All four share oxygen as
         // the oxidant and carbon dioxide as the waste, which is what makes them *alternatives*
         // rather than four disjoint worlds — they compete for one pool of oxidant and feed one
         // pool of waste, so which substrate a lineage runs on is a choice with consequences
