@@ -38,6 +38,51 @@
 //! — because `burn = min(mitochondrion capacity, substrate, oxidant)` and the capacity is already
 //! the binding term. **Food it cannot burn is not food.** That is the finding that matters for the
 //! design: bolting a stomach onto a hunter cannot pay while conversion, not supply, is the limit.
+//!
+//! # Which lever it is short of, measured
+//!
+//! Variants are built by editing the *source* and reassembling, never by forcing an organelle —
+//! forcing one makes the genome rebuild it every tick and pay `build_energy` each time, so the
+//! first attempt at this measured the cost of its own instrument.
+//!
+//! Alone on `soup.ron` after six thousand ticks, holding energy:
+//!
+//! | variant | energy |
+//! |---|---|
+//! | as shipped | 41 |
+//! | + a guard that guards | **143** |
+//! | + mitochondrion 120 | 45 |
+//! | + both | **222** |
+//! | + both, mitochondrion 200 | 152 |
+//!
+//! The guard is the dominant lever, worth three and a half times on its own. The engine helps
+//! only in combination, and at 200 it is *worse* than at 120 — its upkeep outruns what it earns,
+//! which is a real optimum rather than a monotone dial.
+//!
+//! Among sixteen prey, the shipped genome **goes extinct** by tick six thousand. Guard plus
+//! engine 120 holds steady near 190 and never divides: it asymptotes just under its own gate of
+//! 200. Lowering the gate does not help and makes things worse — at 60 it holds 90 — because a
+//! division has to leave a daughter enough to rebuild the body, and that body costs about 68
+//! visible energy (nucleus 12, chloroplast 14, mitochondrion 10, spike 20, lysosome 12).
+//!
+//! # There is no high gear
+//!
+//! The hope was a gear shift: a low-throughput solar economy and a high-throughput carrion one,
+//! with a steep hill between them. Measured, **the carrion economy is the lower gear.** A
+//! predator that gives up its chloroplast and commits to carrion, surrounded by eleven hundred
+//! prey, is *poorer* than one that keeps it — 168 against 203.
+//!
+//! The chain explains it. A dead prey cell yields `carrion_fraction` = ½ of its mass as carrion;
+//! digestion recovers `digestion_efficiency` = ⅔ of that; the carrion is deposited on the square
+//! the prey *died* on and diffuses from there, while a lysosome digests only what is under its
+//! own cell; and conversion is capped by the mitochondrion regardless. Perhaps a sixth of a
+//! corpse reaches the predator, and only if it is standing on it. Sunlight is free, continuous,
+//! and everywhere the light is.
+//!
+//! So a high gear needs one of: carrion that lands where the killer is rather than where the
+//! victim died, a lysosome with a neighbourhood rather than a square, or SPEC §17.5's **lysis** —
+//! flesh into food in one step instead of three with two lossy conversions in between. These
+//! numbers are the argument for that section.
 
 mod common;
 
@@ -479,5 +524,367 @@ fn where_the_energy_goes_tick_by_tick() {
             }
             last = e;
         }
+    }
+}
+
+/// Which lever the predator is actually short of: a working guard, or a bigger engine.
+///
+/// Variants are made by editing the *source* and reassembling, not by forcing the organelle —
+/// forcing it makes the genome rebuild it every tick and pay `build_energy` each time, so the
+/// first version of this measured the cost of its own instrument.
+///
+/// The guard fix replaces `JMPNZ enough / HALT / HALT / enough:` — which does not guard, because
+/// `HALT` ends the tick with the instruction pointer already past it — with a forward `JMPZ` over
+/// the whole divide block, which does.
+#[test]
+fn what_the_predator_is_actually_short_of() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../genomes/predator.mm");
+    let source = std::fs::read_to_string(&path).expect("genome source");
+
+    let real_guard = |s: &str| {
+        s.replace(
+            "        JMPNZ   enough\n        HALT\n        HALT\nenough:\n",
+            "        JMPZ    skip\n",
+        )
+        .replace(
+            "        SPLIT\n        RET\n",
+            "        SPLIT\nskip:\n        RET\n",
+        )
+    };
+    let engine = |s: &str, param: u32| {
+        s.replace(
+            "        IMM     50\n        IMM     2               ; mitochondrion",
+            &format!("        IMM     {param}\n        IMM     2               ; mitochondrion"),
+        )
+    };
+
+    let variants: Vec<(String, String)> = vec![
+        ("as shipped".into(), source.clone()),
+        ("+ real guard".into(), real_guard(&source)),
+        ("+ engine 120".into(), engine(&source, 120)),
+        ("+ both".into(), real_guard(&engine(&source, 120))),
+        (
+            "+ both, engine 200".into(),
+            real_guard(&engine(&source, 200)),
+        ),
+    ];
+
+    eprintln!("\npredator variants, one founder, soup.ron, 6000 ticks:");
+    eprintln!(
+        "{:>22} {:>7} {:>7} {:>9} {:>7}",
+        "variant", "bytes", "pop", "energy", "mass"
+    );
+    for (label, src) in variants {
+        let Ok(built) = mm_asm::assemble(&src) else {
+            eprintln!("{label:>22}   does not assemble");
+            continue;
+        };
+        let bytes = built.bytes;
+        let mut world = World::new(scenario("soup.ron")).expect("world");
+        let _ = seed(&mut world, &bytes);
+        world.run(6000);
+        let cells = world.cells();
+        let (energy, mass) = match cells.iter().next() {
+            Some(i) => (cells.energy[i] / Q10_ONE, cells.mass[i] / Q10_ONE),
+            None => (0, 0),
+        };
+        eprintln!(
+            "{label:>22} {:>7} {:>7} {energy:>9} {mass:>7}",
+            bytes.len(),
+            cells.len()
+        );
+    }
+}
+
+/// The fixed predator in the world it was written for: among prey.
+///
+/// `what_the_predator_is_actually_short_of` leaves it solvent and sterile — rich enough to be
+/// worth watching and never quite able to afford a daughter, alone on a slide with nothing to
+/// hunt. This is the same variants with something to eat, which is the condition the shipped
+/// acceptance test never puts a predator in.
+#[test]
+fn the_fixed_predator_among_prey() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../genomes/predator.mm");
+    let source = std::fs::read_to_string(&path).expect("genome source");
+    let prey = assemble("ancestor.mm");
+
+    let fixed = source
+        .replace(
+            "        JMPNZ   enough\n        HALT\n        HALT\nenough:\n",
+            "        JMPZ    skip\n",
+        )
+        .replace(
+            "        SPLIT\n        RET\n",
+            "        SPLIT\nskip:\n        RET\n",
+        )
+        .replace(
+            "        IMM     50\n        IMM     2               ; mitochondrion",
+            "        IMM     120\n        IMM     2               ; mitochondrion",
+        );
+
+    for (label, src) in [("as shipped", &source), ("guard + engine 120", &fixed)] {
+        let bytes = mm_asm::assemble(src).expect("assembles").bytes;
+        let mut world = World::new(scenario("soup.ron")).expect("world");
+        world.set_biology(BiologyConfig {
+            mutation: MutationRates::none(),
+            ..BiologyConfig::default()
+        });
+        let structural = world.biology().structural_chemical;
+        let mut spawn = |world: &mut World, g: &[u8], x: i32, y: i32| {
+            let interned = world.genomes().intern(g.to_vec()).expect("intern");
+            let id = world.spawn_cell(CellSeed {
+                x: pos(x),
+                y: pos(y),
+                mass: q10(30),
+                energy: q10(400),
+                membrane: 24,
+                key: 11,
+                species: 0,
+                parent: CellId::NONE,
+                birth_tick: 0,
+                genome: interned,
+            });
+            if let Some(i) = world.cells_mut().index(id) {
+                let cells = world.cells_mut();
+                cells.slots_mut(i)[1] = Organelle::finished(OrganelleType::Nucleus, 64);
+                cells.slots_mut(i)[2] = Organelle::finished(OrganelleType::Mitochondrion, 50);
+                cells.slots_mut(i)[3] = Organelle::finished(OrganelleType::Chloroplast, 60);
+                cells.interior_mut(i)[structural] = q10(200);
+                cells.interior_mut(i)[11] = q10(40);
+                cells.interior_mut(i)[14] = q10(40);
+            }
+        };
+        for k in 0..16 {
+            spawn(&mut world, &prey, 12 + (k % 4) * 13, 12 + (k / 4) * 13);
+        }
+        spawn(&mut world, &bytes, 32, 32);
+        world.adopt_current_contents_as_baseline();
+
+        eprintln!(
+            "\n--- {label} ({} bytes), one among sixteen ---",
+            bytes.len()
+        );
+        eprintln!(
+            "{:>6} {:>7} {:>10} {:>7} {:>9}",
+            "tick", "total", "predators", "prey", "energy"
+        );
+        for step in 0..=6 {
+            if step > 0 {
+                world.run(1000);
+            }
+            let cells = world.cells();
+            let mine: Vec<usize> = cells
+                .iter()
+                .filter(|i| cells.genome[*i].len() == bytes.len())
+                .collect();
+            eprintln!(
+                "{:>6} {:>7} {:>10} {:>7} {:>9}",
+                world.tick_count(),
+                cells.len(),
+                mine.len(),
+                cells.len() - mine.len(),
+                mine.first().map_or(0, |i| cells.energy[*i] / Q10_ONE)
+            );
+        }
+    }
+}
+
+/// What division threshold this economy can actually support.
+///
+/// `the_fixed_predator_among_prey` leaves a cell that holds steady at about 190 energy against
+/// its own gate of 200 — solvent, stable and sterile, asymptoting just under the bar it set
+/// itself. This asks where the bar has to be for the economy to clear it, which is the shape of
+/// the question rather than a number to tune until a test passes.
+#[test]
+fn where_the_bar_has_to_be_for_a_predator_to_clear_it() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../genomes/predator.mm");
+    let source = std::fs::read_to_string(&path).expect("genome source");
+    let prey = assemble("ancestor.mm");
+
+    eprintln!("\ndivide threshold sweep, guard fixed + engine 120, one among sixteen prey:");
+    eprintln!(
+        "{:>10} {:>11} {:>7} {:>9}",
+        "threshold", "predators", "prey", "energy"
+    );
+    for threshold in [200u32, 150, 120, 90, 60] {
+        let src = source
+            .replace(
+                "        JMPNZ   enough\n        HALT\n        HALT\nenough:\n",
+                "        JMPZ    skip\n",
+            )
+            .replace(
+                "        SPLIT\n        RET\n",
+                "        SPLIT\nskip:\n        RET\n",
+            )
+            .replace(
+                "        IMM     50\n        IMM     2               ; mitochondrion",
+                "        IMM     120\n        IMM     2               ; mitochondrion",
+            )
+            .replace(
+                "        IMM     200\n        CMP",
+                &format!("        IMM     {threshold}\n        CMP"),
+            );
+        let bytes = mm_asm::assemble(&src).expect("assembles").bytes;
+
+        let mut world = World::new(scenario("soup.ron")).expect("world");
+        world.set_biology(BiologyConfig {
+            mutation: MutationRates::none(),
+            ..BiologyConfig::default()
+        });
+        let structural = world.biology().structural_chemical;
+        let mut spawn = |world: &mut World, g: &[u8], x: i32, y: i32| {
+            let interned = world.genomes().intern(g.to_vec()).expect("intern");
+            let id = world.spawn_cell(CellSeed {
+                x: pos(x),
+                y: pos(y),
+                mass: q10(30),
+                energy: q10(400),
+                membrane: 24,
+                key: 11,
+                species: 0,
+                parent: CellId::NONE,
+                birth_tick: 0,
+                genome: interned,
+            });
+            if let Some(i) = world.cells_mut().index(id) {
+                let cells = world.cells_mut();
+                cells.slots_mut(i)[1] = Organelle::finished(OrganelleType::Nucleus, 64);
+                cells.slots_mut(i)[2] = Organelle::finished(OrganelleType::Mitochondrion, 50);
+                cells.slots_mut(i)[3] = Organelle::finished(OrganelleType::Chloroplast, 60);
+                cells.interior_mut(i)[structural] = q10(200);
+                cells.interior_mut(i)[11] = q10(40);
+                cells.interior_mut(i)[14] = q10(40);
+            }
+        };
+        for k in 0..16 {
+            spawn(&mut world, &prey, 12 + (k % 4) * 13, 12 + (k / 4) * 13);
+        }
+        spawn(&mut world, &bytes, 32, 32);
+        world.adopt_current_contents_as_baseline();
+        world.run(6000);
+
+        let cells = world.cells();
+        let mine: Vec<usize> = cells
+            .iter()
+            .filter(|i| cells.genome[*i].len() == bytes.len())
+            .collect();
+        eprintln!(
+            "{threshold:>10} {:>11} {:>7} {:>9}",
+            mine.len(),
+            cells.len() - mine.len(),
+            mine.first().map_or(0, |i| cells.energy[*i] / Q10_ONE)
+        );
+    }
+}
+
+/// The gear shift: a predator that stops trying to photosynthesise.
+///
+/// The shipped genome runs both economies at once — a chloroplast *and* a spike *and* a
+/// lysosome — and the sweeps above say it is roughly ten to twenty per cent short of affording
+/// either. Its body costs about 68 visible energy to build (nucleus 12, chloroplast 14,
+/// mitochondrion 10, spike 20, lysosome 12) against a steady state of about 190, so a division
+/// cannot leave a daughter enough to rebuild one.
+///
+/// This is the commitment: give up the solar income entirely and live on carrion. It saves the
+/// chloroplast's build cost and its upkeep, and it is the discontinuity a food web needs — you
+/// are in one gear or the other, and the middle is where this genome has been stuck.
+#[test]
+fn a_predator_that_gives_up_the_sun() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../genomes/predator.mm");
+    let source = std::fs::read_to_string(&path).expect("genome source");
+    let prey = assemble("ancestor.mm");
+
+    let guard = |s: &str| {
+        s.replace(
+            "        JMPNZ   enough\n        HALT\n        HALT\nenough:\n",
+            "        JMPZ    skip\n",
+        )
+        .replace(
+            "        SPLIT\n        RET\n",
+            "        SPLIT\nskip:\n        RET\n",
+        )
+    };
+    // The chloroplast build, removed outright.
+    let sunless = |s: &str| {
+        s.replace(
+            "        IMM     55\n        IMM     3               ; chloroplast — smaller than the ancestor's, because the\n        IMM     3               ; upkeep has to leave room for the spike\n        BUILD\n",
+            "",
+        )
+    };
+    let engine = |s: &str, p: u32| {
+        s.replace(
+            "        IMM     50\n        IMM     2               ; mitochondrion",
+            &format!("        IMM     {p}\n        IMM     2               ; mitochondrion"),
+        )
+    };
+
+    let variants: Vec<(String, String)> = vec![
+        ("guard + engine 120".into(), guard(&engine(&source, 120))),
+        (
+            "+ no chloroplast".into(),
+            guard(&sunless(&engine(&source, 120))),
+        ),
+        (
+            "+ no chloroplast, e60".into(),
+            guard(&sunless(&engine(&source, 60))),
+        ),
+    ];
+
+    eprintln!("\nthe gear shift, one among sixteen prey, 8000 ticks:");
+    eprintln!(
+        "{:>24} {:>7} {:>11} {:>7} {:>9}",
+        "variant", "bytes", "predators", "prey", "energy"
+    );
+    for (label, src) in variants {
+        let bytes = mm_asm::assemble(&src).expect("assembles").bytes;
+        let mut world = World::new(scenario("soup.ron")).expect("world");
+        world.set_biology(BiologyConfig {
+            mutation: MutationRates::none(),
+            ..BiologyConfig::default()
+        });
+        let structural = world.biology().structural_chemical;
+        let mut spawn = |world: &mut World, g: &[u8], x: i32, y: i32| {
+            let interned = world.genomes().intern(g.to_vec()).expect("intern");
+            let id = world.spawn_cell(CellSeed {
+                x: pos(x),
+                y: pos(y),
+                mass: q10(30),
+                energy: q10(400),
+                membrane: 24,
+                key: 11,
+                species: 0,
+                parent: CellId::NONE,
+                birth_tick: 0,
+                genome: interned,
+            });
+            if let Some(i) = world.cells_mut().index(id) {
+                let cells = world.cells_mut();
+                cells.slots_mut(i)[1] = Organelle::finished(OrganelleType::Nucleus, 64);
+                cells.slots_mut(i)[2] = Organelle::finished(OrganelleType::Mitochondrion, 50);
+                cells.slots_mut(i)[3] = Organelle::finished(OrganelleType::Chloroplast, 60);
+                cells.interior_mut(i)[structural] = q10(200);
+                cells.interior_mut(i)[11] = q10(40);
+                cells.interior_mut(i)[14] = q10(40);
+            }
+        };
+        for k in 0..16 {
+            spawn(&mut world, &prey, 12 + (k % 4) * 13, 12 + (k / 4) * 13);
+        }
+        spawn(&mut world, &bytes, 32, 32);
+        world.adopt_current_contents_as_baseline();
+        world.run(8000);
+
+        let cells = world.cells();
+        let mine: Vec<usize> = cells
+            .iter()
+            .filter(|i| cells.genome[*i].len() == bytes.len())
+            .collect();
+        eprintln!(
+            "{label:>24} {:>7} {:>11} {:>7} {:>9}",
+            bytes.len(),
+            mine.len(),
+            cells.len() - mine.len(),
+            mine.first().map_or(0, |i| cells.energy[*i] / Q10_ONE)
+        );
     }
 }
