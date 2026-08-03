@@ -71,37 +71,59 @@ fn the_wall_is_painted_and_the_water_beside_it_is_not() {
     let frame = slide.frame();
     let (w, h) = (frame.width as usize, frame.height as usize);
     let mut pixels = vec![0u8; w * h * 4];
-    art::paint_field(
-        &mut pixels,
-        w,
-        h,
-        &frame.light,
-        &[],
-        &frame.barriers,
-        // No vignette, so what is left is the field and nothing else.
-        &|_, _| 1.0,
-    );
+    // No vignette, so what is left is the wall and nothing else.
+    art::paint_barriers(&mut pixels, w, h, &frame.barriers, &|_, _| 1.0);
 
     let texel = |x: usize, y: usize| {
         let at = (y * w + x) * 4;
-        [pixels[at], pixels[at + 1], pixels[at + 2]]
+        [pixels[at], pixels[at + 1], pixels[at + 2], pixels[at + 3]]
     };
     let wall = texel(4, 8);
     let water = texel(6, 8);
 
     assert_eq!(
-        water,
-        [0, 0, 0],
-        "unlit open water is not black, so this test cannot tell a wall from the light"
+        water[3], 0,
+        "open water is not transparent, so it would hide the field under it"
     );
+    assert_eq!(wall[3], 255, "the wall is not opaque: {wall:?}");
     assert!(
-        wall.iter().all(|c| *c > 20),
+        wall[..3].iter().all(|c| *c > 20),
         "the wall came out as a hole rather than a wall: {wall:?}"
     );
     assert!(
         wall[2] > wall[0],
         "the wall should be cooler than the warm light it sits among: {wall:?}"
     );
+}
+
+#[test]
+fn the_wall_layer_is_binary_which_is_what_makes_it_crisp() {
+    // The property behind the sampler choice. Every texel is fully a wall or fully not, with
+    // no partial alpha anywhere — so nearest sampling has nothing to lose, and the edge on
+    // screen falls exactly on the square boundary the simulation put it at.
+    //
+    // Painted through a *vignette* rather than a flat one, because the vignette scales the
+    // colour and must not be allowed to leak into the coverage: a wall that faded out towards
+    // the edge of the field would be a wall the sampler could smear again.
+    let slide = walled_slide();
+    let frame = slide.frame();
+    let (w, h) = (frame.width as usize, frame.height as usize);
+    let mut pixels = vec![0u8; w * h * 4];
+    art::paint_barriers(&mut pixels, w, h, &frame.barriers, &|x, _| x / w as f32);
+
+    for (i, chunk) in pixels.chunks_exact(4).enumerate() {
+        assert!(
+            chunk[3] == 0 || chunk[3] == 255,
+            "texel {i} has partial coverage {}, which a nearest sampler cannot represent \
+             and a linear one would smear",
+            chunk[3]
+        );
+        assert_eq!(
+            chunk[3] == 255,
+            frame.barriers[i],
+            "texel {i} disagrees with the mask about whether it is a wall"
+        );
+    }
 }
 
 #[test]

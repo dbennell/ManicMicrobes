@@ -545,6 +545,24 @@ and ignoring both the light and the overlays, because a blocked square genuinely
 it to paint. The mask is empty rather than all-false on a slide with no barriers, so such a
 slide pays neither the copy nor the per-texel branch.
 
+**Barriers are a second texture, and the reason is the sampler.** They were a layer of the
+field texture for exactly one commit and came out visibly blurred — at high magnification a
+one-square wall was a soft band several pixels wider than the square it stood on. The field is
+sampled **linearly**, and that is right for what was in it: a diffusion field is a continuous
+quantity sampled on a grid, so interpolating between two measured squares is a more faithful
+picture of it than hard blocks are. A barrier is not a sampled continuum. It is blocked or not,
+with nothing in between, so interpolating it draws half a wall — a value the simulation never
+held and a thing the world does not contain, which is precisely what §1 says must never be
+drawn. One sampler cannot serve both, so the barrier mask gets its own grid-sized RGBA texture,
+**nearest**-sampled, alpha-composited over the field at `z = 0.25` — above the field, below the
+junctions at `0.5` and the cells above them, because a wall is part of the slide and everything
+alive sits on top of it. The chemistry keeps its smooth reconstruction and the wall gets the
+hard edge it actually has.
+
+The soft glow that remains beside a wall is not the wall. It is the field: `set_barrier` evicts
+the square's chemistry into its neighbours, so the squares next to a wall really do hold more of
+it, and that is measured data drawn smoothly rather than an artefact.
+
 **Drawing one is a drag, not a click.** It was one square per right-click, edge-triggered, with
 no stored last square and no fill between samples — so the dividing wall in `archipelago.ron`,
 about a hundred and fifty squares, was a hundred and fifty separate clicks, each taking the

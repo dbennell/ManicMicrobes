@@ -118,7 +118,60 @@ pub fn variant_of(id: u64) -> usize {
 /// visible on an unlit slide, dark enough not to compete with the cells, which are the subject.
 pub const BARRIER_RGB: [f32; 3] = [0.17, 0.18, 0.22];
 
-/// Paint the chemical overlays, the light and the barriers into an RGBA buffer (M10.5).
+/// Paint the barrier mask into its own RGBA buffer, transparent everywhere else.
+///
+/// # Why this is not a layer of [`paint_field`]
+///
+/// It was, for exactly one commit, and the walls came out blurred — badly so at high
+/// magnification, where a wall was a soft band several pixels wider than the square it stood on.
+///
+/// The cause is that the field texture is sampled **linearly**, and that is right for what was
+/// in it and wrong for this. A diffusion field is a continuous quantity sampled on a grid, so
+/// interpolating between two measured squares is a more faithful picture of it than hard blocks
+/// are. A barrier is not a sampled continuum. It is a binary property of a square — blocked or
+/// not, with nothing in between — so interpolating it invents half a wall, which is a value the
+/// simulation never held and a thing the world does not contain. `UI.md` §1 asks that nothing be
+/// drawn which the simulation did not produce, and a smeared wall is exactly that.
+///
+/// One sampler cannot be right for both, so they are two textures: this one nearest-sampled and
+/// alpha-composited over the field, which keeps the chemistry smooth and gives a wall the hard
+/// edge it actually has.
+pub fn paint_barriers(
+    into: &mut [u8],
+    width: usize,
+    height: usize,
+    barriers: &[bool],
+    dim: &dyn Fn(f32, f32) -> f32,
+) {
+    for y in 0..height {
+        for x in 0..width {
+            let i = y * width + x;
+            let at = i * 4;
+            let Some(px) = into.get_mut(at..at + 4) else {
+                continue;
+            };
+            if barriers.get(i).copied().unwrap_or(false) {
+                // The vignette applies here as it does to everything else on the plate: it is
+                // the objective, and a wall is under the objective too.
+                let d = dim(x as f32 + 0.5, y as f32 + 0.5);
+                for k in 0..3 {
+                    px[k] = ((BARRIER_RGB[k] * d).clamp(0.0, 1.0) * 255.0) as u8;
+                }
+                px[3] = 255;
+            } else {
+                // Fully transparent, so the field shows through unchanged. Zeroed rather than
+                // left alone because this buffer is reused between frames and a wall that was
+                // erased has to actually go.
+                px.copy_from_slice(&[0, 0, 0, 0]);
+            }
+        }
+    }
+}
+
+/// Paint the chemical overlays and the light into an RGBA buffer (M10.5).
+///
+/// Barriers are **not** in here; they are their own texture, for the sampler reason written
+/// out in [`paint_barriers`].
 ///
 /// # Why this exists
 ///
@@ -146,7 +199,6 @@ pub fn paint_field(
     height: usize,
     light: &[f32],
     layers: &[(&[f32], [f32; 3])],
-    barriers: &[bool],
     dim: &dyn Fn(f32, f32) -> f32,
 ) -> [f32; 3] {
     // Layers add rather than one winning, so two overlays on at once look like two overlays on
@@ -158,17 +210,10 @@ pub fn paint_field(
     for y in 0..height {
         for x in 0..width {
             let i = y * width + x;
-            // A wall, painted as itself. Empty `barriers` is a slide with none, and the
-            // `get` costs nothing there because the slice has no elements to reach.
-            let walled = barriers.get(i).copied().unwrap_or(false);
             // Light as a warm luminance under the chemical layers (SPEC §14).
             let warm = 0.10 * light.get(i).copied().unwrap_or(0.0);
-            let mut rgb = if walled {
-                BARRIER_RGB
-            } else {
-                [warm, warm * 0.92, warm * 0.75]
-            };
-            for (field, tint) in layers.iter().filter(|_| !walled) {
+            let mut rgb = [warm, warm * 0.92, warm * 0.75];
+            for (field, tint) in layers {
                 let Some(c) = field.get(i) else {
                     continue;
                 };
@@ -339,7 +384,7 @@ mod tests {
         let (w, h) = (7usize, 5usize);
         let mut buf = vec![7u8; w * h * 4];
         let light = vec![0.0f32; w * h];
-        paint_field(&mut buf, w, h, &light, &[], &[], &|_, _| 1.0);
+        paint_field(&mut buf, w, h, &light, &[], &|_, _| 1.0);
         for i in 0..w * h {
             assert_eq!(buf[i * 4 + 3], 255, "texel {i} is not opaque");
         }
@@ -357,7 +402,6 @@ mod tests {
             h,
             &light,
             &[(&field, [1.0, 0.0, 0.0])],
-            &[],
             &|_, _| 1.0,
         );
         assert!(buf[4] > 200, "the square holding the chemical is not red");
@@ -378,7 +422,6 @@ mod tests {
             h,
             &light,
             &[(&red, [1.0, 0.0, 0.0]), (&blue, [0.0, 0.0, 1.0])],
-            &[],
             &|_, _| 1.0,
         );
         assert!(buf[0] > 0 && buf[2] > 0, "one layer swallowed the other");
@@ -391,7 +434,7 @@ mod tests {
         let (w, h) = (2usize, 1usize);
         let mut buf = vec![0u8; w * 4];
         let light = vec![1.0f32; w];
-        paint_field(&mut buf, w, h, &light, &[], &[], &|x, _| {
+        paint_field(&mut buf, w, h, &light, &[], &|x, _| {
             if x < 1.0 {
                 1.0
             } else {
@@ -417,7 +460,6 @@ mod tests {
             h,
             &light,
             &[(&field, [1.0, 0.0, 0.0])],
-            &[],
             &|_, _| 1.0,
         );
         // One of the two squares is fully red, so the mean is half red.
@@ -436,7 +478,6 @@ mod tests {
             h,
             &light,
             &[(&field, [1.0, 0.0, 0.0])],
-            &[],
             &|_, _| 0.0,
         );
         assert_eq!(dimmed, haze, "the vignette leaked into the haze");
@@ -444,7 +485,7 @@ mod tests {
 
     #[test]
     fn an_empty_slide_has_a_haze_and_does_not_divide_by_zero() {
-        let haze = paint_field(&mut [], 0, 0, &[], &[], &[], &|_, _| 1.0);
+        let haze = paint_field(&mut [], 0, 0, &[], &[], &|_, _| 1.0);
         assert_eq!(haze, [0.0; 3]);
     }
 
@@ -457,12 +498,19 @@ mod tests {
         // Dark slide, no light anywhere, so nothing else can be painting this.
         let light = vec![0.0f32; w];
         let barriers = vec![false, true, false];
-        paint_field(&mut buf, w, h, &light, &[], &barriers, &|_, _| 1.0);
+        paint_field(&mut buf, w, h, &light, &[], &|_, _| 1.0);
+        let mut wall_layer = vec![0u8; w * 4];
+        paint_barriers(&mut wall_layer, w, h, &barriers, &|_, _| 1.0);
         assert_eq!(
             [buf[0], buf[1], buf[2]],
             [0, 0, 0],
             "open water on an unlit slide is not black"
         );
+        assert_eq!(
+            wall_layer[3], 0,
+            "open water is opaque in the wall layer, so it would hide the field"
+        );
+        let buf = wall_layer;
         assert!(
             buf[4] > 20 && buf[5] > 20 && buf[6] > 20,
             "the barrier square was not painted: {:?}",
@@ -490,15 +538,19 @@ mod tests {
             h,
             &light,
             &[(&field, [1.0, 0.0, 0.0])],
-            &barriers,
             &|_, _| 1.0,
         );
+        let mut wall_layer = vec![0u8; w * 4];
+        paint_barriers(&mut wall_layer, w, h, &barriers, &|_, _| 1.0);
         assert!(buf[0] > 200, "the open square lost its overlay");
-        assert!(
-            buf[4] < 200,
-            "the overlay painted straight through a wall: {:?}",
-            &buf[4..8]
+        // The field still paints chemistry under the wall — it is the wall layer on top,
+        // opaque, that hides it. Cheaper than branching per texel, and invisible because a
+        // blocked square holds nothing to paint in the first place.
+        assert_eq!(
+            wall_layer[7], 255,
+            "the wall is not opaque over the overlay"
         );
+        assert_eq!(wall_layer[3], 0, "open water is not transparent");
     }
 
     #[test]
@@ -509,16 +561,16 @@ mod tests {
         let light = vec![1.0f32; 100];
         let field = vec![0.5f32; 2];
         // The barrier mask is short too, for the same reason and with the same answer.
-        let barriers = vec![true; 3];
         paint_field(
             &mut buf,
             10,
             10,
             &light,
             &[(&field, [1.0, 1.0, 1.0])],
-            &barriers,
             &|_, _| 1.0,
         );
+        // The barrier mask is short too, for the same reason and with the same answer.
+        paint_barriers(&mut buf, 10, 10, &vec![true; 3], &|_, _| 1.0);
     }
 
     #[test]

@@ -1145,8 +1145,15 @@ struct CellArt {
     /// largest cost in the renderer by a wide margin and it bought nothing that a texture does
     /// not.
     field: Handle<Image>,
-    /// What the field texture is currently sized for, so a scenario with a different grid
-    /// reallocates rather than painting into the wrong shape.
+    /// The barrier mask, as its own texture drawn over the field.
+    ///
+    /// Separate from `field` because it needs a different sampler, and that is the whole
+    /// reason it exists — see [`art::paint_barriers`]. Chemistry is a continuous quantity
+    /// sampled on a grid and interpolates faithfully; a wall is blocked or not, and linear
+    /// filtering across its edge draws half a wall, which is a thing the world does not have.
+    barriers: Handle<Image>,
+    /// What the field and barrier textures are currently sized for, so a scenario with a
+    /// different grid reallocates rather than painting into the wrong shape.
     field_size: (u32, u32),
     /// The population's vertex buffers, reused every frame so a steady world allocates nothing.
     cells: cellmesh::Buffers,
@@ -1155,6 +1162,10 @@ struct CellArt {
 /// The single quad the chemical field is drawn on.
 #[derive(Component)]
 struct FieldQuad;
+
+/// The quad the barriers are drawn on, over the field and under the junctions and cells.
+#[derive(Component)]
+struct BarrierQuad;
 
 fn setup(
     mut commands: Commands,
@@ -1247,11 +1258,39 @@ fn setup(
         Transform::from_xyz(0.0, 0.0, 1.0),
     ));
 
+    // The same shape as the field, and deliberately not the same sampler.
+    let mut barriers = Image::new(
+        Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        vec![0, 0, 0, 0],
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+    );
+    // **Nearest**, and this is the point of the second texture. A barrier is a binary property
+    // of a square, so there is no value between blocked and open for a sampler to find — and
+    // linear filtering invents one, which at high magnification smears a one-square wall into a
+    // soft band several pixels wider than the square it stands on. See `art::paint_barriers`.
+    barriers.sampler = ImageSampler::nearest();
+
     let field = images.add(field);
+    let barriers = images.add(barriers);
     commands.spawn((
         FieldQuad,
         Sprite {
             image: field.clone(),
+            color: Color::NONE,
+            custom_size: Some(Vec2::splat(1.0)),
+            ..default()
+        },
+    ));
+    commands.spawn((
+        BarrierQuad,
+        Sprite {
+            image: barriers.clone(),
             color: Color::NONE,
             custom_size: Some(Vec2::splat(1.0)),
             ..default()
@@ -1268,6 +1307,7 @@ fn setup(
             None,
         )),
         field,
+        barriers,
         field_size: (1, 1),
         cells: cellmesh::Buffers::default(),
     });
@@ -1726,6 +1766,16 @@ fn redraw(
         (&mut Sprite, &mut Transform),
         (
             With<FieldQuad>,
+            Without<BarrierQuad>,
+            Without<MoteSprite>,
+            Without<JunctionSprite>,
+        ),
+    >,
+    mut barrier_quad: Query<
+        (&mut Sprite, &mut Transform),
+        (
+            With<BarrierQuad>,
+            Without<FieldQuad>,
             Without<MoteSprite>,
             Without<JunctionSprite>,
         ),
@@ -1734,11 +1784,19 @@ fn redraw(
     mut cell_mesh: Query<(&Mesh2d, &mut Visibility), With<CellMesh>>,
     mut motes: Query<
         (&MoteSprite, &mut Sprite, &mut Transform),
-        (Without<FieldQuad>, Without<JunctionSprite>),
+        (
+            Without<FieldQuad>,
+            Without<BarrierQuad>,
+            Without<JunctionSprite>,
+        ),
     >,
     mut junctions: Query<
         (&JunctionSprite, &mut Sprite, &mut Transform),
-        (Without<FieldQuad>, Without<MoteSprite>),
+        (
+            Without<FieldQuad>,
+            Without<BarrierQuad>,
+            Without<MoteSprite>,
+        ),
     >,
 ) {
     let frame = &sim.latest.frame;
@@ -1817,12 +1875,14 @@ fn redraw(
         if art_handles.field_size != size {
             // A scenario with a different grid. Reallocated rather than painted into the wrong
             // shape, which would smear the world diagonally and look like a physics bug.
-            if let Some(mut image) = images.get_mut(&art_handles.field) {
-                image.resize(Extent3d {
-                    width: size.0,
-                    height: size.1,
-                    depth_or_array_layers: 1,
-                });
+            for handle in [art_handles.field.clone(), art_handles.barriers.clone()] {
+                if let Some(mut image) = images.get_mut(&handle) {
+                    image.resize(Extent3d {
+                        width: size.0,
+                        height: size.1,
+                        depth_or_array_layers: 1,
+                    });
+                }
             }
             art_handles.field_size = size;
         }
@@ -1841,12 +1901,26 @@ fn redraw(
                     frame.height as usize,
                     &frame.light,
                     &layers,
-                    &frame.barriers,
                     // The vignette, which used to be applied per sprite and now has to be painted
                     // in. Asked per square, in square coordinates, because where a square lands on
                     // screen is the camera's business and not the painter's.
                     &|x, y| optics.vignette(field_radius(to_screen(x, y))),
                 );
+            }
+        }
+        // The walls, into their own nearest-sampled texture. Skipped entirely on a slide with
+        // no barriers, where the mask is empty and the quad is switched off below.
+        if !frame.barriers.is_empty() {
+            if let Some(mut image) = images.get_mut(&art_handles.barriers) {
+                if let Some(pixels) = image.data.as_mut() {
+                    art::paint_barriers(
+                        pixels,
+                        frame.width as usize,
+                        frame.height as usize,
+                        &frame.barriers,
+                        &|x, y| optics.vignette(field_radius(to_screen(x, y))),
+                    );
+                }
             }
         }
     }
@@ -1857,6 +1931,21 @@ fn redraw(
         sprite.color = if plane > 0 { Color::WHITE } else { Color::NONE };
         sprite.custom_size = Some(Vec2::new((b.x - a.x).abs(), (a.y - b.y).abs()));
         transform.translation = ((a + b) / 2.0).with_z(0.0);
+    }
+    for (mut sprite, mut transform) in &mut barrier_quad {
+        let a = to_screen(0.0, 0.0);
+        let b = to_screen(frame.width as f32, frame.height as f32);
+        // Switched off rather than drawn transparent when there is nothing to draw, so a slide
+        // with no barriers costs no blend and no sample.
+        sprite.color = if frame.barriers.is_empty() {
+            Color::NONE
+        } else {
+            Color::WHITE
+        };
+        sprite.custom_size = Some(Vec2::new((b.x - a.x).abs(), (a.y - b.y).abs()));
+        // Above the field, below the junctions at 0.5 and the cells above them: a wall is part
+        // of the slide, and everything alive sits on top of it.
+        transform.translation = ((a + b) / 2.0).with_z(0.25);
     }
 
     // Cells: the whole population as one mesh, one material, one draw call (M10.5).
