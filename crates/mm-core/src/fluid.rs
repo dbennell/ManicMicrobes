@@ -117,19 +117,42 @@ impl FluidScratch {
     }
 }
 
+/// The per-chemical rates a sweep needs, together.
+///
+/// A struct rather than two `&[i32; CHEM_COUNT]` arguments side by side: they are the same type
+/// and mean opposite things, so the positional version is a transposition nobody would see —
+/// the world would still conserve matter exactly, and every chemical would move at the wrong
+/// speed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct FluidRates {
+    /// Fraction of the difference between neighbours crossing per step, `Q10`.
+    pub diffusion: [i32; CHEM_COUNT],
+    /// How strongly the flow carries each species, `Q10`. See [`crate::chem::ChemicalDef`].
+    pub advection: [i32; CHEM_COUNT],
+}
+
+impl Default for FluidRates {
+    fn default() -> Self {
+        FluidRates {
+            diffusion: [0; CHEM_COUNT],
+            advection: [Q10_ONE; CHEM_COUNT],
+        }
+    }
+}
+
 /// Run one fluid step: diffusion then advection, every chemical.
-pub fn step(substrate: &mut Substrate, rates: &[i32; CHEM_COUNT], scratch: &mut FluidScratch) {
+pub fn step(substrate: &mut Substrate, rates: &FluidRates, scratch: &mut FluidScratch) {
     sweep(substrate, rates, scratch, true, true);
 }
 
 /// One diffusion sweep over every chemical.
-pub fn diffuse(substrate: &mut Substrate, rates: &[i32; CHEM_COUNT], scratch: &mut FluidScratch) {
+pub fn diffuse(substrate: &mut Substrate, rates: &FluidRates, scratch: &mut FluidScratch) {
     sweep(substrate, rates, scratch, true, false);
 }
 
 /// One advection sweep over every chemical.
-pub fn advect(substrate: &mut Substrate, scratch: &mut FluidScratch) {
-    sweep(substrate, &[0; CHEM_COUNT], scratch, false, true);
+pub fn advect(substrate: &mut Substrate, rates: &FluidRates, scratch: &mut FluidScratch) {
+    sweep(substrate, rates, scratch, false, true);
 }
 
 /// Chemicals do not interact in the fluid, so all of one chemical's passes run before the
@@ -138,7 +161,7 @@ pub fn advect(substrate: &mut Substrate, scratch: &mut FluidScratch) {
 /// which is exactly why the reordering is free.
 fn sweep(
     substrate: &mut Substrate,
-    rates: &[i32; CHEM_COUNT],
+    rates: &FluidRates,
     scratch: &mut FluidScratch,
     do_diffuse: bool,
     do_advect: bool,
@@ -157,18 +180,59 @@ fn sweep(
             continue;
         }
         let rate = if do_diffuse {
-            rates[c].clamp(0, MAX_DIFFUSION)
+            rates.diffusion[c].clamp(0, MAX_DIFFUSION)
         } else {
             0
         };
         if rate > 0 {
-            flux_x(plane, &mut scratch.fx, open_x, w, masked, None, rate);
-            flux_y(plane, &mut scratch.fy, open_y, w, h, masked, None, rate);
+            flux_x(
+                plane,
+                &mut scratch.fx,
+                open_x,
+                w,
+                masked,
+                None,
+                rate,
+                Q10_ONE,
+            );
+            flux_y(
+                plane,
+                &mut scratch.fy,
+                open_y,
+                w,
+                h,
+                masked,
+                None,
+                rate,
+                Q10_ONE,
+            );
             apply(plane, &scratch.fx, &scratch.fy, w);
         }
-        if flowing {
-            flux_x(plane, &mut scratch.fx, open_x, w, masked, Some(evx), 0);
-            flux_y(plane, &mut scratch.fy, open_y, w, h, masked, Some(evy), 0);
+        // A species that couples to the flow not at all is not advected at all, and skipping it
+        // is the same answer for less work rather than a different one.
+        let mobility = rates.advection[c].clamp(0, Q10_ONE);
+        if flowing && mobility > 0 {
+            flux_x(
+                plane,
+                &mut scratch.fx,
+                open_x,
+                w,
+                masked,
+                Some(evx),
+                0,
+                mobility,
+            );
+            flux_y(
+                plane,
+                &mut scratch.fy,
+                open_y,
+                w,
+                h,
+                masked,
+                Some(evy),
+                0,
+                mobility,
+            );
             apply(plane, &scratch.fx, &scratch.fy, w);
         }
     }
@@ -187,6 +251,7 @@ fn flux_x(
     masked: bool,
     edge_v: Option<&[i16]>,
     rate: i32,
+    mobility: i32,
 ) {
     if w < 2 {
         out.fill(0);
@@ -208,10 +273,19 @@ fn flux_x(
                         frow[k] = q10_scale(row[k] - row[k + 1], rate);
                     }
                 }
-                Some(v) => {
+                // Full coupling is every chemical the default table ships, so it keeps the
+                // loop it always had: branching once per row rather than paying a multiply per
+                // edge, which cost 15% of the flowing sweep when it was in the inner loop.
+                Some(v) if mobility >= Q10_ONE => {
                     for k in 0..last {
                         let (a, b) = (row[k], row[k + 1]);
                         frow[k] = cap(upwind(a, b, v[rb + k]), a, b);
+                    }
+                }
+                Some(v) => {
+                    for k in 0..last {
+                        let (a, b) = (row[k], row[k + 1]);
+                        frow[k] = cap(upwind(a, b, damped(v[rb + k], mobility)), a, b);
                     }
                 }
             }
@@ -240,6 +314,7 @@ fn flux_y(
     masked: bool,
     edge_v: Option<&[i16]>,
     rate: i32,
+    mobility: i32,
 ) {
     if h < 2 {
         out.fill(0);
@@ -258,10 +333,17 @@ fn flux_y(
                     chunk[k] = q10_scale(here[k] - below[k], rate);
                 }
             }
-            Some(v) => {
+            // As in `flux_x`: the full-coupling path is the loop this always had.
+            Some(v) if mobility >= Q10_ONE => {
                 for k in 0..live {
                     let (a, b) = (here[k], below[k]);
                     chunk[k] = cap(upwind(a, b, v[base + k]), a, b);
+                }
+            }
+            Some(v) => {
+                for k in 0..live {
+                    let (a, b) = (here[k], below[k]);
+                    chunk[k] = cap(upwind(a, b, damped(v[base + k], mobility)), a, b);
                 }
             }
         }
@@ -337,6 +419,18 @@ fn upwind(a: i32, b: i32, u: i16) -> i32 {
     }
 }
 
+/// The velocity a species of this coupling sees.
+///
+/// Applied to the *velocity* rather than to the flux. The same thing arithmetically and not the
+/// same thing to read: what is being said is that this chemical is carried by a slower current,
+/// which is what being heavy means in a slide with no downward to fall in. Conservation is
+/// untouched either way, because the flux is still one number leaving one square and arriving
+/// in its neighbour.
+#[inline(always)]
+fn damped(u: i16, mobility: i32) -> i16 {
+    q10_scale(u as i32, mobility) as i16
+}
+
 /// A square's new value: lose what leaves on both axes, gain what arrives on both.
 #[inline(always)]
 fn settle(cell: i32, out_x: i32, out_y: i32, in_x: i32, in_y: i32) -> i32 {
@@ -373,8 +467,20 @@ mod tests {
     use crate::fixed::q10;
     use crate::rng::{Purpose, RandCtx};
 
-    fn rates(rate: i32) -> [i32; CHEM_COUNT] {
-        [rate; CHEM_COUNT]
+    /// Every chemical at one diffusion rate, all fully carried by the flow.
+    fn rates(rate: i32) -> FluidRates {
+        FluidRates {
+            diffusion: [rate; CHEM_COUNT],
+            advection: [Q10_ONE; CHEM_COUNT],
+        }
+    }
+
+    /// Every chemical at one diffusion rate and one coupling to the flow.
+    fn rates_at(rate: i32, mobility: i32) -> FluidRates {
+        FluidRates {
+            diffusion: [rate; CHEM_COUNT],
+            advection: [mobility; CHEM_COUNT],
+        }
     }
 
     fn scratch(s: &Substrate) -> FluidScratch {
@@ -525,7 +631,7 @@ mod tests {
             }
         }
         for _ in 0..40 {
-            advect(&mut s, &mut sc);
+            advect(&mut s, &rates(0), &mut sc);
         }
         let mut num = 0i64;
         let mut den = 0i64;
@@ -612,7 +718,7 @@ mod tests {
         }
         let before = s.total_chem();
         for _ in 0..200 {
-            advect(&mut s, &mut sc);
+            advect(&mut s, &rates(0), &mut sc);
         }
         assert_eq!(s.total_chem(), before);
         for y in 0..4 {
@@ -648,12 +754,110 @@ mod tests {
     }
 
     #[test]
+    fn a_heavy_species_lags_the_flow_and_a_light_one_keeps_up() {
+        // The whole point of the field: two identical spikes in the same square, one carried
+        // fully by the water and one at a quarter, in one current for the same number of steps.
+        let mut s = Substrate::new(48, 4).unwrap();
+        let mut sc = scratch(&s);
+        s.set_chem(0, 2, 2, q10(10_000));
+        s.set_chem(1, 2, 2, q10(10_000));
+        for y in 0..4 {
+            for x in 0..48 {
+                s.set_velocity(x, y, MAX_VELOCITY / 2, 0);
+            }
+        }
+        let mut r = rates(0);
+        r.advection[1] = Q10_ONE / 4;
+        for _ in 0..40 {
+            step(&mut s, &r, &mut sc);
+        }
+        // Centre of mass along the flow: where each plume has actually got to.
+        let centre = |c: usize, s: &Substrate| {
+            let (mut num, mut den) = (0i64, 0i64);
+            for x in 0..48i32 {
+                let v = s.chem_at(c, x, 2) as i64;
+                num += v * i64::from(x);
+                den += v;
+            }
+            num as f64 / den.max(1) as f64
+        };
+        let (light, heavy) = (centre(0, &s), centre(1, &s));
+        assert!(
+            light > heavy + 1.0,
+            "the heavy species kept up with the light one: {heavy:.2} against {light:.2}"
+        );
+        assert!(
+            heavy > 2.0,
+            "the heavy species did not move at all: {heavy:.2}"
+        );
+    }
+
+    #[test]
+    fn coupling_to_the_flow_does_not_cost_a_single_unit_of_matter() {
+        // I4 is the one thing this must not touch. Scaling the velocity scales the flux, and a
+        // flux is still one number leaving one square and arriving in its neighbour — so this
+        // asserts the property rather than trusting the argument, at every coupling including
+        // the awkward ones that do not divide evenly.
+        for mobility in [0, 1, Q10_ONE / 3, Q10_ONE / 2, Q10_ONE - 1, Q10_ONE] {
+            let mut s = Substrate::new(24, 24).unwrap();
+            let mut sc = scratch(&s);
+            for y in 0..24 {
+                for x in 0..24 {
+                    s.set_velocity(x, y, MAX_VELOCITY / 2, -MAX_VELOCITY / 3);
+                }
+            }
+            let mut before = [0i64; CHEM_COUNT];
+            for c in 0..CHEM_COUNT {
+                s.set_chem(c, 5 + c as i32 % 7, 3 + c as i32 % 11, q10(500 + c as i32));
+                before[c] = i64::from(s.chem_at(c, 5 + c as i32 % 7, 3 + c as i32 % 11));
+            }
+            let r = rates_at(MAX_DIFFUSION, mobility);
+            for _ in 0..200 {
+                step(&mut s, &r, &mut sc);
+            }
+            for c in 0..CHEM_COUNT {
+                let mut total = 0i64;
+                for y in 0..24i32 {
+                    for x in 0..24i32 {
+                        total += i64::from(s.chem_at(c, x, y));
+                    }
+                }
+                assert_eq!(
+                    total, before[c],
+                    "chemical {c} drifted at coupling {mobility}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_species_with_no_coupling_is_one_the_current_cannot_move() {
+        let mut s = Substrate::new(32, 4).unwrap();
+        let mut sc = scratch(&s);
+        s.set_chem(0, 4, 2, q10(1000));
+        for y in 0..4 {
+            for x in 0..32 {
+                s.set_velocity(x, y, MAX_VELOCITY, 0);
+            }
+        }
+        let r = rates_at(0, 0);
+        for _ in 0..100 {
+            step(&mut s, &r, &mut sc);
+        }
+        assert_eq!(
+            s.chem_at(0, 4, 2),
+            q10(1000),
+            "a current moved a species with no coupling to it"
+        );
+    }
+
+    #[test]
     fn a_zero_diffusion_chemical_does_not_move() {
         let mut s = Substrate::new(8, 8).unwrap();
         let mut sc = scratch(&s);
         s.set_chem(0, 4, 4, q10(1000));
         let mut r = rates(MAX_DIFFUSION);
-        r[0] = 0;
+        r.diffusion[0] = 0;
         for _ in 0..100 {
             diffuse(&mut s, &r, &mut sc);
         }
@@ -686,7 +890,14 @@ mod tests {
         scramble(&mut s, 4);
         let before = s.total_chem();
         for _ in 0..200 {
-            step(&mut s, &table.diffusion_rates(), &mut sc);
+            step(
+                &mut s,
+                &FluidRates {
+                    diffusion: table.diffusion_rates(),
+                    advection: table.advection_rates(),
+                },
+                &mut sc,
+            );
         }
         assert_eq!(s.total_chem(), before);
     }

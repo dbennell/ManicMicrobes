@@ -450,7 +450,11 @@ fn phase_breakdown(_c: &mut Criterion) {
     let rates = chem.diffusion_rates();
     let t = Instant::now();
     for _ in 0..n {
-        mm_core::fluid::step(&mut fluid_substrate, &rates, &mut scratch);
+        mm_core::fluid::step(
+            &mut fluid_substrate,
+            &mm_core::fluid::FluidRates { diffusion: rates, ..Default::default() },
+            &mut scratch,
+        );
     }
     let fluid = t.elapsed() / n;
 

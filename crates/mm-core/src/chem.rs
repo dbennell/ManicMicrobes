@@ -60,6 +60,31 @@ pub struct ChemicalDef {
     /// Fraction of this species that decays per fluid step, `Q10`.
     #[serde(default)]
     pub decay_rate: i32,
+
+    /// How strongly the flow carries this species, `Q10`. One is "goes where the water goes".
+    ///
+    /// SPEC §17.4 asks particulate for "a settling rate and a breakdown rate, since *solid* is a
+    /// behaviour and not a category". The breakdown rate is `decay_to` and `decay_rate` and has
+    /// been here since M10. This is the other half, and it is not called *settling* because in a
+    /// slide seen from above there is no down to settle towards: gravity pulls to the middle of
+    /// the plate, not out of the plane. What being heavy actually means here is coupling to the
+    /// flow less than the water does — a grain lags the current, drops out of a plume, and ends
+    /// up somewhere the dissolved fraction does not.
+    ///
+    /// Scaling the edge velocity is exactly conservative and cannot be otherwise: the flux is
+    /// still one number subtracted from one square and added to its neighbour, and scaling it
+    /// down only moves less. It cannot threaten the CFL bound either, for the same reason.
+    ///
+    /// Defaults to `Q10_ONE`, so a table that says nothing behaves as every table did before
+    /// this field existed.
+    #[serde(default = "full_advection")]
+    pub advection: i32,
+}
+
+/// A chemical that goes exactly where the water goes, which is what all of them did before
+/// [`ChemicalDef::advection`] existed.
+fn full_advection() -> i32 {
+    Q10_ONE
 }
 
 impl ChemicalDef {
@@ -75,6 +100,7 @@ impl ChemicalDef {
             colour: [128, 128, 128],
             decay_to: None,
             decay_rate: 0,
+            advection: Q10_ONE,
         }
     }
 }
@@ -129,6 +155,7 @@ impl ChemTable {
             colour,
             decay_to: None,
             decay_rate: 0,
+            advection: Q10_ONE,
         };
         let monomer = |name: &str, colour: [u8; 3]| ChemicalDef {
             name: name.to_string(),
@@ -139,6 +166,7 @@ impl ChemTable {
             colour,
             decay_to: None,
             decay_rate: 0,
+            advection: Q10_ONE,
         };
         let substrate = |name: &str, yield_: i32, colour: [u8; 3]| ChemicalDef {
             name: name.to_string(),
@@ -149,6 +177,7 @@ impl ChemTable {
             colour,
             decay_to: None,
             decay_rate: 0,
+            advection: Q10_ONE,
         };
         let waste = |name: &str, colour: [u8; 3]| ChemicalDef {
             name: name.to_string(),
@@ -159,6 +188,7 @@ impl ChemTable {
             colour,
             decay_to: None,
             decay_rate: 0,
+            advection: Q10_ONE,
         };
 
         ChemTable::new(vec![
@@ -197,6 +227,7 @@ impl ChemTable {
                 colour: [255, 120, 120],
                 decay_to: Some(11),
                 decay_rate: Q10_ONE / 64,
+                advection: Q10_ONE,
             },
             // The oxidant, and the only reason it is not obvious is that it used to be called
             // `brine`. It is `ChemicalDef::inert` because it needs no engine semantics of its
@@ -222,6 +253,7 @@ impl ChemTable {
                 colour: [150, 205, 225],
                 decay_to: None,
                 decay_rate: 0,
+                advection: Q10_ONE,
             },
             // What a dead cell leaves behind (SPEC §7.2, M8). A chemical rather than an
             // object, so it is conserved, diffuses and decays through machinery that already
@@ -241,6 +273,7 @@ impl ChemTable {
                 colour: [150, 90, 90],
                 decay_to: Some(11),
                 decay_rate: Q10_ONE / 512,
+                advection: Q10_ONE,
             },
         ])
     }
@@ -260,6 +293,13 @@ impl ChemTable {
     }
 
     /// Diffusion rates in index order, for the fluid solver's inner loop.
+    #[must_use]
+    /// Each species' coupling to the flow, in index order. See [`ChemicalDef::advection`].
+    #[must_use]
+    pub fn advection_rates(&self) -> [i32; CHEM_COUNT] {
+        std::array::from_fn(|c| self.defs[c].advection.clamp(0, Q10_ONE))
+    }
+
     #[must_use]
     pub fn diffusion_rates(&self) -> [i32; CHEM_COUNT] {
         std::array::from_fn(|i| self.defs[i].diffusion)

@@ -1012,6 +1012,25 @@ dissolved resource is a commons; a particulate is a thing you can be standing on
 `ChemicalDef` grows a `particulate: bool` — or more precisely a settling rate and a breakdown
 rate, since "solid" is a behaviour and not a category.
 
+*Built as `ChemicalDef::advection`, and the name is the correction.* The breakdown rate was
+already there — `decay_to` and `decay_rate` since M10 — so only the other half was missing, and
+it is not a *settling* rate because in a slide seen from above there is nothing to settle
+towards: gravity pulls to the middle of the plate, not out of the plane. What being heavy
+actually means here is coupling to the flow less than the water does. A grain lags the current,
+drops out of a plume and ends up where the dissolved fraction does not, and that is a *spatial*
+difference rather than a vertical one — which is the one that matters, because it is what puts
+food somewhere a sessile feeder can be waiting for it.
+
+`Q10`, one being "goes where the water goes", defaulting to one so a table that says nothing
+behaves as every table did before the field existed. It scales the edge velocity inside the
+upwind flux, which is exactly conservative and cannot be otherwise: the flux is still one number
+subtracted from one square and added to its neighbour, and scaling it down only moves less. That
+is asserted rather than argued, at six couplings including the ones that do not divide evenly.
+
+Full coupling keeps the loop it always had. Paying the multiply per edge unconditionally cost
+15% of the flowing sweep, which is a real price for a feature every existing chemical declines
+to use, so the branch is once per row and the default path is the code that was there before.
+
 ### 17.5 Lysis: turning cells into particulate
 
 A cell can already wound another with a spike, and a cell that dies becomes carrion. What it

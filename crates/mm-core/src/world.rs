@@ -63,7 +63,8 @@ pub struct World {
     /// How many squares carry a non-zero impulse. Zero means the velocity field cannot have
     /// moved since it was last written.
     active_impulses: u32,
-    diffusion_rates: [i32; CHEM_COUNT],
+    /// Diffusion and flow-coupling per chemical, cached from the scenario's table.
+    fluid_rates: fluid::FluidRates,
     /// Working buffer for the fluid solver. Not state: it holds nothing between steps, and
     /// is excluded from equality, hashing and snapshots for that reason.
     /// The species archive and the tree over it (SPEC §10).
@@ -186,7 +187,10 @@ impl World {
         let substrate =
             Substrate::new(scenario.width, scenario.height).map_err(ScenarioError::Substrate)?;
         let n = substrate.len();
-        let diffusion_rates = scenario.chemicals.diffusion_rates();
+        let fluid_rates = fluid::FluidRates {
+            diffusion: scenario.chemicals.diffusion_rates(),
+            advection: scenario.chemicals.advection_rates(),
+        };
 
         let mut world = World {
             scenario,
@@ -198,7 +202,7 @@ impl World {
             light_written: false,
             velocity_written: false,
             active_impulses: 0,
-            diffusion_rates,
+            fluid_rates,
             archive: crate::phylogeny::Phylogeny::new(),
             events: crate::events::EventLog::new(),
             births_total: 0,
@@ -290,7 +294,9 @@ impl World {
         if x >= self.substrate.width() || y >= self.substrate.height() {
             return;
         }
-        let evicted = self.substrate.set_blocked_deferred(x as i32, y as i32, true);
+        let evicted = self
+            .substrate
+            .set_blocked_deferred(x as i32, y as i32, true);
         self.ledger.record_evicted(&evicted);
     }
 
@@ -562,11 +568,7 @@ impl World {
         if self.tick.is_multiple_of(interval) {
             self.refresh_light();
             self.refresh_velocity();
-            fluid::step(
-                &mut self.substrate,
-                &self.diffusion_rates,
-                &mut self.scratch,
-            );
+            fluid::step(&mut self.substrate, &self.fluid_rates, &mut self.scratch);
             self.decay_fluid();
             if self.active_impulses > 0 {
                 decay_impulses(

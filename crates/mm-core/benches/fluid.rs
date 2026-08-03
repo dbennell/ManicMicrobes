@@ -46,7 +46,10 @@ fn populated(w: u32, h: u32, flowing: bool) -> Substrate {
 }
 
 fn throughput(c: &mut Criterion) {
-    let rates = ChemTable::spec_default().diffusion_rates();
+    let rates = fluid::FluidRates {
+        diffusion: ChemTable::spec_default().diffusion_rates(),
+        advection: ChemTable::spec_default().advection_rates(),
+    };
     let mut group = c.benchmark_group("fluid_512");
     group.throughput(Throughput::Elements(1));
     group.sample_size(10);
@@ -83,12 +86,26 @@ fn gate(_c: &mut Criterion) {
         let mut s = populated(512, 512, flowing);
         let mut scratch = FluidScratch::new(s.len());
         for _ in 0..5 {
-            fluid::step(&mut s, &rates, &mut scratch);
+            fluid::step(
+                &mut s,
+                &fluid::FluidRates {
+                    diffusion: rates,
+                    ..Default::default()
+                },
+                &mut scratch,
+            );
         }
         let n = 60;
         let t = Instant::now();
         for _ in 0..n {
-            fluid::step(&mut s, &rates, &mut scratch);
+            fluid::step(
+                &mut s,
+                &fluid::FluidRates {
+                    diffusion: rates,
+                    ..Default::default()
+                },
+                &mut scratch,
+            );
         }
         let rate = n as f64 / t.elapsed().as_secs_f64();
         eprintln!(
