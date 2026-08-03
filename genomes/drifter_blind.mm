@@ -1,7 +1,14 @@
 ; drifter_blind.mm — the control: the same cell with nothing to see with.
 ;
+; It held `RESERVED_A` — catalogue slot 14 — until that slot was filled by the holdfast, at
+; which point the control quietly stopped being blind: it was building a working organelle,
+; paying a third more upkeep for it than the reserved slot cost, and would have gripped a wall
+; on any slide that had one. A control that acquires a capability is not a control. Moved to
+; slot 15, which is the reserved one now, and this is what an ISA bump costs when a genome was
+; using a slot *for* being empty.
+;
 ; The motile-but-blind control for M3's chemotaxis experiment. Identical to `drifter.mm` byte
-; for byte except that slot 7 holds a `RESERVED_A` organelle instead of a chemosensor: same
+; for byte except that slot 7 holds a `RESERVED_B` organelle instead of a chemosensor: same
 ; length, same instruction count, same build cost, same upkeep, same everything — and no
 ; information about where the food is.
 ;
@@ -41,7 +48,7 @@
         IMM     2
         BUILD
         IMM     60
-        IMM     14:4             ; RESERVED_A — built, paid for, and blind
+        IMM     15:4             ; RESERVED_B — built, paid for, and blind
         IMM     7
         BUILD
         IMM     80
