@@ -138,13 +138,16 @@ use mm_core::{CellId, LightRegime, MutationRates, Organelle, OrganelleType, Scen
 /// rate, so `MM_SHOT_TICK` still photographs the state it says it does. To time the renderer,
 /// focus the window and read it there.
 ///
-/// **It photographs the slide and not the panels.** Bevy 0.15 moved where the screenshot is
-/// taken relative to the egui pass, so what comes out is the render this crate is responsible
-/// for and none of the interface drawn over it. That is the half worth photographing anyway,
-/// and the panels prove themselves a different way: `ctx.available_rect()` shrinking to the
-/// viewport is the layout having happened.
-/// `slide.png` and a frame number, as `slide_000.png`. A single shot still gets a number, so a
-/// series and a lone frame are named the same way and one analysis script reads both.
+/// **It photographs the panels too**, and used to not. This note said the opposite for several
+/// versions — Bevy 0.15 took the screenshot before the egui pass, so what came out was the slide
+/// and none of the interface over it — and somewhere between then and 0.19 that stopped being
+/// true. Believing the stale note cost a review of a pane that could have been looked at
+/// directly, so: `MM_SHOT_VIEW=ecology:budget` photographs the budget pane, and the whole window
+/// is in the file.
+///
+/// The file is named for `MM_SHOT` with a frame number appended, as `slide_000.png`. A single
+/// shot still gets a number, so a series and a lone frame are named the same way and one
+/// analysis script reads both.
 fn numbered_path(path: &str, n: u32) -> String {
     match path.rsplit_once('.') {
         Some((stem, ext)) => format!("{stem}_{n:03}.{ext}"),
@@ -3394,11 +3397,16 @@ fn token_colour(kind: mm_asm::highlight::TokenKind) -> egui::Color32 {
 /// per-chemical mass budget among them — and the metrics rail drew seven of them. This is not
 /// new instrumentation; it is drawing what the instrument already records.
 ///
-/// Two halves, because they answer different questions. **Energy** is a flow and the question
-/// is whether it balances: income against dissipation, and where those two lines meet is where
-/// the economy has found its level. **Matter** is a stock and the question is where it has
-/// gone: the total can never move (I4), so every change is a redistribution between the fluid,
-/// the cells and the dead.
+/// Two halves, because they answer different questions. **Energy** is a flow and the question is
+/// whether it balances: income against what leaves, and where those lines meet is where the
+/// economy has found its level. **Matter** is a stock and the question is where it has gone.
+///
+/// On a closed slide the matter total cannot move, and this pane said so. That is no longer
+/// true and the claim had to go: a scenario with `flux` on it takes matter in at one edge and
+/// lets it out at another, so the total moves by exactly what crossed the boundary and by
+/// nothing else. Which is the sharper statement of I4 anyway — the invariant was never "the
+/// number is constant", it was "nothing changes it that has not been accounted for", and a
+/// closed slide is the special case where the accounting is empty.
 fn budget_view(ui: &mut egui::Ui, sim: &SlideRes) {
     let history = &sim.latest.history;
     let Some(now) = history.latest().cloned() else {
@@ -3410,59 +3418,130 @@ fn budget_view(ui: &mut egui::Ui, sim: &SlideRes) {
         .id_salt("budget")
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            // Both ledgers first, and in one block. They used to open each of their own
+            // sections, which put the material one three scrolls below the fold in a drawer of
+            // ordinary height — so the pane answered "is the energy economy balanced" on sight
+            // and made you go looking for "is the slide filling up". The two nets are the whole
+            // question this pane exists for and they belong side by side, above everything that
+            // explains them.
+            //
+            // Rates, differenced at sample time rather than here — see `Sample::absorbed` for
+            // why a panel must never difference the cumulative counters itself.
+            let open = now.matter_in > 0 || now.matter_out > 0;
+            // Heat is not the only way out any more. Energy also leaves latent in matter that
+            // crosses the boundary, and a net ignoring that reads as an economy still filling
+            // up on a slide that is merely being flushed through.
+            let energy_net = now.absorbed - now.dissipation - now.exported;
+            let matter_net = now.influx - now.efflux;
+            // Near zero against what is coming in: everything arriving is going straight back
+            // out and nothing is accumulating. Away from zero and something is still filling or
+            // still draining.
+            let settled = |net: i64, gross: i64| {
+                if net.abs() * 8 < gross.max(1) {
+                    egui::Color32::from_rgb(140, 220, 150)
+                } else {
+                    egui::Color32::from_rgb(240, 200, 120)
+                }
+            };
+            egui::Grid::new("budget_books")
+                .num_columns(4)
+                .spacing([14.0, 4.0])
+                .show(ui, |ui| {
+                    ui.strong("energy");
+                    ui.label(format!("in {}", now.absorbed));
+                    ui.label(if now.exported > 0 {
+                        format!("out {} + {} washed out", now.dissipation, now.exported)
+                    } else {
+                        format!("out {} as heat", now.dissipation)
+                    });
+                    ui.colored_label(
+                        settled(energy_net, now.absorbed),
+                        format!("net {energy_net:+}"),
+                    )
+                    .on_hover_text(
+                        "per sample, not per tick. Near zero means the energy economy has \
+                         equilibrated — as much is leaving, as heat and in matter washed off \
+                         the slide, as is arriving.",
+                    );
+                    ui.end_row();
+
+                    if open {
+                        ui.strong("matter");
+                        ui.label(format!("in {}", now.influx));
+                        ui.label(format!("out {}", now.efflux));
+                        ui.colored_label(
+                            settled(matter_net, now.influx),
+                            format!("net {matter_net:+}"),
+                        )
+                        .on_hover_text(
+                            "per sample, not per tick. Near zero means the standing stock has \
+                             found its level: what is on the slide is what the flow supports. \
+                             A drain takes a *fraction* of what is there, so outflow rises \
+                             with the stock until it meets the inflow — which is why this one \
+                             converges where the energy economy has no such term and does not.",
+                        );
+                        ui.end_row();
+                    }
+                });
+
+            ui.add_space(8.0);
+            ui.separator();
             ui.heading("energy");
             ui.small(
                 "Energy is not conserved — it degrades. It enters as light and leaves as heat \
                  on every conversion, and what is left over is what the world is holding.",
             );
             ui.add_space(4.0);
-
-            // The rates, both differenced at sample time rather than here — see
-            // `Sample::absorbed` for why a panel must not difference the cumulative counters
-            // itself.
             let income = history.series(|s| s.absorbed);
             let heat = history.series(|s| s.dissipation);
-            let net = now.absorbed - now.dissipation;
-            ui.horizontal(|ui| {
-                ui.label("income");
-                ui.weak(format!("{}", now.absorbed));
-                ui.separator();
-                ui.label("to heat");
-                ui.weak(format!("{}", now.dissipation));
-                ui.separator();
-                ui.label("net");
-                // The number this pane exists for. A world that has found its level has a net
-                // of about zero: everything coming in is going straight back out as heat, and
-                // nothing is accumulating. Away from zero and something is still filling or
-                // still draining.
-                let colour = if net.abs() * 8 < now.absorbed.max(1) {
-                    egui::Color32::from_rgb(140, 220, 150)
-                } else {
-                    egui::Color32::from_rgb(240, 200, 120)
-                };
-                ui.colored_label(colour, format!("{net:+}"));
-            })
-            .response
-            .on_hover_text(
-                "per sample, not per tick. Net near zero means the energy economy has \
-                 equilibrated — as much is leaving as heat as is arriving.",
-            );
+            if now.imported > 0 {
+                ui.small(format!(
+                    "of that income, {} arrived latent in matter rather than as light",
+                    now.imported
+                ));
+            }
             ui.small("income");
             sparkline(ui, &income.normalised());
             ui.small("dissipated as heat");
             sparkline(ui, &heat.normalised());
+            if now.exported > 0 || now.energy_exported > 0 {
+                ui.small("carried off the slide in matter");
+                sparkline(ui, &history.series(|s| s.exported).normalised());
+            }
             ui.small(format!("held by living things — now {}", now.energy_stored));
             sparkline(ui, &history.series(|s| s.energy_stored).normalised());
 
             ui.add_space(8.0);
             ui.separator();
             ui.heading("matter");
-            ui.small(format!(
-                "{} in total, and that number must never move (I4). Everything below is the \
-                 same matter in different places.",
-                now.total_matter
-            ));
+            if open {
+                ui.small(format!(
+                    "{} on the slide. Matter is conserved exactly (I4), so this moves only by \
+                     what crosses the edge — and by nothing else.",
+                    now.total_matter
+                ));
+            } else {
+                ui.small(format!(
+                    "{} in total, and on a closed slide that number never moves (I4). \
+                     Everything below is the same matter in different places.",
+                    now.total_matter
+                ));
+            }
             ui.add_space(4.0);
+
+            // The boundary, and only when there is one. A row of zeroes on every closed slide
+            // would teach the reader to stop looking at this block, which is the opposite of
+            // what it is for. The numbers are up top with the other ledger; these are the
+            // shapes, which is what says whether it is *settling* or merely balanced today.
+            if open {
+                ui.small("arriving from off-slide");
+                sparkline(ui, &history.series(|s| s.influx).normalised());
+                ui.small("leaving over the edge");
+                sparkline(ui, &history.series(|s| s.efflux).normalised());
+                ui.small("total on the slide");
+                sparkline(ui, &history.series(|s| s.total_matter).normalised());
+                ui.add_space(6.0);
+            }
 
             // A bar per chemical in its own colour, against the largest. A stacked plot of
             // sixteen series is unreadable and a table of sixteen numbers says nothing about

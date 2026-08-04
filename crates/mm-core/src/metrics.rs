@@ -48,10 +48,17 @@ pub struct Sample {
     pub influx: i64,
     /// Matter that left the slide since the last sample, across every chemical.
     pub efflux: i64,
+    /// Energy that arrived latent in matter since the last sample. Part of `absorbed`.
+    pub imported: i64,
+    /// Energy that left latent in matter since the last sample.
+    ///
+    /// *Not* part of `dissipation` — matter washing off the slide is not the world getting
+    /// warmer — so the world's true net energy income is `absorbed - dissipation - exported`
+    /// and not the first two alone.
+    pub exported: i64,
     /// Energy that arrived latent in matter, cumulative. Part of `energy_in`.
     pub energy_imported: i64,
-    /// Energy that left latent in matter, cumulative. Part of `energy_out`, and *not* part of
-    /// `dissipation` — matter washing off the slide is not the world getting warmer.
+    /// Energy that left latent in matter, cumulative. Part of `energy_out`.
     pub energy_exported: i64,
     /// Matter in, cumulative. `influx` is this differenced.
     pub matter_in: i64,
@@ -169,6 +176,14 @@ impl Sample {
             }
             None => 0,
         };
+        let imported = match previous {
+            Some(p) => ledger.energy_imported() - p.energy_imported,
+            None => 0,
+        };
+        let exported = match previous {
+            Some(p) => ledger.energy_exported() - p.energy_exported,
+            None => 0,
+        };
         let influx = match previous {
             Some(p) => matter_in - p.matter_in,
             None => 0,
@@ -196,6 +211,8 @@ impl Sample {
             energy_stored: ledger.energy_stored(),
             influx,
             efflux,
+            imported,
+            exported,
             energy_imported: ledger.energy_imported(),
             energy_exported: ledger.energy_exported(),
             matter_in,
@@ -229,7 +246,8 @@ impl Sample {
             concat!(
                 r#"{{"tick":{},"population":{},"births":{},"deaths":{},"#,
                 r#""dissipation":{},"absorbed":{},"energy_in":{},"energy_out":{},"energy_stored":{},"#,
-                r#""influx":{},"efflux":{},"energy_imported":{},"energy_exported":{},"#,
+                r#""influx":{},"efflux":{},"imported":{},"exported":{},"#,
+                r#""energy_imported":{},"energy_exported":{},"#,
                 r#""mean_age":{},"mean_energy":{},"mean_mass":{},"mean_genome_len":{},"#,
                 r#""distinct_genomes":{},"distinct_loadouts":{},"mean_fidelity":{},"#,
                 r#""no_nucleus":{},"trophic_light":{},"producers":{},"scavengers":{},"#,
@@ -248,6 +266,8 @@ impl Sample {
             self.energy_stored,
             self.influx,
             self.efflux,
+            self.imported,
+            self.exported,
             self.energy_imported,
             self.energy_exported,
             self.mean_age,
@@ -395,6 +415,8 @@ mod tests {
         for key in [
             "influx",
             "efflux",
+            "imported",
+            "exported",
             "energy_imported",
             "energy_exported",
             "population",
