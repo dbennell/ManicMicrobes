@@ -43,23 +43,43 @@ fn how_much_a_settled_pack_changes_size_between_ticks() {
     slide.set_camera(32.0, 32.0, 40.0, 40.0);
     slide.set_zoom(64.0);
 
-    let before: std::collections::BTreeMap<u64, (f32, f32)> = slide
+    let before: std::collections::BTreeMap<u64, (f32, f32, usize)> = slide
         .frame()
         .cells
         .iter()
-        .map(|d| (d.id.ordering_key(), (d.area_swell, d.radius)))
+        .map(|d| {
+            (
+                d.id.ordering_key(),
+                (d.area_swell, d.radius, d.squash.len()),
+            )
+        })
         .collect();
     slide.advance(1);
     let after = slide.frame();
 
-    let mut jumps: Vec<(f32, f32)> = Vec::new();
+    // The jump, the cell's size, and whether its seam *set* changed size — which is the
+    // question. A lurch with the same number of seams is the solve amplifying a small motion; a
+    // lurch that coincides with a seam arriving or leaving is membership being a step, and a
+    // step in the input is fixable without giving the renderer a memory.
+    let mut jumps: Vec<(f32, f32, i32, f32)> = Vec::new();
     for d in after.cells.iter() {
-        if let Some((was, _)) = before.get(&d.id.ordering_key()) {
-            jumps.push(((d.area_swell - was).abs(), d.radius));
+        if let Some((was, _, seams)) = before.get(&d.id.ordering_key()) {
+            jumps.push((
+                (d.area_swell - was).abs(),
+                d.radius,
+                d.squash.len() as i32 - *seams as i32,
+                d.area_swell,
+            ));
         }
     }
     assert!(jumps.len() > 100, "not enough cells to measure");
     jumps.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+    let lurchers: Vec<&(f32, f32, i32, f32)> = jumps.iter().filter(|j| j.0 > 0.02).collect();
+    let with_change = lurchers.iter().filter(|j| j.2 != 0).count();
+    eprintln!(
+        "\n  of {} cells whose swell moved by >0.02, {with_change} also gained or lost a seam",
+        lurchers.len()
+    );
 
     let n = jumps.len();
     let mean_radius: f32 = jumps.iter().map(|j| j.1).sum::<f32>() / n as f32;
@@ -75,9 +95,18 @@ fn how_much_a_settled_pack_changes_size_between_ticks() {
         lurched * 1000 / n
     );
     eprintln!("  worst ten:");
-    for (jump, radius) in jumps.iter().take(10) {
-        eprintln!("    swell moved {jump:.3} on a cell of radius {radius:.2}");
+    for (jump, radius, dseams, swell) in jumps.iter().take(10) {
+        eprintln!(
+            "    swell moved {jump:.3} on radius {radius:.2}, seams {dseams:+}, now at {swell:.3}"
+        );
     }
+    let all_swell: f32 = jumps.iter().map(|j| j.3).sum::<f32>() / n as f32;
+    let lurch_swell: f32 = lurchers.iter().map(|j| j.3).sum::<f32>() / lurchers.len().max(1) as f32;
+    eprintln!(
+        "  mean swell: {lurch_swell:.3} for the lurchers, {all_swell:.3} for everybody \
+         (cap {:.2})",
+        1.25
+    );
     let big_jumpers: Vec<f32> = jumps.iter().filter(|j| j.0 > 0.05).map(|j| j.1).collect();
     if !big_jumpers.is_empty() {
         let m: f32 = big_jumpers.iter().sum::<f32>() / big_jumpers.len() as f32;
