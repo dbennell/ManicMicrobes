@@ -43,14 +43,18 @@ fn how_much_a_settled_pack_changes_size_between_ticks() {
     slide.set_camera(32.0, 32.0, 40.0, 40.0);
     slide.set_zoom(64.0);
 
-    let before: std::collections::BTreeMap<u64, (f32, f32, usize)> = slide
+    let before: std::collections::BTreeMap<u64, (f32, f32, Vec<(f32, f32)>)> = slide
         .frame()
         .cells
         .iter()
         .map(|d| {
             (
                 d.id.ordering_key(),
-                (d.area_swell, d.radius, d.squash.len()),
+                (
+                    d.area_swell,
+                    d.radius,
+                    d.squash.iter().map(|s| (s.nx, s.ny)).collect::<Vec<_>>(),
+                ),
             )
         })
         .collect();
@@ -64,10 +68,23 @@ fn how_much_a_settled_pack_changes_size_between_ticks() {
     let mut jumps: Vec<(f32, f32, i32, f32)> = Vec::new();
     for d in after.cells.iter() {
         if let Some((was, _, seams)) = before.get(&d.id.ordering_key()) {
+            // Matched by *direction*, not by count. A cell can swap one neighbour for another
+            // and keep the same number of seams, and comparing counts calls that "unchanged" —
+            // which is how the first version of this ruled membership out by mistake. A seam
+            // with no previous seam within about eight degrees is a new one.
+            let changed = d
+                .squash
+                .iter()
+                .filter(|s| !seams.iter().any(|(nx, ny)| s.nx * nx + s.ny * ny > 0.99))
+                .count()
+                + seams
+                    .iter()
+                    .filter(|(nx, ny)| !d.squash.iter().any(|s| s.nx * nx + s.ny * ny > 0.99))
+                    .count();
             jumps.push((
                 (d.area_swell - was).abs(),
                 d.radius,
-                d.squash.len() as i32 - *seams as i32,
+                changed as i32,
                 d.area_swell,
             ));
         }
@@ -77,7 +94,8 @@ fn how_much_a_settled_pack_changes_size_between_ticks() {
     let lurchers: Vec<&(f32, f32, i32, f32)> = jumps.iter().filter(|j| j.0 > 0.02).collect();
     let with_change = lurchers.iter().filter(|j| j.2 != 0).count();
     eprintln!(
-        "\n  of {} cells whose swell moved by >0.02, {with_change} also gained or lost a seam",
+        "\n  of {} cells whose swell moved by >0.02, {with_change} had a seam come or go \
+         (matched by direction, not by count)",
         lurchers.len()
     );
 
@@ -97,7 +115,7 @@ fn how_much_a_settled_pack_changes_size_between_ticks() {
     eprintln!("  worst ten:");
     for (jump, radius, dseams, swell) in jumps.iter().take(10) {
         eprintln!(
-            "    swell moved {jump:.3} on radius {radius:.2}, seams {dseams:+}, now at {swell:.3}"
+            "    swell moved {jump:.3} on radius {radius:.2}, {dseams} seams changed, now at {swell:.3}"
         );
     }
     let all_swell: f32 = jumps.iter().map(|j| j.3).sum::<f32>() / n as f32;
@@ -111,5 +129,80 @@ fn how_much_a_settled_pack_changes_size_between_ticks() {
     if !big_jumpers.is_empty() {
         let m: f32 = big_jumpers.iter().sum::<f32>() / big_jumpers.len() as f32;
         eprintln!("  mean radius of the lurchers: {m:.2}, against {mean_radius:.2} for everybody");
+    }
+}
+
+/// *Why* the solve is so sensitive — the input to it, on both ticks, for the worst cell.
+///
+/// Three explanations are already ruled out: the seam-slot cap (falls on large cells, the
+/// artefact is on small), seam membership (18 of 21 lurches had an unchanged seam set), and
+/// stiffness near enclosure (the lurchers are *less* swollen than average). Rebuilding the solve
+/// without knowing which input moved would be fixing whatever is easiest to reach.
+#[test]
+fn what_moved_under_the_worst_lurch() {
+    let mut slide = packed();
+    slide.set_camera(32.0, 32.0, 40.0, 40.0);
+    slide.set_zoom(64.0);
+
+    let before: std::collections::BTreeMap<u64, (f32, Vec<(f32, f32, f32)>)> = slide
+        .frame()
+        .cells
+        .iter()
+        .map(|d| {
+            (
+                d.id.ordering_key(),
+                (
+                    d.area_swell,
+                    d.squash.iter().map(|s| (s.nx, s.ny, s.face)).collect(),
+                ),
+            )
+        })
+        .collect();
+    slide.advance(1);
+
+    let mut worst: Option<(f32, u64)> = None;
+    for d in slide.frame().cells.iter() {
+        if let Some((was, _)) = before.get(&d.id.ordering_key()) {
+            let jump = (d.area_swell - was).abs();
+            if worst.is_none_or(|(w, _)| jump > w) {
+                worst = Some((jump, d.id.ordering_key()));
+            }
+        }
+    }
+    let Some((jump, key)) = worst else { return };
+    let (was, old) = before.get(&key).expect("it was there");
+    let after = slide.frame();
+    let now = after
+        .cells
+        .iter()
+        .find(|d| d.id.ordering_key() == key)
+        .expect("still there");
+
+    eprintln!(
+        "\nworst lurch: swell {was:.4} -> {:.4}  ({jump:.4})",
+        now.area_swell
+    );
+    eprintln!(
+        "  radius {:.3}, {} seams -> {}",
+        now.radius,
+        old.len(),
+        now.squash.len()
+    );
+    eprintln!("  seam        was                     now                    moved");
+    // Seams are in contact order, which is spatial, so they can be compared pairwise only when
+    // the count is unchanged — which for a lurch it usually is.
+    for (k, s) in now.squash.iter().enumerate() {
+        match old.get(k) {
+            Some((nx, ny, face)) => eprintln!(
+                "  {k:>2}   n({nx:+.3},{ny:+.3}) f{face:.4}   n({:+.3},{:+.3}) f{:.4}   \
+                 dn {:.4} df {:+.4}",
+                s.nx,
+                s.ny,
+                s.face,
+                ((s.nx - nx).powi(2) + (s.ny - ny).powi(2)).sqrt(),
+                s.face - face,
+            ),
+            None => eprintln!("  {k:>2}   (new)"),
+        }
     }
 }
