@@ -199,7 +199,6 @@ pub struct NeighbourIndex {
     /// otherwise call it once per neighbour per cell. The same hoist `resolve_collisions`
     /// makes, for the same reason.
     radii: Vec<i32>,
-
 }
 
 impl NeighbourIndex {
@@ -643,6 +642,20 @@ fn feel(
         // The nearest neighbour's slot, so a genome has a handle to `JOIN` at (M7).
         nearest: crate::fixed::sat_i16(nearest_slot),
         contact_mass: crate::fixed::sat_i16((mass / crate::fixed::Q10_ONE as i64) as i32),
+        // What the nearest neighbour is wearing (ISA 4). The engine does not know what a
+        // friend is and this is how it stays that way: it reports a number and says nothing
+        // about what the number means. Nothing when there is nobody to read.
+        // Gated on `contacts`, not on `nearest_slot`, and the difference is not cosmetic:
+        // `nearest_slot` starts at 0 rather than at a sentinel, so a cell touching nobody
+        // reports slot 0 as its nearest neighbour. That is harmless for the `nearest` reading,
+        // which exists to be handed to `JOIN` and `JOIN` checks the distance — and it is not
+        // harmless here, because a lonely cell would read whatever slot 0 happens to be
+        // wearing, which in a two-cell world is itself.
+        badge: if contacts > 0 {
+            cells.badge[nearest_slot as usize] as i16
+        } else {
+            0
+        },
     }
 }
 
@@ -1228,7 +1241,11 @@ pub fn resolve_collisions(
         cells.vx[i] = crate::fixed::q10_scale(cells.vx[i], CONTACT_FRICTION);
         cells.vy[i] = crate::fixed::q10_scale(cells.vy[i], CONTACT_FRICTION);
         // And below a threshold it is simply held: see `REST_SPEED`.
-        if cells.vx[i].saturating_abs().saturating_add(cells.vy[i].saturating_abs()) < REST_SPEED {
+        if cells.vx[i]
+            .saturating_abs()
+            .saturating_add(cells.vy[i].saturating_abs())
+            < REST_SPEED
+        {
             cells.vx[i] = 0;
             cells.vy[i] = 0;
         }
@@ -1255,6 +1272,7 @@ mod tests {
                 energy: q10(100),
                 membrane: 16,
                 key: 0,
+                badge: 0,
                 species: 0,
                 parent: CellId::NONE,
                 birth_tick: 0,
@@ -1275,6 +1293,7 @@ mod tests {
                 energy: q10(100),
                 membrane: 16,
                 key: 0,
+                badge: 0,
                 species: 0,
                 parent: CellId::NONE,
                 birth_tick: 0,
@@ -1283,8 +1302,6 @@ mod tests {
         }
         (cells, pool)
     }
-
-
 
     /// The nine-bucket walk `around` replaced, kept as the thing to measure it against.
     /// The naive bucket-at-a-time walk of the `(2k+1)²` block, which the row runs must match.
@@ -1322,11 +1339,7 @@ mod tests {
         let r = 1000.0f64;
         for k in 0..6 {
             let a = std::f64::consts::TAU * k as f64 / 6.0;
-            set.offer(contact(
-                (r * a.cos()) as i32,
-                (r * a.sin()) as i32,
-                50 + k,
-            ));
+            set.offer(contact((r * a.cos()) as i32, (r * a.sin()) as i32, 50 + k));
         }
         assert_eq!(
             set.as_slice().len(),
@@ -1381,7 +1394,11 @@ mod tests {
             for sy in -2..=9 {
                 for sx in -2..=9 {
                     let walked: Vec<usize> = index.within(sx, sy, k).collect();
-                    assert_eq!(walked, block_buckets(&index, sx, sy, k), "at ({sx}, {sy}) k={k}");
+                    assert_eq!(
+                        walked,
+                        block_buckets(&index, sx, sy, k),
+                        "at ({sx}, {sy}) k={k}"
+                    );
                 }
             }
         }
@@ -1531,13 +1548,13 @@ mod tests {
             cells.x[1] = cells.x[1].saturating_sub(load);
             index.rebuild(&cells, 16, 16);
             resolve_collisions(
-            &mut cells,
-            &mut index,
-            &mut Vec::new(),
-            &mut Vec::new(),
-            &mut Vec::new(),
-            &[],
-        );
+                &mut cells,
+                &mut index,
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &[],
+            );
         }
         separation(&cells, 0, 1)
     }
@@ -1646,13 +1663,13 @@ mod tests {
         for _ in 0..400 {
             index.rebuild(&cells, 16, 16);
             resolve_collisions(
-            &mut cells,
-            &mut index,
-            &mut Vec::new(),
-            &mut Vec::new(),
-            &mut Vec::new(),
-            &[],
-        );
+                &mut cells,
+                &mut index,
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &[],
+            );
         }
         let want = 2 * r;
         let core = ((want as i64 * CORE_PERMILLE as i64) / 1000) as i32;
@@ -1767,13 +1784,13 @@ mod tests {
         index.rebuild(&cells, 16, 16);
         for _ in 0..20 {
             resolve_collisions(
-            &mut cells,
-            &mut index,
-            &mut Vec::new(),
-            &mut Vec::new(),
-            &mut Vec::new(),
-            &[],
-        );
+                &mut cells,
+                &mut index,
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &[],
+            );
             index.rebuild(&cells, 16, 16);
         }
         assert!(
@@ -1789,13 +1806,13 @@ mod tests {
         index.rebuild(&cells, 16, 16);
         for _ in 0..50 {
             resolve_collisions(
-            &mut cells,
-            &mut index,
-            &mut Vec::new(),
-            &mut Vec::new(),
-            &mut Vec::new(),
-            &[],
-        );
+                &mut cells,
+                &mut index,
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &[],
+            );
             index.rebuild(&cells, 16, 16);
             for i in cells.iter() {
                 assert!(cells.x[i] >= 0 && cells.x[i] < 16 * POS_ONE);
@@ -1817,13 +1834,13 @@ mod tests {
             for _ in 0..10 {
                 index.rebuild(&cells, 16, 16);
                 resolve_collisions(
-            &mut cells,
-            &mut index,
-            &mut Vec::new(),
-            &mut Vec::new(),
-            &mut Vec::new(),
-            &[],
-        );
+                    &mut cells,
+                    &mut index,
+                    &mut Vec::new(),
+                    &mut Vec::new(),
+                    &mut Vec::new(),
+                    &[],
+                );
             }
             cells
                 .iter()

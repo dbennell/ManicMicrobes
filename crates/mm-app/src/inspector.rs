@@ -956,6 +956,7 @@ mod tests {
             energy: q10(100),
             membrane: 16,
             key: 7,
+            badge: 0,
             species: 3,
             parent: CellId::NONE,
             birth_tick: 0,

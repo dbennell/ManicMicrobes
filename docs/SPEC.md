@@ -654,6 +654,61 @@ must not return Hamming distance to the true key, because that makes the key hil
 in about seven probes and parasitism becomes trivial. `probe_leaks_distance` exists as a
 scenario knob for anyone who wants to watch that happen deliberately.
 
+#### The badge — what a cell shows the world (ISA 4)
+
+The key is a **secret**, and everything above depends on it staying one. Nothing in the ISA can
+read another cell's key and nothing ever should: a secret that can be read is not a secret, and
+this one is the only thing between a colony and anything that fancies joining it.
+
+But §13's finding on the spike says an armed cell cannot tell kin from prey and so kills its own
+daughters — and the fix for that cannot be a kin flag, because the engine deciding what a family
+is would be exactly the special case the design rules forbid. So a cell needs a way to be
+*recognised* that is not the way it is *joined*.
+
+That is the **badge**: 15 bits, set by `SETBADGE`, inherited at division, and the opposite of the
+key in every respect.
+
+| | receptor key | badge |
+|---|---|---|
+| who can read it | nobody, not even its owner | anything touching |
+| what the engine does with it | prices `JOIN` | **nothing at all** |
+| what it costs | — | nothing to wear, nothing to forge |
+| inherited | yes | yes |
+
+**The engine must never know what a friend is.** `TouchSensor` reading 3 reports that the thing
+you are touching is wearing 4211, and says nothing whatever about what 4211 means. Whether that
+is kin, prey or a liar is a genome's problem — which is precisely what leaves room for mimicry,
+and for the arms race that makes recognition worth having. A badge that could not be forged would
+be an identity card issued by the engine.
+
+Three details that are load-bearing rather than incidental:
+
+- **Inherited, not set.** A daughter is born already wearing her mother's colours. She has to be:
+  the window in which a newborn is vulnerable is the window *before* her own first expression
+  cycle has run, which is exactly when recognition matters.
+- **A cell can read its own badge back** (membrane reading 21). Without that, a genome would have
+  to compare a neighbour against a hard-coded number, and would stop knowing its own kin the
+  moment a mutation moved the badge — so no lineage could ever drift its colours. Comparing
+  *neighbour to self* means a lineage that changes what it wears changes what it answers to in
+  the same stroke, and diverges from its cousins as it goes. That is speciation by recognition,
+  and it costs one reading.
+- **Fifteen bits, and `IMM` takes eight.** A badge past 255 has to be composed from two or more
+  instructions, so badge space is not somewhere a single byte mutation can land. A lineage's
+  colours are stickier than its immediates, which is the difference between a marker and noise.
+
+The reading was appended *after* the sixteen chemical readings rather than inserted among the
+scalars, and `SETBADGE` took a `RESERVED` opcode slot. Both so that every genome written under
+ISA 3 means exactly what it always meant: a byte that was a no-op now does something, which can
+only make an old program do more, never something different.
+
+**Still to come**, and deliberately not built yet: colour, which would be reflected rather than
+emitted and so would go dark when the slide does; and an EM signature derived from a cell's
+organelles and how hard it is running them, which is the interesting one because *nobody sets
+it*. A badge is cheap talk and can be forged by anything. A signature that falls out of what you
+are actually spending cannot be — to look like a predator you would have to run a spike. The
+honest and the dishonest channel would then coexist, which is what makes signalling worth
+modelling at all.
+
 ### 8.3 Nucleus access is symmetric
 
 Reading and writing genome bytes uses the same interface whether the target is self or a

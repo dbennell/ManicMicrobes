@@ -77,6 +77,7 @@ fn living_world(seed: u64, size: u32, founders: u32, genome_file: &str) -> World
             energy: q10(400),
             membrane: 24,
             key: 11,
+            badge: 0,
             species: 0,
             parent: CellId::NONE,
             birth_tick: 0,

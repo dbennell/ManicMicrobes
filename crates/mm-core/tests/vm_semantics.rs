@@ -501,7 +501,10 @@ fn setkey_masks_to_seven_bits() {
 
 #[test]
 fn reserved_opcodes_are_no_ops() {
-    for op in [Op::Reserved0, Op::Reserved1] {
+    // `Reserved0` became `SETBADGE` at ISA 4, which is exactly what a reserved slot is for:
+    // the byte was a no-op then and does something now, so an ISA 3 genome carrying it means
+    // more than it did and never something different.
+    for op in [Op::Reserved1] {
         let g = genome(ops(&[op, Op::One]));
         let (vm, _) = run(&g, 2);
         assert_eq!(vm.peek(), 1, "{} should have done nothing", op.name());

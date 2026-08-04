@@ -123,8 +123,29 @@ pub struct CellArena {
     /// The daughter buffer being filled by `COPYB`, if a `BUD` is in progress.
     pub daughter: Vec<Option<Vec<u8>>>,
 
-    /// 7-bit receptor key (SPEC §8.2).
+    /// 7-bit receptor key (SPEC §8.2). **Private, and deliberately unreadable by anything else.**
+    ///
+    /// A cell can set its own with `SETKEY` and `JOIN` discriminates on it, but nothing in the
+    /// ISA can read another's — see `junction.rs` on why leaking even the *distance* to a key
+    /// makes it hill-climbable in about seven probes and parasitism trivial. A secret that can
+    /// be read is not a secret, and this one is the only thing standing between a colony and
+    /// anything that fancies joining it.
     pub key: Vec<u8>,
+    /// 15-bit surface badge: what a cell shows the world (SPEC §8.2).
+    ///
+    /// The public counterpart of `key`, and everything the key is not. It is **inert** — no
+    /// mechanism in the engine reads it, branches on it or charges for it — and it is *readable
+    /// by anything touching*, which is the whole point. Recognition is a genome's problem, not
+    /// the engine's: nothing here knows what a friend is, and a badge can be worn by anything
+    /// that cares to wear one.
+    ///
+    /// Wider than the key on purpose. A hundred and twenty-eight values is a space a mutation
+    /// walks across by accident; thirty-two thousand is one a lineage can hold a place in.
+    ///
+    /// Inherited at division, which is what makes it worth anything. A daughter is born already
+    /// wearing her mother's colours — she has to be, because the window in which she is
+    /// vulnerable is the window before her first expression cycle has run.
+    pub badge: Vec<u16>,
     /// Species assignment (M5).
     pub species: Vec<u32>,
     /// Who this cell divided from.
@@ -166,6 +187,7 @@ impl CellArena {
         self.genome.reserve(n);
         self.daughter.reserve(n);
         self.key.reserve(n);
+        self.badge.reserve(n);
         self.species.reserve(n);
         self.parent.reserve(n);
         self.birth_tick.reserve(n);
@@ -268,6 +290,7 @@ impl CellArena {
                 self.genome.push(Arc::clone(&seed.genome));
                 self.daughter.push(None);
                 self.key.push(0);
+                self.badge.push(0);
                 self.species.push(0);
                 self.parent.push(CellId::NONE);
                 self.birth_tick.push(0);
@@ -304,6 +327,7 @@ impl CellArena {
         self.genome[i] = seed.genome;
         self.daughter[i] = None;
         self.key[i] = seed.key & 0x7F;
+        self.badge[i] = seed.badge & 0x7FFF;
         self.species[i] = seed.species;
         self.parent[i] = seed.parent;
         self.birth_tick[i] = seed.birth_tick;
@@ -419,6 +443,7 @@ impl CellArena {
             genome: &self.genome[i],
             daughter: self.daughter[i].as_deref(),
             key: self.key[i],
+            badge: self.badge[i],
             species: self.species[i],
             parent: self.parent[i],
             birth_tick: self.birth_tick[i],
@@ -474,6 +499,7 @@ impl CellArena {
                 self.genome.push(Arc::new(crate::genome::Genome::empty()));
                 self.daughter.push(None);
                 self.key.push(0);
+                self.badge.push(0);
                 self.species.push(0);
                 self.parent.push(CellId::NONE);
                 self.birth_tick.push(0);
@@ -497,6 +523,7 @@ impl CellArena {
             self.genome.push(c.genome);
             self.daughter.push(c.daughter);
             self.key.push(c.key);
+            self.badge.push(c.badge);
             self.species.push(c.species);
             self.parent.push(c.parent);
             self.birth_tick.push(c.birth_tick);
@@ -533,6 +560,7 @@ pub(crate) struct SlotSnapshot<'a> {
     pub genome: &'a Arc<Genome>,
     pub daughter: Option<&'a [u8]>,
     pub key: u8,
+    pub badge: u16,
     /// Ignored by [`crate::World::spawn_cell`], which assigns a species from the archive by
     /// the genome's fingerprint (SPEC §10.3) — two seedings of one genome are one species and
     /// two different genomes are two, without the caller having to say so.
@@ -562,6 +590,7 @@ pub(crate) struct RestoredCell {
     pub genome: Arc<Genome>,
     pub daughter: Option<Vec<u8>>,
     pub key: u8,
+    pub badge: u16,
     pub species: u32,
     pub parent: CellId,
     pub birth_tick: u64,
@@ -584,6 +613,8 @@ pub struct CellSeed {
     pub energy: i32,
     pub membrane: u8,
     pub key: u8,
+    /// The surface badge she is born wearing. See [`CellArena::badge`].
+    pub badge: u16,
     pub species: u32,
     pub parent: CellId,
     pub birth_tick: u64,
@@ -679,6 +710,7 @@ impl StateHash for CellArena {
                 None => h.bool(false),
             }
             h.u8(self.key[i]);
+            h.u16(self.badge[i]);
             h.u32(self.species[i]);
             h.u64(self.parent[i].ordering_key());
             h.u64(self.birth_tick[i]);
@@ -699,6 +731,7 @@ mod tests {
             energy: 500,
             membrane: 32,
             key: 5,
+            badge: 0,
             species: 0,
             parent: CellId::NONE,
             birth_tick: 0,

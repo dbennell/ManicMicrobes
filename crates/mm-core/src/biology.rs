@@ -194,6 +194,7 @@ impl<'a> CellHost<'a> {
             MembraneReading::Age => sat_i16(self.cells.age[i].min(i32::MAX as u32) as i32),
             MembraneReading::Radius => q10_to_visible(radius(self.cells, i)),
             MembraneReading::Damage => q10_to_visible(self.cells.damage[i]),
+            MembraneReading::Badge => self.cells.badge[i] as i16,
             MembraneReading::Chemical => {
                 let c = MembraneReading::chemical_of(idx);
                 q10_to_visible(self.cells.interior(i)[c])
@@ -505,6 +506,10 @@ impl Host for CellHost<'_> {
 
     fn set_key(&mut self, key: u8) {
         self.intents.push(Intent::SetKey { key });
+    }
+
+    fn set_badge(&mut self, badge: u16) {
+        self.intents.push(Intent::SetBadge { badge });
     }
 
     // --- junctions (SPEC §8) ---
@@ -879,8 +884,7 @@ pub fn resolve(
                     //
                     // The matter simply stays in the interior, where it is still the cell's and
                     // still counted. Refusing to build is not destroying anything (I4).
-                    if config.max_mass > 0
-                        && cells.mass[i].saturating_add(matter) > config.max_mass
+                    if config.max_mass > 0 && cells.mass[i].saturating_add(matter) > config.max_mass
                     {
                         continue;
                     }
@@ -965,7 +969,16 @@ pub fn resolve(
 
                 Intent::Split => {
                     let squeezed = pressure.get(i).copied().unwrap_or(0);
-                    if try_split(cells, config, ledger, pending, &ctx, i, squeezed, &mut report) {
+                    if try_split(
+                        cells,
+                        config,
+                        ledger,
+                        pending,
+                        &ctx,
+                        i,
+                        squeezed,
+                        &mut report,
+                    ) {
                         report.births = report.births.saturating_add(1);
                     } else {
                         report.failed_splits = report.failed_splits.saturating_add(1);
@@ -974,6 +987,10 @@ pub fn resolve(
 
                 Intent::SetKey { key } => {
                     cells.key[i] = key & 0x7F;
+                }
+
+                Intent::SetBadge { badge } => {
+                    cells.badge[i] = badge & 0x7FFF;
                 }
 
                 // --- junctions (SPEC §8) ---
@@ -1383,6 +1400,9 @@ fn try_split(
         y: cells.y[i],
         membrane,
         key: cells.key[i],
+        // Born wearing her mother's colours. She has to be: the window in which a newborn is
+        // vulnerable is the window before her own first expression cycle has run.
+        badge: cells.badge[i],
         species: cells.species[i],
     });
     true
@@ -1438,6 +1458,7 @@ pub fn apply_births(
             energy: birth.energy,
             membrane: birth.membrane,
             key: birth.key,
+            badge: birth.badge,
             species,
             parent: birth.parent,
             birth_tick: tick,
@@ -1727,6 +1748,7 @@ mod tests {
                 energy: q10(500),
                 membrane: 16,
                 key: 3,
+                badge: 0,
                 species: 0,
                 parent: CellId::NONE,
                 birth_tick: 0,

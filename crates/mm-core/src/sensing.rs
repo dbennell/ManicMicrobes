@@ -176,6 +176,8 @@ pub struct TouchReading {
     pub contacts: i16,
     pub nearest: i16,
     pub contact_mass: i16,
+    /// What the nearest neighbour is wearing. See `CellArena::badge`.
+    pub badge: i16,
 }
 
 /// Where and when a sensor is being read, and what is next to it.
@@ -233,10 +235,12 @@ pub fn read_sensor(organelle: &Organelle, index: i16, ctx: SensorContext<'_>) ->
                 _ => visible_gradient(r.gradient_y),
             })
         }
-        OrganelleType::TouchSensor => Some(match (index as u16) % 3 {
+        OrganelleType::TouchSensor => Some(match (index as u16) % 4 {
             0 => touch.contacts,
             1 => touch.nearest,
-            _ => touch.contact_mass,
+            2 => touch.contact_mass,
+            // Appended rather than inserted, so 0, 1 and 2 mean what they have always meant.
+            _ => touch.badge,
         }),
         OrganelleType::Oscillator => {
             let phase = oscillator_phase(organelle.control[0], tick, cell_key);
@@ -788,6 +792,7 @@ mod tests {
             energy: q10(10_000),
             membrane: 16,
             key: 0,
+            badge: 0,
             species: 0,
             parent: CellId::NONE,
             birth_tick: 0,

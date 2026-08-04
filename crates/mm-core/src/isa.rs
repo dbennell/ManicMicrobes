@@ -5,7 +5,7 @@
 //! (M10.3); version 3 filled the `RESERVED_A` catalogue slot with the holdfast (SPEC §17.1).
 
 /// ISA version stamped into save files, scenarios and archived genomes (SPEC §16).
-pub const ISA_VERSION: u16 = 3;
+pub const ISA_VERSION: u16 = 4;
 
 /// Number of opcodes. The opcode of a byte is `byte % OPCODE_COUNT` (SPEC §4.2), so four
 /// distinct byte values map to each opcode and most point mutations are synonymous.
@@ -35,7 +35,12 @@ pub enum Op {
     RLoad = 0x0C,
     RStore = 0x0D,
     Rand = 0x0E,
-    Reserved0 = 0x0F,
+    /// Set this cell's public surface badge (ISA 4).
+    ///
+    /// Took a `RESERVED` slot rather than displacing anything, so every genome written under
+    /// ISA 3 means exactly what it meant: the byte was a no-op then and is a badge now, which
+    /// can only make an old program do *more*, never something different.
+    SetBadge = 0x0F,
 
     // 0x10-0x1F — arithmetic and logic, all saturating
     Add = 0x10,
@@ -109,7 +114,7 @@ const OPS: [Op; 64] = [
     Op::RLoad,
     Op::RStore,
     Op::Rand,
-    Op::Reserved0,
+    Op::SetBadge,
     Op::Add,
     Op::Sub,
     Op::Mul,
@@ -177,7 +182,7 @@ const NAMES: [&str; 64] = [
     "RLOAD",
     "RSTORE",
     "RAND",
-    "RESERVED_0",
+    "SETBADGE",
     "ADD",
     "SUB",
     "MUL",

@@ -690,6 +690,17 @@ pub enum MembraneReading {
     Damage = 4,
     /// `5..=20` read internal chemical `idx - 5`.
     Chemical = 5,
+    /// This cell's own surface badge, at the index right after the chemicals.
+    ///
+    /// *After* them, not before, so that adding it renumbers nothing: every genome written
+    /// under ISA 3 reads the same chemical from the same index it always did.
+    ///
+    /// Readable at all because recognition has to survive the badge changing. A genome that
+    /// compared a neighbour's badge to a hard-coded immediate would stop recognising its own
+    /// kin the moment a mutation moved the badge — so lineages could never drift their colours.
+    /// Comparing *neighbour to self* means a lineage that changes its badge changes what it
+    /// answers to in the same stroke, and diverges from its cousins as it goes.
+    Badge = 21,
 }
 
 impl MembraneReading {
@@ -700,12 +711,13 @@ impl MembraneReading {
     #[inline]
     #[must_use]
     pub fn decode(idx: i16) -> MembraneReading {
-        match (idx as u16 as usize) % (5 + CHEM_COUNT) {
+        match (idx as u16 as usize) % (6 + CHEM_COUNT) {
             0 => MembraneReading::Mass,
             1 => MembraneReading::Energy,
             2 => MembraneReading::Age,
             3 => MembraneReading::Radius,
             4 => MembraneReading::Damage,
+            n if n == 5 + CHEM_COUNT => MembraneReading::Badge,
             _ => MembraneReading::Chemical,
         }
     }

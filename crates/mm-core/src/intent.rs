@@ -61,6 +61,8 @@ pub enum Intent {
     Split,
     /// Set the receptor key (SPEC §8.2).
     SetKey { key: u8 },
+    /// `SETBADGE`: change what this cell shows the world.
+    SetBadge { badge: u16 },
 
     // --- junctions (SPEC §8, M7) ---
     /// Form a junction with the cell at `handle`, offering `key`.
@@ -248,6 +250,8 @@ pub struct PendingBirth {
     pub y: i32,
     pub membrane: u8,
     pub key: u8,
+    /// The surface badge she is born wearing, inherited from her mother.
+    pub badge: u16,
     /// The parent's species. `apply_births` decides whether the daughter stays in it or
     /// founds a new one, by fingerprint distance from that species' founder (SPEC §10.3).
     pub species: u32,

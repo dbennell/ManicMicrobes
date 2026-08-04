@@ -79,7 +79,16 @@ pub trait Host {
     fn jlen(&mut self, v: i16, jidx: i16) {}
 
     /// `SETKEY ( v -- )` — set this cell's 7-bit receptor key. Already masked to `0..=127`.
+    ///
+    /// Private. Nothing can read it back, not even the cell that set it — see
+    /// `CellArena::key`.
     fn set_key(&mut self, key: u8) {}
+
+    /// `SETBADGE ( v -- )` — set this cell's public surface badge. Masked to `0..=32767`.
+    ///
+    /// The opposite of the key in every respect: inert, readable by anything touching, and
+    /// worn rather than kept. See `CellArena::badge`.
+    fn set_badge(&mut self, badge: u16) {}
 
     /// `INJECT ( jidx -- ok )` — write one byte into a target nucleus. `jidx` selects a soft
     /// junction, or [`INJECT_SELF`] for this cell's own genome; reading and writing genome
@@ -117,6 +126,7 @@ pub struct RecordingHost {
     pub emits: Vec<(i16, i16)>,
     pub eats: Vec<(i16, i16)>,
     pub key: Option<u8>,
+    pub badge: Option<u16>,
     /// What `OGET` should return, by `(slot, idx)`. Anything unlisted reads as 0.
     pub oget_values: std::collections::BTreeMap<(i16, i16), i16>,
 }
@@ -151,6 +161,10 @@ impl Host for RecordingHost {
 
     fn set_key(&mut self, key: u8) {
         self.key = Some(key);
+    }
+
+    fn set_badge(&mut self, badge: u16) {
+        self.badge = Some(badge);
     }
 }
 

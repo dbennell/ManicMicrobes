@@ -83,6 +83,7 @@ fn seed_on_pathway(
         energy: q10(400),
         membrane: 24,
         key: 11,
+        badge: 0,
         species: 0,
         parent: CellId::NONE,
         birth_tick: 0,

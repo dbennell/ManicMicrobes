@@ -242,7 +242,10 @@ impl Vm {
                     self.rand_ctr = self.rand_ctr.wrapping_add(1);
                     self.push(v);
                 }
-                Op::Reserved0 => {}
+                Op::SetBadge => {
+                    let v = self.pop();
+                    host.set_badge(v as u16 & 0x7FFF);
+                }
 
                 // ---- 0x10-0x1F arithmetic and logic, all saturating ----
                 Op::Add => self.binary(|a, b| sat(a.wrapping_add(b))),

@@ -932,6 +932,7 @@ fn seed_packing(slide: &mut Slide) {
             energy: q10(1_000_000),
             membrane: 24,
             key: 11,
+            badge: 0,
             species: 0,
             parent: CellId::NONE,
             birth_tick: 0,
