@@ -514,7 +514,7 @@ impl NeighbourIndex {
 /// out of slots stops cutting for somebody who is still cutting for it. The result is one cell
 /// laid over another with no shared wall at all, which is precisely what a crowd should never
 /// look like. Cheaper to never reach the limit than to be clever about which contact to drop.
-pub const CONTACTS_PER_CELL: usize = 12;
+pub const CONTACTS_PER_CELL: usize = 24;
 
 /// A neighbour a cell is overlapping, for whoever draws it.
 ///

@@ -263,7 +263,23 @@ fn fragment(in: Output) -> @location(0) vec4<f32> {
     //
     // Swollen only where there is room for it. Between `bare` at a facet's edge and the full
     // 0.65 out in a free arc, which is the taper above.
-    let radius = mix(bare, 0.65, room) * (1.0 + wobble + wear);
+    //
+    // The wobble goes on the *free* end of the mix and not on the whole of it. Multiplying the
+    // mixed radius applies it to `bare` as well — and `bare` is the agreed wall, the one number
+    // two cells compute independently and must both honour. A fifth of a radius of private
+    // knobbliness laid on top of that is a cell's outline crossing its own shared wall wherever
+    // one of its three lobes happens to point, which is one cell drawn over another with no seam
+    // between them however correct the seam was.
+    //
+    // It flickers because `slack` is `1 - 0.96 * pressure` and `pressure` comes off the *nearest*
+    // seam: a clump jostling by a fraction of a square swings the wobble amplitude by twenty-five
+    // times, so the lobe grows over the neighbour and shrinks back with nothing having moved.
+    // That is the same lobe, the same direction every time, appearing and disappearing — a cell
+    // with nine neighbours and no shortage of seam slots included.
+    //
+    // Now: at a facet the outline is exactly `bare` and the wall is kept, and out in a free arc
+    // it is the full knobbly `0.65`, which is where the irregularity was always meant to live.
+    let radius = mix(bare, 0.65 * (1.0 + wobble + wear), room);
 
     // --- the edge ---
     //

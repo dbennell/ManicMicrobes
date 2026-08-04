@@ -3638,7 +3638,23 @@ fn drawer(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
 /// default, which is a seam nothing can reach.
 fn squash_of(dot: &mm_app::CellDot) -> [cellmesh::Squash; cellmesh::SQUASH_PER_CELL] {
     let mut out = [cellmesh::Squash::default(); cellmesh::SQUASH_PER_CELL];
-    for (slot, s) in out.iter_mut().zip(dot.squash.iter()) {
+    // Deepest first when there are more seams than the mesh can carry, and *never* the order
+    // they arrived in. `NeighbourIndex::within` walks its buckets in ascending y, so taking the
+    // first `SQUASH_PER_CELL` takes the neighbours above and drops the ones below — and world
+    // +y is *down* on screen, so a cell would be drawn overlapping its lower neighbours and
+    // never its upper ones. A directional artefact out of nothing but an iteration order.
+    //
+    // `face` is how far along its normal the seam sits as a fraction of the radius, so smaller
+    // is a deeper cut and the ones that matter most sort first.
+    let mut seams: Vec<&mm_app::slide::Squash> = dot.squash.iter().collect();
+    if seams.len() > cellmesh::SQUASH_PER_CELL {
+        seams.sort_by(|a, b| {
+            a.face
+                .partial_cmp(&b.face)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
+    for (slot, s) in out.iter_mut().zip(seams.into_iter()) {
         *slot = cellmesh::Squash {
             nx: s.nx,
             // Negated, because `to_screen` negates it. The slide's rows run downwards and the

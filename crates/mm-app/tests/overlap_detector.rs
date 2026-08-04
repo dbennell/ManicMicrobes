@@ -53,6 +53,8 @@ fn offenders(slide: &Slide) -> (usize, usize, f32) {
     let mut worst = 0.0f32;
     let mut touching = 0usize;
     let mut worst_cases: Vec<(f32, usize, usize, f32, f32, f32)> = Vec::new();
+    let mut bearings: Vec<(f32, f32)> = Vec::new();
+    let mut first_case: Option<String> = None;
     for (a, i) in cells.iter().enumerate() {
         for j in cells.iter().skip(a + 1) {
             let (dx, dy) = (j.x - i.x, j.y - i.y);
@@ -86,6 +88,36 @@ fn offenders(slide: &Slide) -> (usize, usize, f32) {
                     .iter()
                     .map(|s| s.nx * -ux + s.ny * -uy)
                     .fold(-1.0f32, f32::max);
+                // Which way the overlap points, from the cell that is missing the seam towards
+                // the one it is laid over. Reported because the artefact is observed to run one
+                // way — "eighty percent down, twenty side to side, none up" — and a direction
+                // that strong is structural, not statistical.
+                if !i_sees {
+                    bearings.push((ux, uy));
+                }
+                if !j_sees {
+                    bearings.push((-ux, -uy));
+                }
+                if first_case.is_none() {
+                    // Everything about one pair, so the reason can be read rather than guessed.
+                    // `PACKING_PERMILLE` admits a contact when `d < 1.5 * (ri + rj)` using
+                    // `mm-core`'s radii, which are not the radii anything is *drawn* at.
+                    let core_i = i.radius; // the drawn bare radius
+                    let core_j = j.radius;
+                    first_case = Some(format!(
+                        "d {d:.4}  bare {core_i:.4}/{core_j:.4}  swell {:.3}/{:.3}  \
+                         drawn {ri:.4}/{rj:.4}  sum {:.4}  admit-at {:.4}  seams {}/{}  \
+                         sees {}/{}",
+                        i.area_swell,
+                        j.area_swell,
+                        ri + rj,
+                        1.5 * (core_i + core_j),
+                        i.squash.len(),
+                        j.squash.len(),
+                        i_sees,
+                        j_sees,
+                    ));
+                }
                 worst_cases.push((
                     (ri + rj - d) / (ri + rj),
                     i.squash.len(),
@@ -96,6 +128,17 @@ fn offenders(slide: &Slide) -> (usize, usize, f32) {
                 ));
             }
         }
+    }
+    // World +y is *down* on screen: `to_screen` negates it.
+    let down = bearings.iter().filter(|(_, y)| *y > 0.3).count();
+    let up = bearings.iter().filter(|(_, y)| *y < -0.3).count();
+    let side = bearings.len() - down - up;
+    eprintln!(
+        "    the overlap points: down {down}, up {up}, sideways {side}  (of {})",
+        bearings.len()
+    );
+    if let Some(first) = first_case {
+        eprintln!("    one offender in full: {first}");
     }
     worst_cases.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
     for (depth, ni, nj, bi, bj, gap) in worst_cases.iter().take(5) {
@@ -142,10 +185,17 @@ fn overlapping_pairs_with_no_wall_between_them() {
     // (24). Which is also why raising it has been tried before and appeared to do nothing:
     // `cellmesh::SQUASH_PER_CELL` is a *second* cap of twelve, and the extra contacts never
     // reach the shader. Both have to move.
-    assert!(
-        counts[0] < counts[1],
-        "a still pack should have fewer of these than a jiggling one, and it had {} against {}",
-        counts[0],
-        counts[1]
-    );
+    // Was "a jiggling pack has more of these than a still one", which is what it measured while
+    // the artefact was there — 41 / 111 / 186 as the jitter rose. With both causes fixed the
+    // counts are 4 / 4 / 3 and the dependence on movement is gone, which is the result and no
+    // longer an ordering. So the guard is on the level instead.
+    for (n, bad) in counts.iter().enumerate() {
+        assert!(
+            *bad <= 8,
+            "{bad} pairs are drawn overlapping with no wall between them at jitter step {n}. \
+             Both causes have to stay fixed: the contact reach has to cover what the renderer \
+             actually draws to, and the seam cap has to be high enough that nobody hits it — \
+             widening one alone trades one failure for the other."
+        );
+    }
 }

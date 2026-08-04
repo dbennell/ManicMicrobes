@@ -122,7 +122,7 @@ pub const PACKING: f32 = 1.15;
 /// Wide enough that a seam is always in hand well before it is needed. A contact that is not yet
 /// overlapping costs one half-plane test that clips nothing, which is cheap; a contact that
 /// arrives late costs the picture.
-const PACKING_PERMILLE: i32 = 1500;
+const PACKING_PERMILLE: i32 = 1750;
 
 /// The closest to its own centre a cell may be cut, as a fraction of its drawn radius.
 ///
