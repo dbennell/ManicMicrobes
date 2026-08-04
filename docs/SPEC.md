@@ -701,6 +701,31 @@ scalars, and `SETBADGE` took a `RESERVED` opcode slot. Both so that every genome
 ISA 3 means exactly what it always meant: a byte that was a no-op now does something, which can
 only make an old program do more, never something different.
 
+**Does it work?** `genomes/sentinel.mm` is `predator.mm` with a touch sensor and six instructions
+of opinion, and the cleanest form of the question holds the genome still: take the sterile
+half-extension predator, add only the gate, change nothing else.
+
+| one founder in `soup.ron`, 2400 ticks | population |
+|---|---|
+| blind, spike out at 512 | 1 |
+| the same, plus a badge  | **99** |
+
+Same weapon, same extension. As shipped, `sentinel.mm` reaches 79 against `predator.mm`'s 64
+while carrying a spike thirty-two times sharper, an extra organelle and a hundred and eleven more
+bytes. **A weapon you can put away is a weapon you can afford to make sharp.**
+
+Two properties of the gate are worth stating because both were found by getting them wrong:
+
+- **A cell touching nobody reads a badge of zero**, which differs from its own — so a gate that
+  only asks "is this one of mine" arms a solitary cell permanently, and it is `predator.mm` again,
+  paying the dearest upkeep in the catalogue to menace open water. The genome must ask "is anyone
+  there" first. With that line, ninety-nine descendants; without it, none.
+- **A founder is seeded bare-faced.** The badge is inherited, so a *daughter* is dressed before
+  she runs an instruction — but the first cell of a lineage puts its colours on during its first
+  expression cycle, and until then it is a stranger to its own kind. Two founders placed touching
+  kill each other. Every seeding path spreads them, so this costs nothing in practice and would
+  cost everything if it were ever forgotten.
+
 **Still to come**, and deliberately not built yet: colour, which would be reflected rather than
 emitted and so would go dark when the slide does; and an EM signature derived from a cell's
 organelles and how hard it is running them, which is the interesting one because *nobody sets

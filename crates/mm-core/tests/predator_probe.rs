@@ -1155,3 +1155,342 @@ fn is_a_spike_that_can_raise_daughters_still_a_spike() {
         );
     }
 }
+
+/// Whether looking before you stab is worth the sensor it costs.
+///
+/// `predator.mm` had to have its spike turned down to a sixtyfourth to have descendants at all,
+/// because it holds the weapon out permanently and a daughter is born inside its reach.
+/// `sentinel.mm` carries a badge and a touch sensor and asks, every cycle, whether the nearest
+/// thing is wearing what it is wearing — and puts the spike away when it is. It carries the
+/// weapon at the half extension that sterilised the other one.
+///
+/// So: does the discrimination pay for the organelle it takes?
+#[test]
+fn does_telling_kin_from_prey_pay_for_the_eye_that_does_it() {
+    let prey = assemble("ancestor.mm");
+    eprintln!("\nalone in soup.ron from one founder, 2400 ticks:");
+    eprintln!(
+        "{:>16}  {:>6}  {:>5}  {:>7}",
+        "genome", "bytes", "pop", "energy"
+    );
+    for name in ["predator.mm", "sentinel.mm"] {
+        let bytes = assemble(name);
+        let mut world = World::new(scenario("soup.ron")).expect("world");
+        let id = seed(&mut world, &bytes);
+        world.run(2400);
+        let energy = world
+            .cells()
+            .index(id)
+            .map_or(0, |i| world.cells().energy[i] / Q10_ONE);
+        eprintln!(
+            "{name:>16}  {:>6}  {:>5}  {energy:>7}",
+            bytes.len(),
+            world.cells().len()
+        );
+    }
+
+    eprintln!("\none among sixteen prey, 4000 ticks:");
+    eprintln!(
+        "{:>16}  {:>10}  {:>7}  {:>9}",
+        "genome", "of its kind", "others", "carrion"
+    );
+    for name in ["predator.mm", "sentinel.mm"] {
+        let bytes = assemble(name);
+        let mut world = World::new(scenario("soup.ron")).expect("world");
+        let mine = {
+            let id = seed(&mut world, &bytes);
+            world.cells().index(id).map(|i| world.cells().species[i])
+        };
+        let structural = world.biology().structural_chemical;
+        for k in 0..16u32 {
+            let (x, y) = (12 + (k % 4) as i32 * 12, 12 + (k / 4) as i32 * 12);
+            let Ok(g) = world.genomes().intern(prey.clone()) else {
+                continue;
+            };
+            let id = world.spawn_cell(CellSeed {
+                x: pos(x),
+                y: pos(y),
+                mass: q10(30),
+                energy: q10(400),
+                membrane: 24,
+                key: 11,
+                badge: 0,
+                species: 0,
+                parent: CellId::NONE,
+                birth_tick: 0,
+                genome: g,
+            });
+            if let Some(i) = world.cells_mut().index(id) {
+                let cells = world.cells_mut();
+                cells.slots_mut(i)[1] = Organelle::finished(OrganelleType::Nucleus, 64);
+                cells.slots_mut(i)[2] = Organelle::finished(OrganelleType::Mitochondrion, 50);
+                cells.slots_mut(i)[3] = Organelle::finished(OrganelleType::Chloroplast, 60);
+                cells.interior_mut(i)[structural] = q10(200);
+                cells.interior_mut(i)[11] = q10(40);
+                cells.interior_mut(i)[14] = q10(40);
+            }
+        }
+        world.adopt_current_contents_as_baseline();
+        world.run(4000);
+        let ours = world
+            .cells()
+            .iter()
+            .filter(|i| Some(world.cells().species[*i]) == mine)
+            .count();
+        eprintln!(
+            "{name:>16}  {ours:>10}  {:>7}  {:>9}",
+            world.cells().len() - ours,
+            world.total_matter()[mm_core::ecology::CARRION] / i64::from(Q10_ONE),
+        );
+    }
+}
+
+/// Does the friend-or-foe decision actually fire? Measured on the spike, not on the outcome.
+#[test]
+fn a_sentinel_puts_its_spike_away_for_its_own_kind() {
+    let sentinel = assemble("sentinel.mm");
+    let prey = assemble("ancestor.mm");
+
+    for (label, neighbour, badge) in [
+        ("beside its own", &sentinel, 1234u16),
+        ("beside a stranger", &prey, 0),
+    ] {
+        let mut world = World::new(scenario("soup.ron")).expect("world");
+        let watcher = seed(&mut world, &sentinel);
+        // Right next door. `seed` puts its cell at 32,32.
+        let structural = world.biology().structural_chemical;
+        let g = world.genomes().intern(neighbour.clone()).expect("intern");
+        let id = world.spawn_cell(CellSeed {
+            x: pos(33),
+            y: pos(32),
+            mass: q10(30),
+            energy: q10(400),
+            membrane: 24,
+            key: 11,
+            // Wearing what a sentinel wears, when it is one: the badge is inherited, and a
+            // hand-placed cell has to be dressed by hand.
+            badge,
+            species: 0,
+            parent: CellId::NONE,
+            birth_tick: 0,
+            genome: g,
+        });
+        if let Some(i) = world.cells_mut().index(id) {
+            let cells = world.cells_mut();
+            cells.slots_mut(i)[1] = Organelle::finished(OrganelleType::Nucleus, 64);
+            cells.slots_mut(i)[2] = Organelle::finished(OrganelleType::Mitochondrion, 50);
+            cells.slots_mut(i)[3] = Organelle::finished(OrganelleType::Chloroplast, 60);
+            cells.interior_mut(i)[structural] = q10(200);
+            cells.interior_mut(i)[11] = q10(40);
+            cells.interior_mut(i)[14] = q10(40);
+        }
+        world.adopt_current_contents_as_baseline();
+
+        eprintln!("  --- {label} ---");
+        eprintln!("    tick  alive  my badge  spike ext  energy");
+        for tick in 0..400 {
+            world.step();
+            if tick % 50 != 0 {
+                continue;
+            }
+            match world.cells().index(watcher) {
+                Some(i) => eprintln!(
+                    "    {tick:>4}    yes  {:>8}  {:>9}  {:>6}",
+                    world.cells().badge[i],
+                    mm_core::ecology::spike_extension(world.cells(), i),
+                    world.cells().energy[i] / Q10_ONE,
+                ),
+                None => {
+                    eprintln!("    {tick:>4}     no");
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// What the two halves of the friend-or-foe comparison actually read.
+#[test]
+fn what_the_sentinel_sees() {
+    let watcher_src = "
+        EXPRESS #build
+        EXPRESS #dress
+        EXPRESS #eye
+        EXPRESS #look
+        HALT
+        GENE    #build
+        IMM     64
+        IMM     1
+        IMM     1
+        BUILD
+        RET
+        GENE    #dress
+        IMM     4
+        IMM     8
+        SHL
+        IMM     210
+        OR
+        SETBADGE
+        RET
+        GENE    #eye
+        IMM     40
+        IMM     9
+        IMM     7
+        BUILD
+        RET
+        GENE    #look
+        IMM     3
+        IMM     7
+        OGET
+        ZERO
+        RSTORE
+        IMM     21
+        ZERO
+        OGET
+        ONE
+        RSTORE
+        RET
+";
+    let watcher = mm_asm::assemble(watcher_src).expect("assembles").bytes;
+    let prey = assemble("ancestor.mm");
+
+    for (label, badge) in [
+        ("neighbour wearing 1234", 1234u16),
+        ("neighbour wearing 0", 0),
+    ] {
+        let mut world = World::new(scenario("soup.ron")).expect("world");
+        let me = seed(&mut world, &watcher);
+        let structural = world.biology().structural_chemical;
+        let g = world.genomes().intern(prey.clone()).expect("intern");
+        let id = world.spawn_cell(CellSeed {
+            x: pos(33),
+            y: pos(32),
+            mass: q10(30),
+            energy: q10(400),
+            membrane: 24,
+            key: 11,
+            badge,
+            species: 0,
+            parent: CellId::NONE,
+            birth_tick: 0,
+            genome: g,
+        });
+        if let Some(i) = world.cells_mut().index(id) {
+            let cells = world.cells_mut();
+            cells.slots_mut(i)[1] = Organelle::finished(OrganelleType::Nucleus, 64);
+            cells.interior_mut(i)[structural] = q10(200);
+        }
+        world.adopt_current_contents_as_baseline();
+        world.run(80);
+        match world.cells().index(me) {
+            Some(i) => eprintln!(
+                "  {label:<24} neighbour reads {:>6}, own badge reads {:>6}, slot 7 is {:?}",
+                world.cells().vm[i].regs[0],
+                world.cells().vm[i].regs[1],
+                world.cells().slots(i)[7].kind,
+            ),
+            None => eprintln!("  {label:<24} died"),
+        }
+    }
+}
+
+/// Does the badge buy back the weapon?
+///
+/// The cleanest form of the question, with the genome held still. `predator.mm` at half
+/// extension is sterile — it kills every daughter it makes. Take exactly that genome, add a
+/// touch sensor and four instructions that put the spike away when the nearest thing is wearing
+/// what this cell is wearing, and change nothing else. If the badge does what it was built for,
+/// the same weapon at the same extension stops being a sterility switch.
+#[test]
+fn does_a_badge_buy_back_the_weapon() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../genomes/predator.mm");
+    let source = std::fs::read_to_string(&path).expect("genome source");
+    let arm = "        GENE    #arm\n        IMM     80\n        IMM     12              ; spike\n        IMM     5\n        BUILD\n";
+
+    // Half extension, flat, with no way to tell who is in front of it. The sterile control.
+    let blind = source.replace(
+        "        IMM     4\n        IMM     2\n        SHL                     ; 16 — see above; 512 sterilises the lineage",
+        "        IMM     128\n        IMM     2\n        SHL                     ; 512",
+    );
+    // The same, plus an eye and an opinion.
+    let seeing = blind.replace(
+        arm,
+        &format!(
+            "{arm}        IMM     40\n        IMM     9               ; touch sensor\n        IMM     7\n        BUILD\n\
+             \x20       IMM     210\n        SETBADGE\n\
+             \x20       IMM     3\n        IMM     7\n        OGET\n        DUP\n        JMPZ    kin\n\
+             \x20       IMM     21\n        ZERO\n        OGET\n        CMP\n        JMPZ    kin\n"
+        ),
+    ) + "";
+    let seeing = seeing.replace(
+        "        ZERO                    ; control 0 — signed extension\n        IMM     5\n        OSET\n        RET\n",
+        "        ZERO                    ; control 0 — signed extension\n        IMM     5\n        OSET\n        RET\nkin:\n        ZERO\n        ZERO\n        IMM     5\n        OSET\n        RET\n",
+    );
+
+    let mut reached: Vec<usize> = Vec::new();
+    eprintln!("\none founder in soup.ron, 2400 ticks — the weapon held at 512 either way:");
+    eprintln!("{:>28}  {:>6}  {:>5}", "", "bytes", "pop");
+    for (label, text, badge) in [
+        ("blind, spike out at 512", &blind, 0u16),
+        ("the same, plus a badge", &seeing, 210),
+    ] {
+        let bytes = match mm_asm::assemble(text) {
+            Ok(a) => a.bytes,
+            Err(e) => {
+                eprintln!("{label:>28}  does not assemble: {e}");
+                continue;
+            }
+        };
+        let mut world = World::new(scenario("soup.ron")).expect("world");
+        world.set_biology(BiologyConfig {
+            mutation: MutationRates::none(),
+            ..BiologyConfig::default()
+        });
+        let structural = world.biology().structural_chemical;
+        let g = world.genomes().intern(bytes.clone()).expect("intern");
+        let id = world.spawn_cell(CellSeed {
+            x: pos(32),
+            y: pos(32),
+            mass: q10(30),
+            energy: q10(400),
+            membrane: 24,
+            key: 11,
+            badge,
+            species: 0,
+            parent: CellId::NONE,
+            birth_tick: 0,
+            genome: g,
+        });
+        if let Some(i) = world.cells_mut().index(id) {
+            let cells = world.cells_mut();
+            cells.slots_mut(i)[1] = Organelle::finished(OrganelleType::Nucleus, 64);
+            cells.slots_mut(i)[2] = Organelle::finished(OrganelleType::Mitochondrion, 50);
+            cells.slots_mut(i)[3] = Organelle::finished(OrganelleType::Chloroplast, 60);
+            cells.interior_mut(i)[structural] = q10(200);
+            cells.interior_mut(i)[11] = q10(40);
+            cells.interior_mut(i)[14] = q10(40);
+        }
+        world.adopt_current_contents_as_baseline();
+        world.run(2400);
+        eprintln!(
+            "{label:>28}  {:>6}  {:>5}",
+            bytes.len(),
+            world.cells().len()
+        );
+        reached.push(world.cells().len());
+    }
+
+    // Asserted rather than merely printed, because this is the claim the whole badge rests on
+    // and a probe that only prints cannot notice when it stops being true.
+    assert!(
+        reached[0] <= 2,
+        "the blind one bred after all, at {} — the sterility this is measured against is gone",
+        reached[0]
+    );
+    assert!(
+        reached[1] > 20,
+        "a badge stopped buying back the weapon: blind reached {}, seeing reached {}",
+        reached[0],
+        reached[1]
+    );
+}

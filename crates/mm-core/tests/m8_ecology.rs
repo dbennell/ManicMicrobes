@@ -278,13 +278,15 @@ fn a_scavenger_gets_something_out_of_a_corpse() {
 ///
 /// The fragments — `arithmetic.mm`, `scan.mm` and the rest — are VM exercises for the M0 and
 /// M1 tests and are not cells.
-const ORGANISMS: [&str; 6] = [
+const ORGANISMS: [&str; 8] = [
     "ancestor.mm",
     "ancestor_sloppy.mm",
     "drifter.mm",
     "hunter.mm",
     "scavenger.mm",
     "predator.mm",
+    "sentinel.mm",
+    "sponge.mm",
 ];
 
 #[test]
