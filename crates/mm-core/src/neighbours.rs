@@ -486,6 +486,7 @@ impl NeighbourIndex {
                 dx: cells.x[j].saturating_sub(cells.x[i]),
                 dy: cells.y[j].saturating_sub(cells.y[i]),
                 radius: rj,
+                mass: cells.mass[j],
                 overlap,
                 rigidity: cells.slots(j).first().map_or(0, |m| m.param as i32),
             });
@@ -527,6 +528,14 @@ pub struct Contact {
     pub dy: i32,
     /// The neighbour's radius, `POS`.
     pub radius: i32,
+    /// The neighbour's mass, `Q10`.
+    ///
+    /// Carried so a caller that draws cells at a size of its own devising can work the
+    /// neighbour out the same way it works itself out. Without it a front end that smooths the
+    /// radius smooths only its *own* — and then the two cells of a pair compute their shared
+    /// wall from different numbers and stop agreeing where it is, which is the one property the
+    /// whole seam scheme rests on.
+    pub mass: i32,
     /// How far inside each other's reach the two are, `POS`. Always positive, and measured
     /// against whatever reach the caller asked for rather than against bare radii.
     pub overlap: i32,
@@ -1384,6 +1393,7 @@ mod tests {
             dx,
             dy,
             radius: 100,
+            mass: 0,
             overlap,
             rigidity: 24,
         }

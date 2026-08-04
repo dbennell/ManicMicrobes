@@ -285,3 +285,133 @@ fn which_way_does_a_forgotten_neighbour_lie() {
         vanished.len()
     );
 }
+
+/// What the renderer misses because the index is a tick's separation out of date.
+///
+/// `World::step` rebuilds the neighbour index, then runs `resolve_collisions`, which **moves
+/// cells** — and nothing rebuilds it afterwards. So when the frame is published and the renderer
+/// asks `world.neighbours()` for a cell's contacts, the lookup takes the cell's *current* square
+/// and reads buckets filled from its *previous* one. A cell that separation pushed over a square
+/// boundary is filed in the wrong bucket and simply is not found.
+///
+/// Which would show up exactly as reported: never on a settled bench, because separation moves
+/// nothing there; constantly once anything jiggles; and not fixed by raising the slot cap,
+/// because the contact was never offered a slot in the first place.
+///
+/// Measured by asking the same question twice of the same world — once through the index as the
+/// renderer gets it, once through one rebuilt from where the cells actually are.
+#[test]
+fn what_the_stale_index_cannot_see() {
+    let mut world = packed(64, 4000);
+    world.run(1);
+
+    let (w, h) = (world.substrate().width(), world.substrate().height());
+    let mut fresh = NeighbourIndex::default();
+    fresh.rebuild(world.cells(), w, h);
+
+    let cells = world.cells();
+    let (mut missed, mut phantom, mut total) = (0usize, 0usize, 0usize);
+    let mut cells_affected = 0usize;
+    let mut bearing: Vec<(i32, i32)> = Vec::new();
+    for i in cells.iter() {
+        let stale: Vec<(i32, i32)> = world
+            .neighbours()
+            .contacts(cells, i, 1500)
+            .as_slice()
+            .iter()
+            .map(|c| (c.dx, c.dy))
+            .collect();
+        let now: Vec<(i32, i32)> = fresh
+            .contacts(cells, i, 1500)
+            .as_slice()
+            .iter()
+            .map(|c| (c.dx, c.dy))
+            .collect();
+        total += now.len();
+        let mut any = false;
+        for c in &now {
+            if !stale.contains(c) {
+                missed += 1;
+                bearing.push(*c);
+                any = true;
+            }
+        }
+        for c in &stale {
+            if !now.contains(c) {
+                phantom += 1;
+                any = true;
+            }
+        }
+        if any {
+            cells_affected += 1;
+        }
+    }
+    eprintln!(
+        "\n{} cells, {total} contacts as they really are",
+        cells.len()
+    );
+    eprintln!("  the renderer's index misses: {missed}");
+    eprintln!("  and reports as present:      {phantom}  (neighbours that have moved away)");
+    eprintln!("  cells with at least one wrong: {cells_affected}");
+    if !bearing.is_empty() {
+        let up = bearing.iter().filter(|(_, dy)| *dy > 0).count();
+        let down = bearing.iter().filter(|(_, dy)| *dy < 0).count();
+        eprintln!("  the missed ones lie: +y {up}, -y {down}");
+    }
+}
+
+/// Two cells of a pair must compute the same wall. This is the property, checked directly.
+///
+/// The seam is the plane through the two points where the outlines cross, and it depends only on
+/// the two centres and the two radii — so each cell arrives at it independently, and this cell's
+/// face plus its neighbour's must sum to the distance between them. If they do not, the pair is
+/// drawn with a gap or an overlap and no shared edge, whatever else is right.
+///
+/// Worth a test of its own because it is exactly what a change to how the radius is *drawn* can
+/// break without touching anything that looks like seam code: smooth one side and not the other
+/// and the sum stops holding.
+#[test]
+fn both_cells_of_a_pair_agree_where_their_wall_is() {
+    let mut world = packed(64, 4000);
+    world.run(1);
+    let (w, h) = (world.substrate().width(), world.substrate().height());
+    let mut index = NeighbourIndex::default();
+    index.rebuild(world.cells(), w, h);
+    let cells = world.cells();
+
+    // Both cells' drawn radii, as the front end works them out.
+    let drawn = |mass: i32| 0.25 + (mass as f64 / 1024.0).max(0.0).sqrt() * 0.125;
+    const PACKING: f64 = 1.15;
+
+    let at: std::collections::BTreeMap<(i32, i32), usize> = cells
+        .iter()
+        .map(|i| ((cells.x[i], cells.y[i]), i))
+        .collect();
+
+    let (mut checked, mut worst) = (0usize, 0.0f64);
+    for i in cells.iter() {
+        let r = drawn(cells.mass[i]) * PACKING;
+        for c in index.contacts(cells, i, 1500).as_slice() {
+            let Some(&j) = at.get(&(cells.x[i] + c.dx, cells.y[i] + c.dy)) else {
+                continue;
+            };
+            let other = drawn(c.mass) * PACKING;
+            let d = ((c.dx as f64).powi(2) + (c.dy as f64).powi(2)).sqrt() / 256.0;
+            if d <= 0.0 {
+                continue;
+            }
+            // This cell's face, and the same formula from the neighbour's side.
+            let mine = (d * d + r * r - other * other) / (2.0 * d);
+            let theirs = (d * d + other * other - r * r) / (2.0 * d);
+            let _ = j;
+            checked += 1;
+            worst = worst.max((mine + theirs - d).abs());
+        }
+    }
+    eprintln!("\n{checked} pairs checked, worst disagreement {worst:.6} squares");
+    assert!(
+        worst < 1e-4,
+        "the two sides of a wall disagree by {worst} squares — one of them is using a different \
+         radius for the other than the other uses for itself"
+    );
+}

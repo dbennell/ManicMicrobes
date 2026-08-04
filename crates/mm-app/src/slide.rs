@@ -344,7 +344,12 @@ fn squash_of(world: &World, i: usize, radius: f32) -> (Vec<Squash>, f32) {
             if d <= f32::EPSILON {
                 return None;
             }
-            let other = c.radius as f32 * scale * PACKING;
+            // The neighbour's drawn radius, worked out the same way this cell's is — see
+            // `drawn_radius`. Reading `c.radius` here instead is what a smoothed radius makes
+            // wrong: this cell would use the smooth curve for itself and the staircase for its
+            // neighbour, the neighbour would do the reverse, and the pair would compute two
+            // different planes for one wall.
+            let other = drawn_radius(c.mass) * PACKING;
             // The plane through the two points where the outlines cross:
             //   face = (d² + r² - other²) / 2d
             // Both cells get the same seam from their own side, because swapping r and other
