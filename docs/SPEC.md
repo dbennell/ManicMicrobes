@@ -761,6 +761,14 @@ nothing to the ledger — if it ever became a charge, going quiet would be a sav
 would stop being a sacrifice. And it is snapshot state rather than scratch, because it is written
 during one tick and read by the next tick's sense phase: the same trap `pressure` fell into.
 
+**It is a homing sense and not a searching one**, and that bounds what can be built on it.
+`em_range` is six squares. `genomes/stalker.mm` connects the metabolic gradient to two cilia on
+perpendicular mounts — the four instructions `drifter.mm` deliberately lacks — and started five
+squares from a crowd of nine it closes to **one** square in a hundred and twenty ticks, where the
+identical body swimming blind ends **eighteen** away. Started twenty squares out it reads a
+gradient of exactly zero and sits perfectly still, which is the honest answer: it finds what is
+already near, and to find what is far something would have to search first.
+
 **No organelle emits it, and that is the point.** If radiating needed something built, a cell
 could opt out of being seen by not building it, which is exactly the forgery this channel exists
 to exclude. Deliberate light — a photophore, brightness on a control word — is a *different* and
