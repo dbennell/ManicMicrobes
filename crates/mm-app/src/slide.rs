@@ -479,6 +479,11 @@ pub struct Frame {
     /// particulate rather than dissolved — so specks drawn at the water's speed would be a
     /// picture of the wrong thing, and would say the current carries food faster than it does.
     pub detritus_drift: f32,
+    /// The sources and drains in force, so the view can show where they are.
+    ///
+    /// A source is an area of water that behaves differently and has nothing to see until it has
+    /// filled up, so an unmarked one is a thing you placed and can never find again.
+    pub flux: Vec<mm_core::Flux>,
     /// The barrier mask, one entry per square, or empty on a slide with no barriers.
     ///
     /// Until this existed the renderer was never told where the walls were, so a barrier was
@@ -1152,6 +1157,7 @@ impl Slide {
             detritus,
             detritus_drift: table.advection_rates()[mm_core::ecology::DETRITUS] as f32
                 / Q10_ONE as f32,
+            flux: self.world.scenario().flux.clone(),
             barriers,
             population: cells.len(),
             lod: self.lod,

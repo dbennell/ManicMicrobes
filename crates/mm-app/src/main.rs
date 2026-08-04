@@ -369,6 +369,7 @@ fn arrange(spec: &str, sim: &mut SlideRes, view: &mut View) {
                 sim.select(first);
                 view.panels.set(Panel::Genome, true);
             }
+            "toolbox" => view.panels.set(Panel::Toolbox, true),
             "ecology" => {
                 view.panels.set(Panel::Ecology, true);
                 view.ecology = match sub {
@@ -456,6 +457,20 @@ const FLOW_FLOOR: f32 = 0.002;
 /// A quarter of a square per step is `fluid::MAX_VELOCITY`, the fastest the solver allows, so
 /// the brightest arrow on screen is water at the engine's own ceiling.
 const FLOW_FULL: f32 = 0.25;
+
+/// Every tool and its key, in one list so the menu and the toolbox cannot disagree.
+const TOOLS: [(Tool, &str); 10] = [
+    (Tool::Select, "F1"),
+    (Tool::Move, "F2"),
+    (Tool::Remove, "F3"),
+    (Tool::DrawBarrier, "F4"),
+    (Tool::EraseBarrier, "F5"),
+    (Tool::Paint, "F6"),
+    (Tool::Unpaint, "F7"),
+    (Tool::Source, "F8"),
+    (Tool::Drain, "F9"),
+    (Tool::PlaceCell, "F10"),
+];
 
 /// Roughly how far apart the specks of suspended particulate are drawn, in pixels.
 ///
@@ -728,6 +743,46 @@ impl SlideRes {
     fn new_slide(&mut self, size: u32, founders: u32) {
         let held = self.engine.handle();
         seed_ancestors(&mut held.slide(), size, founders);
+        self.selected = None;
+        self.engine.select(None);
+        self.sandbox = None;
+        self.breakpoints.rearm();
+    }
+
+    /// An empty slide, stopped, for building a scenario on.
+    ///
+    /// Not `new_slide` with a founder count of zero. That gives a petri dish — lit, and seeded
+    /// with the three chemicals a cell needs — which is a fine place to *run* something and the
+    /// wrong place to *author* one: everything you then paint is on top of a uniform wash you
+    /// did not ask for and cannot see, and the saved scenario carries it.
+    ///
+    /// Stopped, because authoring a slide that is running means placing a cell into a current
+    /// and watching it leave. The tools all work on a stopped world — that is what the pause
+    /// was built to allow.
+    fn new_scenario(&mut self, size: u32) {
+        let blank = Scenario {
+            name: "untitled".to_string(),
+            seed: 1,
+            width: size,
+            height: size,
+            light: LightRegime::Uniform {
+                intensity: mm_core::Q10_ONE,
+            },
+            current: CurrentField::Still,
+            ..Scenario::default()
+        };
+        {
+            let held = self.engine.handle();
+            let mut slide = held.slide();
+            match mm_core::World::new(blank) {
+                Ok(w) => slide.set_world(w),
+                Err(e) => {
+                    eprintln!("cannot make a {size}-square slide: {e:?}");
+                    return;
+                }
+            }
+        }
+        self.engine.set_rate(Rate::Paused);
         self.selected = None;
         self.engine.select(None);
         self.sandbox = None;
@@ -1117,6 +1172,18 @@ struct View {
     /// samples. Keeping where the stroke was lets the next sample fill the gap — see
     /// [`ui::line_squares`].
     paint_from: Option<(i32, i32)>,
+    /// Which chemical the brush and the flux tools are loaded with.
+    load: usize,
+    /// How much the brush puts in one square per stamp, and what a new source puts in per step.
+    dose: i32,
+    /// What fraction a new drain takes per step, `Q10`.
+    drain_rate: i32,
+    /// Where a flux rectangle was started, while the button is still down.
+    flux_from: Option<(i32, i32)>,
+    /// Which genome the cell-placing tool drops, by file name in `genomes/`.
+    place_genome: String,
+    /// How many it drops at once.
+    place_count: u32,
     /// Which species page is open.
     species: Option<mm_core::phylogeny::SpeciesId>,
     /// Which of the ecology pane's three views is showing (M10.4).
@@ -1160,6 +1227,14 @@ impl Default for View {
             tool_focus: ui::Focus::default(),
             brush: ui::BRUSH_DEFAULT,
             paint_from: None,
+            // Carbon: the thing a cell builds itself out of, and so the one a slide is most
+            // often short of.
+            load: 4,
+            dose: mm_core::fixed::q10(100),
+            drain_rate: mm_core::Q10_ONE / 8,
+            flux_from: None,
+            place_genome: "ancestor.mm".to_string(),
+            place_count: 1,
             species: None,
             ecology: Ecology::Tree,
             tree_floor: 2,
@@ -1181,6 +1256,16 @@ enum Tool {
     Remove,
     DrawBarrier,
     EraseBarrier,
+    /// Paint chemistry into the water. Matter from outside the world, through the ledger.
+    Paint,
+    /// Take it out again. Matter *leaving*, not matter ceasing to exist.
+    Unpaint,
+    /// Drag a rectangle that supplies chemistry every step.
+    Source,
+    /// Drag a rectangle that lets it off the slide every step.
+    Drain,
+    /// Drop founders of a chosen genome where you point.
+    PlaceCell,
 }
 
 impl Tool {
@@ -1191,7 +1276,17 @@ impl Tool {
             Tool::Remove => "remove",
             Tool::DrawBarrier => "wall",
             Tool::EraseBarrier => "erase",
+            Tool::Paint => "paint",
+            Tool::Unpaint => "unpaint",
+            Tool::Source => "source",
+            Tool::Drain => "drain",
+            Tool::PlaceCell => "seed",
         }
+    }
+
+    /// Whether this tool works by dragging a rectangle rather than by clicking or stroking.
+    fn is_rect(self) -> bool {
+        matches!(self, Tool::Source | Tool::Drain)
     }
 }
 
@@ -1210,6 +1305,10 @@ struct Suspended(usize);
 
 #[derive(Component)]
 struct FlowArrow(usize);
+
+/// One edge of a source or drain rectangle, four to a flux.
+#[derive(Component)]
+struct FluxMark(usize);
 
 /// The per-cell data the shader reads, beyond position, corner and colour.
 ///
@@ -1680,6 +1779,11 @@ fn keyboard(keys: &ButtonInput<KeyCode>, view: &mut View, sim: &mut SlideRes) {
         (KeyCode::F3, Tool::Remove),
         (KeyCode::F4, Tool::DrawBarrier),
         (KeyCode::F5, Tool::EraseBarrier),
+        (KeyCode::F6, Tool::Paint),
+        (KeyCode::F7, Tool::Unpaint),
+        (KeyCode::F8, Tool::Source),
+        (KeyCode::F9, Tool::Drain),
+        (KeyCode::F10, Tool::PlaceCell),
     ] {
         if keys.just_pressed(key) {
             view.tool = tool;
@@ -1707,6 +1811,7 @@ fn panel_key(panel: Panel) -> KeyCode {
         Panel::Parameters => KeyCode::Comma,
         Panel::Editor => KeyCode::KeyE,
         Panel::Debugger => KeyCode::KeyD,
+        Panel::Toolbox => KeyCode::KeyT,
     }
 }
 
@@ -1813,7 +1918,10 @@ fn handle_mouse(
     // `archipelago.ron` — about a hundred and fifty squares — was a hundred and fifty separate
     // right-clicks, each taking the simulation lock and each re-running the ring eviction that
     // pushes the square's chemistry outwards. It was the single reason the tool was unusable.
-    let painting = matches!(view.tool, Tool::DrawBarrier | Tool::EraseBarrier);
+    let painting = matches!(
+        view.tool,
+        Tool::DrawBarrier | Tool::EraseBarrier | Tool::Paint | Tool::Unpaint
+    );
     let tool_target = view.tool_focus.resolve(live_target);
     if painting && buttons.pressed(MouseButton::Right) && tool_target == Target::Slide {
         if let Some((slide_x, slide_y)) = pointer_on_slide(window, view, scale) {
@@ -1821,6 +1929,7 @@ fn handle_mouse(
             // From wherever the stroke was, or from here if it has only just begun.
             let from = view.paint_from.unwrap_or(to);
             if view.paint_from != Some(to) {
+                let chemistry = matches!(view.tool, Tool::Paint | Tool::Unpaint);
                 let draw = view.tool == Tool::DrawBarrier;
                 // The whole stroke segment, brush and all, gathered before the lock is taken:
                 // `World::set_barriers` rebuilds the fluid's edge masks once for the batch, and
@@ -1835,7 +1944,32 @@ fn handle_mouse(
                         }
                     }
                 }
-                if !squares.is_empty() {
+                if !squares.is_empty() && chemistry {
+                    // Through `World::inject`/`extract`, never `substrate_mut().add_chem`:
+                    // matter from outside the world has to reach the ledger, and a metabolic
+                    // substrate brings its energy with it.
+                    let add = view.tool == Tool::Paint;
+                    let (mut moved, c, dose) = (0i64, view.load, view.dose);
+                    let held = sim.engine.handle();
+                    let mut slide = held.slide();
+                    let world = slide.world_mut();
+                    for (x, y) in &squares {
+                        moved += i64::from(if add {
+                            world.inject(c, *x as i32, *y as i32, dose)
+                        } else {
+                            world.extract(c, *x as i32, *y as i32, dose)
+                        });
+                    }
+                    let name = sim
+                        .chem_names
+                        .get(c)
+                        .cloned()
+                        .unwrap_or_else(|| c.to_string());
+                    sim.last_tool = Some(tools::ToolEvent::Refused(format!(
+                        "{} {moved} {name}",
+                        if add { "added" } else { "removed" }
+                    )));
+                } else if !squares.is_empty() {
                     let held = sim.engine.handle();
                     held.slide().world_mut().set_barriers(&squares, draw);
                     sim.last_tool = Some(if draw {
@@ -1884,8 +2018,86 @@ fn handle_mouse(
                         }
                     }
                 }
+                Tool::PlaceCell => {
+                    // Founders of a named genome, where you point. The genome is a *name*
+                    // because that is what a scenario can write down — a cell dropped from a
+                    // file the scenario can also name is a cell the saved slide will have.
+                    match genome_bytes(&view.place_genome) {
+                        Some(bytes) => {
+                            let n = view.place_count.max(1);
+                            let at = (square.0.max(0) as u32, square.1.max(0) as u32);
+                            let mut slide = held.slide();
+                            let world = slide.world_mut();
+                            let placed = world.place_founders_at(&bytes, n, Some(at));
+                            world.note_inhabitant(&view.place_genome, placed, at);
+                            sim.last_tool = Some(tools::ToolEvent::Refused(format!(
+                                "seeded {placed} × {}",
+                                view.place_genome
+                            )));
+                        }
+                        None => {
+                            sim.last_tool = Some(tools::ToolEvent::Refused(format!(
+                                "{} did not assemble",
+                                view.place_genome
+                            )))
+                        }
+                    }
+                }
                 // Painted above, for as long as the button is held, rather than once here.
-                Tool::DrawBarrier | Tool::EraseBarrier => {}
+                Tool::DrawBarrier | Tool::EraseBarrier | Tool::Paint | Tool::Unpaint => {}
+                // Dragged: the press only marks the corner. See below.
+                Tool::Source | Tool::Drain => {}
+            }
+        }
+    }
+
+    // The rectangle tools. A source is an *area* rather than a point, so it is dragged: the
+    // press marks one corner, the release the other, and nothing is committed until the button
+    // comes up — which means a drag that started by accident can be abandoned by dragging back
+    // onto its own corner.
+    if view.tool.is_rect() && tool_target == Target::Slide {
+        if buttons.just_pressed(MouseButton::Right) {
+            view.flux_from = pointer_on_slide(window, view, scale)
+                .map(|(x, y)| (x.floor() as i32, y.floor() as i32));
+        }
+        if buttons.just_released(MouseButton::Right) {
+            if let (Some(from), Some((sx, sy))) =
+                (view.flux_from.take(), pointer_on_slide(window, view, scale))
+            {
+                let to = (sx.floor() as i32, sy.floor() as i32);
+                let (x0, y0) = (from.0.min(to.0).max(0), from.1.min(to.1).max(0));
+                let (x1, y1) = (from.0.max(to.0).max(0), from.1.max(to.1).max(0));
+                let (w, h) = ((x1 - x0 + 1) as u32, (y1 - y0 + 1) as u32);
+                let f = if view.tool == Tool::Source {
+                    mm_core::Flux::Source {
+                        chemical: view.load,
+                        x: x0 as u32,
+                        y: y0 as u32,
+                        width: w,
+                        height: h,
+                        per_tick: view.dose,
+                    }
+                } else {
+                    mm_core::Flux::Drain {
+                        chemical: view.load,
+                        x: x0 as u32,
+                        y: y0 as u32,
+                        width: w,
+                        height: h,
+                        rate: view.drain_rate,
+                    }
+                };
+                let held = sim.engine.handle();
+                held.slide().world_mut().add_flux(f);
+                let name = sim
+                    .chem_names
+                    .get(view.load)
+                    .cloned()
+                    .unwrap_or_else(|| view.load.to_string());
+                sim.last_tool = Some(tools::ToolEvent::Refused(format!(
+                    "{} of {name}, {w}×{h}",
+                    view.tool.name()
+                )));
             }
         }
     }
@@ -1999,6 +2211,7 @@ fn redraw(
             Without<JunctionSprite>,
             Without<FlowArrow>,
             Without<Suspended>,
+            Without<FluxMark>,
         ),
     >,
     mut barrier_quad: Query<
@@ -2010,6 +2223,7 @@ fn redraw(
             Without<JunctionSprite>,
             Without<FlowArrow>,
             Without<Suspended>,
+            Without<FluxMark>,
         ),
     >,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -2022,6 +2236,7 @@ fn redraw(
             Without<JunctionSprite>,
             Without<FlowArrow>,
             Without<Suspended>,
+            Without<FluxMark>,
         ),
     >,
     mut junctions: Query<
@@ -2032,6 +2247,7 @@ fn redraw(
             Without<MoteSprite>,
             Without<FlowArrow>,
             Without<Suspended>,
+            Without<FluxMark>,
         ),
     >,
     mut arrows: Query<
@@ -2042,6 +2258,7 @@ fn redraw(
             Without<MoteSprite>,
             Without<JunctionSprite>,
             Without<Suspended>,
+            Without<FluxMark>,
         ),
     >,
     mut specks: Query<
@@ -2052,6 +2269,18 @@ fn redraw(
             Without<MoteSprite>,
             Without<JunctionSprite>,
             Without<FlowArrow>,
+            Without<FluxMark>,
+        ),
+    >,
+    mut flux_marks: Query<
+        (&FluxMark, &mut Sprite, &mut Transform),
+        (
+            Without<FieldQuad>,
+            Without<BarrierQuad>,
+            Without<MoteSprite>,
+            Without<JunctionSprite>,
+            Without<FlowArrow>,
+            Without<Suspended>,
         ),
     >,
 ) {
@@ -2380,6 +2609,84 @@ fn redraw(
         // Above the field and below the walls at 0.25: the particulate is in the water, and
         // the water is under everything solid.
         transform.translation = at.with_z(0.2);
+    }
+
+    // Sources and drains, outlined where they are.
+    //
+    // An outline rather than a wash, and the distinction is the whole point: a filled rectangle
+    // in the chemical's colour is indistinguishable from the chemical overlay reading high
+    // there, which is exactly the confusion to avoid — a source is a *cause* and the overlay is
+    // the *effect*, and a source that has not run yet must still be visible.
+    //
+    // Four edge sprites each, so the water inside is unobscured.
+    let mut edges: Vec<(Vec3, Vec2, [f32; 3], f32)> = Vec::new();
+    for f in &frame.flux {
+        let (c, x, y, w, h, source) = match f {
+            mm_core::Flux::Source {
+                chemical,
+                x,
+                y,
+                width,
+                height,
+                ..
+            } => (*chemical, *x, *y, *width, *height, true),
+            mm_core::Flux::Drain {
+                chemical,
+                x,
+                y,
+                width,
+                height,
+                ..
+            } => (*chemical, *x, *y, *width, *height, false),
+        };
+        let a = to_screen(x as f32, y as f32);
+        let b = to_screen((x + w) as f32, (y + h) as f32);
+        let (x0, x1) = (a.x.min(b.x), a.x.max(b.x));
+        let (y0, y1) = (a.y.min(b.y), a.y.max(b.y));
+        if x1 < cull.min_x || x0 > cull.max_x || y1 < cull.min_y || y0 > cull.max_y {
+            continue;
+        }
+        let rgb = sim.chem_colours.get(c).copied().unwrap_or([200, 200, 200]);
+        // A source is drawn in its chemical's own colour; a drain in the same hue held back, so
+        // the pair reads as "this one gives, this one takes" without needing a legend.
+        let dim = if source { 1.0 } else { 0.45 };
+        let tint = [
+            rgb[0] as f32 / 255.0 * dim,
+            rgb[1] as f32 / 255.0 * dim,
+            rgb[2] as f32 / 255.0 * dim,
+        ];
+        let thick = if source { 2.0 } else { 1.5 };
+        let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+        let (width, height) = (x1 - x0, y1 - y0);
+        for (at, size) in [
+            (Vec3::new(cx, y0, 0.0), Vec2::new(width, thick)),
+            (Vec3::new(cx, y1, 0.0), Vec2::new(width, thick)),
+            (Vec3::new(x0, cy, 0.0), Vec2::new(thick, height)),
+            (Vec3::new(x1, cy, 0.0), Vec2::new(thick, height)),
+        ] {
+            edges.push((at, size, tint, if source { 0.9 } else { 0.7 }));
+        }
+    }
+    for i in flux_marks.iter().count()..edges.len() {
+        commands.spawn((
+            FluxMark(i),
+            Sprite {
+                color: Color::NONE,
+                custom_size: Some(Vec2::splat(1.0)),
+                ..default()
+            },
+        ));
+    }
+    for (marker, mut sprite, mut transform) in &mut flux_marks {
+        let Some((at, size, rgb, alpha)) = edges.get(marker.0).copied() else {
+            sprite.color = Color::NONE;
+            continue;
+        };
+        sprite.color = Color::srgba(rgb[0], rgb[1], rgb[2], alpha);
+        sprite.custom_size = Some(size);
+        // Above the walls, because a source drawn over a barrier is a source you can see is
+        // pointed at one.
+        transform.translation = at.with_z(0.28);
     }
 
     // Cells: the whole population as one mesh, one material, one draw call (M10.5).
@@ -2803,6 +3110,35 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                         ui.close();
                     }
                 });
+                ui.menu_button("New scenario…", |ui| {
+                    ui.label("an empty slide, stopped, to build one on");
+                    ui.small(
+                        "No light gradient, no chemistry, no walls, nobody home. Paint what \
+                         you want on it with the tools, seed it, then Save below — and what \
+                         comes back when you open it is what you built.",
+                    );
+                    ui.add(
+                        egui::DragValue::new(&mut view.new_size)
+                            .speed(4.0)
+                            .range(16..=1024)
+                            .prefix("size "),
+                    );
+                    ui.separator();
+                    if ui
+                        .button("Create")
+                        .on_hover_text("throws away what is on the slide now")
+                        .clicked()
+                    {
+                        let size = view.new_size;
+                        sim.new_scenario(size);
+                        view.centre = Vec2::splat(size as f32 / 2.0);
+                        view.zoom = (BASE_SCALE * 6.0 / size as f32).clamp(0.05, 40.0);
+                        // Straight into the tool you need first: a blank slide is a slide with
+                        // nothing to select.
+                        view.tool = Tool::Paint;
+                        ui.close();
+                    }
+                });
                 ui.menu_button("Scenario library", |ui| {
                     let found = library::scenarios();
                     if found.is_empty() {
@@ -2850,11 +3186,19 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                     ui.text_edit_singleline(&mut view.file_path);
                     if ui.button("Save").clicked() {
                         let path = std::path::PathBuf::from(view.file_path.trim());
-                        let scenario = {
+                        let mut scenario = {
                             let held = sim.engine.handle();
                             let slide = held.slide();
                             slide.world().scenario().clone()
                         };
+                        // A slide built from `New scenario…` is still called "untitled", and a
+                        // library full of untitleds is a library you cannot read. The file name
+                        // is the one thing the author has definitely already chosen.
+                        if scenario.name == "untitled" {
+                            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                                scenario.name = stem.replace('_', " ");
+                            }
+                        }
                         view.file_note = Some(match library::save(&path, &scenario) {
                             Ok(written) => Ok(format!("wrote {}", written.display())),
                             Err(e) => Err(e.to_string()),
@@ -3063,13 +3407,7 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
             });
 
             ui.menu_button("Tools", |ui| {
-                for (tool, key) in [
-                    (Tool::Select, "F1"),
-                    (Tool::Move, "F2"),
-                    (Tool::Remove, "F3"),
-                    (Tool::DrawBarrier, "F4"),
-                    (Tool::EraseBarrier, "F5"),
-                ] {
+                for (tool, key) in TOOLS {
                     if ui
                         .add(
                             egui::Button::new(tool.name())
@@ -3083,18 +3421,17 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                     }
                 }
                 ui.separator();
-                // Not closed on change, unlike the buttons above: a width is something you
-                // adjust and look at, and a menu that shut on the first drag would have to be
-                // reopened for every squares' worth.
-                ui.add(
-                    egui::Slider::new(&mut view.brush, ui::BRUSH_MIN..=ui::BRUSH_MAX)
-                        .text("thickness"),
-                )
-                .on_hover_text(
-                    "how wide a stroke of the wall and erase tools is, in substrate \
-                     squares. The eraser is the same width as the pen, so it can always \
-                     take back what the pen just drew.",
-                );
+                // The settings live in the toolbox panel, not here. A menu closes the moment
+                // you click the slide, so a dose adjusted from a menu costs open-change-close
+                // for every stroke — see `Panel::Toolbox`.
+                if ui
+                    .add(egui::Button::new("Toolbox…").shortcut_text("T"))
+                    .on_hover_text("what the tools are loaded with, and the sources on the slide")
+                    .clicked()
+                {
+                    view.panels.set(Panel::Toolbox, true);
+                    ui.close();
+                }
             });
 
             ui.menu_button("Help", |ui| {
@@ -3107,7 +3444,7 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                     ("1–9", "chemical overlays"),
                     ("[ ]", "step one overlay at a time"),
                     ("v", "flow field"),
-                    ("F1–F5", "tools"),
+                    ("F1–F10", "tools"),
                     ("drag", "pan the slide"),
                     ("wheel", "zoom about the pointer"),
                     ("click", "select a cell"),
@@ -3281,6 +3618,7 @@ fn drawer(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
             match showing {
                 Panel::Genome => genome_body(ui, sim, view),
                 Panel::Ecology => ecology_body(ui, sim, view),
+                Panel::Toolbox => toolbox_body(ui, sim, view),
                 Panel::Parameters => parameters_body(ui, sim),
                 Panel::Editor => editor_body(ui, sim),
                 Panel::Debugger => debugger_body(ui, sim),
@@ -3387,6 +3725,167 @@ fn token_colour(kind: mm_asm::highlight::TokenKind) -> egui::Color32 {
         T::Unknown => ink_colour(Ink::Miss, false),
         T::Comment => egui::Color32::from_gray(105),
         T::Space => ink_colour(Ink::Note, false),
+    }
+}
+
+/// The tools and what they are loaded with (`docs/UI.md` §4).
+///
+/// A panel rather than a menu. These began in the Tools menu and it does not work: a menu closes
+/// the moment you click the slide, so adjusting a dose between strokes was open, change, close,
+/// paint, open again. Anything you adjust *while* working has to stay on screen while you work,
+/// and building a slide is nothing but adjusting and working.
+fn toolbox_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
+    egui::ScrollArea::vertical()
+        .id_salt("toolbox")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for (tool, key) in TOOLS {
+                    if ui
+                        .add(
+                            egui::Button::new(tool.name())
+                                .shortcut_text(key)
+                                .selected(view.tool == tool),
+                        )
+                        .clicked()
+                    {
+                        view.tool = tool;
+                    }
+                }
+            });
+            ui.small("right-click the slide to use the selected tool; drag to pan.");
+            ui.add_space(6.0);
+            ui.separator();
+
+            ui.add(
+                egui::Slider::new(&mut view.brush, ui::BRUSH_MIN..=ui::BRUSH_MAX).text("thickness"),
+            )
+            .on_hover_text(
+                "how wide a stroke of the wall, erase, paint and unpaint tools is, in \
+                 substrate squares. The eraser is the same width as the pen, so it can always \
+                 take back what the pen just drew.",
+            );
+
+            ui.add_space(6.0);
+            ui.label("chemistry");
+            ui.small(
+                "One chemical for all four of paint, unpaint, source and drain — they are four \
+                 things you do to a chemical, and four separate settings would be four places \
+                 to notice you had the wrong one.",
+            );
+            ui.horizontal_wrapped(|ui| {
+                egui::ComboBox::from_id_salt("tool chemical")
+                    .selected_text(
+                        sim.chem_names
+                            .get(view.load)
+                            .cloned()
+                            .unwrap_or_else(|| view.load.to_string()),
+                    )
+                    .show_ui(ui, |ui| {
+                        for (i, name) in sim.chem_names.iter().enumerate() {
+                            ui.selectable_value(&mut view.load, i, name);
+                        }
+                    });
+                ui.add(
+                    egui::DragValue::new(&mut view.dose)
+                        .speed(256.0)
+                        .range(0..=1_000_000)
+                        .prefix("dose "),
+                )
+                .on_hover_text(
+                    "how much one stamp of the brush puts in a square, and how much a new \
+                     source supplies per step. 1024 is one unit.",
+                );
+            });
+            ui.add(
+                egui::Slider::new(&mut view.drain_rate, 1..=mm_core::Q10_ONE)
+                    .text("drain")
+                    .logarithmic(true),
+            )
+            .on_hover_text(
+                "what share of a square a new drain takes each step, out of 1024. A fraction \
+                 rather than an amount, so a drain settles into balance with whatever reaches \
+                 it instead of scouring the slide dry.",
+            );
+
+            ui.add_space(6.0);
+            ui.label("seeding");
+            ui.horizontal_wrapped(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut view.place_genome)
+                        .desired_width(140.0)
+                        .hint_text("ancestor.mm"),
+                )
+                .on_hover_text("a file in genomes/. The seed tool drops founders of it.");
+                ui.add(
+                    egui::DragValue::new(&mut view.place_count)
+                        .speed(0.2)
+                        .range(1..=64)
+                        .prefix("× "),
+                );
+            });
+
+            // The flux already on the slide. Listing them is the only way to *find* one: a
+            // source is an area of water that behaves differently, and until it has filled up
+            // there is nothing there to see but its outline.
+            let flux = {
+                let held = sim.engine.handle();
+                let slide = held.slide();
+                slide.world().flux().to_vec()
+            };
+            ui.add_space(6.0);
+            ui.separator();
+            ui.label("sources and drains");
+            if flux.is_empty() {
+                ui.small("none. Pick source or drain and drag a rectangle on the slide.");
+            }
+            let mut remove = None;
+            for (i, f) in flux.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    if ui.small_button("x").on_hover_text("remove").clicked() {
+                        remove = Some(i);
+                    }
+                    ui.small(describe_flux(f, &sim.chem_names));
+                });
+            }
+            if let Some(i) = remove {
+                let held = sim.engine.handle();
+                held.slide().world_mut().remove_flux(i);
+            }
+        });
+}
+
+/// One line describing a source or a drain, for the list that lets you delete it.
+fn describe_flux(f: &mm_core::Flux, names: &[String]) -> String {
+    let named = |c: usize| {
+        names
+            .get(c)
+            .cloned()
+            .unwrap_or_else(|| format!("chemical {c}"))
+    };
+    match f {
+        mm_core::Flux::Source {
+            chemical,
+            x,
+            y,
+            width,
+            height,
+            per_tick,
+        } => format!(
+            "source · {} · {width}×{height} at {x},{y} · {per_tick}/step",
+            named(*chemical)
+        ),
+        mm_core::Flux::Drain {
+            chemical,
+            x,
+            y,
+            width,
+            height,
+            rate,
+        } => format!(
+            "drain · {} · {width}×{height} at {x},{y} · {rate}/1024 per step",
+            named(*chemical)
+        ),
     }
 }
 

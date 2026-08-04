@@ -1273,8 +1273,45 @@ impl World {
                     .metabolism
                     .latent_in(&self.scenario.chemicals, c, i64::from(moved));
             self.ledger.import(latent);
+            self.note_seeding(c, x, y, moved);
         }
         moved
+    }
+
+    /// Keep `scenario.seeding` in step with chemistry put on the slide by hand.
+    ///
+    /// The same argument as `record_barriers`: chemistry painted into the substrate and nowhere
+    /// else is chemistry that vanishes when the scenario is saved and opened again, and what a
+    /// scenario *is* is a recipe for a slide — so anything a hand did to the slide belongs in it.
+    ///
+    /// Merged per square rather than appended, so leaning on the brush over one patch is one
+    /// entry that grows and not ten thousand that say the same thing.
+    fn note_seeding(&mut self, c: usize, x: i32, y: i32, delta: i32) {
+        let (w, h) = (self.substrate.width(), self.substrate.height());
+        if x < 0 || y < 0 || x as u32 >= w || y as u32 >= h {
+            return;
+        }
+        let (x, y) = (x as u32, y as u32);
+        if let Some(i) = self.scenario.seeding.iter().position(|s| {
+            matches!(s, crate::Seeding::Spike { chemical, x: sx, y: sy, .. }
+                if *chemical == c && *sx == x && *sy == y)
+        }) {
+            if let crate::Seeding::Spike { amount, .. } = &mut self.scenario.seeding[i] {
+                *amount = amount.saturating_add(delta);
+                if *amount <= 0 {
+                    self.scenario.seeding.remove(i);
+                }
+            }
+            return;
+        }
+        if delta > 0 {
+            self.scenario.seeding.push(crate::Seeding::Spike {
+                chemical: c,
+                x,
+                y,
+                amount: delta,
+            });
+        }
     }
 
     /// Take matter out of a square, off the slide. Returns what actually left.
@@ -1296,8 +1333,40 @@ impl World {
                     .metabolism
                     .latent_in(&self.scenario.chemicals, c, i64::from(moved));
             self.ledger.export(latent);
+            self.note_seeding(c, x, y, -moved);
         }
         moved
+    }
+
+    /// Write a hand-placed founder into the scenario's inhabitant list.
+    ///
+    /// Placing a cell puts it on the slide; this is what makes the slide able to *say* so, and
+    /// the two are separate because they are separate claims. `place_founders_at` changes the
+    /// world; this changes the recipe.
+    ///
+    /// Note what a scenario is, because it is easy to expect otherwise: it is a starting
+    /// condition and not a state. Saving one mid-run writes down the founders that were placed,
+    /// not the population that grew from them — for the world as it stands there is
+    /// `Snapshot`. A repeat placement of the same genome on the same square adds to the count
+    /// rather than making a second entry, so leaning on the button reads as "twelve here".
+    pub fn note_inhabitant(&mut self, genome: &str, count: u32, at: (u32, u32)) {
+        if count == 0 {
+            return;
+        }
+        if let Some(existing) = self
+            .scenario
+            .inhabitants
+            .iter_mut()
+            .find(|i| i.genome == genome && i.at == Some(at))
+        {
+            existing.count = existing.count.saturating_add(count);
+            return;
+        }
+        self.scenario.inhabitants.push(crate::Inhabitant {
+            genome: genome.to_string(),
+            count,
+            at: Some(at),
+        });
     }
 
     /// The sources and drains in force. See [`crate::Flux`].

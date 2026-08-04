@@ -332,6 +332,70 @@ says it. Closing it means `Intervention` growing beyond `BiologyConfig`, which b
 snapshot format and touches the diff view that reconstructs "what changed"; that is its own
 piece of work and it is the next one this section owes.
 
+### Building a slide: the toolbox and `New scenario…`
+
+Setting an experiment up is half of what this is for, and until now the only slide you could
+build in the front end was one with walls on it. Everything else — the chemistry, the sources,
+who lives there — was a `.ron` and a text editor.
+
+The tools are `Select, Move, Remove, DrawBarrier, EraseBarrier, Paint, Unpaint, Source, Drain,
+PlaceCell`, on `F1`–`F10`. The last five are the new ones. `Paint` and `Unpaint` stroke like the
+wall tools do, at the same brush width; `Source` and `Drain` are dragged as rectangles, because a
+flux is an area and clicking a point cannot say how big; `PlaceCell` drops founders of a named
+genome where you point.
+
+**Every one of them goes through `World`, never through `substrate_mut()`.** `World::inject` and
+`World::extract` put matter in and take it out through the ledger, in both currencies. The
+spelling that skips them compiles, works, and puts the world's books out by exactly the energy in
+whatever you painted — which the next tick's I5 check would report as a failure somewhere else
+entirely. A tool is a mechanism like any other and gets no exemption.
+
+#### The settings are a panel because a menu closes
+
+They started in the Tools menu, which is where the brush width already lived, and it does not
+work for anything you adjust *while* working: a menu shuts the moment you click the slide, so
+changing a dose between two strokes was open, change, close, paint, open again. `Panel::Toolbox`
+(`T`) holds the tool row, the brush width, what the chemistry tools are loaded with, the seeding
+genome, and the list of sources and drains on the slide.
+
+The list is not a convenience. A source is an area of water that behaves differently, and until
+it has filled up there is nothing there to look at — so without a list, a rectangle dragged in
+the wrong place could not be found again, let alone removed. They are also outlined on the slide,
+in their chemical's colour, held back for a drain: an outline rather than a wash, because a
+filled rectangle in the chemical's colour is indistinguishable from the chemical overlay reading
+high there, and a source is a *cause* where the overlay is the *effect*.
+
+#### An edit has to survive being saved, and three of them did not
+
+`Slide → New scenario…` gives an empty stopped slide to build on — not `New slide` with no
+founders, which is a petri dish, lit and seeded with three chemicals you did not ask for and
+cannot see. Build it, then Save from the same menu.
+
+For that to mean anything, everything the tools do has to reach the `Scenario`, and three things
+did not:
+
+- **Walls** lived in the substrate only. `place_barrier` never touched `scenario.barriers`, so
+  drawing on a slide and saving gave back a scenario with no walls in it.
+- **Painted chemistry** likewise. It is recorded as `Seeding::Spike` per square, merged, so
+  leaning on the brush is one entry that grows rather than ten thousand saying the same thing.
+- **A hand-placed cell** had nowhere in the format to be said at all, which is what
+  `Inhabitant.at` is for.
+
+Erasing inside an authored `Barrier::Rect` is the awkward case, because a square in the middle of
+a shape cannot be removed by deleting a list entry. The list is flattened to squares and the
+erased one dropped — but only when the eraser actually lands inside a shape, or every scenario
+that ships a rectangle would lose it the first time anybody rubbed at an empty corner.
+
+**A scenario is a recipe and not a state.** Saving one mid-run writes down the founders that were
+placed, not the population that grew from them; for the world as it stands there is `Snapshot`.
+That is the honest division and it is worth stating out loud, because "save" invites the other
+reading.
+
+What is still missing: these edits are not recorded as interventions, so a slide edited while
+running does not replay from its scenario. That has been true of barrier drawing since it
+existed and the new tools inherit it rather than widening it — a scenario built while *stopped*
+and then played is exactly reproducible, which is the path the editor is for.
+
 ### The parameter editor
 
 One `Parameters…` view, grouped (world · chemistry · light · VM · metabolism ·

@@ -292,3 +292,117 @@ fn where_the_inhabitants_go_survives_the_round_trip() {
     assert_eq!(back.inhabitants, s.inhabitants);
     assert_eq!(back.flux, s.flux);
 }
+
+#[test]
+fn chemistry_painted_by_hand_survives_being_saved() {
+    // The same bug the walls had. Chemistry in the substrate and nowhere else is chemistry that
+    // vanishes when the scenario is written out, and a scenario is a recipe for a slide.
+    let mut world = World::new(slide()).expect("world");
+    world.inject(DETRITUS, 9, 9, q10(60));
+    world.inject(DETRITUS, 9, 9, q10(40));
+
+    let back =
+        World::new(Scenario::from_ron(&world.scenario().to_ron().expect("render")).expect("parse"))
+            .expect("world");
+    assert_eq!(
+        back.substrate().chem_at(DETRITUS, 9, 9),
+        q10(100),
+        "the paint did not come back"
+    );
+    assert_eq!(
+        world.scenario().seeding.len(),
+        1,
+        "two strokes on one square made two entries rather than one that grew"
+    );
+}
+
+#[test]
+fn unpainting_back_to_nothing_leaves_no_trace_in_the_recipe() {
+    let mut world = World::new(slide()).expect("world");
+    world.inject(DETRITUS, 9, 9, q10(60));
+    world.extract(DETRITUS, 9, 9, q10(60));
+    assert!(
+        world.scenario().seeding.is_empty(),
+        "an erased stroke left {:?} behind",
+        world.scenario().seeding
+    );
+    world.check_matter().expect("the books moved");
+}
+
+/// The editor's whole promise, end to end: build a slide by hand, write it out, open it again,
+/// and get back what you built.
+///
+/// Every piece of this was a separate near-miss. Walls lived only in the substrate. Painted
+/// chemistry lived only in the substrate. A hand-placed cell had nowhere in the format to be
+/// said. Any one of them missing turns "save your scenario" into "save most of your scenario",
+/// which is worse than not offering it.
+#[test]
+fn a_slide_built_by_hand_comes_back_the_way_it_was_left() {
+    let genome = {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../genomes/sponge.mm");
+        let src = std::fs::read_to_string(path).expect("genome");
+        mm_asm::assemble(&src).expect("assembles").bytes
+    };
+
+    let mut built = World::new(slide()).expect("world");
+    // A channel wall.
+    built.set_barriers(&[(10, 6), (11, 6), (12, 6), (13, 6)], true);
+    // A patch of something to build bodies out of.
+    for x in 2..6 {
+        built.inject(4, x, 20, q10(80));
+    }
+    // A supply at one edge and a way out at the other.
+    built.add_flux(Flux::Source {
+        chemical: DETRITUS,
+        x: 0,
+        y: 14,
+        width: 2,
+        height: 8,
+        per_tick: q10(12),
+    });
+    built.add_flux(Flux::Drain {
+        chemical: DETRITUS,
+        x: 30,
+        y: 0,
+        width: 2,
+        height: 32,
+        rate: Q10_ONE / 8,
+    });
+    // And somebody to live there, against the wall where a holdfast has something to grip.
+    let placed = built.place_founders_at(&genome, 2, Some((11, 8)));
+    built.note_inhabitant("sponge.mm", placed, (11, 8));
+
+    let text = built.scenario().to_ron().expect("render");
+    let reopened = Scenario::from_ron(&text).expect("parse");
+    let mut back = World::new(reopened.clone()).expect("world");
+
+    assert!(
+        back.substrate().blocked()[(6 * 32 + 12) as usize],
+        "the wall did not come back"
+    );
+    assert_eq!(
+        back.substrate().chem_at(4, 3, 20),
+        q10(80),
+        "the painted chemistry did not come back"
+    );
+    assert_eq!(
+        back.flux().len(),
+        2,
+        "the source and drain did not come back"
+    );
+    assert_eq!(
+        reopened.inhabitants,
+        vec![Inhabitant {
+            genome: "sponge.mm".to_string(),
+            count: 2,
+            at: Some((11, 8)),
+        }],
+        "who lives there did not come back"
+    );
+
+    // And it runs: the recipe is a slide somebody can press play on.
+    back.place_founders_at(&genome, 2, Some((11, 8)));
+    back.run(200);
+    back.check_invariants()
+        .expect("a hand-built slide broke an invariant when it was played");
+}

@@ -339,6 +339,13 @@ pub enum Panel {
     Ecology,
     Editor,
     Debugger,
+    /// The tools and their settings, for building a slide rather than watching one.
+    ///
+    /// A panel and not a menu, and that is the whole reason it exists. The settings began in the
+    /// Tools menu, which closes the moment you click the slide — so adjusting a dose meant open,
+    /// change, close, paint, and open again for the next stroke. A thing you adjust *while*
+    /// working has to stay on screen while you work.
+    Toolbox,
 }
 
 /// Which view the ecology pane is showing.
@@ -396,12 +403,13 @@ pub enum Dock {
 }
 
 impl Panel {
-    pub const ALL: [Panel; 8] = [
+    pub const ALL: [Panel; 9] = [
         Panel::Cell,
         Panel::Metrics,
         Panel::Legend,
         Panel::Genome,
         Panel::Ecology,
+        Panel::Toolbox,
         Panel::Parameters,
         Panel::Editor,
         Panel::Debugger,
@@ -415,6 +423,7 @@ impl Panel {
             Panel::Legend => "legend",
             Panel::Genome => "genome",
             Panel::Ecology => "ecology",
+            Panel::Toolbox => "toolbox",
             Panel::Parameters => "parameters",
             Panel::Editor => "editor",
             Panel::Debugger => "debugger",
@@ -433,6 +442,7 @@ impl Panel {
             Panel::Parameters => ",",
             Panel::Editor => "E",
             Panel::Debugger => "D",
+            Panel::Toolbox => "T",
         }
     }
 
@@ -445,7 +455,8 @@ impl Panel {
             | Panel::Ecology
             | Panel::Parameters
             | Panel::Editor
-            | Panel::Debugger => Dock::Drawer,
+            | Panel::Debugger
+            | Panel::Toolbox => Dock::Drawer,
         }
     }
 }
