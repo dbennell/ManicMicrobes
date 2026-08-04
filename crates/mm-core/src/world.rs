@@ -332,12 +332,23 @@ impl World {
     }
 
     fn raise_barriers(&mut self) {
-        let barriers = self.scenario.barriers.clone();
-        for b in &barriers {
+        for (x, y) in self.barrier_squares() {
+            self.block(x, y);
+        }
+        // Once, now that every square is placed. `block` defers it.
+        self.substrate.rebuild_edge_masks();
+    }
+
+    /// Every square the scenario's barrier list covers, shapes expanded.
+    ///
+    /// One expansion, because there were nearly two: the editing tools need to know which
+    /// squares an authored shape covers in order to erase one out of it, and a second copy of
+    /// "what does a `WallWithGap` mean" is a copy that drifts from this one.
+    fn barrier_squares(&self) -> Vec<(u32, u32)> {
+        let mut out = Vec::new();
+        for b in &self.scenario.barriers {
             match b {
-                Barrier::Square { x, y } => {
-                    self.block(*x, *y);
-                }
+                Barrier::Square { x, y } => out.push((*x, *y)),
                 Barrier::Rect {
                     x,
                     y,
@@ -346,7 +357,7 @@ impl World {
                 } => {
                     for dy in 0..*height {
                         for dx in 0..*width {
-                            self.block(x.saturating_add(dx), y.saturating_add(dy));
+                            out.push((x.saturating_add(dx), y.saturating_add(dy)));
                         }
                     }
                 }
@@ -362,21 +373,15 @@ impl World {
                         self.substrate.width()
                     };
                     for i in 0..span {
-                        let in_gap = i >= *gap_start && i < gap_start.saturating_add(*gap_len);
-                        if in_gap {
+                        if i >= *gap_start && i < gap_start.saturating_add(*gap_len) {
                             continue;
                         }
-                        if *vertical {
-                            self.block(*at, i);
-                        } else {
-                            self.block(i, *at);
-                        }
+                        out.push(if *vertical { (*at, i) } else { (i, *at) });
                     }
                 }
             }
         }
-        // Once, now that every square is placed. `block` defers it.
-        self.substrate.rebuild_edge_masks();
+        out
     }
 
     /// Raise one scenario barrier square, deferring the edge-mask rebuild.
@@ -995,6 +1000,15 @@ impl World {
     /// matter to the world — that is what setting a scenario up means, and it is said out loud
     /// here rather than left for the conservation check to trip over.
     pub fn place_founders(&mut self, genome: &[u8], count: u32) -> u32 {
+        self.place_founders_at(genome, count, None)
+    }
+
+    /// The same, at a named square rather than spread over the slide.
+    ///
+    /// `at` is where the *first* one goes; any beyond that spiral outward from it, because a
+    /// count of four dropped on one square is one cell and three refusals. `None` is the grid
+    /// spread [`World::place_founders`] describes.
+    pub fn place_founders_at(&mut self, genome: &[u8], count: u32, at: Option<(u32, u32)>) -> u32 {
         if count == 0 {
             return 0;
         }
@@ -1017,12 +1031,45 @@ impl World {
             let Ok(genome) = self.genomes.intern(genome.to_vec()) else {
                 continue;
             };
-            let at = |n: u32, extent: i32| {
+            let spread = |n: u32, extent: i32| {
                 crate::fixed::pos(extent * (2 * n as i32 + 1) / (2 * across as i32))
             };
+            // Outward in a square spiral from the named square, so a count above one lands
+            // beside its predecessor rather than inside it.
+            let (px, py) = match at {
+                Some((ax, ay)) => {
+                    let ring = (0..).find(|r| (2 * r + 1) * (2 * r + 1) > k).unwrap_or(0);
+                    let side = 2 * ring + 1;
+                    let along = k.saturating_sub(if ring == 0 {
+                        0
+                    } else {
+                        (2 * ring - 1) * (2 * ring - 1)
+                    });
+                    let (dx, dy) = if side <= 1 {
+                        (0i32, 0i32)
+                    } else {
+                        let per = side - 1;
+                        let (edge, step) = (along / per, (along % per) as i32);
+                        let r = ring as i32;
+                        match edge {
+                            0 => (-r + step, -r),
+                            1 => (r, -r + step),
+                            2 => (r - step, r),
+                            _ => (-r, r - step),
+                        }
+                    };
+                    (
+                        crate::fixed::pos((ax as i32 + dx).clamp(0, w - 1))
+                            + crate::fixed::POS_ONE / 2,
+                        crate::fixed::pos((ay as i32 + dy).clamp(0, h - 1))
+                            + crate::fixed::POS_ONE / 2,
+                    )
+                }
+                None => (spread(k % across, w), spread(k / across, h)),
+            };
             let id = self.spawn_cell(CellSeed {
-                x: at(k % across, w),
-                y: at(k / across, h),
+                x: px,
+                y: py,
                 mass: crate::fixed::q10(30),
                 energy: crate::fixed::q10(400),
                 membrane: 24,
@@ -1204,6 +1251,71 @@ impl World {
         );
     }
 
+    /// Put matter into a square from outside the world. Returns what actually landed.
+    ///
+    /// The tool half of [`crate::Flux`]. A brush is a source that fires once where you point it
+    /// rather than every step where the scenario says, and it needs exactly the same care: what
+    /// `add_chem` reports is what is recorded, so painting onto a barrier or onto a square at
+    /// the quantity cap records what it managed. Matter that is a metabolic substrate brings its
+    /// latent energy with it (I5), which is why this cannot be `substrate_mut().add_chem` at the
+    /// call site — that spelling compiles, works, and puts the world's books out by exactly the
+    /// energy in whatever you painted.
+    pub fn inject(&mut self, chemical: usize, x: i32, y: i32, amount: i32) -> i32 {
+        if amount <= 0 {
+            return 0;
+        }
+        let c = chemical % CHEM_COUNT;
+        let moved = self.substrate.add_chem(c, x, y, amount);
+        if moved > 0 {
+            self.ledger.record_injected(c, i64::from(moved));
+            let latent =
+                self.biology
+                    .metabolism
+                    .latent_in(&self.scenario.chemicals, c, i64::from(moved));
+            self.ledger.import(latent);
+        }
+        moved
+    }
+
+    /// Take matter out of a square, off the slide. Returns what actually left.
+    ///
+    /// The eraser, and the other half of the books. Not "delete": matter does not stop existing,
+    /// it leaves — which is the same claim [`crate::Flux::Drain`] makes and is accounted the same
+    /// way, down to the energy going out with it.
+    pub fn extract(&mut self, chemical: usize, x: i32, y: i32, amount: i32) -> i32 {
+        if amount <= 0 {
+            return 0;
+        }
+        let c = chemical % CHEM_COUNT;
+        let here = self.substrate.chem_at(c, x, y);
+        let moved = -self.substrate.add_chem(c, x, y, -amount.min(here));
+        if moved > 0 {
+            self.ledger.record_drained(c, i64::from(moved));
+            let latent =
+                self.biology
+                    .metabolism
+                    .latent_in(&self.scenario.chemicals, c, i64::from(moved));
+            self.ledger.export(latent);
+        }
+        moved
+    }
+
+    /// The sources and drains in force. See [`crate::Flux`].
+    #[must_use]
+    pub fn flux(&self) -> &[crate::Flux] {
+        &self.scenario.flux
+    }
+
+    /// Add a source or a drain to a running world.
+    pub fn add_flux(&mut self, f: crate::Flux) {
+        self.scenario.flux.push(f);
+    }
+
+    /// Remove one, by position in [`World::flux`]. Returns it if it was there.
+    pub fn remove_flux(&mut self, i: usize) -> Option<crate::Flux> {
+        (i < self.scenario.flux.len()).then(|| self.scenario.flux.remove(i))
+    }
+
     /// Draw or erase a barrier, putting whatever was in the square somewhere it can go.
     ///
     /// `Substrate::set_blocked` evicts the square's contents and hands them back; dropping
@@ -1233,6 +1345,56 @@ impl World {
             self.place_barrier(x, y, blocked);
         }
         self.substrate.rebuild_edge_masks();
+        self.record_barriers(squares, blocked);
+    }
+
+    /// Keep `scenario.barriers` in step with the substrate.
+    ///
+    /// Without this a wall drawn in the front end exists on the slide and nowhere else, so
+    /// saving the scenario and opening it again gives you back a slide with no walls on it —
+    /// which reads as the save being broken rather than as the wall never having been part of
+    /// what a scenario is. A freehand stroke becomes a run of `Barrier::Square`, which is
+    /// verbose in the file and exactly right: an authored `Rect` stays a `Rect` until somebody
+    /// draws over it, and the file says what is actually there.
+    fn record_barriers(&mut self, squares: &[(u32, u32)], blocked: bool) {
+        for &(x, y) in squares {
+            let listed = self.scenario.barriers.iter().position(
+                |b| matches!(b, crate::Barrier::Square { x: bx, y: by } if *bx == x && *by == y),
+            );
+            match (blocked, listed) {
+                (true, None) => self.scenario.barriers.push(crate::Barrier::Square { x, y }),
+                (false, Some(i)) => {
+                    self.scenario.barriers.remove(i);
+                }
+                _ => {}
+            }
+        }
+        if !blocked {
+            // A square in the middle of an authored `Rect` or `WallWithGap` cannot be taken out
+            // of the list by deleting an entry, so when the eraser lands inside a shape the
+            // whole list is flattened to squares and the erased ones dropped. Only then: a
+            // scenario that ships rectangles keeps them until somebody actually rubs one out.
+            let flatten = squares.iter().any(|&(x, y)| self.inside_a_shape(x, y));
+            if flatten {
+                self.scenario.barriers = self
+                    .barrier_squares()
+                    .into_iter()
+                    .map(|(x, y)| crate::Barrier::Square { x, y })
+                    .collect();
+                self.scenario
+                    .barriers
+                    .retain(|b| !matches!(b, crate::Barrier::Square { x, y } if squares.contains(&(*x, *y))));
+            }
+        }
+    }
+
+    /// Whether this square is covered by a barrier entry that is not a lone square.
+    fn inside_a_shape(&self, x: u32, y: u32) -> bool {
+        self.scenario
+            .barriers
+            .iter()
+            .any(|b| !matches!(b, crate::Barrier::Square { .. }))
+            && self.barrier_squares().contains(&(x, y))
     }
 
     fn place_barrier(&mut self, x: u32, y: u32, blocked: bool) {

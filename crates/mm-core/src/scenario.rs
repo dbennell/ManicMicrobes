@@ -120,6 +120,14 @@ pub struct Inhabitant {
     pub genome: String,
     /// How many founders to place.
     pub count: u32,
+    /// Where to put them, or `None` to spread them over the whole slide.
+    ///
+    /// A scenario laid out by hand needs to say *where*, or the editor can only describe slides
+    /// whose inhabitants happen to land on a square grid — and the whole reason to place a cell
+    /// by hand is that you want it somewhere the grid would not put it: against a wall, in the
+    /// mouth of a channel, on one side of a barrier and not the other.
+    #[serde(default)]
+    pub at: Option<(u32, u32)>,
 }
 
 /// Where barriers go.
@@ -395,6 +403,10 @@ impl StateHash for Scenario {
         for i in &self.inhabitants {
             h.bytes(i.genome.as_bytes());
             h.u32(i.count);
+            if let Some((x, y)) = i.at {
+                h.u32(x);
+                h.u32(y);
+            }
         }
         h.u64(self.flux.len() as u64);
         self.biology.hash_state(h);
@@ -423,10 +435,12 @@ mod tests {
                 Inhabitant {
                     genome: "sponge.mm".to_string(),
                     count: 12,
+                    at: None,
                 },
                 Inhabitant {
                     genome: "drifter.mm".to_string(),
                     count: 4,
+                    at: Some((9, 40)),
                 },
             ],
             ..Scenario::default()
