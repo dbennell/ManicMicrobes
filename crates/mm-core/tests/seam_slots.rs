@@ -143,6 +143,7 @@ fn do_any_two_cells_disagree_about_their_shared_wall() {
     let mut asymmetric = 0usize;
     let mut dropper_radius = Vec::new();
     let mut victim_radius = Vec::new();
+    let mut bearing: Vec<(i32, i32)> = Vec::new();
     for (i, mine) in &sets {
         for j in mine {
             let theirs = match lookup.get(j) {
@@ -153,8 +154,28 @@ fn do_any_two_cells_disagree_about_their_shared_wall() {
                 asymmetric += 1;
                 dropper_radius.push(mm_core::biology::radius(world.cells(), *j));
                 victim_radius.push(mm_core::biology::radius(world.cells(), *i));
+                // Which way the cell it forgot about lies. Reported because the artefact was
+                // observed to run one way — "downwards, sixty to eighty percent of the time" —
+                // and a direction is the one thing that can only come from the search or the
+                // order it happens in, never from geometry.
+                bearing.push((
+                    world.cells().x[*i] - world.cells().x[*j],
+                    world.cells().y[*i] - world.cells().y[*j],
+                ));
             }
         }
+    }
+
+    if !bearing.is_empty() {
+        let up = bearing.iter().filter(|(_, dy)| *dy > 0).count();
+        let down = bearing.iter().filter(|(_, dy)| *dy < 0).count();
+        let left = bearing.iter().filter(|(dx, _)| *dx < 0).count();
+        let right = bearing.iter().filter(|(dx, _)| *dx > 0).count();
+        eprintln!(
+            "  the forgotten neighbour lies: +y {up}, -y {down}, -x {left}, +x {right} \
+             (of {} pairs)",
+            bearing.len()
+        );
     }
 
     let radii: Vec<i32> = world
@@ -183,4 +204,84 @@ fn do_any_two_cells_disagree_about_their_shared_wall() {
             victim_radius.iter().filter(|r| (**r as i64) < mean).count()
         );
     }
+}
+
+/// Contacts appearing and disappearing between ticks, and which way they lie.
+///
+/// The literal form of the report: a cell "cannot see" a neighbour so forms no seam, notices a
+/// few ticks later, then forgets again — and it runs one way, downwards, most of the time. A
+/// direction is the one thing geometry cannot produce on its own. Either the search is
+/// asymmetric, or the order it happens in is, or the report is about something else.
+#[test]
+fn which_way_does_a_forgotten_neighbour_lie() {
+    let mut world = packed(64, 4000);
+
+    fn look(world: &mut World) -> std::collections::BTreeMap<u64, Vec<(i32, i32)>> {
+        let (w, h) = (world.substrate().width(), world.substrate().height());
+        let mut index = NeighbourIndex::default();
+        index.rebuild(world.cells(), w, h);
+        let cells = world.cells();
+        cells
+            .iter()
+            .map(|i| {
+                (
+                    cells.id_at(i).ordering_key(),
+                    index
+                        .contacts(cells, i, 1500)
+                        .as_slice()
+                        .iter()
+                        .map(|c| (c.dx, c.dy))
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
+    let before = look(&mut world);
+    world.run(1);
+    let after = look(&mut world);
+
+    // Matched by bearing: a contact is "the same one" if its direction barely moved. Positions
+    // shift by a fraction of a square a tick, so anything genuinely new points somewhere new.
+    let same = |a: &(i32, i32), b: &(i32, i32)| {
+        let (ax, ay) = (a.0 as f64, a.1 as f64);
+        let (bx, by) = (b.0 as f64, b.1 as f64);
+        let (la, lb) = ((ax * ax + ay * ay).sqrt(), (bx * bx + by * by).sqrt());
+        la > 0.0 && lb > 0.0 && (ax * bx + ay * by) / (la * lb) > 0.995
+    };
+
+    let (mut appeared, mut vanished) = (Vec::new(), Vec::new());
+    for (key, now) in &after {
+        let Some(was) = before.get(key) else { continue };
+        for c in now {
+            if !was.iter().any(|o| same(c, o)) {
+                appeared.push(*c);
+            }
+        }
+        for o in was {
+            if !now.iter().any(|c| same(c, o)) {
+                vanished.push(*o);
+            }
+        }
+    }
+
+    let tally = |v: &[(i32, i32)]| {
+        (
+            v.iter().filter(|(_, dy)| *dy > 0).count(),
+            v.iter().filter(|(_, dy)| *dy < 0).count(),
+            v.iter().filter(|(dx, _)| *dx < 0).count(),
+            v.iter().filter(|(dx, _)| *dx > 0).count(),
+        )
+    };
+    let (au, ad, al, ar) = tally(&appeared);
+    let (vu, vd, vl, vr) = tally(&vanished);
+    eprintln!("\none tick apart, {} cells", after.len());
+    eprintln!(
+        "  contacts that appeared: {}   +y {au}  -y {ad}  -x {al}  +x {ar}",
+        appeared.len()
+    );
+    eprintln!(
+        "  contacts that vanished: {}   +y {vu}  -y {vd}  -x {vl}  +x {vr}",
+        vanished.len()
+    );
 }
