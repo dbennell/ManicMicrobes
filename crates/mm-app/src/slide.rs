@@ -173,6 +173,35 @@ const MAX_SWELL: f32 = 1.25;
 /// How many directions the clipped area is measured along. See [`area_swell`].
 const SWELL_RAYS: usize = 64;
 
+/// How much of the area-preserving correction is applied. **One, and this is the record of why.**
+///
+/// The swell solve is a wildly sensitive function of its input: on a settled pack one tick apart,
+/// 14% of cells change size by more than a percent and the worst by **eleven**, with their seam
+/// sets unchanged — the whole outline rescaling because one neighbour moved a fraction of a
+/// square. In a sheet whose gaps are far smaller than that, an eleven percent rescale is a lobe
+/// appearing over a neighbour and going away again, which is what a packed slide looks like:
+/// overlaps flickering on and off all over it.
+///
+/// Applying only part of the correction attenuates that, exactly and only in proportion:
+///
+/// | gain | cells resizing >1% | worst jump | how it looks |
+/// |------|--------------------|------------|--------------|
+/// | 1.0  | 141‰               | 0.109      | tiles like tissue |
+/// | 0.8  | 118‰               | 0.087      | very slightly loose |
+/// | 0.5  |  69‰               | 0.055      | open gaps everywhere, reads as pebbles |
+///
+/// **Which is why it is not the fix.** Sensitivity and fill are the same quantity scaled by the
+/// same number, so the trade is one for one: the flicker is only tolerable at a gain where the
+/// packing has visibly come apart, and the packing is the whole reason the swell exists. Left at
+/// one, with the lever in place and measured, so nobody has to find this out twice.
+///
+/// The real fix is structural. The solve has **one** degree of freedom — a single scale on the
+/// whole circle — for a constraint that is entirely local, so any local change has to be absorbed
+/// by moving the entire outline, including the parts pointing at cells that had nothing to do
+/// with it. Give each free arc its own correction and a local change stays local, at the same
+/// fill and with no memory of the previous frame.
+const SWELL_GAIN: f32 = 1.0;
+
 /// How much larger a cell must be drawn for its *clipped* outline to enclose the area it has.
 ///
 /// This is what separates a foam from a gravel pile, and it is the thing that was missing when
@@ -233,7 +262,7 @@ fn area_swell(radius: f32, want_radius: f32, seams: &[Squash]) -> f32 {
         0.5 * sum * std::f32::consts::TAU / SWELL_RAYS as f32
     };
     if area_at(MAX_SWELL) < target {
-        return MAX_SWELL;
+        return 1.0 + SWELL_GAIN * (MAX_SWELL - 1.0);
     }
     // The bottom of the range is *below* one, and deliberately. `radius` arrives already
     // inflated by `PACKING`, which exists only so that cells the physics leaves touching still
@@ -249,7 +278,8 @@ fn area_swell(radius: f32, want_radius: f32, seams: &[Squash]) -> f32 {
             hi = mid;
         }
     }
-    0.5 * (lo + hi)
+    // Only part of the way. See `SWELL_GAIN`.
+    1.0 + SWELL_GAIN * (0.5 * (lo + hi) - 1.0)
 }
 
 /// The seams a cell is flattened along, and how much it must swell to keep its area.
