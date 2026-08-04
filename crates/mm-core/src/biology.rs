@@ -107,6 +107,9 @@ pub struct CellHost<'a> {
     /// deal rather than how many cells are in front of it. Copied in rather than reached for
     /// through a config reference, because a host holds only what one cell may read.
     spike_damage: i32,
+    /// How far a photosensor looks for other cells' glow, in squares. Copied in for the same
+    /// reason `spike_damage` is.
+    em_range: i32,
     /// Which reactions this world offers, so a mitochondrion's reading can be about the
     /// substrate *it* burns rather than about chemical 8 (M10.3).
     chemistry: crate::organelle::MetabolicChemistry,
@@ -128,6 +131,7 @@ pub fn read_organelle(
     slot: usize,
     idx: i16,
     spike_damage: i32,
+    em_range: i32,
     chemistry: crate::organelle::MetabolicChemistry,
 ) -> i16 {
     // A throwaway intent buffer: reading an organelle pushes nothing, but the host holds a
@@ -145,6 +149,7 @@ pub fn read_organelle(
         intents,
         0,
         spike_damage,
+        em_range,
         chemistry,
     );
     Host::oget(&mut host, idx, slot as i16)
@@ -161,6 +166,7 @@ impl<'a> CellHost<'a> {
         intents: SlotIntents<'a>,
         tick: u64,
         spike_damage: i32,
+        em_range: i32,
         chemistry: crate::organelle::MetabolicChemistry,
     ) -> CellHost<'a> {
         let square = substrate.index(pos_to_square(cells.x[slot]), pos_to_square(cells.y[slot]));
@@ -174,6 +180,7 @@ impl<'a> CellHost<'a> {
             claimed: [0; CHEM_COUNT],
             tick,
             spike_damage,
+            em_range,
             chemistry,
         }
     }
@@ -413,6 +420,30 @@ impl Host for CellHost<'_> {
                 } else {
                     crate::sensing::TouchReading::default()
                 };
+                // Same argument as `touch`: only a photosensor reads it, so only a photosensor
+                // pays for the scan. And only when it is asked for something past the ambient
+                // light readings, which is what the index says.
+                let glow = if o.kind == OrganelleType::Photosensor && (idx as u16) % 9 >= 3 {
+                    let range = self.em_range;
+                    [
+                        crate::neighbours::glow_reading(
+                            self.cells,
+                            self.neighbours,
+                            self.slot,
+                            range,
+                            0,
+                        ),
+                        crate::neighbours::glow_reading(
+                            self.cells,
+                            self.neighbours,
+                            self.slot,
+                            range,
+                            1,
+                        ),
+                    ]
+                } else {
+                    Default::default()
+                };
                 crate::sensing::read_sensor(
                     &o,
                     idx,
@@ -423,6 +454,7 @@ impl Host for CellHost<'_> {
                         tick: self.tick,
                         cell_key: self.cells.id_at(self.slot).ordering_key(),
                         touch,
+                        glow,
                     },
                 )
                 // Built, paid for, and not yet implemented. A `RESERVED` organelle reads as
@@ -1627,6 +1659,7 @@ pub fn execute(
     // Passed in rather than taking the whole `BiologyConfig`, because these are the only things
     // a cell reads from it during execution.
     spike_damage: i32,
+    em_range: i32,
     chemistry: crate::organelle::MetabolicChemistry,
 ) {
     let mut vms = std::mem::take(&mut cells.vm);
@@ -1645,6 +1678,7 @@ pub fn execute(
             slot,
             tick,
             spike_damage,
+            em_range,
             chemistry,
         );
         vm.tick(&genome, cfg, &ctx, &mut host);
@@ -2436,6 +2470,7 @@ mod tests {
             0,
             1,
             f.config.ecology.spike_damage,
+            f.config.ecology.em_range,
             f.config.metabolism.catalogue.metabolism,
         );
         assert_eq!(
@@ -2470,6 +2505,7 @@ mod tests {
             slot,
             0,
             f.config.ecology.spike_damage,
+            f.config.ecology.em_range,
             f.config.metabolism.catalogue.metabolism,
         );
         assert_eq!(host.oget(1, 0), 1234, "energy");
@@ -2495,6 +2531,7 @@ mod tests {
             slot,
             0,
             f.config.ecology.spike_damage,
+            f.config.ecology.em_range,
             f.config.metabolism.catalogue.metabolism,
         );
         assert_eq!(host.eat(10, 5), 10);

@@ -131,6 +131,18 @@ pub struct CellArena {
     /// be read is not a secret, and this one is the only thing standing between a colony and
     /// anything that fancies joining it.
     pub key: Vec<u8>,
+    /// What this cell radiated last tick, by band (SPEC §8.2).
+    ///
+    /// **Derived, never set.** No opcode writes it; it is accumulated from what the cell
+    /// actually *paid* as it paid it, which is the whole of why it cannot be forged — to look
+    /// like something running a spike you have to run a spike, and pay for it. The reverse
+    /// holds too: to be dark you have to be idle, so stealth costs a metabolism.
+    ///
+    /// Snapshot state rather than scratch, and the distinction matters for the same reason it
+    /// does for `pressure`: it is written during one tick and read by the *next* tick's sense
+    /// phase, so a world restored without it sees a slide full of cold cells for one tick and
+    /// diverges.
+    pub emission: Vec<[i32; crate::organelle::OrganelleType::EM_BANDS]>,
     /// 15-bit surface badge: what a cell shows the world (SPEC §8.2).
     ///
     /// The public counterpart of `key`, and everything the key is not. It is **inert** — no
@@ -157,6 +169,33 @@ pub struct CellArena {
 }
 
 impl CellArena {
+    /// Record that a cell radiated, having actually paid for it.
+    ///
+    /// Called from wherever energy is dissipated, with the same figure that *was* dissipated —
+    /// never with what an action would have cost. An extended spike a starving cell cannot
+    /// afford does no damage, and must not glow either, or a cell could look dangerous for
+    /// free and the whole point of the signal is that it cannot.
+    #[inline]
+    pub fn emit_energy(&mut self, i: usize, band: usize, amount: i32) {
+        if amount <= 0 {
+            return;
+        }
+        if let Some(cell) = self.emission.get_mut(i) {
+            let b = band % crate::organelle::OrganelleType::EM_BANDS;
+            cell[b] = cell[b].saturating_add(amount);
+        }
+    }
+
+    /// Forget last tick's spending, ready to accumulate this tick's.
+    ///
+    /// Between execute and resolve: the sense phase has already read the completed figure and
+    /// nothing has been charged yet.
+    pub fn clear_emission(&mut self) {
+        for e in &mut self.emission {
+            *e = [0; crate::organelle::OrganelleType::EM_BANDS];
+        }
+    }
+
     #[must_use]
     pub fn new() -> CellArena {
         CellArena::default()
@@ -188,6 +227,7 @@ impl CellArena {
         self.daughter.reserve(n);
         self.key.reserve(n);
         self.badge.reserve(n);
+        self.emission.reserve(n);
         self.species.reserve(n);
         self.parent.reserve(n);
         self.birth_tick.reserve(n);
@@ -291,6 +331,8 @@ impl CellArena {
                 self.daughter.push(None);
                 self.key.push(0);
                 self.badge.push(0);
+                self.emission
+                    .push([0; crate::organelle::OrganelleType::EM_BANDS]);
                 self.species.push(0);
                 self.parent.push(CellId::NONE);
                 self.birth_tick.push(0);
@@ -328,6 +370,9 @@ impl CellArena {
         self.daughter[i] = None;
         self.key[i] = seed.key & 0x7F;
         self.badge[i] = seed.badge & 0x7FFF;
+        // A newborn has done nothing yet, so she is cold. Honest, and it is also a tell: a
+        // cell that has just divided is briefly the quietest thing on the slide.
+        self.emission[i] = [0; crate::organelle::OrganelleType::EM_BANDS];
         self.species[i] = seed.species;
         self.parent[i] = seed.parent;
         self.birth_tick[i] = seed.birth_tick;
@@ -444,6 +489,7 @@ impl CellArena {
             daughter: self.daughter[i].as_deref(),
             key: self.key[i],
             badge: self.badge[i],
+            emission: self.emission[i],
             species: self.species[i],
             parent: self.parent[i],
             birth_tick: self.birth_tick[i],
@@ -500,6 +546,8 @@ impl CellArena {
                 self.daughter.push(None);
                 self.key.push(0);
                 self.badge.push(0);
+                self.emission
+                    .push([0; crate::organelle::OrganelleType::EM_BANDS]);
                 self.species.push(0);
                 self.parent.push(CellId::NONE);
                 self.birth_tick.push(0);
@@ -524,6 +572,7 @@ impl CellArena {
             self.daughter.push(c.daughter);
             self.key.push(c.key);
             self.badge.push(c.badge);
+            self.emission.push(c.emission);
             self.species.push(c.species);
             self.parent.push(c.parent);
             self.birth_tick.push(c.birth_tick);
@@ -561,6 +610,7 @@ pub(crate) struct SlotSnapshot<'a> {
     pub daughter: Option<&'a [u8]>,
     pub key: u8,
     pub badge: u16,
+    pub emission: [i32; crate::organelle::OrganelleType::EM_BANDS],
     /// Ignored by [`crate::World::spawn_cell`], which assigns a species from the archive by
     /// the genome's fingerprint (SPEC §10.3) — two seedings of one genome are one species and
     /// two different genomes are two, without the caller having to say so.
@@ -591,6 +641,7 @@ pub(crate) struct RestoredCell {
     pub daughter: Option<Vec<u8>>,
     pub key: u8,
     pub badge: u16,
+    pub emission: [i32; crate::organelle::OrganelleType::EM_BANDS],
     pub species: u32,
     pub parent: CellId,
     pub birth_tick: u64,
@@ -711,6 +762,9 @@ impl StateHash for CellArena {
             }
             h.u8(self.key[i]);
             h.u16(self.badge[i]);
+            for v in self.emission[i] {
+                h.i32(v);
+            }
             h.u32(self.species[i]);
             h.u64(self.parent[i].ordering_key());
             h.u64(self.birth_tick[i]);

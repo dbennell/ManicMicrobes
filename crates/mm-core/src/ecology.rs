@@ -138,6 +138,13 @@ pub struct EcologyConfig {
     /// its own square to zero every tick would be limited by the flow and not by itself, and
     /// then its size would not matter.
     pub capture_rate: i32,
+    /// How far a photosensor looks for other cells' glow, in squares.
+    ///
+    /// The scan is a square of side `2 * range + 1`, paid by the cell doing the looking, so
+    /// this is the one number that decides whether seeing is cheap. Six squares is far enough
+    /// to be *range* — several body-lengths, past anything a touch sensor could reach — and
+    /// small enough that a slide where everything is watching does not stall.
+    pub em_range: i32,
 }
 
 impl Default for EcologyConfig {
@@ -160,6 +167,7 @@ impl Default for EcologyConfig {
             crowding_reference_radius: (Q10_ONE * 7) / 8,
             capture_efficiency: (Q10_ONE * 3) / 4,
             capture_rate: Q10_ONE / 4,
+            em_range: 6,
         }
     }
 }
@@ -383,6 +391,9 @@ pub fn step(
             cells.energy[i] = cells.energy[i].saturating_sub(paid);
             report.spike_upkeep += paid as i64;
             ledger.dissipate(paid as i64);
+            // Mechanical, and the loudest thing a cell does. This is the line that makes a
+            // signature worth reading: an armed cell is audible whether or not it wants to be.
+            cells.emit_energy(i, crate::organelle::OrganelleType::EM_MECHANICAL, paid);
             // An extended spike a cell cannot afford does nothing. Violence is not free, and a
             // starving cell is not a threat.
             if paid >= cost {

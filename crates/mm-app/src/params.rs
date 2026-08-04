@@ -483,6 +483,15 @@ pub const FIELDS: &[Field] = &[
                past it. The one number that decides whether staying still is a living",
     },
     Field {
+        path: "ecology.em_range",
+        label: "sight range",
+        group: Group::Ecology,
+        unit: Unit::Count,
+        note: "how far a photosensor sees other cells glowing. The scan is a square of side \
+               2r+1 and the cell doing the looking pays for it, so this is the number that \
+               decides whether seeing is cheap",
+    },
+    Field {
         path: "ecology.crowding_damage",
         label: "crowding damage",
         group: Group::Ecology,

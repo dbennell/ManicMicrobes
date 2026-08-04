@@ -164,6 +164,26 @@ impl OrganelleType {
         }
     }
 
+    /// How many bands the emission spectrum is divided into.
+    pub const EM_BANDS: usize = 2;
+
+    /// Work done against the world: pushing, gripping, stabbing.
+    ///
+    /// The split is between *doing* and *being*, not between kinds of organ, and getting that
+    /// wrong the first time is what taught it. Charging a spike's upkeep to this band made a
+    /// sheathed spike glow exactly like a drawn one — which turns the signature into an
+    /// inventory of what a cell carries, when the whole value of it is that it reports what a
+    /// cell is *doing*. Maintenance is maintenance whatever it maintains, so upkeep is all
+    /// metabolic, and only work reaches this band.
+    ///
+    /// The consequence is worth stating because it is the interesting one: a predator at rest
+    /// is indistinguishable from anything else its size, and becomes unmistakable the instant
+    /// it extends. Ambush is available; ambush while armed is not.
+    pub const EM_MECHANICAL: usize = 0;
+
+    /// Chemistry and housekeeping — everything a cell pays simply to go on existing.
+    pub const EM_METABOLIC: usize = 1;
+
     /// All catalogue entries in order.
     #[must_use]
     pub const fn all() -> &'static [OrganelleType; SLOT_COUNT] {

@@ -195,6 +195,12 @@ pub struct SensorContext<'a> {
     /// The cell's own id, so clonal cells do not share a clock phase.
     pub cell_key: u64,
     pub touch: TouchReading,
+    /// What is glowing nearby, by band, with the direction it is coming from.
+    ///
+    /// Supplied only for a photosensor and only when it is asked for, the same way `touch` is:
+    /// the scan is a square of side `2 * range + 1`, and a chemosensor has no business paying
+    /// for one.
+    pub glow: [ChemReading; crate::organelle::OrganelleType::EM_BANDS],
 }
 
 /// Read an organelle's output, for the sensor types (M3).
@@ -210,6 +216,7 @@ pub fn read_sensor(organelle: &Organelle, index: i16, ctx: SensorContext<'_>) ->
         tick,
         cell_key,
         touch,
+        glow,
     } = ctx;
     if !organelle.is_active() {
         return None;
@@ -228,11 +235,28 @@ pub fn read_sensor(organelle: &Organelle, index: i16, ctx: SensorContext<'_>) ->
             })
         }
         OrganelleType::Photosensor => {
-            let r = sense_light(substrate, x, y);
-            Some(match (index as u16) % 3 {
-                0 => visible(r.concentration),
-                1 => visible_gradient(r.gradient_x),
-                _ => visible_gradient(r.gradient_y),
+            // A photosensor detects electromagnetic radiation, and ambient light and a cell's
+            // own glow are the same thing arriving from different places. So the glow readings
+            // live here rather than on an organelle of their own — of which there is none free
+            // anyway, `ReservedB` being `drifter_blind.mm`'s deliberately blind control.
+            //
+            // Appended, so 0, 1 and 2 still mean what they have always meant and only the
+            // indices that used to wrap have changed.
+            Some(match (index as u16) % 9 {
+                0 => visible(sense_light(substrate, x, y).concentration),
+                1 => visible_gradient(sense_light(substrate, x, y).gradient_x),
+                2 => visible_gradient(sense_light(substrate, x, y).gradient_y),
+                // Reported in `Q10` energy a tick rather than divided down to whole units like
+                // the light readings are. A whole cell's upkeep is well under one unit — the
+                // ancestor's is 0.41 — so `visible` would round every signature on the slide to
+                // nothing. Saturating instead means a very bright crowd reads as 32767 and the
+                // genome learns "too bright to count", which is a better failure than "dark".
+                3 => sat_i16(glow[0].concentration),
+                4 => sat_i16(glow[0].gradient_x),
+                5 => sat_i16(glow[0].gradient_y),
+                6 => sat_i16(glow[1].concentration),
+                7 => sat_i16(glow[1].gradient_x),
+                _ => sat_i16(glow[1].gradient_y),
             })
         }
         OrganelleType::TouchSensor => Some(match (index as u16) % 4 {

@@ -427,6 +427,7 @@ fn a_chemosensor_can_actually_read_the_gradient_it_is_standing_in() {
         tick: 0,
         cell_key: 0,
         touch: mm_core::sensing::TouchReading::default(),
+        glow: Default::default(),
     };
     let gx = mm_core::sensing::read_sensor(&sensor, 1, ctx).expect("a chemosensor reads");
     let gy = mm_core::sensing::read_sensor(&sensor, 2, ctx).expect("a chemosensor reads");

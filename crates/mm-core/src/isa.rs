@@ -5,7 +5,7 @@
 //! (M10.3); version 3 filled the `RESERVED_A` catalogue slot with the holdfast (SPEC §17.1).
 
 /// ISA version stamped into save files, scenarios and archived genomes (SPEC §16).
-pub const ISA_VERSION: u16 = 4;
+pub const ISA_VERSION: u16 = 5;
 
 /// Number of opcodes. The opcode of a byte is `byte % OPCODE_COUNT` (SPEC §4.2), so four
 /// distinct byte values map to each opcode and most point mutations are synonymous.

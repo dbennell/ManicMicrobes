@@ -726,8 +726,53 @@ Two properties of the gate are worth stating because both were found by getting 
   kill each other. Every seeding path spreads them, so this costs nothing in practice and would
   cost everything if it were ever forgotten.
 
+#### The signature — what a cell cannot help showing (ISA 5)
+
+The badge is cheap talk, and that is deliberate. This is the other channel and it is the opposite
+in the one way that matters: **nothing sets it.** `CellArena::emission` is accumulated from what a
+cell actually *paid*, as it paid it, so to look like something running a spike you have to run a
+spike and pay for it. To be dark you have to be idle. Both directions cost what they cost, which
+is the difference between a signature and a name tag.
+
+Two bands. The split is between **doing and being**, not between kinds of organ, and getting that
+wrong the first time is what taught it: charging a spike's *upkeep* to the mechanical band made a
+sheathed spike glow exactly like a drawn one, which turns the signature into an inventory of what
+a cell carries when the whole value of it is that it reports what a cell is *doing*. Maintenance
+is maintenance whatever it maintains, so upkeep is all metabolic and only work reaches the
+mechanical band. The consequence is the interesting one: **a predator at rest is
+indistinguishable from anything else its size, and unmistakable the instant it extends.** Ambush
+is available; ambush while armed is not.
+
+Read by the photosensor, because ambient light and a cell's own glow are the same physics
+arriving from different places — and because there is no free organelle slot anyway, type 15
+being `drifter_blind.mm`'s deliberately blind control. Readings 0–2 are the light field as
+before; 3–5 and 6–8 are the two bands, each as power and a gradient, so a genome reads them with
+the idiom it already knows from the chemosensor.
+
+Falloff is inverse-square with a floor of one square, and it is what makes the reading a distance
+rather than a headcount: without it a cell could not tell one loud neighbour from four distant
+ones, and the gradient would point at the densest crowd rather than the brightest thing in it.
+The scan is a square of side `2 · em_range + 1` **paid by the cell doing the looking**, not
+gathered for the population — a slide where nothing carries a photosensor pays nothing, and a
+slide where everything does is a slide where seeing is worth it.
+
+Two accounting rules it must keep. It is a *shadow* of dissipation already recorded and adds
+nothing to the ledger — if it ever became a charge, going quiet would be a saving and stealth
+would stop being a sacrifice. And it is snapshot state rather than scratch, because it is written
+during one tick and read by the next tick's sense phase: the same trap `pressure` fell into.
+
+**No organelle emits it, and that is the point.** If radiating needed something built, a cell
+could opt out of being seen by not building it, which is exactly the forgery this channel exists
+to exclude. Deliberate light — a photophore, brightness on a control word — is a *different* and
+complementary thing: the voluntary, costly, forgeable counterpart to this involuntary one. Worth
+having, and worth having after something has used the honest channel, because it weakens it. Note
+that faking is already available without it: extend a spike you never use, pay exactly what being
+armed costs, and look exactly like something armed. That is the handicap principle in the
+mechanism as it stands.
+
 **Still to come**, and deliberately not built yet: colour, which would be reflected rather than
-emitted and so would go dark when the slide does; and an EM signature derived from a cell's
+emitted and so would go dark when the slide does — and which needs no organelle either, since
+reflectance is a membrane property and the membrane is slot 0 on every cell; and an EM signature derived from a cell's
 organelles and how hard it is running them, which is the interesting one because *nobody sets
 it*. A badge is cheap talk and can be forged by anything. A signature that falls out of what you
 are actually spending cannot be — to look like a predator you would have to run a spike. The

@@ -28,6 +28,11 @@ use crate::chem::CHEM_COUNT;
 use crate::isa::ISA_VERSION;
 use crate::organelle::{Organelle, OrganelleType, SLOT_COUNT};
 use crate::scenario::Scenario;
+
+/// `EM_BANDS`, in a const fn so the array literal above can use it.
+const fn mm_core_em_bands() -> usize {
+    crate::organelle::OrganelleType::EM_BANDS
+}
 use crate::vm::{Vm, CALL_STACK_LEN, DATA_STACK_LEN, RAM_WORDS, REGISTER_COUNT};
 use crate::world::World;
 
@@ -35,7 +40,7 @@ use crate::world::World;
 pub const MAGIC: [u8; 8] = *b"MMSNAP\0\x01";
 /// Snapshot format version, distinct from the ISA version. The format may change without
 /// the meaning of a genome changing, and vice versa.
-pub const FORMAT_VERSION: u16 = 10;
+pub const FORMAT_VERSION: u16 = 11;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum SnapshotError {
@@ -511,6 +516,9 @@ impl Snapshot {
                     }
                     w.u8(c.key);
                     w.u16(c.badge);
+                    for v in c.emission {
+                        w.i32(v);
+                    }
                     w.u32(c.species);
                     w.u32(c.parent.slot());
                     w.u32(c.parent.generation());
@@ -813,6 +821,10 @@ impl Snapshot {
             let daughter = if r.bool()? { Some(r.byte_vec()?) } else { None };
             let key = r.u8()?;
             let badge = r.u16()?;
+            let mut emission = [0i32; mm_core_em_bands()];
+            for slot in emission.iter_mut() {
+                *slot = r.i32()?;
+            }
             let species = r.u32()?;
             let parent = CellId::from_parts(r.u32()?, r.u32()?);
             let birth_tick = r.u64()?;
@@ -835,6 +847,7 @@ impl Snapshot {
                     daughter,
                     key,
                     badge,
+                    emission,
                     species,
                     parent,
                     birth_tick,

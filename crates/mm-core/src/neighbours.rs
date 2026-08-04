@@ -588,6 +588,72 @@ impl ContactSet {
 
 /// What one cell can feel around it (SPEC §6.2's touch sensor).
 ///
+/// What a cell can see glowing around it, by band, with the direction it is coming from.
+///
+/// Computed on demand for the cell asking, not gathered for the population: the scan is a
+/// square of side `2 * range + 1` squares, so the cost falls on the cell that wants to see
+/// rather than on the world. A slide where nothing carries a photosensor pays nothing, and a
+/// slide where everything does is a slide where seeing is worth it.
+///
+/// **Falloff is inverse-square**, which is what radiating into two dimensions from a point does,
+/// with a floor of one square so a cell standing on top of another does not divide by nothing.
+/// Without it a genome could not tell one loud neighbour from four distant ones, and the
+/// gradient would point at the densest crowd rather than the brightest thing in it.
+///
+/// Accumulated in `i64` and saturated once at the end. Saturating addition is not associative,
+/// so per-step saturation would make the answer depend on the order the neighbours came in —
+/// which is an I6 violation that shows up only as two machines disagreeing.
+#[must_use]
+pub fn glow_reading(
+    cells: &CellArena,
+    index: &NeighbourIndex,
+    i: usize,
+    range: i32,
+    band: usize,
+) -> crate::sensing::ChemReading {
+    let (sx, sy) = (
+        crate::fixed::pos_to_square(cells.x[i]),
+        crate::fixed::pos_to_square(cells.y[i]),
+    );
+    let (mut total, mut gx, mut gy) = (0i64, 0i64, 0i64);
+    let reach = crate::fixed::pos(range.max(1));
+    for j in index.within(sx, sy, range.max(1)) {
+        if j == i || !cells.occupied(j) {
+            continue;
+        }
+        let power = cells
+            .emission
+            .get(j)
+            .and_then(|e| e.get(band))
+            .copied()
+            .unwrap_or(0);
+        if power <= 0 {
+            continue;
+        }
+        let (dx, dy) = (
+            cells.x[j].saturating_sub(cells.x[i]) as i64,
+            cells.y[j].saturating_sub(cells.y[i]) as i64,
+        );
+        // One square, squared, as the floor: closer than that and it is simply "touching".
+        let one = crate::fixed::POS_ONE as i64;
+        let d2 = (dx * dx + dy * dy).max(one * one);
+        if d2 > (reach as i64) * (reach as i64) {
+            continue;
+        }
+        let seen = (power as i64 * one * one) / d2;
+        total += seen;
+        // Weighted by what is seen rather than by what is there, so the gradient points at the
+        // brightest thing rather than the nearest.
+        gx += (seen * dx) / one;
+        gy += (seen * dy) / one;
+    }
+    crate::sensing::ChemReading {
+        concentration: crate::fixed::sat_i32(total),
+        gradient_x: crate::fixed::sat_i32(gx),
+        gradient_y: crate::fixed::sat_i32(gy),
+    }
+}
+
 /// Walks the neighbourhood. Prefer [`NeighbourIndex::touch`], which reads the gathered table
 /// when there is one; this is what that falls back to, and what fills the table.
 #[must_use]

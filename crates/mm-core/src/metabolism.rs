@@ -672,6 +672,9 @@ impl Metabolism {
                 let paid = cells.energy[i].min(upkeep);
                 cells.energy[i] = cells.energy[i].saturating_sub(paid);
                 report.dissipated += ledger.dissipate(paid as i64);
+                // What it actually paid, not what it owed — so a cell that cannot meet its
+                // upkeep dims, which is what starving looks like from the outside.
+                cells.emit_energy(i, crate::organelle::OrganelleType::EM_METABOLIC, paid);
                 if paid < upkeep {
                     // It could not pay. A cell that cannot meet its own upkeep is dying, and
                     // the bookkeeping phase is where that is acted on.

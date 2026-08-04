@@ -594,8 +594,13 @@ impl World {
                 tick,
                 seed,
                 self.biology.ecology.spike_damage,
+                self.biology.ecology.em_range,
                 self.biology.metabolism.catalogue.metabolism,
             );
+
+            // 2b. Last tick's spending has been read by everything that was going to read it,
+            //     and this tick's has not started. See `CellArena::emission`.
+            self.cells.clear_emission();
 
             // 3. Resolve. Intents applied in slot order, which is cell-id order, so a
             //    contested square is allocated the same way on every machine.
