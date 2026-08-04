@@ -922,3 +922,229 @@ fn what_bar_the_ancestor_can_clear() {
         );
     }
 }
+
+/// Why the predator will not divide, watched instruction by instruction rather than guessed at.
+///
+/// Everything else had been ruled out by measurement: the divide threshold makes no difference
+/// at all (200 down to 60 give the same two predators), a bigger engine puts its energy well
+/// clear of its own bar and it still does not divide, and standing on carrion among a thousand
+/// prey does not change it either. So the guard is passing and something after it is refusing.
+/// This watches the daughter buffer, which is the one thing between `BUD` and `SPLIT`.
+#[test]
+fn what_happens_between_bud_and_split() {
+    for name in ["ancestor.mm", "predator.mm"] {
+        let bytes = assemble(name);
+        let mut world = World::new(scenario("soup.ron")).expect("world");
+        let id = seed(&mut world, &bytes);
+        eprintln!("\n--- {name} ({} bytes) ---", bytes.len());
+        eprintln!("  tick  energy  mass   buffer  pop  pc-ish");
+
+        let mut last_buffer = 0usize;
+        let mut peak_buffer = 0usize;
+        let mut buds = 0u32;
+        for tick in 0..1200u64 {
+            world.step();
+            let Some(i) = world.cells().index(id) else {
+                eprintln!("  founder died at {tick}");
+                break;
+            };
+            let buffer = world.cells().daughter[i].as_ref().map_or(0, |b| b.len());
+            if buffer > last_buffer && last_buffer == 0 {
+                buds += 1;
+            }
+            peak_buffer = peak_buffer.max(buffer);
+            if tick % 100 == 0 || (buffer == 0 && last_buffer > 0) {
+                eprintln!(
+                    "  {tick:>4}  {:>6}  {:>4}   {buffer:>6}  {:>3}",
+                    world.cells().energy[i] / Q10_ONE,
+                    world.cells().mass[i] / Q10_ONE,
+                    world.cells().len(),
+                );
+            }
+            last_buffer = buffer;
+        }
+        eprintln!(
+            "  {buds} buds started, biggest buffer {peak_buffer} of {} bytes needed",
+            bytes.len()
+        );
+    }
+}
+
+/// Which of the predator's costs is killing its daughters.
+///
+/// `what_happens_between_bud_and_split` establishes that it is not the divide guard, not the
+/// copy, and not the split: it buds thirteen times in twelve hundred ticks, copies all 339 bytes
+/// every time, and the population oscillates one-two-one. **The parent divides and the daughter
+/// dies**, inside about fifteen ticks, before it has built the body it needs to earn anything.
+///
+/// A daughter is born with a bare membrane and half of what the parent had. It has no income at
+/// all until it has built a chloroplast, and it has to build a bigger nucleus than the ancestor
+/// does to hold a longer genome before it gets there. So the levers worth trying are the three
+/// that change what it must build and what it earns when it has.
+#[test]
+fn which_cost_kills_the_daughters() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../genomes/predator.mm");
+    let source = std::fs::read_to_string(&path).expect("genome source");
+
+    let nucleus = |s: &str, p: u32| {
+        s.replace(
+            "        IMM     56              ; nucleus: 448 bytes, room for 342 and some drift",
+            &format!("        IMM     {p}              ; nucleus"),
+        )
+    };
+    let leaf = |s: &str, p: u32| {
+        s.replace(
+            "        IMM     55\n        IMM     3               ; chloroplast",
+            &format!("        IMM     {p}\n        IMM     3               ; chloroplast"),
+        )
+    };
+    let spike_out = |s: &str, ext: u32| {
+        s.replace(
+            "        IMM     128\n        IMM     2\n        SHL                     ; 512, half extension",
+            &format!("        IMM     {ext}\n        IMM     2\n        SHL                     ; extension"),
+        )
+    };
+
+    // Sheathe the spike for the duration of the copy and the split, and let `#arm` put it back
+    // out on the next pass. The copy loop is inside `#divide`, so nothing re-extends it while
+    // the daughter is being made or at the moment it is born.
+    let sheathe = |s: &str| {
+        s.replace(
+            "        GENE    #divide\n        ONE\n",
+            "        GENE    #divide\n        ZERO                    ; sheathe the spike\n             \x20       ZERO\n        IMM     5\n        OSET\n        ONE\n",
+        )
+    };
+
+    // Two cilia and the power to beat them, as `drifter.mm` builds them. A predator that cannot
+    // move cannot get away from the daughter it is about to kill, and neither can she.
+    let swim = |s: &str| {
+        s.replace(
+            "        GENE    #arm\n",
+            "        GENE    #arm\n        IMM     80\n        IMM     6\n        IMM     7\n             \x20       BUILD\n        IMM     80\n        IMM     6\n        IMM     8\n             \x20       BUILD\n        IMM     255\n        ZERO\n        IMM     7\n             \x20       OSET\n        IMM     255\n        ZERO\n        IMM     8\n             \x20       OSET\n",
+        )
+    };
+
+    let variants: Vec<(String, String)> = vec![
+        ("as shipped".into(), source.clone()),
+        ("nucleus 44".into(), nucleus(&source, 44)),
+        ("chloroplast 70".into(), leaf(&source, 70)),
+        ("spike quarter out".into(), spike_out(&source, 64)),
+        ("no spike at all".into(), spike_out(&source, 0)),
+        (
+            "nucleus 44 + chloroplast 70".into(),
+            leaf(&nucleus(&source, 44), 70),
+        ),
+        ("sheathed while dividing".into(), sheathe(&source)),
+        ("with cilia".into(), swim(&source)),
+        ("sheathed + cilia".into(), swim(&sheathe(&source))),
+        ("extension 32".into(), spike_out(&source, 8)),
+        ("extension 64".into(), spike_out(&source, 16)),
+        ("extension 128".into(), spike_out(&source, 32)),
+        ("extension 16".into(), spike_out(&source, 4)),
+        ("extension 4".into(), spike_out(&source, 1)),
+    ];
+
+    eprintln!("\none founder, soup.ron, 2400 ticks — the test wants four cells:");
+    eprintln!(
+        "{:>28}  {:>6}  {:>5}  {:>7}",
+        "variant", "bytes", "pop", "energy"
+    );
+    for (label, text) in &variants {
+        let bytes = match mm_asm::assemble(text) {
+            Ok(a) => a.bytes,
+            Err(e) => {
+                eprintln!("{label:>28}  does not assemble: {e}");
+                continue;
+            }
+        };
+        let mut world = World::new(scenario("soup.ron")).expect("world");
+        let id = seed(&mut world, &bytes);
+        world.run(2400);
+        let energy = match world.cells().index(id) {
+            Some(i) => world.cells().energy[i] / Q10_ONE,
+            None => 0,
+        };
+        eprintln!(
+            "{label:>28}  {:>6}  {:>5}  {energy:>7}",
+            bytes.len(),
+            world.cells().len()
+        );
+    }
+}
+
+/// Whether a spike small enough to raise daughters is still a spike.
+///
+/// `which_cost_kills_the_daughters` finds the cliff: a lineage collapses between extension 16
+/// and 32, because `spike_damage` is `Q10_ONE/16` and so damage per tick is `64 × ext / 1024` —
+/// one a tick at 16, two a tick at 32, and a newborn dies of two a tick in about twelve. But a
+/// spike that cannot raise a daughter and a spike that cannot kill anything are equally useless,
+/// so the question is whether those are the same setting.
+#[test]
+fn is_a_spike_that_can_raise_daughters_still_a_spike() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../genomes/predator.mm");
+    let source = std::fs::read_to_string(&path).expect("genome source");
+    let prey = assemble("ancestor.mm");
+
+    eprintln!("\none predator among sixteen prey, 4000 ticks:");
+    eprintln!(
+        "{:>12}  {:>10}  {:>7}  {:>9}  {:>9}",
+        "extension", "predators", "prey", "carrion", "converted"
+    );
+    for pre in [0u32, 1, 4, 8, 16, 32, 128] {
+        let text = source.replace(
+            "        IMM     128\n        IMM     2\n        SHL                     ; 512, half extension",
+            &format!("        IMM     {pre}\n        IMM     2\n        SHL                     ; extension"),
+        );
+        let bytes = mm_asm::assemble(&text).expect("assembles").bytes;
+        let mut world = World::new(scenario("soup.ron")).expect("world");
+
+        let hunter_species = {
+            let id = seed(&mut world, &bytes);
+            world.cells().index(id).map(|i| world.cells().species[i])
+        };
+        let structural = world.biology().structural_chemical;
+        for k in 0..16u32 {
+            let (x, y) = (12 + (k % 4) as i32 * 12, 12 + (k / 4) as i32 * 12);
+            let Ok(g) = world.genomes().intern(prey.clone()) else {
+                continue;
+            };
+            let id = world.spawn_cell(CellSeed {
+                x: pos(x),
+                y: pos(y),
+                mass: q10(30),
+                energy: q10(400),
+                membrane: 24,
+                key: 11,
+                species: 0,
+                parent: CellId::NONE,
+                birth_tick: 0,
+                genome: g,
+            });
+            if let Some(i) = world.cells_mut().index(id) {
+                let cells = world.cells_mut();
+                cells.slots_mut(i)[1] = Organelle::finished(OrganelleType::Nucleus, 64);
+                cells.slots_mut(i)[2] = Organelle::finished(OrganelleType::Mitochondrion, 50);
+                cells.slots_mut(i)[3] = Organelle::finished(OrganelleType::Chloroplast, 60);
+                cells.interior_mut(i)[structural] = q10(200);
+                cells.interior_mut(i)[11] = q10(40);
+                cells.interior_mut(i)[14] = q10(40);
+            }
+        }
+        world.adopt_current_contents_as_baseline();
+
+        let before = world.ledger().converted();
+        world.run(4000);
+        let damage = world.ledger().converted() - before;
+        let predators = world
+            .cells()
+            .iter()
+            .filter(|i| Some(world.cells().species[*i]) == hunter_species)
+            .count();
+        eprintln!(
+            "{:>12}  {predators:>10}  {:>7}  {:>9}  {damage:>9}",
+            pre * 4,
+            world.cells().len() - predators,
+            world.total_matter()[mm_core::ecology::CARRION] / i64::from(Q10_ONE),
+        );
+    }
+}

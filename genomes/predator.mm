@@ -51,19 +51,48 @@
 
 ; ---------------------------------------------------------------- the spike
 ;
-; Slot 5, held out at half extension. Damage and upkeep both scale with extension, so half is
-; a compromise a mutation can move in either direction: further out to kill faster, further in
-; to survive a lean patch. Which way pays depends on how much prey there is, which is exactly
-; the feedback a predator-prey oscillation is made of.
+; Slot 5, held out a sixtyfourth. This number was 512 — half extension — and at 512 this genome
+; **kills its own daughters**, which took a long time to see because every plausible explanation
+; was wrong first.
+;
+; A spike damages what it touches. It has no idea what it is touching: `ecology::step` filters
+; the victims by "not me", "occupied" and "within reach", and that is the whole list. There is no
+; kin check and there must not be one — a special case for "my own offspring" is exactly the kind
+; of flag `CLAUDE.md` forbids. A daughter is born inside her mother's reach, and this genome has
+; no cilia, so neither of them can leave.
+;
+; `spike_damage` is `Q10_ONE/16`, so damage a tick is `64 * extension / 1024`. A newborn dies of
+; two a tick in about twelve ticks. That is the cliff, and it is sharp — one founder in
+; `soup.ron`, 2400 ticks:
+;
+;   extension     4      16      32      64     128     512
+;   population  183      64       2       2       1       1
+;
+; What is *not* the cause, each ruled out by measurement rather than by argument: it is not the
+; divide guard (sweeping the threshold from 200 down to 60 changes nothing at all), not the
+; energy (a bigger engine puts it at 131 against its own bar of 100 and it still will not breed),
+; not the copy (it buds thirteen times in twelve hundred ticks and completes all 339 bytes every
+; time), not the nucleus, not the chloroplast, and not the want of prey — among a thousand prey
+; it reaches two. It divides perfectly well. The daughters die.
+;
+; Sheathing the spike for the duration of the copy does not save them either: it is back out on
+; the next pass, and she is still there. Cilia do not save them: two of them and the power to beat
+; them gets to two cells. Only a spike small enough to be survivable does.
+;
+; So this is the finding the genome exists to carry: **an armed cell that cannot tell kin from
+; prey and cannot move away from either has to carry a weapon its own children can survive.**
+; Sixteen is one point of damage a tick — a prey cell with a membrane of twenty-four takes some
+; twenty-four ticks of unbroken contact to kill, which is a real weapon and a slow one. Half
+; extension is not a weapon at all. It is a sterility switch.
 
         GENE    #arm
         IMM     80
         IMM     12              ; spike
         IMM     5
         BUILD
-        IMM     128
+        IMM     4
         IMM     2
-        SHL                     ; 512, half extension
+        SHL                     ; 16 — see above; 512 sterilises the lineage
         ZERO                    ; control 0 — signed extension
         IMM     5
         OSET

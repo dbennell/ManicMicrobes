@@ -857,6 +857,41 @@ by `mm-cli` as newline-delimited JSON, and rendered as live plots in `mm-app`:
   which a predator has to acquire separately if it wants to eat what it killed. Reporting a
   "predation income" would mean inventing a number for a mechanism the engine does not have.
 
+  **A spike cannot tell kin from prey, and that turns out to bound what a predator can be.**
+  `ecology::step` filters a spike's victims by "not me", "occupied" and "within reach", and that
+  is the whole list. There is no kin check and there must not be one — a flag for "my own
+  offspring" is exactly the special case the design rules forbid, and the same absence is what
+  makes a parasite just a cell that writes to another's nucleus.
+
+  What follows from it was found by `predator.mm` failing to reproduce, and took a long time to
+  see because every plausible explanation was wrong first. A daughter is born *inside her
+  mother's reach*, and a mother holding a spike out kills her in about twelve ticks at half
+  extension. `spike_damage` is `Q10_ONE/16`, so damage a tick is `64 × extension / 1024`, and the
+  cliff is sharp — one founder in `soup.ron` over 2400 ticks:
+
+  | extension  | 4   | 16 | 32 | 64 | 128 | 512 |
+  |------------|-----|----|----|----|-----|-----|
+  | population | 183 | 64 | 2  | 2  | 1   | 1   |
+
+  Ruled out by measurement rather than by argument, in this order: the divide guard (sweeping the
+  threshold from 200 down to 60 changes nothing at all), the energy economy (a bigger engine puts
+  it at 131 against its own bar of 100 and it still will not breed), the copy (it buds thirteen
+  times in twelve hundred ticks and completes all 339 bytes every time), the nucleus, the
+  chloroplast, and the want of prey — among a thousand prey it reaches two. It divides perfectly
+  well and then kills what it made.
+
+  Sheathing the spike for the duration of the copy does not save the daughter: it is back out on
+  the next pass and she has not gone anywhere. Cilia do not save her either — two of them and the
+  power to beat them reaches two cells, because a newborn cannot outrun a neighbour it is
+  touching. **Only a weapon its own children can survive does.** So an armed lineage here is
+  constrained to a spike that kills slowly: at extension 16 a prey cell with a membrane of
+  twenty-four takes some twenty-four ticks of unbroken contact, which is a real weapon and a
+  patient one. Half extension is not a weapon at all, it is a sterility switch.
+
+  This is a constraint on strategy and not a defect to tune away. The alternative — kin
+  recognition — would be the engine deciding what a family is, and that is not its place to
+  know.
+
 ---
 
 ## 14. The front-end
