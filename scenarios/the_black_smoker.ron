@@ -1,0 +1,87 @@
+// The black smoker — a vent that actually vents.
+//
+// `the_vent.ron` is a slide with one small sun at the bottom of it and nothing else: the vent is
+// a *light* source, and its own header admits that a chloroplast near a vent and a chloroplast
+// in daylight run the same reaction on a different intensity. This is the other half — a vent
+// that puts matter into the water as well as light, which is what a real one does and what
+// `Scenario::flux` was built for.
+//
+// Sulphide wells up at the mouth and washes out over the rim. It is not decoration: pathway 2
+// of the default metabolic chemistry burns sulphide against the same oxidant as the others, so
+// this is a genuine second economy, in the water, unused.
+//
+// **Nothing shipped in `genomes/` can eat it.** Every one of them runs a mitochondrion on its
+// default control word, which selects pathway 0 and burns sugar. Reaching the sulphide takes one
+// `OSET` writing 2 into `control[1]` of an organelle that already exists — one instruction, on a
+// value a copy error can land on by itself. That is the experiment.
+//
+// The light is `the_vent.ron`'s exactly, and that is the design: this and the vent differ in the
+// plume and in nothing else, so the pair is a control the way `archipelago` and
+// `archipelago_control` are. Any difference in what evolves here is the sulphide's doing.
+//
+// Making the light meaner was tried first and is a dead end worth recording, because the
+// interesting result would have been a population poor enough to *need* the sulphide. It does
+// not survive being made poor. Over six thousand ticks, from sixteen founders:
+//
+//   intensity 4096, half-life 8  →  127, 587, 813   thriving
+//   intensity 2048, half-life 8  →    7,   7,   7   persisting, never growing
+//   intensity 3072, half-life 6  →    5,   5,   3   guttering
+//   intensity 4096, half-life 5  →    2,   0,   0   extinct by four thousand
+//
+// The cliff is in the half-life and not the intensity: eight squares works and six does not,
+// at any brightness tried. Which says the constraint is the *area* of the lit disc rather than
+// how bright the middle of it is — a population needs room to be a population, and a small
+// bright spot is a smaller habitat than a large dim one. A slide poor enough to make the
+// sulphide urgent is a slide too poor to hold anything that might discover it.
+//
+//   mm-cli run scenarios/the_black_smoker.ron --ticks 500000 --archive smoker.ndjson
+//
+// What to watch is the trophic split in the budget pane. Income attributed to `influx` is energy
+// that arrived latent in the sulphide; while every cell is photosynthesising it sits in the
+// water, arrives, and washes straight back out over the rim. A run where the world's stored
+// energy climbs against a flat light income is a run where something has started drinking.
+(
+    name: "the black smoker",
+    seed: 20260804,
+    width: 128,
+    height: 128,
+
+    // `the_vent.ron`'s light, unchanged, so the two scenarios are a matched pair.
+    light: PointSource(
+        x: 64,
+        y: 64,
+        intensity: 4096,
+        half_life_squares: 8,
+    ),
+
+    // Convection off the mouth, which is what carries the plume outward. Without it the
+    // sulphide would sit in the middle and diffuse into a bullseye.
+    current: Rotational(strength: 64),
+    fluid_interval: 1,
+
+    seeding: [
+        Uniform(chemical: 11, per_square: 409600),
+        Uniform(chemical: 14, per_square: 409600),
+        Uniform(chemical: 4, per_square: 409600),
+    ],
+
+    inhabitants: [
+        (genome: "ancestor.mm", count: 16),
+    ],
+
+    // The plume. A source at the mouth and four drains around the rim — a rectangle cannot be a
+    // ring, and saying so in four lines is better than a shape nobody can picture.
+    //
+    // The drains are a rate rather than an amount, so the rim cannot scour the slide dry: what
+    // leaves rises with what has reached the edge, and the standing plume settles where the two
+    // meet. That level is the resource, and it is a number the vent's strength sets.
+    flux: [
+        Source(chemical: 10, x: 61, y: 61, width: 6, height: 6, per_tick: 24000),
+        Drain(chemical: 10, x: 0, y: 0, width: 128, height: 4, rate: 64),
+        Drain(chemical: 10, x: 0, y: 124, width: 128, height: 4, rate: 64),
+        Drain(chemical: 10, x: 0, y: 4, width: 4, height: 120, rate: 64),
+        Drain(chemical: 10, x: 124, y: 4, width: 4, height: 120, rate: 64),
+    ],
+
+    barriers: [],
+)
