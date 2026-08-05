@@ -93,6 +93,8 @@ pub struct World {
     /// Per-cell radii, reused by collision separation so it does not allocate per tick.
     /// Scratch like `scratch`: excluded from equality and from the hash.
     radii: Vec<i32>,
+    /// The separation solver's own working memory, for the same reason and on the same terms.
+    separation: crate::neighbours::SeparationScratch,
     /// How hard each cell is being pressed by cells it is not joined to, `POS`, as of this
     /// tick's separation pass. Scratch in the same sense: recomputed from positions every
     /// tick, so it is excluded from equality and from the hash.
@@ -308,6 +310,7 @@ impl World {
             census: std::collections::BTreeMap::new(),
             scratch: crate::fluid::FluidScratch::new(n),
             radii: Vec::new(),
+            separation: crate::neighbours::SeparationScratch::default(),
             crowding: Vec::new(),
             pressure: Vec::new(),
             slip: Vec::new(),
@@ -688,6 +691,7 @@ impl World {
                 &mut self.crowding,
                 &mut self.pressure,
                 blocked,
+                &mut self.separation,
             );
         }
 

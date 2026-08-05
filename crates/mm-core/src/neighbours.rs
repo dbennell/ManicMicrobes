@@ -801,7 +801,7 @@ fn separation_sq(cells: &CellArena, i: usize, j: usize) -> i64 {
 /// A cell's whole answer, computed from its neighbours without touching any of them. Returned
 /// rather than applied so that a pass can compute every cell's answer at once and apply them
 /// together — see the Jacobi loop in [`resolve_collisions`].
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, Debug)]
 struct Correction {
     dx: i32,
     dy: i32,
@@ -1134,6 +1134,40 @@ fn correction_for(
 /// daughter, and only one whose neighbourhood has nothing left to give does not.
 /// `blocked` is the substrate's barrier mask, one entry per square in row-major order. Pass an
 /// empty slice for a slide with no barriers on it; see [`barrier_correction`].
+/// Working memory for [`resolve_collisions`], kept between ticks.
+///
+/// The solver allocated four vectors the size of the arena on every call — two for what the
+/// constraints moved each cell, one for what is touching anything, and one per pass for the
+/// corrections `collect` gathered. At fifty thousand cells and three passes that is six
+/// allocations and about a megabyte of zeroing a tick, for buffers whose contents never survive
+/// the call that made them.
+///
+/// Scratch in the same sense as `World::radii` and `World::crowding`: derived fresh inside every
+/// call, so two worlds that differ only in what is left here are the same world, and it is
+/// excluded from equality, hashing and snapshots.
+#[derive(Clone, Debug, Default)]
+pub struct SeparationScratch {
+    /// What the constraints ended up moving each cell, so velocity can be reconciled with it.
+    push_x: Vec<i32>,
+    push_y: Vec<i32>,
+    /// Whether a cell is touching anything at all — not the same question as whether it *moved*.
+    touching: Vec<bool>,
+    /// One pass's corrections, gathered in slot order.
+    deltas: Vec<(u32, Correction)>,
+}
+
+impl SeparationScratch {
+    /// Empty every buffer and size it for `capacity` cells, keeping the allocations.
+    fn begin(&mut self, capacity: usize) {
+        self.push_x.clear();
+        self.push_x.resize(capacity, 0);
+        self.push_y.clear();
+        self.push_y.resize(capacity, 0);
+        self.touching.clear();
+        self.touching.resize(capacity, false);
+    }
+}
+
 pub fn resolve_collisions(
     cells: &mut CellArena,
     index: &NeighbourIndex,
@@ -1141,6 +1175,7 @@ pub fn resolve_collisions(
     crowding: &mut Vec<i32>,
     pressure: &mut Vec<i32>,
     blocked: &[bool],
+    scratch: &mut SeparationScratch,
 ) -> u32 {
     let mut separated = 0u32;
     let width = index.width;
@@ -1171,14 +1206,19 @@ pub fn resolve_collisions(
     }
 
     // What the constraints ended up moving each cell, so that velocity can be reconciled with it
-    // once the passes are done. See the note below the pass loop.
-    let mut push_x: Vec<i32> = vec![0; cells.capacity()];
-    let mut push_y: Vec<i32> = vec![0; cells.capacity()];
-    // Whether a cell is touching anything at all. Not the same question as whether it was
-    // *moved*: the interior of a pack is where the pushes cancel, so a cell can be gripped on
-    // every side and have a net correction of zero. Friction has to key off contact, not motion,
-    // or it would apply everywhere except the one place that needs it.
-    let mut touching: Vec<bool> = vec![false; cells.capacity()];
+    // once the passes are done, and whether a cell is touching anything at all — which is not the
+    // same question as whether it was *moved*, because the interior of a pack is where the pushes
+    // cancel. Friction has to key off contact, not motion, or it would apply everywhere except
+    // the one place that needs it.
+    //
+    // Reused across ticks rather than allocated per call. See [`SeparationScratch`].
+    scratch.begin(cells.capacity());
+    let SeparationScratch {
+        push_x,
+        push_y,
+        touching,
+        deltas,
+    } = scratch;
 
     for pass in 0..SEPARATION_PASSES {
         // Jacobi rather than Gauss-Seidel: every cell works out its own correction from where
@@ -1215,7 +1255,10 @@ pub fn resolve_collisions(
         let first = pass == 0;
         let arena: &CellArena = cells;
         let radii_ref: &[i32] = radii;
-        let deltas: Vec<(u32, Correction)> = index
+        // Into the buffer rather than into a fresh `Vec`: `collect_into_vec` keeps the
+        // allocation and writes in the same order `collect` would, so the arithmetic and its
+        // sequence are untouched.
+        index
             .occupants()
             .par_iter()
             .map(|&i| {
@@ -1224,7 +1267,7 @@ pub fn resolve_collisions(
                     correction_for(arena, index, radii_ref, blocked, i as usize, first),
                 )
             })
-            .collect();
+            .collect_into_vec(deltas);
 
         let max_x = (width as i64 * POS_ONE as i64) - 1;
         let max_y = (height as i64 * POS_ONE as i64) - 1;
@@ -1587,6 +1630,7 @@ mod tests {
             &mut Vec::new(),
             &mut Vec::new(),
             &[],
+            &mut SeparationScratch::default(),
         );
         assert_eq!(n, 1);
         assert!(
@@ -1606,7 +1650,8 @@ mod tests {
                 &mut Vec::new(),
                 &mut Vec::new(),
                 &[],
-            ),
+            &mut SeparationScratch::default(),
+        ),
             0
         );
         let after: Vec<(i32, i32)> = far.iter().map(|i| (far.x[i], far.y[i])).collect();
@@ -1630,7 +1675,8 @@ mod tests {
                 &mut Vec::new(),
                 &mut Vec::new(),
                 &[],
-            );
+            &mut SeparationScratch::default(),
+        );
         }
         separation(&cells, 0, 1)
     }
@@ -1745,7 +1791,8 @@ mod tests {
                 &mut Vec::new(),
                 &mut Vec::new(),
                 &[],
-            );
+            &mut SeparationScratch::default(),
+        );
         }
         let want = 2 * r;
         let core = ((want as i64 * CORE_PERMILLE as i64) / 1000) as i32;
@@ -1778,6 +1825,7 @@ mod tests {
             &mut crowding,
             &mut Vec::new(),
             &[],
+            &mut SeparationScratch::default(),
         );
         assert_eq!(
             crowding.iter().filter(|c| **c > 0).count(),
@@ -1796,6 +1844,7 @@ mod tests {
             &mut crowding,
             &mut Vec::new(),
             &[],
+            &mut SeparationScratch::default(),
         );
         assert!(
             crowding[0] > 0 && crowding[1] > 0,
@@ -1823,6 +1872,7 @@ mod tests {
             &mut Vec::new(),
             &mut light,
             &[],
+            &mut SeparationScratch::default(),
         );
 
         // Driven onto the core.
@@ -1837,6 +1887,7 @@ mod tests {
             &mut Vec::new(),
             &mut heavy,
             &[],
+            &mut SeparationScratch::default(),
         );
 
         assert!(
@@ -1866,7 +1917,8 @@ mod tests {
                 &mut Vec::new(),
                 &mut Vec::new(),
                 &[],
-            );
+            &mut SeparationScratch::default(),
+        );
             index.rebuild(&cells, 16, 16);
         }
         assert!(
@@ -1888,7 +1940,8 @@ mod tests {
                 &mut Vec::new(),
                 &mut Vec::new(),
                 &[],
-            );
+            &mut SeparationScratch::default(),
+        );
             index.rebuild(&cells, 16, 16);
             for i in cells.iter() {
                 assert!(cells.x[i] >= 0 && cells.x[i] < 16 * POS_ONE);
@@ -1916,7 +1969,8 @@ mod tests {
                     &mut Vec::new(),
                     &mut Vec::new(),
                     &[],
-                );
+            &mut SeparationScratch::default(),
+        );
             }
             cells
                 .iter()
@@ -1969,6 +2023,7 @@ mod tests {
             &mut Vec::new(),
             &mut Vec::new(),
             &wall_at(16, 16, 6, 5),
+            &mut SeparationScratch::default(),
         );
         assert!(
             cells.x[0] < before,
@@ -1993,6 +2048,7 @@ mod tests {
             &mut Vec::new(),
             &mut Vec::new(),
             &wall_at(16, 16, 6, 5),
+            &mut SeparationScratch::default(),
         );
         assert!(
             cells.y[0] < pos(5) + POS_ONE / 8,
@@ -2020,6 +2076,7 @@ mod tests {
             &mut Vec::new(),
             &mut Vec::new(),
             &[],
+            &mut SeparationScratch::default(),
         );
         let b = resolve_collisions(
             &mut clear,
@@ -2028,6 +2085,7 @@ mod tests {
             &mut Vec::new(),
             &mut Vec::new(),
             &vec![false; 16 * 16],
+            &mut SeparationScratch::default(),
         );
         assert_eq!(a, b);
         for i in 0..arrangement.len() {
@@ -2053,6 +2111,7 @@ mod tests {
             &mut crowding,
             &mut pressure,
             &wall_at(16, 16, 6, 5),
+            &mut SeparationScratch::default(),
         );
         assert_eq!(crowding[0], 0, "a wall wounded a cell resting against it");
         assert_eq!(pressure[0], 0, "a wall stopped a cell dividing");
