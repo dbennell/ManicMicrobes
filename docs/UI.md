@@ -34,7 +34,7 @@ Three consequences that decide arguments later:
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ File   Slide   Simulation   View   Tools   Help          ⏸ ▶ 1× 8× 256× ⏭    │  menu bar
+│ File   Slide   Simulation   View   Tools   Help       ⏸ ▶ ½× 1× 8× max ⏭     │  menu bar
 ├────────────────┬───────────────────────────────────────┬─────────────────────┤
 │                │                                       │                     │
 │   CELL         │                                       │   METRICS           │
@@ -106,7 +106,9 @@ Slide     Scenario library        ▸           whatever is in scenarios/, by na
 
 Simulation  Run / Pause           Space
             Step one tick         .
-            Speed                 ▸           1× · 8× · 256× · unlimited
+            Speed                 ▸           paused · ½× · 1× · 8× · unlimited
+                                              (½× is 30 ticks a second, for watching a
+                                              division rather than catching one)
             Breakpoints…
             ──
             Interventions…                    what has been changed mid-run, and when

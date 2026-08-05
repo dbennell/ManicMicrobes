@@ -92,6 +92,23 @@ impl Rate {
         }
     }
 
+    /// Half realtime: thirty ticks a second.
+    ///
+    /// The other end of the control from [`Rate::Unlimited`], and there for the same reason:
+    /// the interesting things do not all happen at one speed. A split lands in a single tick
+    /// and the daughters are pushed apart over the few after it, so at 1× the whole of a
+    /// division is a couple of frames — which reads as a cell that was suddenly two cells.
+    /// Halving the rate does not slow the world down, it gives the same ticks more frames to
+    /// be seen in.
+    ///
+    /// Its own constructor rather than a fraction in [`Rate::times`]: `times` is whole
+    /// multiples, a `times(0)` that means paused already lives there, and one named half is
+    /// less to read than a numerator-and-denominator nobody else would use.
+    #[must_use]
+    pub fn half() -> Rate {
+        Rate::PerSecond(REALTIME / 2)
+    }
+
     fn encode(self) -> u32 {
         match self {
             Rate::Paused => 0,
@@ -621,6 +638,37 @@ mod tests {
     const PATIENCE: Duration = Duration::from_secs(20);
 
     #[test]
+    fn the_slow_stop_is_half_of_one_times_and_is_its_own_setting() {
+        // The control's stops have to be distinguishable, because the toolbar highlights the
+        // one in force by comparing against each: two spellings of the same rate would light
+        // two buttons, and a half that decoded back as something else would light none.
+        assert_eq!(Rate::half(), Rate::PerSecond(REALTIME / 2));
+        assert_ne!(Rate::half(), Rate::times(1));
+        assert!(Rate::half().is_running(), "half speed is not a pause");
+    }
+
+    #[test]
+    fn running_slower_does_not_run_a_different_world() {
+        // Half speed is a rate and rates do not reach a tick — the same claim
+        // `how_the_ticks_were_grouped_does_not_change_the_world` makes, at the one stop where
+        // a tick is now spread over two of the thread's iterations rather than crowded into
+        // one. That is the arithmetic in `run` that carries fractional ticks, so it is worth
+        // asserting at a rate that actually exercises the carry.
+        let engine = Engine::start(Slide::new(scenario()).unwrap(), Rate::half());
+        assert!(
+            engine.wait_for_tick(30, PATIENCE),
+            "half speed never got there"
+        );
+        engine.set_rate(Rate::Paused);
+        let held = engine.handle();
+        let (tick, hash) = {
+            let slide = held.slide();
+            (slide.world().tick_count(), slide.world().state_hash())
+        };
+        assert_eq!(hash, headless(tick));
+    }
+
+    #[test]
     fn a_world_run_on_a_thread_is_the_world_run_headless() {
         // The whole guarantee, stated directly: moving the simulation off the render thread
         // must not change what the simulation does. If this fails, nothing else here matters.
@@ -811,6 +859,7 @@ mod tests {
         for rate in [
             Rate::Paused,
             Rate::Unlimited,
+            Rate::half(),
             Rate::PerSecond(1),
             Rate::PerSecond(60),
             Rate::PerSecond(15_360),

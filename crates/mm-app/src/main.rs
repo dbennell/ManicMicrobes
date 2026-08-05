@@ -17,7 +17,7 @@
 //! is deliberately no binding that cannot be discovered from the menus.
 //!
 //! ```text
-//!   File  Slide  Simulation  View  Tools  Help        ⏸ ▶ 1× 8× 256× ⏭
+//!   File  Slide  Simulation  View  Tools  Help     ⏸ ▶ ½× 1× 8× max ⏭
 //!  ┌────────────┬────────────────────────────┬──────────────────────┐
 //!  │  cell      │        THE SLIDE           │  metrics             │
 //!  │            │                            │  legend              │
@@ -36,7 +36,7 @@
 //! | right click | apply the current tool |
 //! | `space` | pause / resume |
 //! | `.` | step one tick |
-//! | `0` `-` `=` `backspace` | speed: paused, 1×, 8×, as fast as it will go |
+//! | `0` `` ` `` `-` `=` `backspace` | speed: paused, ½×, 1×, 8×, as fast as it will go |
 //! | `1`–`9` | toggle that chemical's overlay |
 //! | `i` `p` `l` | cell, metrics, legend |
 //! | `g` `w` `e` `d` | drawer: genome, ecology, editor, debugger |
@@ -1576,8 +1576,14 @@ fn keyboard(keys: &ButtonInput<KeyCode>, view: &mut View, sim: &mut SlideRes) {
     }
     // Speed control, including "run as fast as the machine will go" (SPEC §14): the render
     // detaches from the tick rate rather than the tick rate bending to the render.
+    //
+    // `` ` `` for the slow stop: the ramp `0 - = ⌫` runs along the right of the number row and
+    // there is no free key to the left of `0` on it — `1`–`9` are the overlays and taking one
+    // would cost a chemical its key. The row's other end is the only unclaimed key on the row,
+    // and it is at least the end of it that reads as "less".
     for (key, rate) in [
         (KeyCode::Digit0, Rate::Paused),
+        (KeyCode::Backquote, Rate::half()),
         (KeyCode::Minus, Rate::times(1)),
         (KeyCode::Equal, Rate::times(8)),
         (KeyCode::Backspace, Rate::Unlimited),
@@ -3128,6 +3134,7 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                 ui.menu_button("Speed", |ui| {
                     for (label, key, rate) in [
                         ("paused", "0", Rate::Paused),
+                        ("½× — 30 ticks a second", "`", Rate::half()),
                         ("1× — 60 ticks a second", "-", Rate::times(1)),
                         ("8×", "=", Rate::times(8)),
                         ("as fast as it will go", "backspace", Rate::Unlimited),
@@ -3312,7 +3319,7 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                 for (key, what) in [
                     ("space", "run / pause"),
                     (".", "step one tick"),
-                    ("0 - = ⌫", "speed"),
+                    ("0 ` - = ⌫", "speed"),
                     ("1–9", "chemical overlays"),
                     ("[ ]", "step one overlay at a time"),
                     ("v", "flow field"),
@@ -3331,10 +3338,14 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                 if ui.button("⏭").on_hover_text("step one tick  (.)").clicked() {
                     sim.engine.step();
                 }
+                // Slowest last, because the layout is right-to-left: this reads ½× 1× 8× max
+                // on screen, which is the order the keys are in and the order a speed control
+                // is in everywhere else.
                 for (label, rate) in [
                     ("max", Rate::Unlimited),
                     ("8×", Rate::times(8)),
                     ("1×", Rate::times(1)),
+                    ("½×", Rate::half()),
                 ] {
                     if ui
                         .add(egui::Button::new(label).selected(sim.engine.rate() == rate))
