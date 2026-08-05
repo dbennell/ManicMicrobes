@@ -6,6 +6,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
+# The microscope is what `cargo run -p mm-app` means. Without this the shader bench makes that
+# ambiguous, and the command every doc in the repo gives stops working.
+default-run = "mm-app"
 
 [dependencies]
 # The per-cell seam solve in `slide::frame`, which is embarrassingly parallel and was five

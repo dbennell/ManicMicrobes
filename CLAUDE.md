@@ -125,7 +125,7 @@ cargo run -p mm-app --features render --release   # the microscope
 # The cell shader with no simulation behind it: cells from `mm_app::phantom`, drawn through
 # the same shader and vertex layout the microscope uses, so that a fault in the picture can be
 # blamed on the shader or on the data and not argued about. `cell.wgsl` hot-reloads.
-cargo run -p mm-app --bin shaderbench --features render --release
+cargo run -p mm-app --bin shaderbench --features render --release   # --bin, not the default
 cargo test -p mm-app --test shader_probe -- --ignored --nocapture --test-threads=1  # its numbers
 
 # And what the shader actually put on the screen, against what it was told to draw. Two
