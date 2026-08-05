@@ -494,3 +494,96 @@ fn the_detector_is_sensitive_to_the_faults_it_is_for() {
         );
     }
 }
+
+/// The closed-form swell agrees with the bisection it replaced.
+///
+/// `slide::area_swell` used to find its scale by sixteen steps of bisection over `[1, MAX_SWELL]`,
+/// summing all `SWELL_RAYS` rays at each step. It now inverts the piecewise quadratic directly.
+/// That is the same function evaluated a different way, so it has to give the same answer — and
+/// where it differs it must be because the *bisection* was the approximate one: sixteen steps over
+/// a range of a quarter leaves about 4·10⁻⁶ of slack.
+///
+/// Checked against a reference bisection written out here, over every arrangement the phantom
+/// has, at several spacings, which is thousands of real seam sets rather than invented ones.
+#[test]
+fn the_closed_form_swell_agrees_with_the_bisection_it_replaced() {
+    /// What `area_swell` used to do, kept as the thing the new one is measured against.
+    fn by_bisection(radius: f32, want_radius: f32, seams: &[mm_app::slide::Squash]) -> f32 {
+        const RAYS: usize = 64;
+        const MAX_SWELL: f32 = 1.25;
+        if seams.is_empty() || radius <= 0.0 {
+            return 1.0;
+        }
+        let mut reach = [f32::INFINITY; RAYS];
+        for (j, r) in reach.iter_mut().enumerate() {
+            let theta = std::f32::consts::TAU * j as f32 / RAYS as f32;
+            let (sy, sx) = theta.sin_cos();
+            for s in seams {
+                let along = sx * s.nx + sy * s.ny;
+                if along > 1e-4 {
+                    *r = r.min((s.face * radius) / along);
+                }
+            }
+        }
+        let target = std::f32::consts::PI * want_radius * want_radius;
+        let area_at = |scale: f32| -> f32 {
+            let r = radius * scale;
+            let sum: f32 = reach.iter().map(|reach| reach.min(r) * reach.min(r)).sum();
+            0.5 * sum * std::f32::consts::TAU / RAYS as f32
+        };
+        if area_at(MAX_SWELL) < target {
+            return MAX_SWELL;
+        }
+        let (mut lo, mut hi) = (1.0f32, MAX_SWELL);
+        for _ in 0..16 {
+            let mid = 0.5 * (lo + hi);
+            if area_at(mid) < target {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        0.5 * (lo + hi)
+    }
+
+    let mut compared = 0usize;
+    let mut worst = 0.0f32;
+    for layout in Layout::ALL {
+        for spacing in [0.7f32, 0.85, 1.0, 1.15, 1.3] {
+            let bench = Bench {
+                layout,
+                spacing,
+                motion: Motion::Jitter,
+                ..Bench::default()
+            };
+            for f in 0..12u64 {
+                for cell in bench.frame(f) {
+                    // The seams as `squash_of` has them at this point: fractions of the
+                    // *unswollen* radius, before the divide by the swell.
+                    let raw: Vec<mm_app::slide::Squash> = cell
+                        .seams
+                        .iter()
+                        .map(|s| mm_app::slide::Squash {
+                            nx: s.nx,
+                            ny: s.ny,
+                            face: s.face * cell.swell,
+                        })
+                        .collect();
+                    let closed = mm_app::slide::area_swell(cell.bare, cell.bare, &raw);
+                    let bisected = by_bisection(cell.bare, cell.bare, &raw);
+                    worst = worst.max((closed - bisected).abs());
+                    compared += 1;
+                }
+            }
+        }
+    }
+    assert!(compared > 1000, "only {compared} cells compared");
+    // The bisection's own slack is 0.25 / 2^16 ≈ 3.8e-6, and the closed form should land inside
+    // it. Ten times that is a tolerance the difference cannot hide in and float noise can.
+    assert!(
+        worst < 4e-5,
+        "the closed form and the bisection disagree by {worst:.3e} over {compared} cells, which \
+         is more than the bisection's own convergence slack"
+    );
+    eprintln!("  {compared} cells: worst disagreement {worst:.3e} (bisection's own slack 3.8e-6)");
+}

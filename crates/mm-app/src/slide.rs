@@ -268,10 +268,13 @@ pub fn area_swell(radius: f32, want_radius: f32, seams: &[Squash]) -> f32 {
         return 1.0;
     }
     // Distance to the nearest seam along each of `SWELL_RAYS` directions, ignoring the circle.
+    //
+    // The directions come from a table computed once rather than from `sin_cos` per ray per
+    // cell. Same numbers — the table is built by the same call — but sixty-four transcendentals
+    // per cell per frame was the largest single cost in building a frame, and a frame is built
+    // on the simulation thread under the lock a tick takes.
     let mut reach = [f32::INFINITY; SWELL_RAYS];
-    for (j, r) in reach.iter_mut().enumerate() {
-        let theta = std::f32::consts::TAU * j as f32 / SWELL_RAYS as f32;
-        let (sy, sx) = theta.sin_cos();
+    for (r, (sx, sy)) in reach.iter_mut().zip(ray_directions().iter()) {
         for s in seams {
             // `face` is a fraction of `radius`; the seam sits at `face * radius` along its own
             // normal. A ray pointing away from a seam is not limited by it.
@@ -282,35 +285,89 @@ pub fn area_swell(radius: f32, want_radius: f32, seams: &[Squash]) -> f32 {
         }
     }
     let target = std::f32::consts::PI * want_radius * want_radius;
-    let area_at = |scale: f32| -> f32 {
-        let r = radius * scale;
-        let mut sum = 0.0;
-        for reach in reach.iter() {
-            let rho = reach.min(r);
-            sum += rho * rho;
+    // The scale that hits the target exactly, solved rather than searched for.
+    //
+    // The clipped area along the rays is `½ dθ Σ min(reach_j, r)²` with `r = radius · scale`,
+    // which is a *piecewise quadratic* in `r`: as `r` grows, one ray at a time stops being capped
+    // by the circle and starts being capped by its seam, and between two consecutive reach values
+    // nothing changes shape. So sort the reaches, walk the brackets, and in whichever one
+    // contains the answer invert the quadratic directly:
+    //
+    //     r² = (target / (½ dθ) − Σ_{reach ≤ r} reach²) / (however many rays are still uncapped)
+    //
+    // This replaces sixteen bisection steps, each of which summed all sixty-four rays. It is also
+    // the *exact* root rather than one bracketed to a part in 65,536 — a bisection over a range of
+    // 0.25 leaves about 4·10⁻⁶ of slack, and that slack was the only thing separating two cells'
+    // idea of a shared wall from each other.
+    let mut sorted = reach;
+    sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let half_dtheta = 0.5 * std::f32::consts::TAU / SWELL_RAYS as f32;
+    let want = target / half_dtheta;
+
+    let mut capped_area = 0.0f32; // Σ reach² over the rays already capped by their seam
+    let mut r_star = f32::INFINITY;
+    for k in 0..=SWELL_RAYS {
+        let lower = if k == 0 { 0.0 } else { sorted[k - 1] };
+        let upper = if k == SWELL_RAYS {
+            f32::INFINITY
+        } else {
+            sorted[k]
+        };
+        let uncapped = (SWELL_RAYS - k) as f32;
+        if uncapped > 0.0 {
+            let needed = (want - capped_area) / uncapped;
+            if needed >= 0.0 {
+                let r = needed.sqrt();
+                if r >= lower && r <= upper {
+                    r_star = r;
+                    break;
+                }
+            }
+        } else if capped_area >= want {
+            // Every ray is capped by a seam, so the area cannot grow any further. The cell is
+            // enclosed and the answer is wherever it stopped.
+            r_star = lower;
+            break;
         }
-        // ½ ρ² dθ, with dθ the same for every ray.
-        0.5 * sum * std::f32::consts::TAU / SWELL_RAYS as f32
-    };
-    if area_at(MAX_SWELL) < target {
-        return 1.0 + SWELL_GAIN * (MAX_SWELL - 1.0);
+        if k < SWELL_RAYS {
+            // The next bracket up has this ray capped. An unreachable seam contributes an
+            // infinite reach, which no finite `r` can pass, so the walk ends before it is added.
+            if !sorted[k].is_finite() {
+                break;
+            }
+            capped_area += sorted[k] * sorted[k];
+        }
     }
+
     // The bottom of the range is *below* one, and deliberately. `radius` arrives already
     // inflated by `PACKING`, which exists only so that cells the physics leaves touching still
     // overlap on screen and have a seam to share. That inflation is a lie about the cell's size,
     // and an unclipped cell should not be told it: with the target set to the honest area, a cell
     // nothing is pressing on solves to `1 / PACKING` and is drawn at exactly the radius it has.
-    let (mut lo, mut hi) = (1.0f32, MAX_SWELL);
-    for _ in 0..16 {
-        let mid = 0.5 * (lo + hi);
-        if area_at(mid) < target {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
-    }
+    //
+    // Clamped to the same interval the search used to be confined to, which is where the cap at
+    // `MAX_SWELL` and the floor at one both come from.
+    let scale = (r_star / radius).clamp(1.0, MAX_SWELL);
     // Only part of the way. See `SWELL_GAIN`.
-    1.0 + SWELL_GAIN * (0.5 * (lo + hi) - 1.0)
+    1.0 + SWELL_GAIN * (scale - 1.0)
+}
+
+/// The `SWELL_RAYS` directions the clipped area is measured along, as `(cos, sin)`.
+///
+/// Built once. `area_swell` is called for every cell on camera at `Lod::Packed` and above, sixty
+/// times a second, and it was calling `sin_cos` once per ray inside that — sixty-four
+/// transcendentals per cell per frame, for a table of constants.
+fn ray_directions() -> &'static [(f32, f32); SWELL_RAYS] {
+    static RAYS: std::sync::LazyLock<[(f32, f32); SWELL_RAYS]> = std::sync::LazyLock::new(|| {
+        let mut out = [(0.0, 0.0); SWELL_RAYS];
+        for (j, slot) in out.iter_mut().enumerate() {
+            let theta = std::f32::consts::TAU * j as f32 / SWELL_RAYS as f32;
+            let (sy, sx) = theta.sin_cos();
+            *slot = (sx, sy);
+        }
+        out
+    });
+    &RAYS
 }
 
 /// The one seam between a cell of drawn radius `radius` and a neighbour of drawn radius `other`,
