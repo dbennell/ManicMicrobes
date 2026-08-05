@@ -187,6 +187,14 @@ struct Shared {
     /// packing it into a `u64` would be a second encoding to keep honest.
     selected: Mutex<Option<mm_core::CellId>>,
     rate: AtomicU32,
+    /// The rate to come back to when the world is unpaused. Never [`Rate::Paused`].
+    ///
+    /// Resuming used to go to 1× whatever you had been watching at, which is a small thing
+    /// until it is in the way: looking closely at something means pausing repeatedly, and at
+    /// ½× or at max every one of those cost you the speed you had chosen. Kept here rather
+    /// than in the front end because pausing is not only the transport's doing — a breakpoint
+    /// pauses, and its `continue` should resume the same way the button does.
+    resume: AtomicU32,
     /// One-shot ticks owed, honoured whatever the rate is — including paused, which is the
     /// point of them.
     steps: AtomicU64,
@@ -333,11 +341,19 @@ impl Engine {
         // thread cannot silently reset the overlays a scenario chose.
         let overlays = slide.overlay_mask();
         let optics = slide.optics.enabled;
+        // A world started paused has nothing to remember yet, and 1× is what unpausing has
+        // always meant.
+        let resume = if rate.is_running() {
+            rate
+        } else {
+            Rate::times(1)
+        };
         let shared = Arc::new(Shared {
             slide: Mutex::new(slide),
             posted: Mutex::new(None),
             selected: Mutex::new(None),
             rate: AtomicU32::new(rate.encode()),
+            resume: AtomicU32::new(resume.encode()),
             steps: AtomicU64::new(0),
             stop: AtomicBool::new(false),
             measured: AtomicU32::new(0),
@@ -449,13 +465,42 @@ impl Engine {
         self.shared.flow.load(Ordering::Relaxed)
     }
 
+    /// Set the rate. A running one is also remembered as what to unpause to.
     pub fn set_rate(&self, rate: Rate) {
+        // Pausing deliberately does not overwrite the memory — that is the whole mechanism.
+        if rate.is_running() {
+            self.shared.resume.store(rate.encode(), Ordering::Relaxed);
+        }
         self.shared.rate.store(rate.encode(), Ordering::Relaxed);
     }
 
     #[must_use]
     pub fn rate(&self) -> Rate {
         Rate::decode(self.shared.rate.load(Ordering::Relaxed))
+    }
+
+    /// What [`Engine::unpause`] would run at. Never [`Rate::Paused`].
+    #[must_use]
+    pub fn resume_rate(&self) -> Rate {
+        Rate::decode(self.shared.resume.load(Ordering::Relaxed))
+    }
+
+    /// Start running again, at whatever speed was last chosen.
+    pub fn unpause(&self) {
+        self.set_rate(self.resume_rate());
+    }
+
+    /// Pause a running world, or resume a paused one at the speed it was last running at.
+    ///
+    /// Returns the rate now in force, which is what the caller needs to update its own idea of
+    /// whether the world is running.
+    pub fn toggle_pause(&self) -> Rate {
+        if self.rate().is_running() {
+            self.set_rate(Rate::Paused);
+        } else {
+            self.unpause();
+        }
+        self.rate()
     }
 
     /// Advance exactly one tick, whatever the rate is. The thing that makes a paused world
@@ -666,6 +711,38 @@ mod tests {
             (slide.world().tick_count(), slide.world().state_hash())
         };
         assert_eq!(hash, headless(tick));
+    }
+
+    #[test]
+    fn unpausing_goes_back_to_the_speed_you_were_watching_at() {
+        // The QoL rule, in the form the transport relies on: a pause is a pause and not also a
+        // speed change. Resuming used to be spelled `set_rate(times(1))` at three call sites,
+        // so watching at ½× and pausing to look at something cost you the ½×.
+        let engine = Engine::start(Slide::new(scenario()).unwrap(), Rate::Paused);
+        assert_eq!(
+            engine.resume_rate(),
+            Rate::times(1),
+            "a world started paused has nothing to remember, and 1× is what unpausing meant"
+        );
+
+        engine.set_rate(Rate::half());
+        assert_eq!(engine.toggle_pause(), Rate::Paused);
+        assert_eq!(
+            engine.resume_rate(),
+            Rate::half(),
+            "pausing must not overwrite what to come back to"
+        );
+        assert_eq!(engine.toggle_pause(), Rate::half());
+
+        // Every stop, not just the slow one — someone at max who pauses to read the metrics
+        // wants max back.
+        for rate in [Rate::times(8), Rate::Unlimited, Rate::times(1)] {
+            engine.set_rate(rate);
+            engine.set_rate(Rate::Paused);
+            engine.unpause();
+            assert_eq!(engine.rate(), rate);
+        }
+        engine.set_rate(Rate::Paused);
     }
 
     #[test]

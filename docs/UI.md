@@ -104,7 +104,7 @@ Slide     Scenario library        ▸           whatever is in scenarios/, by na
           ──
           Reseed                  R
 
-Simulation  Run / Pause           Space
+Simulation  Run / Pause           Space     resumes at the speed it was paused at, not 1×
             Step one tick         .
             Speed                 ▸           paused · ½× · 1× · 8× · unlimited
                                               (½× is 30 ticks a second, for watching a

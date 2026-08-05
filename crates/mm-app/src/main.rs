@@ -34,7 +34,7 @@
 //! | wheel | zoom about the pointer, whole-slide to single cell |
 //! | left click | select a cell |
 //! | right click | apply the current tool |
-//! | `space` | pause / resume |
+//! | `space` | pause / resume, at the speed you were watching at |
 //! | `.` | step one tick |
 //! | `0` `` ` `` `-` `=` `backspace` | speed: paused, ½×, 1×, 8×, as fast as it will go |
 //! | `1`–`9` | toggle that chemical's overlay |
@@ -1562,12 +1562,10 @@ fn handle_input(
 /// Everything bound to a key, once it is established that the keyboard is ours.
 fn keyboard(keys: &ButtonInput<KeyCode>, view: &mut View, sim: &mut SlideRes) {
     if keys.just_pressed(KeyCode::Space) {
-        view.paused = !view.paused;
-        sim.engine.set_rate(if view.paused {
-            Rate::Paused
-        } else {
-            Rate::times(1)
-        });
+        // Resuming goes back to the speed you were watching at rather than to 1×. See
+        // `Engine::toggle_pause`: looking closely at something means pausing over and over,
+        // and every one of those used to cost you the speed you had chosen.
+        view.paused = !sim.engine.toggle_pause().is_running();
     }
     if keys.just_pressed(KeyCode::Period) {
         // Step one tick, whatever the speed. A paused world you cannot advance is a
@@ -3117,12 +3115,7 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                     )
                     .clicked()
                 {
-                    sim.engine.set_rate(if running {
-                        Rate::Paused
-                    } else {
-                        Rate::times(1)
-                    });
-                    view.paused = running;
+                    view.paused = !sim.engine.toggle_pause().is_running();
                     ui.close();
                 }
                 if ui
@@ -3361,12 +3354,7 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                     .on_hover_text("run / pause  (space)")
                     .clicked()
                 {
-                    sim.engine.set_rate(if running {
-                        Rate::Paused
-                    } else {
-                        Rate::times(1)
-                    });
-                    view.paused = running;
+                    view.paused = !sim.engine.toggle_pause().is_running();
                 }
             });
         });
@@ -5877,7 +5865,9 @@ fn debugger_body(ui: &mut egui::Ui, sim: &mut SlideRes) {
         );
         if ui.button("continue").clicked() {
             sim.breakpoints.rearm();
-            sim.engine.set_rate(Rate::times(1));
+            // At the speed you were running at when it tripped, not at 1×: a breakpoint set
+            // while watching something slowly is set *because* you were watching it slowly.
+            sim.engine.unpause();
         }
     }
     let tick = sim.latest.frame.tick;
