@@ -201,6 +201,9 @@ fn gate(_c: &mut Criterion) {
     if cfg!(debug_assertions) {
         return;
     }
+    // The pool the binaries build, so the gate measures the machine they will run on rather
+    // than rayon's default. Honours `RAYON_NUM_THREADS`, so a scaling sweep still overrides it.
+    mm_core::threads::use_performance_cores();
     let threads = rayon::current_num_threads();
     eprintln!("\nPopulation gates ({threads} threads):");
 
@@ -219,10 +222,22 @@ fn gate(_c: &mut Criterion) {
         1.0 / bare_per_tick
     );
 
+    // `MM_BENCH_GENOMES=ancestor.mm` runs one gate rather than both.
+    //
+    // Not a nicety. A cached population is invalidated by any change to the snapshot format, and
+    // regrowing one takes upwards of twenty minutes — during which the phase breakdown below,
+    // which is the part that says where the time actually goes and takes half a minute, cannot be
+    // reached at all. A measurement you cannot get at is not a gate, which is the same objection
+    // `grown` already makes about growing on every run.
+    let only = std::env::var("MM_BENCH_GENOMES").unwrap_or_default();
     for (milestone, file, want) in [
         ("M2", "ancestor.mm", M2_GATE),
         ("M3", "drifter.mm", M3_GATE),
     ] {
+        if !only.is_empty() && !only.split(',').any(|g| g.trim() == file) {
+            eprintln!("  {milestone}: skipped, {file} is not in MM_BENCH_GENOMES");
+            continue;
+        }
         let Some(mut world) = grown(file, 1) else {
             continue;
         };
@@ -286,6 +301,7 @@ fn phase_breakdown(_c: &mut Criterion) {
     let mut radii = Vec::new();
     let mut crowding = Vec::new();
     let mut pressure = Vec::new();
+    let mut separation = neighbours::SeparationScratch::default();
     let t = Instant::now();
     for _ in 0..n {
         std::hint::black_box(neighbours::resolve_collisions(
@@ -295,6 +311,7 @@ fn phase_breakdown(_c: &mut Criterion) {
             &mut crowding,
             &mut pressure,
             &[],
+            &mut separation,
         ));
     }
     let collisions = t.elapsed() / n;
@@ -310,6 +327,7 @@ fn phase_breakdown(_c: &mut Criterion) {
     // per call is what is being timed, not the trajectory.
     let vm = world.scenario().vm;
     let spike_damage = world.biology().ecology.spike_damage;
+    let em_range = world.biology().ecology.em_range;
     let chemistry = world.biology().metabolism.catalogue.metabolism;
     // Cloned once, because `execute` wants the cells mutably and the substrate shared, and
     // both live in the same `World`. Outside the timed loop, so it costs the measurement
@@ -331,6 +349,7 @@ fn phase_breakdown(_c: &mut Criterion) {
             0,
             1,
             spike_damage,
+            em_range,
             chemistry,
         );
     }
@@ -354,6 +373,7 @@ fn phase_breakdown(_c: &mut Criterion) {
 
     let mut ledger = mm_core::ledger::Ledger::new();
     let mut starving = Vec::new();
+    let mut capacities = Vec::new();
     // Cloned, because `step` wants the cells mutably and both of these live in the same `World`.
     // Outside the timed loops, so it costs the measurement nothing — the same move the substrate
     // above makes for the same reason.
@@ -370,6 +390,7 @@ fn phase_breakdown(_c: &mut Criterion) {
             &mut ledger,
             &mut starving,
             &[],
+            &mut capacities,
         ));
     }
     let metabolic = t.elapsed() / n;

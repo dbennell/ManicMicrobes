@@ -43,6 +43,20 @@ use crate::cell::CellArena;
 use crate::chem::{ChemTable, CHEM_COUNT};
 use crate::fixed::{q10, q10_scale, Q10_ONE};
 use crate::ledger::Ledger;
+use rayon::prelude::*;
+
+/// One cell's photosynthetic and respiratory capacity, per pathway, worked out before the
+/// sequential loop starts. See [`MetabolismConfig::capacities_into`].
+///
+/// Scratch: derived fresh from the organelle loadout every tick, so two worlds that differ only
+/// in what is left here are the same world, and it is excluded from equality, hashing and
+/// snapshots — exactly as `World::radii` and `World::crowding` are.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Capacities {
+    pub photosynthesis: [i32; crate::organelle::PATHWAY_COUNT],
+    pub respiration: [i32; crate::organelle::PATHWAY_COUNT],
+}
+
 use crate::organelle::{MetabolicChemistry, OrganelleCatalogue, OrganelleType, PATHWAY_COUNT};
 use crate::substrate::Substrate;
 
@@ -394,6 +408,36 @@ impl Metabolism {
     /// Cells are visited in slot order, which is id order (I6). Nothing here depends on how
     /// the work is scheduled because nothing here is scheduled — metabolism is part of
     /// resolve, and resolve is sequential by design.
+    /// Work out every cell's photosynthetic and respiratory capacity, in parallel.
+    ///
+    /// Both are pure functions of a cell's *own* organelle slots and the configured rates: they
+    /// read no other cell, no substrate square and no accumulator, and they write nothing. That
+    /// is what makes them safe to lift out of the sequential loop, and they are worth lifting —
+    /// each is a scan of all sixteen slots and each cell does two of them, which measured at
+    /// **43% of `step`** on the fifty-thousand-cell bench (9.23 ms against 5.25 ms with the scans
+    /// stubbed out).
+    ///
+    /// The rest of `step` stays sequential and has to: it charges the energy ledger, and
+    /// `Ledger::dissipate` clamps each request against the energy still on the books, so what a
+    /// cell is charged depends on what every cell before it was charged. That ordering is part of
+    /// the conservation guarantee (I5) rather than an implementation detail, and it is not
+    /// something a parallel loop can reproduce.
+    fn capacities_into(&self, cells: &CellArena, into: &mut Vec<Capacities>) {
+        into.clear();
+        into.resize(cells.capacity(), Capacities::default());
+        into.par_iter_mut().enumerate().for_each(|(i, slot)| {
+            if !cells.occupied(i) {
+                return;
+            }
+            slot.photosynthesis = self.capacity_by_pathway(cells, i, OrganelleType::Chloroplast);
+            slot.respiration = self.capacity_by_pathway(cells, i, OrganelleType::Mitochondrion);
+        });
+    }
+
+    // Eight, and each one is a distinct thing the metabolism needs: the cells it changes, the
+    // three read-only tables it consults, the two accumulators it reports through, the pressure
+    // it reads, and its own scratch. Bundling them would name the bundle after nothing.
+    #[allow(clippy::too_many_arguments)]
     pub fn step(
         &self,
         cells: &mut CellArena,
@@ -402,25 +446,47 @@ impl Metabolism {
         ledger: &mut Ledger,
         starving: &mut Vec<crate::cell::CellId>,
         pressure: &[i32],
+        capacities: &mut Vec<Capacities>,
     ) -> MetabolicReport {
         let m = self.catalogue.metabolism;
         let mut report = MetabolicReport::default();
 
+        // --- construction: an organelle takes time before it works ---
+        //
+        // SPEC §6.2: organelles take time to construct and a partially built one is inert. This
+        // is where that time passes. Without it every organelle a cell ever built would stay
+        // inert forever, which looks exactly like a metabolism that does not work.
+        //
+        // Its own pass, ahead of the scans below, and that ordering is the whole of it.
+        // `Organelle::is_active` is `is_present() && remaining_build == 0`, so an organelle whose
+        // last build tick is this one becomes active *during* this tick — it did when this block
+        // sat immediately above the scans inside the loop, and it has to go on doing so. Lifting
+        // the scans out without lifting this would have delayed every newly finished organelle by
+        // a tick, which is a real change to the biology and not an optimisation.
+        //
+        // Per cell and independent of every other, so moving it is exact.
         for i in 0..cells.capacity() {
             if !cells.occupied(i) {
                 continue;
             }
-
-            // --- construction: an organelle takes time before it works ---
-            //
-            // SPEC §6.2: organelles take time to construct and a partially built one is
-            // inert. This is where that time passes. Without it every organelle a cell ever
-            // built would stay inert forever, which looks exactly like a metabolism that
-            // does not work.
             for o in cells.slots_mut(i) {
                 if o.remaining_build > 0 {
                     o.remaining_build = o.remaining_build.saturating_sub(1);
                 }
+            }
+        }
+
+        // The organelle scans, for every cell at once. See `capacities_into` for why these and
+        // only these, and why they can be lifted at all.
+        self.capacities_into(cells, capacities);
+
+        // Indexed rather than iterated, and `capacities` is indexed alongside: the loop walks
+        // arena *slots*, most of which are occupied and some of which are holes, and every array
+        // it touches is keyed by that slot number.
+        #[allow(clippy::needless_range_loop)]
+        for i in 0..cells.capacity() {
+            if !cells.occupied(i) {
+                continue;
             }
 
             // --- photosynthesis: 2 waste + light -> substrate + oxidant ---
@@ -436,7 +502,7 @@ impl Metabolism {
                 substrate.light().get(sq).copied().unwrap_or(0)
             };
             if light > 0 {
-                let by_pathway = self.capacity_by_pathway(cells, i, OrganelleType::Chloroplast);
+                let by_pathway = capacities[i].photosynthesis;
                 for (n, &capacity) in by_pathway.iter().enumerate() {
                     if capacity <= 0 {
                         continue;
@@ -480,7 +546,7 @@ impl Metabolism {
             }
 
             // --- respiration: substrate + oxidant -> waste + energy ---
-            let by_pathway = self.capacity_by_pathway(cells, i, OrganelleType::Mitochondrion);
+            let by_pathway = capacities[i].respiration;
             for (n, &capacity) in by_pathway.iter().enumerate() {
                 if capacity <= 0 {
                     continue;
@@ -825,7 +891,7 @@ mod tests {
         let i = spawn(&mut cells, &pool);
         cells.energy[i] = 0;
         let mut starving = Vec::new();
-        met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
+        met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[], &mut Vec::new());
         assert_eq!(
             cells.damage[i], met.rates.background_damage,
             "a cell carrying no toxin at all took no wear"
@@ -837,7 +903,7 @@ mod tests {
         let mut ticks = 0u32;
         while cells.damage[i] <= tolerance && ticks < 100_000 {
             cells.energy[i] = 0;
-            met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
+            met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[], &mut Vec::new());
             ticks += 1;
         }
         assert!(
@@ -860,7 +926,7 @@ mod tests {
         let before = cells.energy[i];
 
         let mut starving = Vec::new();
-        met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
+        met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[], &mut Vec::new());
 
         assert!(
             cells.damage[i] < q10(5),
@@ -882,7 +948,7 @@ mod tests {
         cells.energy[i] = 0;
 
         let mut starving = Vec::new();
-        met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
+        met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[], &mut Vec::new());
         assert!(
             cells.damage[i] >= q10(5),
             "a cell with no energy repaired itself anyway"
@@ -944,7 +1010,7 @@ mod tests {
         let before_total = grand_total(&cells, &sub);
         let before_energy = cells.energy[i];
         let mut starving = Vec::new();
-        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
+        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[], &mut Vec::new());
 
         assert!(report.burned > 0, "nothing was respired");
         assert!(
@@ -981,7 +1047,7 @@ mod tests {
         ledger.set_baseline(total_matter(&cells, &sub));
         let before = grand_total(&cells, &sub);
         let mut starving = Vec::new();
-        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
+        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[], &mut Vec::new());
 
         assert!(report.fixed > 0, "nothing was photosynthesised");
         assert!(report.absorbed > 0, "light was free");
@@ -1018,13 +1084,13 @@ mod tests {
         cells.interior_mut(i)[m.primary().substrate] = q10(50);
         cells.interior_mut(i)[m.primary().oxidant] = q10(50);
         let mut starving = Vec::new();
-        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
+        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[], &mut Vec::new());
         assert_eq!(report.burned, 0, "it burned a substrate it was not set to");
         assert_eq!(cells.interior(i)[m.primary().substrate], q10(50));
 
         // Fed its own, it eats.
         cells.interior_mut(i)[one.substrate] = q10(50);
-        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
+        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[], &mut Vec::new());
         assert!(report.burned > 0, "it would not burn its own substrate");
     }
 
@@ -1051,7 +1117,7 @@ mod tests {
             cells.interior_mut(i)[p.oxidant] = q10(50);
             let before = cells.energy[i];
             let mut starving = Vec::new();
-            met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
+            met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[], &mut Vec::new());
             cells.energy[i] - before
         };
         assert!(
@@ -1089,7 +1155,7 @@ mod tests {
         ledger.set_baseline(total_matter(&cells, &sub));
         let before = grand_total(&cells, &sub);
         let mut starving = Vec::new();
-        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
+        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[], &mut Vec::new());
 
         assert!(report.fixed > 0, "the chloroplast did nothing");
         assert!(report.burned > 0, "the mitochondrion did nothing");
@@ -1117,7 +1183,7 @@ mod tests {
         cells.interior_mut(i)[m.primary().substrate] = q10(50);
         cells.interior_mut(i)[m.primary().oxidant] = q10(50);
         let mut starving = Vec::new();
-        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
+        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[], &mut Vec::new());
         assert!(
             report.burned > 0,
             "an unconfigured mitochondrion did nothing"
@@ -1148,7 +1214,7 @@ mod tests {
         let before = grand_total(&cells, &sub);
         let mut starving = Vec::new();
         for tick in 0..2_000 {
-            met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
+            met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[], &mut Vec::new());
             assert_eq!(
                 grand_total(&cells, &sub),
                 before,
@@ -1188,7 +1254,7 @@ mod tests {
 
         let mut starving = Vec::new();
         for tick in 0..1_000 {
-            met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
+            met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[], &mut Vec::new());
             ledger
                 .check_energy()
                 .unwrap_or_else(|e| panic!("identity broke at tick {tick}: {e}"));
@@ -1226,7 +1292,7 @@ mod tests {
 
         ledger.absorb(q10(100_000) as i64);
         let mut starving = Vec::new();
-        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
+        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[], &mut Vec::new());
 
         assert_eq!(cells.damage[tolerable], 0, "a survivable dose did harm");
         assert!(cells.damage[poisoned] > 0, "an overdose did none");
@@ -1246,7 +1312,7 @@ mod tests {
         let mut starving = Vec::new();
         let mut ticks = 0;
         while starving.is_empty() && ticks < 10_000 {
-            met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
+            met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[], &mut Vec::new());
             ticks += 1;
         }
         assert!(!starving.is_empty(), "a poisoned cell never died");
@@ -1264,7 +1330,7 @@ mod tests {
         let before = cells.damage[i];
         let mut starving = Vec::new();
         for _ in 0..200 {
-            met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
+            met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[], &mut Vec::new());
         }
         assert!(cells.damage[i] < before, "damage never healed");
     }
@@ -1289,7 +1355,7 @@ mod tests {
         }
         ledger.absorb(q10(100_000) as i64);
         let mut starving = Vec::new();
-        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
+        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[], &mut Vec::new());
         assert_eq!(report.damage, 0);
         assert_eq!(cells.damage[i], 0);
     }
@@ -1311,7 +1377,7 @@ mod tests {
         let mut ledger = Ledger::new();
         ledger.absorb(i64::from(i32::MAX));
         let mut starving = Vec::new();
-        met.step(cells, sub, chem, &mut ledger, &mut starving, &[]);
+        met.step(cells, sub, chem, &mut ledger, &mut starving, &[], &mut Vec::new());
         assert!(
             starving.is_empty(),
             "the fixture is meant to be able to afford itself"
@@ -1498,7 +1564,7 @@ mod tests {
 
         let mut starving = Vec::new();
         for _ in 0..4000 {
-            met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
+            met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[], &mut Vec::new());
         }
         assert!(
             starving.is_empty(),
@@ -1532,7 +1598,7 @@ mod tests {
 
         let mut starving = Vec::new();
         ledger.absorb(1_000_000);
-        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
+        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[], &mut Vec::new());
         assert_eq!(report.starved, 1);
         assert_eq!(starving, vec![cells.id_at(i)]);
         assert_eq!(cells.energy[i], 0, "it spent everything it had trying");
@@ -1544,7 +1610,7 @@ mod tests {
         let i = spawn(&mut cells, &pool);
         ledger.absorb(q10(1000) as i64);
         let mut starving = Vec::new();
-        met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
+        met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[], &mut Vec::new());
         assert_eq!(cells.age[i], 1);
         assert!(
             cells.energy[i] < q10(100),
@@ -1565,7 +1631,7 @@ mod tests {
         cells.interior_mut(i)[m.primary().oxidant] = q10(50);
 
         let mut starving = Vec::new();
-        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
+        let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[], &mut Vec::new());
         assert_eq!(report.burned, 0, "a half-built mitochondrion must be inert");
         assert!(cells.energy[i] < q10(100), "but it is still being carried");
     }
@@ -1585,7 +1651,7 @@ mod tests {
             cells.interior_mut(i)[m.primary().substrate] = q10(50);
             cells.interior_mut(i)[m.primary().oxidant] = q10(50);
             let mut starving = Vec::new();
-            let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[]);
+            let report = met.step(&mut cells, &sub, &chem, &mut ledger, &mut starving, &[], &mut Vec::new());
             burned.push(report.burned);
             cells.despawn(cells.id_at(i));
         }
