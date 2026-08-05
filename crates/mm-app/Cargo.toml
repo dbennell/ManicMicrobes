@@ -52,3 +52,12 @@ path = "src/lib.rs"
 name = "mm-app"
 path = "src/main.rs"
 required-features = ["render"]
+
+# The cell shader with no simulation behind it. See the module docs in `src/bin/shaderbench.rs`
+# and `src/phantom.rs`: it draws cells that arithmetic made, through the same shader, material and
+# vertex layout the microscope uses, so that "the shader" and "what the shader was given" can be
+# told apart without running a world.
+[[bin]]
+name = "shaderbench"
+path = "src/bin/shaderbench.rs"
+required-features = ["render"]
