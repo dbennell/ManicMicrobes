@@ -61,3 +61,9 @@ required-features = ["render"]
 name = "shaderbench"
 path = "src/bin/shaderbench.rs"
 required-features = ["render"]
+
+# For `threads::pin_to` and nothing else: `sched_setaffinity`, so rayon's workers stay on the
+# cores worth having. See that module for what it buys and why it cannot live in `mm-core`,
+# which is `#![forbid(unsafe_code)]`.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

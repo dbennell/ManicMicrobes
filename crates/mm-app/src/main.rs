@@ -487,6 +487,11 @@ const SPECK_RGB: [f32; 3] = [0.745, 0.667, 0.510];
 const SPECK_MAX_SIDE: u64 = 8;
 
 fn main() {
+    // Before anything touches rayon, because a global pool can only be built once. Worth about
+    // a tenth of a tick at fifty thousand cells on a processor with more than one kind of core,
+    // and nothing at all on one without — see `mm_app::threads`.
+    mm_app::threads::use_performance_cores();
+
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {

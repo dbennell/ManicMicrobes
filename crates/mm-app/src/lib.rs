@@ -27,6 +27,7 @@
 //! - [`tools`] — tweezers and barriers: the one place that is *meant* to touch the world.
 //! - [`params`] — what the parameter editor calls each knob (M10.2).
 //! - [`ui`] — the shell: pointer routing, panel state, camera arithmetic.
+//! - [`threads`] — which cores rayon runs the simulation on.
 //!
 //! All of them are testable without a graphics stack, which is the point. `main.rs` is the
 //! only file that knows Bevy exists, and it is behind the `render` feature.
@@ -51,6 +52,8 @@ pub mod optics;
 pub mod params;
 pub mod phantom;
 pub mod slide;
+/// Rayon's pool, pinned to the cores worth having. A scheduling hint and nothing more.
+pub mod threads;
 pub mod tools;
 pub mod ui;
 pub mod wiki;

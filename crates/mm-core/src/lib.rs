@@ -65,6 +65,9 @@ pub mod sensing;
 pub mod snapshot;
 pub mod state_hash;
 pub mod substrate;
+/// Which cores the simulation runs on. A scheduling hint; see the module docs for why it
+/// cannot change an outcome.
+pub mod threads;
 pub mod vm;
 pub mod world;
 

@@ -63,6 +63,14 @@ directly from a CI job.
 ";
 
 fn main() -> ExitCode {
+    // Before anything touches rayon, because a global pool can only be built once. On a
+    // processor with more than one kind of core this is worth about a tenth of a tick; on one
+    // without, it does nothing. See `mm_core::threads`.
+    //
+    // The count only, not the affinity: pinning needs `sched_setaffinity` and lives in
+    // `mm_app::threads`, which the microscope calls and this does not depend on.
+    mm_core::threads::use_performance_cores();
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     match run(&args) {
         Ok(()) => ExitCode::SUCCESS,
