@@ -598,14 +598,24 @@ pub struct Frame {
     /// Incident light, normalised. Rendered as a warm luminance layer (SPEC §14).
     pub light: Vec<f32>,
     /// The prescribed flow plus whatever cilia have stirred into it, coarsened to one sample
-    /// per [`FLOW_STRIDE`] squares each way, in squares per fluid step. Empty when the overlay
-    /// is off, which is the usual case and costs nothing.
+    /// per [`FLOW_STRIDE`] squares each way, in squares per fluid step.
+    ///
+    /// Present when the arrows are switched on *or* when there is particulate to carry, since
+    /// the specks are advected by it — so this being non-empty does not mean the overlay was
+    /// asked for. [`Frame::flow_shown`] is that question; drawing arrows off this field alone
+    /// is how the overlay came to be on whether or not it was switched on.
     ///
     /// Coarsened rather than carried whole because the full field is two `i32` planes — two
     /// megabytes a frame at 512×512 — to draw a few hundred arrows from. Averaged over each
     /// block rather than point-sampled, so an arrow is what the water in that block is doing
     /// and not what one square of it happens to be doing.
     pub flow: Vec<[f32; 2]>,
+    /// Whether the flow overlay was switched on when this frame was built.
+    ///
+    /// The renderer's gate for the arrows. Carried on the frame rather than read from the
+    /// engine at draw time so that the arrows and the field they are drawn from are the same
+    /// tick's answer.
+    pub flow_shown: bool,
     /// Samples across, so the renderer can index `flow` without recomputing the division.
     pub flow_cols: u32,
     /// Detritus on the same lattice as `flow`, as a fraction of the busiest block.
@@ -1296,6 +1306,7 @@ impl Slide {
             light,
             flow,
             flow_cols,
+            flow_shown: self.show_flow,
             detritus,
             detritus_drift: table.advection_rates()[mm_core::ecology::DETRITUS] as f32
                 / Q10_ONE as f32,
@@ -1733,6 +1744,39 @@ mod tests {
             assert_eq!(layer.field.len(), 24 * 20);
             assert!(layer.field.iter().all(|v| (0.0..=1.0).contains(v)));
         }
+    }
+
+    #[test]
+    fn the_flow_field_is_carried_for_the_specks_but_the_arrows_are_asked_for() {
+        // The overlay was permanently on and its menu item inert, because the renderer drew
+        // arrows from `flow` being non-empty and `flow` is also gathered for the particulate
+        // to drift along. Two separate questions: whether the velocity is *available*, and
+        // whether the arrows were *switched on*. Only the second belongs to the menu.
+        let mut slide = Slide::new(scenario()).unwrap();
+        slide.advance(20);
+        slide
+            .world
+            .substrate_mut()
+            .add_chem(mm_core::ecology::DETRITUS, 10, 10, 4096);
+
+        assert!(!slide.show_flow, "the instrument starts off");
+        let off = slide.frame();
+        assert!(
+            !off.flow.is_empty(),
+            "particulate on the slide means the velocity is gathered regardless"
+        );
+        assert!(
+            !off.flow_shown,
+            "but a frame carrying the field is not a frame asking for arrows"
+        );
+
+        slide.show_flow = true;
+        let on = slide.frame();
+        assert!(on.flow_shown);
+        assert_eq!(
+            on.flow_cols, off.flow_cols,
+            "the same field either way — the toggle is about drawing it"
+        );
     }
 
     #[test]

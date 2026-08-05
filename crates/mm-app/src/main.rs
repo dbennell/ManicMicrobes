@@ -2321,7 +2321,12 @@ fn redraw(
     // Rebuilt each frame; a few hundred entries at most, because the lattice is chosen in
     // screen space and the window is only so big.
     let mut arrow_slots: Vec<(Vec3, [f32; 2], f32)> = Vec::new();
-    let arrow_count = if frame.flow.is_empty() || frame.flow_cols == 0 {
+    //
+    // Gated on `flow_shown` and not merely on the field being there: the field is also gathered
+    // for the particulate, which needs the velocity to drift the specks along, so on any slide
+    // with detritus on it `frame.flow` is populated whether or not the overlay was asked for.
+    // Drawing off the field alone had the arrows permanently on and the menu item inert.
+    let arrow_count = if !frame.flow_shown || frame.flow.is_empty() || frame.flow_cols == 0 {
         0
     } else {
         let cols = frame.flow_cols as usize;
