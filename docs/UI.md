@@ -806,6 +806,11 @@ derived from the cell's identity and not from time — which also means a cell k
 silhouette as you follow it, and a division produces a daughter that looks related but not
 identical.
 
+> **Two things about this that were wrong for a long time, and are worth knowing before touching
+> it:** the material must ask for `AlphaMode2d::Blend` or the antialiased edge below is computed
+> and thrown away, and every per-cell attribute must be `@interpolate(flat)` or the packed seam
+> normals arrive corrupted. See `docs/OVERLAPS.md`.
+
 **The fragment shader**, in the order the pixel is built:
 
 ```

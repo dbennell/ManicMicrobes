@@ -3,6 +3,11 @@
 Read this before making any change. Read `docs/SPEC.md` before implementing anything;
 it is normative. Read `docs/MILESTONES.md` to find the current definition of done.
 
+**Before chasing anything wrong with the picture, read `docs/OVERLAPS.md`.** Cells drawn over one
+another was hunted through the physics for days and was twice in the shader's wiring — and the
+bench that settled it (`cargo run -p mm-app --bin shaderbench --features render`) draws cells no
+simulation made, so the data can be taken off the table in one run instead of one per hypothesis.
+
 ## What this project is
 
 Manic Microbes: an artificial-life simulator where cells execute byte-encoded genomes in a
@@ -116,6 +121,20 @@ cargo run -p mm-cli -- match genomes/a.mm genomes/b.mm --ticks 20000     # an ar
 cargo run -p mm-app --features render --release   # the microscope
 # `--features render` is required: Bevy is an optional dependency so that the
 # simulation/render wall in slide.rs stays testable without a graphics stack.
+
+# The cell shader with no simulation behind it: cells from `mm_app::phantom`, drawn through
+# the same shader and vertex layout the microscope uses, so that a fault in the picture can be
+# blamed on the shader or on the data and not argued about. `cell.wgsl` hot-reloads.
+cargo run -p mm-app --bin shaderbench --features render --release
+cargo test -p mm-app --test shader_probe -- --ignored --nocapture --test-threads=1  # its numbers
+
+# And what the shader actually put on the screen, against what it was told to draw. Two
+# photographs of one frame over different backgrounds give the coverage exactly; see the script.
+MM_BENCH_AT=30 MM_BENCH_PANEL=0 MM_BENCH_DUMP=/tmp/f.txt MM_BENCH_SHOT=/tmp/dark.png \
+  ./target/release/shaderbench
+MM_BENCH_AT=30 MM_BENCH_PANEL=0 MM_BENCH_BG=1,1,1 MM_BENCH_SHOT=/tmp/light.png \
+  ./target/release/shaderbench
+tools/check_outline.py /tmp/f.txt /tmp/dark.png /tmp/light.png
 ```
 
 ## Layout
@@ -127,6 +146,8 @@ crates/mm-cli/    headless runner, parameter sweeps, metric export.
 crates/mm-app/    Bevy front-end: microscope, editor, wiki, tools.
 docs/SPEC.md      normative specification.
 docs/MILESTONES.md  delivery plan and acceptance tests.
+docs/OVERLAPS.md  the overlapping cells: what it was, what it was not, and the bench.
+tools/            scripts that turn a screenshot into numbers.
 scenarios/        .ron scenario configs.
 genomes/          .mm assembly sources.
 ```
