@@ -75,7 +75,6 @@
 //! by convolution. A real separable blur belongs in the post-process pass this leaves room
 //! for.
 
-use bevy::asset::{load_internal_asset, uuid_handle};
 use bevy::diagnostic::{Diagnostic, DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::image::ImageSampler;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
@@ -84,18 +83,15 @@ use bevy::prelude::*;
 // `bevy_sprite_render`. Nothing below changed but where it lives.
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::NoFrustumCulling;
-use bevy::mesh::{Indices, Mesh2d, MeshVertexAttribute, MeshVertexBufferLayoutRef};
-use bevy::render::render_resource::{
-    AsBindGroup, Extent3d, PrimitiveTopology, RenderPipelineDescriptor,
-    SpecializedMeshPipelineError, TextureDimension, TextureFormat, VertexFormat,
-};
-use bevy::shader::ShaderRef;
-use bevy::sprite_render::{Material2d, Material2dKey, Material2dPlugin, MeshMaterial2d};
+use bevy::mesh::Mesh2d;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy::sprite_render::MeshMaterial2d;
 use bevy::window::PrimaryWindow;
 use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 
 use mm_app::art;
 use mm_app::cellmesh;
+use mm_app::cellpipe;
 use mm_app::debugger::{Breakpoint, Breakpoints, Sandbox};
 use mm_app::editor::Editor;
 use mm_app::engine::{Engine, Published, Rate};
@@ -502,9 +498,8 @@ fn main() {
     // After `DefaultPlugins`, not before: the macro writes straight into `Assets<Shader>`, and
     // `AssetPlugin` is what puts that resource in the world. Before it, this is a panic on the
     // first line of `main` with a message about a missing resource rather than about a shader.
-    load_internal_asset!(app, CELL_SHADER, "cell.wgsl", Shader::from_wgsl);
+    cellpipe::plugin(&mut app);
     app.add_plugins(FrameTimeDiagnosticsPlugin::default())
-        .add_plugins(Material2dPlugin::<CellMaterial>::default())
         .add_plugins(EguiPlugin::default())
         .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.03)))
         .insert_resource(SlideRes::new())
@@ -1311,114 +1306,6 @@ struct FlowArrow(usize);
 #[derive(Component)]
 struct FluxMark(usize);
 
-/// The per-cell data the shader reads, beyond position, corner and colour.
-///
-/// The id is arbitrary but must be stable and must not collide with Bevy's own attributes,
-/// which is what the large number is for.
-const ATTRIBUTE_SHAPE: MeshVertexAttribute =
-    MeshVertexAttribute::new("CellShape", 0x6D_6D_5F_63_65_6C_6C, VertexFormat::Float32x4);
-
-/// Which way each of a cell's four seams faces, packed two 16-bit snorms per component.
-const ATTRIBUTE_SQUASH_DIR: MeshVertexAttribute = MeshVertexAttribute::new(
-    "CellSquashDir",
-    0x6D_6D_5F_63_65_6C_6D,
-    VertexFormat::Float32x4,
-);
-
-/// How far along each of those the seam sits.
-const ATTRIBUTE_SQUASH_FACE: MeshVertexAttribute = MeshVertexAttribute::new(
-    "CellSquashFace",
-    0x6D_6D_5F_63_65_6C_6E,
-    VertexFormat::Float32x4,
-);
-
-/// Seam directions 4..7.
-const ATTRIBUTE_SQUASH_DIR2: MeshVertexAttribute = MeshVertexAttribute::new(
-    "CellSquashDir2",
-    0x6D_6D_5F_63_65_6C_6F,
-    VertexFormat::Float32x4,
-);
-
-/// How far along seams 4..7 they sit.
-const ATTRIBUTE_SQUASH_FACE2: MeshVertexAttribute = MeshVertexAttribute::new(
-    "CellSquashFace2",
-    0x6D_6D_5F_63_65_6C_70,
-    VertexFormat::Float32x4,
-);
-
-/// Seams 8..11, for the cells a packed sheet presses on from every side.
-///
-/// Eight was called headroom over the six a monolayer settles on, and it was not: once the
-/// neighbour search covered a cell's real neighbourhood, cells routinely found nine or ten, and
-/// a cell that runs out of slots stops cutting for a neighbour that is still cutting for it —
-/// which draws as five clean shared walls and one side simply overlapping.
-const ATTRIBUTE_SQUASH_DIR3: MeshVertexAttribute = MeshVertexAttribute::new(
-    "CellSquashDir3",
-    0x6D_6D_5F_63_65_6C_71,
-    VertexFormat::Float32x4,
-);
-
-/// How far along seams 8..11 they sit.
-const ATTRIBUTE_SQUASH_FACE3: MeshVertexAttribute = MeshVertexAttribute::new(
-    "CellSquashFace3",
-    0x6D_6D_5F_63_65_6C_72,
-    VertexFormat::Float32x4,
-);
-
-/// How much the cell was grown to keep its area, so the shader can hand it back at the seams.
-///
-/// A bare `Float32`: four bytes a vertex rather than the forty-eight a fifth `vec4` would cost,
-/// and `CellShape` has no spare component.
-const ATTRIBUTE_SWELL: MeshVertexAttribute =
-    MeshVertexAttribute::new("CellSwell", 0x6D_6D_5F_63_65_6C_73, VertexFormat::Float32);
-
-/// Embedded at compile time rather than loaded from an `assets/` directory, so the binary runs
-/// from anywhere. The same thing `bevy_sprite` does for its own shaders.
-const CELL_SHADER: Handle<Shader> = uuid_handle!("6d6d5f63-656c-6c5f-7368-616465720001");
-
-/// The whole population, drawn by one material with one shader (M10.5).
-///
-/// No bindings: everything that varies rides in the vertex attributes, because it varies *per
-/// cell* and a material's uniforms are per draw call — and the entire point is that there is one
-/// draw call. See `cellmesh.rs` for why a mesh rather than instancing, and `cell.wgsl` for the
-/// field itself.
-#[derive(Asset, TypePath, AsBindGroup, Clone, Default)]
-struct CellMaterial {}
-
-impl Material2d for CellMaterial {
-    fn vertex_shader() -> ShaderRef {
-        ShaderRef::Handle(CELL_SHADER)
-    }
-
-    fn fragment_shader() -> ShaderRef {
-        ShaderRef::Handle(CELL_SHADER)
-    }
-
-    fn specialize(
-        descriptor: &mut RenderPipelineDescriptor,
-        layout: &MeshVertexBufferLayoutRef,
-        _key: Material2dKey<Self>,
-    ) -> Result<(), SpecializedMeshPipelineError> {
-        // The locations here are the locations in `cell.wgsl`, and the two have to agree
-        // exactly — a mismatch is a validation failure at draw time with nothing to say which
-        // end is wrong.
-        descriptor.vertex.buffers = vec![layout.0.get_layout(&[
-            Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
-            Mesh::ATTRIBUTE_UV_0.at_shader_location(1),
-            Mesh::ATTRIBUTE_COLOR.at_shader_location(2),
-            ATTRIBUTE_SHAPE.at_shader_location(3),
-            ATTRIBUTE_SQUASH_DIR.at_shader_location(4),
-            ATTRIBUTE_SQUASH_FACE.at_shader_location(5),
-            ATTRIBUTE_SQUASH_DIR2.at_shader_location(6),
-            ATTRIBUTE_SQUASH_FACE2.at_shader_location(7),
-            ATTRIBUTE_SQUASH_DIR3.at_shader_location(8),
-            ATTRIBUTE_SQUASH_FACE3.at_shader_location(9),
-            ATTRIBUTE_SWELL.at_shader_location(10),
-        ])?];
-        Ok(())
-    }
-}
-
 /// The one entity the whole population is drawn as.
 #[derive(Component)]
 struct CellMesh;
@@ -1465,7 +1352,7 @@ fn setup(
     mut images: ResMut<Assets<Image>>,
     mut layouts: ResMut<Assets<TextureAtlasLayout>>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut cell_materials: ResMut<Assets<CellMaterial>>,
+    mut cell_materials: ResMut<Assets<cellpipe::CellMaterial>>,
 ) {
     // Order -1 so the slide is composited *before* anything egui draws. bevy_egui attaches its
     // context to a camera, and with both at the default order the tie-break is spawn order —
@@ -1522,22 +1409,7 @@ fn setup(
     field.sampler = ImageSampler::linear();
 
     // One mesh for the whole population, rewritten each frame. Spawned empty; `redraw` fills it.
-    let mut cells = Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
-    );
-    cells.insert_attribute(Mesh::ATTRIBUTE_POSITION, Vec::<[f32; 3]>::new());
-    cells.insert_attribute(Mesh::ATTRIBUTE_UV_0, Vec::<[f32; 2]>::new());
-    cells.insert_attribute(Mesh::ATTRIBUTE_COLOR, Vec::<[f32; 4]>::new());
-    cells.insert_attribute(ATTRIBUTE_SHAPE, Vec::<[f32; 4]>::new());
-    cells.insert_attribute(ATTRIBUTE_SQUASH_DIR, Vec::<[f32; 4]>::new());
-    cells.insert_attribute(ATTRIBUTE_SQUASH_FACE, Vec::<[f32; 4]>::new());
-    cells.insert_attribute(ATTRIBUTE_SQUASH_DIR2, Vec::<[f32; 4]>::new());
-    cells.insert_attribute(ATTRIBUTE_SQUASH_FACE2, Vec::<[f32; 4]>::new());
-    cells.insert_attribute(ATTRIBUTE_SQUASH_DIR3, Vec::<[f32; 4]>::new());
-    cells.insert_attribute(ATTRIBUTE_SQUASH_FACE3, Vec::<[f32; 4]>::new());
-    cells.insert_attribute(ATTRIBUTE_SWELL, Vec::<f32>::new());
-    cells.insert_indices(Indices::U32(Vec::new()));
+    let cells = cellpipe::empty_mesh();
     commands.spawn((
         CellMesh,
         // The vertices are rewritten every frame in screen space, so the bounding box Bevy
@@ -1546,7 +1418,7 @@ fn setup(
         // exactly like every cell dying at once.
         NoFrustumCulling,
         Mesh2d(meshes.add(cells)),
-        MeshMaterial2d(cell_materials.add(CellMaterial {})),
+        MeshMaterial2d(cell_materials.add(cellpipe::CellMaterial {})),
         // Above the chemical field, below the organelles.
         Transform::from_xyz(0.0, 0.0, 1.0),
     ));
@@ -2863,18 +2735,7 @@ fn redraw(
         } else {
             Visibility::Visible
         };
-        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, buffers.positions.clone());
-        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, buffers.uvs.clone());
-        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, buffers.colours.clone());
-        mesh.insert_attribute(ATTRIBUTE_SHAPE, buffers.shapes.clone());
-        mesh.insert_attribute(ATTRIBUTE_SQUASH_DIR, buffers.squash_dirs.clone());
-        mesh.insert_attribute(ATTRIBUTE_SQUASH_FACE, buffers.squash_faces.clone());
-        mesh.insert_attribute(ATTRIBUTE_SQUASH_DIR2, buffers.squash_dirs2.clone());
-        mesh.insert_attribute(ATTRIBUTE_SQUASH_FACE2, buffers.squash_faces2.clone());
-        mesh.insert_attribute(ATTRIBUTE_SQUASH_DIR3, buffers.squash_dirs3.clone());
-        mesh.insert_attribute(ATTRIBUTE_SQUASH_FACE3, buffers.squash_faces3.clone());
-        mesh.insert_attribute(ATTRIBUTE_SWELL, buffers.swells.clone());
-        mesh.insert_indices(Indices::U32(buffers.indices.clone()));
+        cellpipe::upload(&mut mesh, buffers);
     }
 
     // Junctions. A stretched, rotated sprite per link: hard ones solid because they are

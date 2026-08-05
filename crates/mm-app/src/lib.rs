@@ -32,6 +32,14 @@
 
 pub mod art;
 pub mod cellmesh;
+/// The Bevy side of drawing a cell: the vertex layout, the material and the shader handle.
+///
+/// The one module of the library that knows Bevy exists, and behind the `render` feature for the
+/// same reason the application is. It holds no logic — only the layout the shader and the mesh
+/// must agree about — and it exists so that the microscope and the shader bench cannot drift
+/// apart in what they draw through.
+#[cfg(feature = "render")]
+pub mod cellpipe;
 pub mod debugger;
 pub mod editor;
 pub mod engine;
