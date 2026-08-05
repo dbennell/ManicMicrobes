@@ -19,6 +19,7 @@
 //! - [`optics`] — the microscope's look, as parameters rather than as a shader.
 //! - [`art`] — the baked cell atlas, and the chemical field's pixels.
 //! - [`cellmesh`] — the whole population as one mesh, for the per-pixel cell shader.
+//! - [`phantom`] — cells no simulation made, for testing the renderer rather than the slide.
 //! - [`inspector`] — a read-only transcript of one cell.
 //! - [`editor`] — a `.mm` source buffer, its diagnostics and its exports.
 //! - [`debugger`] — breakpoints over the live world, instruction stepping in a sandbox.
@@ -48,6 +49,7 @@ pub mod inspector;
 pub mod library;
 pub mod optics;
 pub mod params;
+pub mod phantom;
 pub mod slide;
 pub mod tools;
 pub mod ui;

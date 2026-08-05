@@ -190,7 +190,8 @@ pub const MIN_FACE: f32 = 0.55;
 /// This is presentation only. The physics keeps the staircase: collision, contact and every
 /// invariant still run on the integer radius, and must, or the picture would be of a different
 /// world than the one being simulated.
-fn drawn_radius(mass: i32) -> f32 {
+#[must_use]
+pub fn drawn_radius(mass: i32) -> f32 {
     let m = (mass as f32 / Q10_ONE as f32).max(0.0);
     0.25 + m.sqrt() * 0.125
 }
@@ -260,7 +261,9 @@ const SWELL_GAIN: f32 = 1.0;
 /// Depends on nothing but this frame's seams — no feedback from the previous frame's swell — so
 /// it cannot oscillate on its own account. It does *amplify* a seam appearing or disappearing,
 /// because that resizes the whole cell rather than one edge of it.
-fn area_swell(radius: f32, want_radius: f32, seams: &[Squash]) -> f32 {
+/// Public because it is a named suspect and the shader bench runs it on cells no simulation
+/// made — see [`crate::phantom`]. Pure arithmetic over plain data; it never sees a `World`.
+pub fn area_swell(radius: f32, want_radius: f32, seams: &[Squash]) -> f32 {
     if seams.is_empty() || radius <= 0.0 {
         return 1.0;
     }
@@ -310,6 +313,80 @@ fn area_swell(radius: f32, want_radius: f32, seams: &[Squash]) -> f32 {
     1.0 + SWELL_GAIN * (0.5 * (lo + hi) - 1.0)
 }
 
+/// The one seam between a cell of drawn radius `radius` and a neighbour of drawn radius `other`,
+/// whose centre is `(dx, dy)` away.
+///
+/// The whole scheme rests on this being computable from either side: swap the two radii, measure
+/// from the far centre, and every step below gives `d` minus what it gives here. So two cells
+/// arrive at one plane without talking to each other, and a shared wall has no gap and no doubled
+/// edge. `None` only for centres too close together to have a direction at all.
+///
+/// Split out of [`squash_of`] so that the shader bench can compute seams for cells no simulation
+/// made — see [`crate::phantom`]. Everything the plane depends on is in the arguments: there is
+/// no `World`, no neighbour index and no contact set, which is what makes the bench's data
+/// trustworthy where a frame's is exactly what is in doubt.
+#[must_use]
+pub fn seam_between(
+    radius: f32,
+    other: f32,
+    dx: f32,
+    dy: f32,
+    rigidity: f32,
+    other_rigidity: f32,
+) -> Option<Squash> {
+    let d = (dx * dx + dy * dy).sqrt();
+    // Exactly coincident centres have no direction to be squashed along. Separation will pull
+    // them apart next tick; until then they are simply drawn whole.
+    if d <= f32::EPSILON {
+        return None;
+    }
+    // The plane through the two points where the outlines cross:
+    //   face = (d² + r² - other²) / 2d
+    let face = (d * d + radius * radius - other * other) / (2.0 * d);
+    // Then moved towards whichever of the two is softer.
+    //
+    // The plane on its own says two cells give way equally, and they do not: a cell that has paid
+    // for a thick membrane holds its shape and one that has not gives in. So the seam slides along
+    // the overlap in proportion to the difference, bounded by half of it — a firm cell pressed
+    // against a soft one stays round and dents the other, and two cells of the same build still
+    // meet in the middle.
+    //
+    // Both sides compute the same seam: the shift is antisymmetric in the two rigidities, so the
+    // softer cell arrives at the same line from its own side and they still meet with no gap.
+    let overlap = (radius + other - d).max(0.0);
+    let firmness = (rigidity - other_rigidity) / (rigidity + other_rigidity).max(1.0);
+    let face = face + 0.5 * overlap * firmness;
+    // Then held off both cores — this one's and the neighbour's — as *one* interval rather than
+    // one clamp per side.
+    //
+    // Clamping each cell's own face independently is what this replaced, and it broke the one
+    // property the whole scheme rests on: that both cells arrive at the same plane. Whenever the
+    // clamp bit, the two faces stopped summing to the distance between the centres and the pair
+    // was drawn overlapping instead of sharing a wall. With cells of a size, that was rare. Now
+    // that the physics presses crowds to their core it fires constantly on any mismatched pair —
+    // the neighbour's face is the part that goes short, and nothing on this side could see it.
+    //
+    // Written as an interval, it is antisymmetric again: if this cell's face is pushed out to
+    // `d - theirs`, the neighbour computing from its own side is pushed in to exactly `theirs`,
+    // and the two still meet on one line.
+    let my_core = MIN_FACE * radius;
+    let their_core = MIN_FACE * other;
+    let face = if my_core + their_core >= d {
+        // No plane can respect both cores: the pair is closer than SPEC §6.4 should allow, which
+        // happens for a tick after a division places a daughter inside its parent. Split the
+        // distance between them in proportion instead — still one plane, still the same from both
+        // sides.
+        d * my_core / (my_core + their_core).max(f32::EPSILON)
+    } else {
+        face.clamp(my_core, d - their_core)
+    };
+    Some(Squash {
+        nx: dx / d,
+        ny: dy / d,
+        face: face / radius,
+    })
+}
+
 /// The seams a cell is flattened along, and how much it must swell to keep its area.
 ///
 /// `radius` is the drawn radius, not the physical one — the seams have to be worked out at the
@@ -338,68 +415,13 @@ fn squash_of(world: &World, i: usize, radius: f32) -> (Vec<Squash>, f32) {
         .iter()
         .filter_map(|c| {
             let (dx, dy) = (c.dx as f32 * scale, c.dy as f32 * scale);
-            let d = (dx * dx + dy * dy).sqrt();
-            // Exactly coincident centres have no direction to be squashed along. Separation
-            // will pull them apart next tick; until then they are simply drawn whole.
-            if d <= f32::EPSILON {
-                return None;
-            }
             // The neighbour's drawn radius, worked out the same way this cell's is — see
             // `drawn_radius`. Reading `c.radius` here instead is what a smoothed radius makes
             // wrong: this cell would use the smooth curve for itself and the staircase for its
             // neighbour, the neighbour would do the reverse, and the pair would compute two
             // different planes for one wall.
             let other = drawn_radius(c.mass) * PACKING;
-            // The plane through the two points where the outlines cross:
-            //   face = (d² + r² - other²) / 2d
-            // Both cells get the same seam from their own side, because swapping r and other
-            // and measuring from the far centre gives d minus this.
-            let face = (d * d + radius * radius - other * other) / (2.0 * d);
-            // Then moved towards whichever of the two is softer.
-            //
-            // The plane on its own says two cells give way equally, and they do not: a cell
-            // that has paid for a thick membrane holds its shape and one that has not gives
-            // in. So the seam slides along the overlap in proportion to the difference,
-            // bounded by half of it — a firm cell pressed against a soft one stays round and
-            // dents the other, and two cells of the same build still meet in the middle.
-            //
-            // Both sides compute the same seam: the shift is antisymmetric in the two
-            // rigidities, so the softer cell arrives at the same line from its own side and
-            // they still meet with no gap.
-            let overlap = (radius + other - d).max(0.0);
-            let (mine, theirs) = (rigidity, c.rigidity as f32);
-            let firmness = (mine - theirs) / (mine + theirs).max(1.0);
-            let face = face + 0.5 * overlap * firmness;
-            // Then held off both cores — this one's and the neighbour's — as *one* interval
-            // rather than one clamp per side.
-            //
-            // Clamping each cell's own face independently is what this replaced, and it broke
-            // the one property the whole scheme rests on: that both cells arrive at the same
-            // plane. Whenever the clamp bit, the two faces stopped summing to the distance
-            // between the centres and the pair was drawn overlapping instead of sharing a wall.
-            // With cells of a size, that was rare. Now that the physics presses crowds to their
-            // core it fires constantly on any mismatched pair — the neighbour's face is the part
-            // that goes short, and nothing on this side could see it.
-            //
-            // Written as an interval, it is antisymmetric again: if this cell's face is pushed
-            // out to `d - theirs`, the neighbour computing from its own side is pushed in to
-            // exactly `theirs`, and the two still meet on one line.
-            let my_core = MIN_FACE * radius;
-            let their_core = MIN_FACE * other;
-            let face = if my_core + their_core >= d {
-                // No plane can respect both cores: the pair is closer than SPEC §6.4 should
-                // allow, which happens for a tick after a division places a daughter inside its
-                // parent. Split the distance between them in proportion instead — still one
-                // plane, still the same from both sides.
-                d * my_core / (my_core + their_core).max(f32::EPSILON)
-            } else {
-                face.clamp(my_core, d - their_core)
-            };
-            Some(Squash {
-                nx: dx / d,
-                ny: dy / d,
-                face: face / radius,
-            })
+            seam_between(radius, other, dx, dy, rigidity, c.rigidity as f32)
         })
         .collect();
 
