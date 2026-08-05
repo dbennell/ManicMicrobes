@@ -19,7 +19,7 @@ use bevy::render::render_resource::{
     VertexFormat,
 };
 use bevy::shader::ShaderRef;
-use bevy::sprite_render::{Material2d, Material2dKey, Material2dPlugin};
+use bevy::sprite_render::{AlphaMode2d, Material2d, Material2dKey, Material2dPlugin};
 
 use crate::cellmesh;
 
@@ -110,6 +110,44 @@ impl Material2d for CellMaterial {
 
     fn fragment_shader() -> ShaderRef {
         ShaderRef::Handle(CELL_SHADER)
+    }
+
+    /// **Blend, and this is the whole reason the field is evaluated per pixel.**
+    ///
+    /// `Material2d::alpha_mode` defaults to `Opaque`, which is a blend state of *replace*: the
+    /// fragment's alpha is written to the target and never composited. So `cell.wgsl` computed an
+    /// antialiased edge one pixel wide at any magnification, and it was thrown away. What decided
+    /// the drawn shape instead was the `discard` at the bottom of the fade — `alpha <= 0.001` —
+    /// which is a hard, aliased edge at the *outer* end of the ramp rather than its middle.
+    ///
+    /// Measured on the shader bench, a plain circle with the wobble switched off, against the
+    /// radius the data asked for:
+    ///
+    /// | | median | p10 | p90 | the edge |
+    /// |---|---|---|---|---|
+    /// | `Opaque` | **+1.85 px** | +1.39 | +2.19 | 1.000 → 0.144 → 0.000, one pixel, hard |
+    /// | `Blend`  | **−0.00 px** | −0.01 | +0.01 | 0.870, 0.739, 0.500, 0.271, 0.128 |
+    ///
+    /// The same +1.8 px at 40 px per square and at 110, because it is not a radius error: it is
+    /// the width of the fade, added to every cell whatever size it is drawn.
+    ///
+    /// Two consequences, and they are the report:
+    ///
+    /// * **Every cell was drawn about two pixels bigger than its own outline.** A shared wall is
+    ///   computed by two cells agreeing on one plane, and then both of them overran it by two
+    ///   pixels — so the wall was a four-pixel band that both claimed and neither owned, resolved
+    ///   by whichever happened to be drawn second. That is a cell drawn over its neighbour with no
+    ///   boundary between them, on every contact on the slide, from a cause that has nothing to do
+    ///   with seams.
+    /// * **The edge could not be antialiased, so it crawled.** A hard edge on a body moving by a
+    ///   fraction of a pixel flips whole pixels between one cell and the next; an antialiased one
+    ///   slides smoothly. Which is exactly "it does not show up if nothing is moving, and any
+    ///   movement at all brings it out".
+    ///
+    /// `tests/shader_probe.rs` measures the geometry and `tools/check_outline.py` measures the
+    /// pixels; between them the claim above is checkable rather than remembered.
+    fn alpha_mode(&self) -> AlphaMode2d {
+        AlphaMode2d::Blend
     }
 
     fn specialize(
