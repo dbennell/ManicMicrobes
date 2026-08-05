@@ -39,18 +39,40 @@ struct Vertex {
     @location(10) swell: f32,
 };
 
+// Everything but the corner is **flat**, and on the seam directions that is not an optimisation.
+//
+// `squash_dir` does not carry a number. It carries two 16-bit snorms in the bits of an `f32`, and
+// the fragment shader takes it apart with `bitcast` — so the *bit pattern* is the payload and any
+// arithmetic on it at all is destructive. All four vertices of a quad hold the same value, which
+// looks like it makes interpolation a no-op, and on hardware that interpolates as
+// `a + (b-a)*u + (c-a)*v` it is. On hardware that interpolates as `a*w0 + b*w1 + c*w2` it is not:
+// the weights sum to one only to within rounding, so the result comes back one or two ulps off.
+// One ulp is the bottom bit of the mantissa, the bottom bit of the mantissa is the bottom bit of
+// the *packed pattern*, and that is the low half of `nx` — so a seam normal arrives pointing
+// somewhere else entirely, and does so differently at each pixel, because the weights differ at
+// each pixel.
+//
+// What that draws is a cell whose flat sides come and go across its own face: mostly round where
+// the normals landed wrong, walled where they happened to survive. Two neighbours then have no
+// agreed boundary and are drawn one over the other. It moves when the cell moves, because the
+// interpolation weights move with it — which is exactly "it does not show up if nothing is moving,
+// and any movement at all brings it out".
+//
+// The rest are flat because they are per-cell constants and interpolating a constant is work for
+// no reason. Only `uv` is a genuine per-pixel quantity: it is the corner, and the whole field is
+// evaluated against it.
 struct Output {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) uv: vec2<f32>,
-    @location(1) colour: vec4<f32>,
-    @location(2) shape: vec4<f32>,
-    @location(3) squash_dir: vec4<f32>,
-    @location(4) squash_face: vec4<f32>,
-    @location(5) squash_dir2: vec4<f32>,
-    @location(6) squash_face2: vec4<f32>,
-    @location(7) squash_dir3: vec4<f32>,
-    @location(8) squash_face3: vec4<f32>,
-    @location(9) swell: f32,
+    @location(1) @interpolate(flat) colour: vec4<f32>,
+    @location(2) @interpolate(flat) shape: vec4<f32>,
+    @location(3) @interpolate(flat) squash_dir: vec4<f32>,
+    @location(4) @interpolate(flat) squash_face: vec4<f32>,
+    @location(5) @interpolate(flat) squash_dir2: vec4<f32>,
+    @location(6) @interpolate(flat) squash_face2: vec4<f32>,
+    @location(7) @interpolate(flat) squash_dir3: vec4<f32>,
+    @location(8) @interpolate(flat) squash_face3: vec4<f32>,
+    @location(9) @interpolate(flat) swell: f32,
 };
 
 @vertex
