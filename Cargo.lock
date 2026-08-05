@@ -3094,6 +3094,7 @@ version = "0.0.1"
 dependencies = [
  "bevy",
  "bevy_egui",
+ "libc",
  "mm-asm",
  "mm-core",
  "rayon",
