@@ -1169,7 +1169,75 @@ exactly one meaning" and "no two text roles are the same size" be tests rather t
 
 ---
 
-## 9. Order of work
+## 9. Building a scenario (M10.7)
+
+§4 already says what a scenario is, what the ten tools do, and that a scenario built while
+*stopped* and then played is exactly reproducible while one edited mid-run is not. The code does
+all of it. **What the interface does not do is say any of it**, and that is what this section is
+for: M10.7 adds almost no mechanism, and a great deal of telling.
+
+### 9.1 Authoring is a state, not a mode
+
+A slide stopped at tick 0 is a recipe you are writing. The moment it has run a tick it is a
+state you are watching, and the tools stop being reproducible — §4's last paragraph. Nothing in
+the window says which of those you are looking at, and it is the difference between a scenario
+that replays and one that does not.
+
+So: `ui::authoring(tick, running)` — `tick == 0 && !running` — and a caption in the menu bar
+saying so, in `WARN`. **A predicate and not a flag**, because a flag is a lie the first time you
+press play and forget to clear it.
+
+**The transport stays live**, which is a deliberate departure from the design. The mock greys it
+out while authoring, and that is backwards: playing a stopped scenario from tick 0 is precisely
+the reproducible path, so the control that starts it is the last one to disable. The caption is
+the information; taking the button away is a different and wronger claim.
+
+### 9.2 The scenario pane
+
+A drawer tab, `scenario` (`S`), on the drawer shape of §8.6: the outline in the work area, and
+**what Save will write** in the context column, as the actual RON, live.
+
+The design puts these in the two rails instead, replacing the cell inspector and the metrics
+while authoring. That is a second layout, and §2 has already spent a milestone establishing that
+the rails are *what is selected* and *what the world is doing*. A tab costs nothing, reuses
+`skin::drawer_split`, and does not make the rails mean two different things depending on a mode.
+
+The RON preview is the item worth building this pane for. "A scenario is a recipe and not a
+state" is asserted in §4, asserted again in the pane's own footnote, and until you can see the
+file it would write it is only ever an assertion. `library::save` already serialises; this shows
+the string first.
+
+### 9.3 What is on the slide
+
+The toolbox lists sources and drains because a source that has not filled up yet is invisible,
+and without a list a rectangle in the wrong place cannot be found again (§4.3). Every word of
+that argument applies to a hand-placed founder and to an authored barrier, neither of which is
+listed. One table: kind, what, where, and the one number that matters to it.
+
+### 9.4 Sheets, not submenus
+
+`New slide…` is a submenu holding two sliders, and it closes if you look away. This is the
+complaint that moved the toolbox out of the Tools menu in §4.3, still unaddressed one menu over.
+Both `New…` items and the scenario library become windows that stay until dismissed, each
+saying what it will destroy before it does it.
+
+The library's window is a list beside a detail pane, and the detail is read from the `.ron` when
+you pick one — a directory listing is genuinely all it knows before that. **No thumbnail and no
+description field**: the design shows both, and a description means a new `Scenario` field, which
+is a format change and does not belong in a chrome milestone.
+
+### 9.5 Not in this milestone
+
+**The preview run** (design 3b) — running a genome for 10k–500k ticks and setting two genomes'
+populations side by side. Deferred deliberately. The design's own footnote concedes the problem
+and CLAUDE.md is unambiguous: there is no fitness function in this codebase and there must never
+be one. A person comparing two runs is not selection pressure inside the simulation, so the idea
+is defensible — but a panel that headlines one number per genome and colours the winner teaches
+people to read it as a score, and that is worth more thought than a milestone deadline gives it.
+
+---
+
+## 10. Order of work
 
 | step | what | why it is here |
 | --- | --- | --- |
@@ -1179,6 +1247,7 @@ exactly one meaning" and "no two text roles are the same size" be tests rather t
 | **M10.4** | ecology pane | The data all exists; this is presentation. |
 | **M10.5** | field texture, instanced cell shader, organelle pass | The biggest piece and the only one with real technical risk. Last, on a shell that is already stable. |
 | **M10.6** | the chrome: theme, type, row grammar, menus, toolbox and parameters | §8. After the renderer, because it must not be moving while the renderer is; and it touches none of the same files, so it cannot be the reason a frame regresses. |
+| **M10.7** | building a scenario: the authoring caption, the scenario pane and its RON preview, what is on the slide, sheets and the library | §9. Almost no new mechanism — §4 built it all and the interface never said so. Last because it is the smallest, and because it is the one whose absence is only ever confusing rather than wrong. |
 
 10.1 first because it is the smallest thing that makes the application usable day to day.
 10.5 before 10.6 because it is the one that can go wrong, and it should go wrong against a UI
@@ -1188,7 +1257,7 @@ costs nothing to revert.
 
 ---
 
-## 10. What could go wrong
+## 11. What could go wrong
 
 - **The instanced pipeline is the risky part.** Bevy's mid-level render API is the part that
   moves most between releases and has the least documentation. Mitigation: follow the upstream

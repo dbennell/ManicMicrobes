@@ -404,6 +404,17 @@ is done by watching, which is what this milestone is for.
   shape, which the toolbox does not have; menus with a shortcut column and a live speed control;
   a parameter editor that says which field you changed. Designed in `docs/UI.md` §8.
 
+- **M10.7 — building a scenario.** The half of §4 the interface never said out loud. Authoring
+  is a state — stopped at tick 0 — and the window says so, because that state is the difference
+  between a scenario that replays and one that does not. A scenario pane whose context column is
+  the RON that Save would write, live. One table of everything on the slide, not just the flux.
+  The two `New…` items and the library as windows that stay open rather than submenus that close
+  when you look away. Designed in `docs/UI.md` §9.
+
+  **The preview run is deliberately not in it.** UI.md §9.5 has the reasoning: a panel that
+  headlines a population per genome and colours the winner is a fitness function with a person
+  in the loop, and I2 says there is never one of those.
+
   **This deliverable does not open the renderer.** `cellpipe.rs`, `cellmesh.rs`, `cell.wgsl`,
   `art.rs`, `optics.rs`, `phantom.rs`, `slide.rs` and `main.rs`'s `redraw` are finished work —
   see `docs/OVERLAPS.md` for what some of it cost — and UI.md §8.1 makes the boundary explicit.
