@@ -1362,7 +1362,22 @@ that a system reading it **must** be pinned to the main thread with a `NonSendMa
 the thread-local is a freshly constructed empty one, every window lookup silently misses, and
 the window simply stops being movable with nothing anywhere saying why.
 
-### 11.3 Glyphs are a gamble that has to be looked at
+### 11.3 The transport is one control, not seven
+
+A single bordered box with hairline divisions, as the design draws it. Separate chips with gaps
+between them read as separate controls that happen to be adjacent, and these are seven positions
+of one thing.
+
+**Pause and play are two segments and not one toggle.** A toggle makes you read the glyph to
+work out which state you are in; two segments lit differently makes you look at it. Two are lit
+at once while it runs, and they are painted differently on purpose: play takes the **accent** —
+*the world is going* — and the current speed takes a **raised ground** — *this is how fast*.
+Two facts, both true, and a bar that painted them the same could not say so.
+
+`skin::segmented_bar` is where this lives, and the ends keep the box's rounding on their outer
+corners so a lit first or last segment does not square off the corner it sits in.
+
+### 11.4 Glyphs are a gamble that has to be looked at
 
 egui ships Hack and Ubuntu-Light and no more. `✕` (U+2715) is in neither and rendered as a tofu
 box in the close button — which a screenshot showed and nothing else would have. The buttons use

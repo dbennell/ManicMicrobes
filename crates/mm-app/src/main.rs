@@ -4096,43 +4096,77 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                 }
                 ui.add_space(12.0);
 
-                if skin::chip(ui, "⏭", None, false)
-                    .on_hover_text("step one tick  (.)  ·  paused: 0")
-                    .clicked()
-                {
-                    sim.engine.step();
-                }
-                // Slowest last, because the layout is right-to-left: this reads ½× 1× 8× max
-                // on screen, which is the order the keys are in and the order a speed control
-                // is in everywhere else.
-                // The keys, in the hover text. UI.md §2 asks that no shortcut exist which is
-                // not written down somewhere reachable, and the Simulation menu is where these
-                // seven used to be written — it was deleted because everything else in it was
-                // a second copy of these very buttons. The transport inherits the job.
-                for (label, key, rate) in [
-                    ("max", "backspace", Rate::Unlimited),
-                    ("8×", "=", Rate::times(8)),
-                    ("1×", "-", Rate::times(1)),
+                // The transport, as one segmented control rather than a row of chips (M10.9).
+                // Seven positions of one thing, and separate chips with gaps between them read
+                // as separate controls that happen to be adjacent.
+                //
+                // Pause and play are two segments and not one toggle, which is the design's
+                // arrangement and the better one: a toggle makes you read the glyph to work out
+                // the state, and two lit differently makes you look at it. Two segments *are*
+                // lit at once when it runs — play in the accent, saying the world is going, and
+                // the speed in a raised ground, saying how fast. Different facts, different
+                // paint.
+                let rate = sim.engine.rate();
+                let running = rate.is_running();
+                let icon = Some(26.0);
+                let speeds = [
                     ("½×", "`", Rate::half()),
-                ] {
-                    if skin::chip(ui, label, None, sim.engine.rate() == rate)
-                        .on_hover_text(format!("{label}  ({key})"))
-                        .clicked()
-                    {
-                        sim.engine.set_rate(rate);
-                        view.paused = false;
+                    ("1×", "-", Rate::times(1)),
+                    ("8×", "=", Rate::times(8)),
+                    ("max", "backspace", Rate::Unlimited),
+                ];
+                let mut segments = vec![
+                    skin::Segment {
+                        label: "⏸",
+                        on: !running,
+                        accent: true,
+                        hover: "pause  (space)".to_string(),
+                        width: icon,
+                    },
+                    skin::Segment {
+                        label: "▶",
+                        on: running,
+                        accent: true,
+                        hover: "run  (space)".to_string(),
+                        width: icon,
+                    },
+                ];
+                segments.extend(speeds.iter().map(|(label, key, at)| skin::Segment {
+                    label,
+                    on: running && rate == *at,
+                    accent: false,
+                    hover: format!("{label}  ({key})"),
+                    width: None,
+                }));
+                segments.push(skin::Segment {
+                    label: "⏭",
+                    on: false,
+                    accent: false,
+                    hover: "step one tick  (.)".to_string(),
+                    width: icon,
+                });
+
+                if let Some(picked) = skin::segmented_bar(ui, &segments) {
+                    match picked {
+                        0 => {
+                            sim.engine.set_rate(Rate::Paused);
+                            view.paused = true;
+                        }
+                        1 => {
+                            // Resumes at the speed it was paused at, not at 1×.
+                            if !running {
+                                view.paused = !sim.engine.toggle_pause().is_running();
+                            }
+                        }
+                        n if n <= speeds.len() + 1 => {
+                            sim.engine.set_rate(speeds[n - 2].2);
+                            view.paused = false;
+                        }
+                        _ => sim.engine.step(),
                     }
                 }
-                let running = sim.engine.rate().is_running();
-                // Never accented: run and pause are one *action* whose label already says which
-                // way it goes, and the accent means state. The speed chips beside it carry the
-                // state, and two lit chips side by side say nothing at all.
-                if skin::chip(ui, if running { "⏸" } else { "▶" }, None, false)
-                    .on_hover_text("run / pause  (space)")
-                    .clicked()
-                {
-                    view.paused = !sim.engine.toggle_pause().is_running();
-                }
+                ui.add_space(8.0);
+
                 ui.label(skin::text(Role::Section, "transport"));
 
                 // Which of the two things you are looking at (UI.md §9.1). A slide stopped at
