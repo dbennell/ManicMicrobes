@@ -398,6 +398,16 @@ is done by watching, which is what this milestone is for.
 - **M10.5 — the look.** Chemical fields as one uploaded texture rather than a quarter of a
   million sprites. Cells as a single instanced draw with a signed-distance shader: rounded
   shading, per-cell irregularity, membrane ring, in-shader depth of field.
+- **M10.6 — the chrome.** The half of the window that is not the slide. A palette and a type
+  scale in `theme.rs` with no egui in it; every number in monospace; the three-column row
+  grammar replacing the labelled-slab bars; section headers; the drawer's work-area-plus-context
+  shape, which the toolbox does not have; menus with a shortcut column and a live speed control;
+  a parameter editor that says which field you changed. Designed in `docs/UI.md` §8.
+
+  **This deliverable does not open the renderer.** `cellpipe.rs`, `cellmesh.rs`, `cell.wgsl`,
+  `art.rs`, `optics.rs`, `phantom.rs`, `slide.rs` and `main.rs`'s `redraw` are finished work —
+  see `docs/OVERLAPS.md` for what some of it cost — and UI.md §8.1 makes the boundary explicit.
+  A chrome change that appears to need one of those files is a chrome change that is wrong.
 
 **Acceptance tests**
 1. **Input goes where it is pointed.** `ui::route` is a pure function of pointer position and
@@ -413,7 +423,16 @@ is done by watching, which is what this milestone is for.
 5. **Decoupling, for real this time.** The tick rate is unchanged whether the render runs at
    60fps or 5fps, and the state hash at 100,000 ticks matches `mm-cli`. M4 tests 1 and 3,
    which could not fail while the two shared a thread.
-6. **No regression.** Every acceptance test from M0–M8 still passes.
+6. **The theme is data, and the data is checked.** `theme.rs` builds with egui absent, as
+   `ui.rs` does. Its tests assert what a palette can actually get wrong: no two text roles
+   share a size; the accent colour is returned for selection and state and for nothing else;
+   and every role/ground pair that occurs in the interface clears a contrast floor, so a
+   near-black theme cannot ship with a label nobody can read.
+7. **The chrome did not touch the renderer.** `shader_probe`, `packing_probe`, `nine_cells`,
+   `overlap_detector`, `swell_probe`, `gradient_probe` and `frame_cost` pass unmodified, and
+   the M10.6 diff contains none of the files UI.md §8.1 lists. The picture is finished; this
+   milestone is the window around it.
+8. **No regression.** Every acceptance test from M0–M8 still passes.
 
 ---
 

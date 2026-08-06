@@ -957,7 +957,194 @@ world advanced in one go.
 
 ---
 
-## 8. Order of work
+## 8. The chrome (M10.6)
+
+§7 is about the renderer. This is about everything that is not the renderer: the panels, the
+menus, the type and the colour. They are separate sections because they are separate concerns
+with a hard boundary between them, and the boundary is the point of this one.
+
+The complaint that started it: *the simulation rendering is fine, the interface looks like it
+is from the 1990s.* Both halves are true, and the second one has a single cause. `main.rs` sets
+no `Visuals`, no fonts, no `Style` — in six thousand lines the only styling anywhere in the
+crate is three lines making one `DragValue`'s background transparent. Every dated thing in the
+window is egui's default dark theme and egui's default proportional font, drawing an interface
+that has never asked egui for anything. That is worth writing down because it decides the
+answer to "should we replace egui": no. Nothing designed below is out of egui's reach, and the
+things egui genuinely cannot do — CSS-grade layout, transitions, `:hover` rules — are not in it.
+
+### 8.1 What this does not touch
+
+**Nothing that draws the slide.** The renderer is finished work: the cell shader, the packing
+tiers, the seam solve, the optics. It cost days and three of them are written up in
+`docs/OVERLAPS.md`. So M10.6 does not open:
+
+```
+cellpipe.rs  cellmesh.rs  cell.wgsl  art.rs  optics.rs  phantom.rs  slide.rs
+```
+
+nor `main.rs`'s `redraw`, its materials, or anything reachable from them. If a chrome change
+appears to need one of those files, the change is wrong. The one thing the chrome draws over
+the viewport — the slide caption, the active-overlay chips, the selection ring — is egui
+painting on top of a finished picture and touches none of it.
+
+This is a boundary and not a preference. `tests/shader_probe.rs`, `tests/packing_probe.rs` and
+`tests/nine_cells.rs` fix the renderer's behaviour; they must pass untouched, and if one of
+them so much as needs re-recording then the boundary has been crossed.
+
+### 8.2 The palette
+
+Panels are near-black so the slide carries the only saturated colour in the window — which §1
+already required and the build does not do. One accent, reserved for **selection and state**;
+where it appears, something is on or something is chosen. It is never decoration.
+
+| token | value | what it is |
+| --- | --- | --- |
+| `SLIDE` | `#08090b` | behind the viewport, and the drawer's darkest ground |
+| `PANEL` | `#0e1013` | every rail and the drawer |
+| `SUNK` | `#12151a` | the trough of a bar, the well of a value field |
+| `RAISED` | `#1b1f25` | a hovered menu item, a pressed chip |
+| `RULE` | `#23272e` | a border between regions |
+| `HAIR` | `#1a1e24` | a rule inside a region |
+| `INK` | `#e6e9ed` | a number that matters, a selected label |
+| `BODY` | `#c6cdd5` | ordinary text |
+| `LABEL` | `#79828d` | the name of a thing whose value is next to it |
+| `DIM` | `#4e565f` | section headers, units, keys, anything you read second |
+| `ACCENT` | `#7fa8c0` | **selection and state, and nothing else** |
+| `GOOD` | `#8ab098` | income, a clean assemble, a healthy reading |
+| `WARN` | `#c8a25a` | changed and not yet applied; an intervention |
+| `BAD` | `#c4736e` | damage, a drain, an error, a loop that is not closing |
+
+Chemical colours are not in this table. They come from the scenario and are the slide's, not
+the interface's; the chrome shows them in swatches and never restyles them.
+
+### 8.3 Type
+
+Two families with two jobs, and the rule that does most of the work:
+
+> **Every number is monospace.** Every one, everywhere — a tick count, a byte offset, a Q10
+> reading, a key in a menu, a coordinate in a flux row. Prose and control labels are
+> proportional. Nothing else is a judgement call.
+
+The reason is column alignment. A rail full of readings that do not line up looks like a form
+and reads like one; the same numbers in a mono column read like an instrument, and you can
+compare two of them by eye without moving your head. This is the largest single change in the
+section and it costs one `FontId`.
+
+**No font is vendored.** egui already carries `Hack` for `Monospace` and `Ubuntu-Light` for
+`Proportional`, and Hack is a perfectly good instrument face. Swapping the proportional side
+for something with more character — Archivo, Inter — is a one-line change at `theme::FONTS`
+and a ~200 KB OFL binary in the repo, which is a decision about the repo rather than about the
+design, and is deliberately not being made here.
+
+| role | size | family | colour |
+| --- | --- | --- | --- |
+| `Section` | 10 | mono, letterspaced, upper | `DIM` |
+| `Body` | 12 | proportional | `BODY` |
+| `Label` | 11 | mono | `LABEL` |
+| `Value` | 11 | mono | `INK` |
+| `Small` | 10.5 | proportional | `DIM` |
+| `Code` | 11.5 | mono | per `inspector::Ink` |
+
+Nothing goes below 10. egui rasterises through `ab_glyph` with no hinting, so dim mono at 9px
+on a 1× display is mush; the mock's 9.5px is a browser's number and does not survive the port.
+
+### 8.4 The row grammar
+
+Three columns, and every quantity in the interface uses them:
+
+```
+label ······· ▁▁▁▁▁▁▁▁▁▁▁▁ ····· 89.0
+LABEL/mono     bar, 5px          INK/mono, right
+```
+
+The bar is a 5px hairline in `SUNK` with the value in its own colour, and **the label is
+outside it**. `bar()` today paints a 16px slab with the label inside — which is a Windows 95
+progress bar, and is the single most dated object in the window. Where there is no meaningful
+maximum there is no bar, just label and value; a bar against an invented full scale is a lie
+told in a straight line.
+
+### 8.5 Section headers
+
+Small letterspaced mono caps in `DIM`, above a group, with a hairline under the group and not
+over it: `CELL`, `LOADOUT`, `MACHINE`, `INTERIOR CHEMISTRY`, `OVERLAYS`, `BREAKPOINTS`,
+`SOURCES AND DRAINS ON THE SLIDE`. They are the cheapest legibility in the design — a rail of
+undifferentiated rows becomes four named groups for the price of four labels — and they are why
+the panels read as a notebook rather than a settings dialogue.
+
+### 8.6 The drawer has one shape
+
+Every drawer tab is **a wide work area plus a fixed 300px context column on the right**, and
+the context column holds whatever the work area cannot say about itself:
+
+| tab | work area | context column |
+| --- | --- | --- |
+| genome | the listing | genes, and the diagnostics |
+| ecology | the tree, web, timeline or budget | the selected species |
+| toolbox | tools, settings, the flux table | why this is a panel; what a source looks like on the slide |
+| parameters | the field table | *(the group list, on the left instead)* |
+| editor | the buffer | diagnostics, live |
+| debugger | the trace | breakpoints, and the step controls |
+
+The toolbox is the one that needs it most and has it least. It is a vertical stack of a
+`Slider`, a `ComboBox`, a `DragValue` and a `TextEdit` with four paragraphs of prose
+interleaved *between the controls* — a narrow column in a wide space, which is the exact
+failure `ui::Panel::dock` exists to prevent and which its test asserts against. The prose is
+worth keeping and worth reading once; it does not belong between two settings you are trying to
+compare. It moves to the column.
+
+### 8.7 The menus
+
+The menu bar is discovery, and it is the only place the fourteen single-key bindings are
+written down. Three changes:
+
+- **A shortcut column**, right-aligned, mono, in `DIM`. `Button::shortcut_text` already does
+  this and is already used; what is missing is that every item has one.
+- **Group captions** — `SLIDE FILES` above the first block of File — and hairline rules
+  between groups rather than egui's full-width separators.
+- **Speed is a live control, not a submenu.** `Simulation ▸ Speed ▸ 1×` is three levels to
+  change one thing, and the menu shuts on the click, so comparing ½× against 8× means opening
+  it twice. It becomes a segmented row inline in the menu, for the same reason the toolbox is a
+  panel: *a thing you adjust while watching has to stay where you can reach it.* This overrides
+  the `Speed ▸` in §2, which was written before the transport existed in the bar.
+
+A disabled item says why it is disabled, in its hover text. An item that does nothing and does
+not say why is worse than an absent one.
+
+### 8.8 Parameters says what you changed
+
+The parameter editor is 51 fields under six collapsing headers, and its only signal that you
+have edited anything is one `not applied` label at the top. It cannot tell you *which* field,
+so the way to find your own edit is to open all six headers and read. Three additions:
+
+- a **`default` column** beside the value, so a drift is visible without being remembered;
+- **per-row marking** — `WARN` value, `WARN` left edge, warm row ground — and a footer that
+  counts them: *2 fields changed from the scenario*;
+- the **explanation as a column** rather than a tooltip. Every one of those sentences is
+  already written, in `params.rs`, and is currently reachable one hover at a time.
+
+The group list moves to a 150px rail on the left with a count per group, which pins the column
+header and makes finding a field a click instead of an expand-scan-collapse.
+
+### 8.9 What is not taken from the design
+
+- **The mock's slide.** Its warm blooms and vignette are painted decoration, and §1 forbids
+  drawing what the simulation did not produce. The renderer already does this properly and is
+  out of scope besides.
+- **9.5px text and 44px drop shadows.** Browser numbers. See §8.3; shadows come down to
+  something that does not look like a web modal at a 23px row height.
+- **Fixed rail widths.** The rails stay resizable, as §2 has them.
+
+### 8.10 Where the tokens live
+
+`theme.rs`, in `mm-app`, **with no egui in it**. The palette is `[u8; 3]`, the type scale is
+`f32`, and the roles are an enum — so the whole thing compiles and is tested without a graphics
+stack, exactly as `ui.rs` and `slide.rs` are, and `main.rs` converts to `Color32` and `FontId`
+at the boundary and nowhere else. This is not ceremony: it is what lets "the accent colour has
+exactly one meaning" and "no two text roles are the same size" be tests rather than intentions.
+
+---
+
+## 9. Order of work
 
 | step | what | why it is here |
 | --- | --- | --- |
@@ -966,14 +1153,17 @@ world advanced in one go.
 | **M10.3** | genome reading mode | Small, self-contained, high value per line. |
 | **M10.4** | ecology pane | The data all exists; this is presentation. |
 | **M10.5** | field texture, instanced cell shader, organelle pass | The biggest piece and the only one with real technical risk. Last, on a shell that is already stable. |
+| **M10.6** | the chrome: theme, type, row grammar, menus, toolbox and parameters | §8. After the renderer, because it must not be moving while the renderer is; and it touches none of the same files, so it cannot be the reason a frame regresses. |
 
 10.1 first because it is the smallest thing that makes the application usable day to day.
-10.5 last because it is the one that can go wrong, and it should go wrong against a UI that is
-otherwise finished rather than one that is also moving.
+10.5 before 10.6 because it is the one that can go wrong, and it should go wrong against a UI
+that is otherwise finished rather than one that is also moving. 10.6 last because it is the
+only step whose worst outcome is that something looks wrong, which is visible immediately and
+costs nothing to revert.
 
 ---
 
-## 9. What could go wrong
+## 10. What could go wrong
 
 - **The instanced pipeline is the risky part.** Bevy's mid-level render API is the part that
   moves most between releases and has the least documentation. Mitigation: follow the upstream
@@ -991,3 +1181,12 @@ otherwise finished rather than one that is also moving.
   ample — but it is an estimate, and the simulation half of the target is M9's problem and is
   currently the larger of the two. Measure the halves separately from M10.1 onward and do not
   let one hide behind the other.
+- **A theme is a thousand small chances to touch the renderer.** Every panel that draws a
+  swatch, a cell portrait or a slide overlay sits one function call away from code that is
+  finished and must not move. The mitigation is §8.1's file list and the renderer's own probes:
+  if `shader_probe`, `packing_probe` or `nine_cells` needs re-recording, the boundary was
+  crossed and the commit is wrong regardless of how it looks.
+- **Dark chrome hides low-contrast text.** The palette in §8.2 puts `DIM` at `#4e565f` against
+  `#0e1013`, which is legible on the panel it was chosen against and marginal on the darker
+  `SLIDE` ground. Every role/ground pair that actually occurs is checked for contrast in
+  `theme.rs`'s tests rather than by eye on one monitor.
