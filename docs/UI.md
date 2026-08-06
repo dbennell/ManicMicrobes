@@ -1092,6 +1092,18 @@ failure `ui::Panel::dock` exists to prevent and which its test asserts against. 
 worth keeping and worth reading once; it does not belong between two settings you are trying to
 compare. It moves to the column.
 
+The split is `skin::drawer_split` and is computed in exactly one place, because writing it out
+by hand got it wrong the first time: the work area took `available - CONTEXT_COLUMN` and the
+column then asked for `CONTEXT_COLUMN.min(available * 0.4)` of *what was left*, which is a
+fraction of a fraction, came out at 120 points, and wrapped its own headings. Below
+`380 + CONTEXT_COLUMN` the column is dropped rather than squeezed — a tab that has lost its
+work area is useless, one that has lost its notes is merely quieter.
+
+**Toolbox, parameters and ecology are on it. Genome, editor and debugger are not yet**, and
+they are the outstanding work in M10.6: the genome tab wants its gene list and its assembler
+diagnostics in the column, the editor its live diagnostics, the debugger its breakpoints and
+step controls.
+
 ### 8.7 The menus
 
 The menu bar is discovery, and it is the only place the fourteen single-key bindings are

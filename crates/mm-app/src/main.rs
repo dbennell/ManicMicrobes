@@ -5630,30 +5630,32 @@ fn cell_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
     skin::row(
         ui,
         "energy",
-        Some(q10(c.energy) / 400.0),
+        Some((q10(c.energy) / 400.0, Mood::Warn.rgb())),
         &format!("{:.1}", q10(c.energy)),
         Mood::Warn.rgb(),
     );
+    let ink = Role::Value.ink().unwrap_or(theme::DIM);
     skin::row(
         ui,
         "mass",
-        Some(q10(c.mass) / 120.0),
+        Some((q10(c.mass) / 120.0, ink)),
         &format!("{:.1}", q10(c.mass)),
         // No mood: mass being high is not good news or bad news, it is just mass. The design
         // gives this bar a blue that is the accent in all but name, and the accent means
         // selection. A reading with nothing to say about itself is drawn in ink.
-        Role::Value.ink().unwrap_or(theme::DIM),
+        ink,
     );
+    let hurt = if c.damage > 0 {
+        Mood::Bad.rgb()
+    } else {
+        theme::DIM
+    };
     skin::row(
         ui,
         "damage",
-        Some(q10(c.damage) / 40.0),
+        Some((q10(c.damage) / 40.0, hurt)),
         &format!("{:.1}", q10(c.damage)),
-        if c.damage > 0 {
-            Mood::Bad.rgb()
-        } else {
-            theme::DIM
-        },
+        hurt,
     );
 
     ui.add_space(theme::SECTION_GAP);
@@ -5661,6 +5663,13 @@ fn cell_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
 
     // --- the schematic ---
     let placed = mm_app::inspector::placements(&c.slots);
+    ui.horizontal(|ui| {
+        ui.label(skin::text(Role::Section, "loadout"));
+        ui.label(skin::text(
+            Role::Label,
+            format!("{} of {} slots", placed.len(), c.slots.len()),
+        ));
+    });
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), 150.0),
         egui::Sense::hover(),
@@ -5669,11 +5678,7 @@ fn cell_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
     let centre = rect.center();
     let r = (rect.height() / 2.0 - 8.0).max(8.0);
     // The membrane: the circle everything else lives inside.
-    painter.circle_stroke(
-        centre,
-        r,
-        egui::Stroke::new(2.0, egui::Color32::from_rgb(150, 160, 170)),
-    );
+    painter.circle_stroke(centre, r, egui::Stroke::new(1.5, skin::col(theme::RULE)));
     for p in &placed {
         let at = centre + egui::vec2(p.dx * r, p.dy * r);
         let rgb = mm_app::slide::organelle_rgb(p.kind);
@@ -5723,25 +5728,23 @@ fn cell_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
             centre,
             egui::Align2::CENTER_CENTER,
             "bare membrane",
-            egui::FontId::proportional(11.0),
-            egui::Color32::from_gray(130),
+            skin::font(Role::Small),
+            skin::col(theme::DIM),
         );
     }
 
-    ui.separator();
+    ui.add_space(theme::SECTION_GAP);
+    skin::hairline(ui);
     egui::ScrollArea::vertical().show(ui, |ui| {
         // --- the genome, with the cell's own instruction pointer in it ---
         let over = c.nucleus_capacity > 0 && c.genome_len > c.nucleus_capacity;
+        skin::section(ui, "machine", true);
+        skin::stat(ui, "genome", &format!("{} B", c.genome_len));
+        skin::stat(ui, "nucleus", &c.nucleus_capacity.to_string());
+        skin::stat(ui, "ip", &c.ip.to_string());
         ui.horizontal(|ui| {
-            ui.label(format!(
-                "genome {} bytes / nucleus {}",
-                c.genome_len, c.nucleus_capacity
-            ));
             if over {
-                ui.colored_label(
-                    egui::Color32::from_rgb(230, 130, 90),
-                    "⚠ truncated at division",
-                )
+                ui.label(skin::moody(Role::Label, Mood::Bad, "⚠ truncated at division"))
                 .on_hover_text(
                     "SPEC §4.1: a genome longer than its nucleus is cut short in every \
                              daughter. The lineage will stop without an error.",
@@ -5750,24 +5753,26 @@ fn cell_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
         });
         ui.horizontal(|ui| {
             match c.fidelity {
-                Some(f) => ui.weak(format!("fidelity {:.2}", q10(f))),
+                Some(f) => ui.label(skin::text(Role::Label, format!("fidelity {:.2}", q10(f)))),
                 // Not "fidelity 0.00". A cell with no nucleus has no fidelity, cannot
                 // copy its genome and cannot divide — which is a different and much
                 // louder fact than copying badly.
-                None => ui.colored_label(
-                    egui::Color32::from_rgb(230, 130, 90),
+                None => ui.label(skin::moody(
+                    Role::Label,
+                    Mood::Bad,
                     "no nucleus — cannot divide",
-                ),
+                )),
             };
-            ui.weak(format!(
-                "{}   ip {}",
-                if c.halted { "halted" } else { "running" },
-                c.ip
-            ));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if c.halted {
+                    ui.label(skin::moody(Role::Label, Mood::Warn, "halted"));
+                } else {
+                    ui.label(skin::moody(Role::Label, Mood::Good, "running"));
+                }
+            });
         });
 
-        if ui
-            .button("open genome ▸")
+        if skin::chip(ui, "open genome ▸", Some("G"), false)
             .on_hover_text("the disassembly, live, in the drawer (g)")
             .clicked()
         {
@@ -5775,21 +5780,41 @@ fn cell_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
         }
 
         // --- what it is holding ---
-        ui.collapsing("chemistry", |ui| {
-            for (i, v) in c.interior.iter().enumerate() {
-                if *v != 0 {
-                    ui.label(format!("{:<16} {:.2}", chem_names[i], q10(*v)));
-                }
+        //
+        // Every chemical it has any of, in the row grammar, against the largest of them — so
+        // "a lot of sugar and a trace of peroxide" is a shape rather than two numbers to
+        // compare in your head.
+        skin::section(ui, "interior chemistry", true);
+        let peak = c.interior.iter().copied().max().unwrap_or(0).max(1);
+        let mut any = false;
+        for (i, v) in c.interior.iter().enumerate() {
+            if *v == 0 {
+                continue;
             }
-        });
+            any = true;
+            let rgb = sim.chem_colours.get(i).copied().unwrap_or([160, 160, 160]);
+            skin::row(
+                ui,
+                chem_names.get(i).map_or("?", String::as_str),
+                // The bar in the chemical's own colour, the number in ink. Some of those
+                // colours are very dark — `carbon` is `#464650` — and a reading you cannot
+                // read is not a reading.
+                Some((*v as f32 / peak as f32, rgb)),
+                &format!("{:.2}", q10(*v)),
+                Role::Value.ink().unwrap_or(theme::DIM),
+            );
+        }
+        if !any {
+            ui.label(skin::text(Role::Small, "nothing in it"));
+        }
 
-        ui.collapsing("machine", |ui| {
-            ui.label(format!("stack {:?}", c.stack));
-            ui.label(format!("calls {:?}", c.call_stack));
+        ui.collapsing(skin::text(Role::Label, "registers and stacks"), |ui| {
+            ui.label(skin::text(Role::Label, format!("stack {:?}", c.stack)));
+            ui.label(skin::text(Role::Label, format!("calls {:?}", c.call_stack)));
             if c.ln > 0 {
-                ui.label(format!(
-                    "copying: {} bytes to go, from {} to {}",
-                    c.ln, c.pa, c.pb
+                ui.label(skin::text(
+                    Role::Label,
+                    format!("copying: {} bytes to go, from {} to {}", c.ln, c.pa, c.pb),
                 ));
             }
             let live: Vec<String> = c
@@ -5799,11 +5824,14 @@ fn cell_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
                 .filter(|(_, v)| **v != 0)
                 .map(|(n, v)| format!("r{n}={v}"))
                 .collect();
-            ui.label(if live.is_empty() {
-                "registers all zero".to_string()
-            } else {
-                live.join("  ")
-            });
+            ui.label(skin::text(
+                Role::Label,
+                if live.is_empty() {
+                    "registers all zero".to_string()
+                } else {
+                    live.join("  ")
+                },
+            ));
             let ram: Vec<String> = c
                 .ram
                 .iter()
@@ -5811,11 +5839,14 @@ fn cell_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
                 .filter(|(_, v)| **v != 0)
                 .map(|(n, v)| format!("[{n}]={v}"))
                 .collect();
-            ui.label(if ram.is_empty() {
-                "ram all zero".to_string()
-            } else {
-                ram.join("  ")
-            });
+            ui.label(skin::text(
+                Role::Label,
+                if ram.is_empty() {
+                    "ram all zero".to_string()
+                } else {
+                    ram.join("  ")
+                },
+            ));
         });
     });
 }

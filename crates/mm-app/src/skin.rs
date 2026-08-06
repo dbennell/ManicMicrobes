@@ -221,33 +221,50 @@ pub fn hairline(ui: &mut egui::Ui) {
 /// energy ······ ▁▁▁▁▁▁▁▁▁▁▁▁ ····· 1.6
 /// ```
 ///
-/// `fill` is `None` where there is no meaningful maximum, and then no bar is drawn at all —
-/// a bar against an invented full scale is a lie told in a straight line, and energy and mass
-/// have no ceiling. `colour` is the value's, and the bar's; where they differ the value is the
-/// one that carries meaning, so it is the one that gets the colour.
-pub fn row(ui: &mut egui::Ui, label: &str, fill: Option<f32>, value: &str, colour: Rgb) {
+/// `bar` is `None` where there is no meaningful maximum, and then nothing is drawn between the
+/// label and the number — a bar against an invented full scale is a lie told in a straight
+/// line, and energy and mass have no ceiling. Where there is one it carries its own colour,
+/// which is **not** the value's: a chemical's bar is drawn in the chemical's colour, and those
+/// come out of the scenario, where `carbon` is `#464650`. Painting the number in it too made
+/// the reading unreadable, and the number is the part you came for.
+pub fn row(ui: &mut egui::Ui, label: &str, bar: Option<(f32, Rgb)>, value: &str, ink: Rgb) {
     let (rect, _) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), theme::row::HEIGHT),
         egui::Sense::hover(),
     );
     let painter = ui.painter();
 
-    painter.text(
-        egui::pos2(rect.left(), rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        label,
-        font(Role::Label),
-        col(Role::Label.ink().unwrap_or(theme::DIM)),
+    // Clipped to its column, with an ellipsis. `carbon_dioxide` is fourteen characters and the
+    // label column is not; unclipped it ran on under the bar beside it.
+    let mut job = egui::text::LayoutJob::single_section(
+        label.to_owned(),
+        egui::TextFormat::simple(
+            font(Role::Label),
+            col(Role::Label.ink().unwrap_or(theme::DIM)),
+        ),
     );
+    job.wrap = egui::text::TextWrapping {
+        max_width: theme::row::LABEL,
+        max_rows: 1,
+        overflow_character: Some('…'),
+        ..Default::default()
+    };
+    let galley = painter.layout_job(job);
+    painter.galley(
+        egui::pos2(rect.left(), rect.center().y - galley.size().y / 2.0),
+        galley,
+        egui::Color32::PLACEHOLDER,
+    );
+
     painter.text(
         egui::pos2(rect.right(), rect.center().y),
         egui::Align2::RIGHT_CENTER,
         value,
         font(Role::Value),
-        col(colour),
+        col(ink),
     );
 
-    if let Some(fraction) = fill {
+    if let Some((fraction, colour)) = bar {
         let left = rect.left() + theme::row::LABEL + theme::row::GUTTER;
         let right = rect.right() - theme::row::VALUE - theme::row::GUTTER;
         if right <= left {
