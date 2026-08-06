@@ -256,3 +256,119 @@ mod tests {
         );
     }
 }
+
+/// One line of the RON preview, and whether it stands for lines that are not being shown.
+pub struct RonLine {
+    pub text: String,
+    pub folded: bool,
+}
+
+/// The RON with its chemical table folded to one line, unless asked for.
+///
+/// Four hundred of an empty scenario's four hundred and twenty lines are `chemicals`, and they
+/// are the same in every scenario on the shelf. A preview whose job is "did the wall I just drew
+/// reach the file" is no use if the answer is four hundred lines below the fold.
+///
+/// Brace depth rather than a RON parser, because this is a *preview* and the thing being
+/// previewed is text. The summary line says how many lines it stands for, so nobody can read the
+/// fold as the file being shorter than it is.
+#[must_use]
+pub fn fold_ron(text: &str, show_chemicals: bool) -> Vec<RonLine> {
+    let mut out = Vec::new();
+    let mut skipping = false;
+    let mut depth = 0i32;
+    let mut hidden = 0usize;
+    for line in text.lines() {
+        if !show_chemicals && !skipping && line.trim_start().starts_with("chemicals:") {
+            skipping = true;
+            depth = 0;
+            hidden = 0;
+        }
+        if skipping {
+            hidden += 1;
+            depth += line.chars().filter(|c| *c == '[' || *c == '(').count() as i32;
+            depth -= line.chars().filter(|c| *c == ']' || *c == ')').count() as i32;
+            if depth <= 0 {
+                let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+                out.push(RonLine {
+                    text: format!("{indent}chemicals: [ … {hidden} lines ],"),
+                    folded: true,
+                });
+                skipping = false;
+            }
+            continue;
+        }
+        out.push(RonLine {
+            text: line.to_string(),
+            folded: false,
+        });
+    }
+    // A table whose brackets never balance would otherwise swallow every line after it and
+    // leave the preview showing half a file with nothing saying so. This is not a shape
+    // `to_ron` produces — but a preview that can silently drop the end of the thing it is
+    // previewing is the one failure a preview must not have.
+    if skipping {
+        out.push(RonLine {
+            text: format!("chemicals: [ … {hidden} lines, unterminated ],"),
+            folded: true,
+        });
+    }
+    out
+}
+
+
+#[cfg(test)]
+mod fold_tests {
+    use super::*;
+
+    const SAMPLE: &str = "(\n    name: \"x\",\n    chemicals: [\n        (\n            name: \"a\",\n        ),\n        (\n            name: \"b\",\n        ),\n    ],\n    barriers: [],\n)";
+
+    #[test]
+    fn the_chemical_table_folds_to_one_line_that_says_what_it_hides() {
+        let folded = fold_ron(SAMPLE, false);
+        let text: Vec<&str> = folded.iter().map(|l| l.text.as_str()).collect();
+        assert!(
+            text.iter().any(|l| l.contains("chemicals: [ … 8 lines ]")),
+            "{text:?}"
+        );
+        // And the fold is marked, so the preview can draw it as the summary it is.
+        assert_eq!(folded.iter().filter(|l| l.folded).count(), 1);
+    }
+
+    #[test]
+    fn what_the_author_edits_survives_the_fold() {
+        // The whole point: `barriers` is what the wall tool writes, and it is *after* the
+        // chemical table in the file. A fold that swallowed it would be worse than no fold.
+        let text: Vec<String> = fold_ron(SAMPLE, false).into_iter().map(|l| l.text).collect();
+        assert!(text.iter().any(|l| l.contains("barriers: []")), "{text:?}");
+        assert!(text.iter().any(|l| l.contains("name: \"x\"")), "{text:?}");
+        assert_eq!(text.last().map(String::as_str), Some(")"));
+    }
+
+    #[test]
+    fn asking_for_the_chemicals_gives_every_line_back_unchanged() {
+        let shown: Vec<String> = fold_ron(SAMPLE, true).into_iter().map(|l| l.text).collect();
+        assert_eq!(shown, SAMPLE.lines().collect::<Vec<_>>());
+        assert!(fold_ron(SAMPLE, true).iter().all(|l| !l.folded));
+    }
+
+    #[test]
+    fn a_file_with_no_chemical_table_is_left_alone() {
+        let plain = "(\n    name: \"x\",\n)";
+        let shown: Vec<String> = fold_ron(plain, false).into_iter().map(|l| l.text).collect();
+        assert_eq!(shown, plain.lines().collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn an_unterminated_table_does_not_swallow_the_rest_of_the_file() {
+        // Depth never returns to zero, so nothing after it is emitted — which would be a
+        // preview quietly showing half a file. The summary is emitted at the end instead.
+        let truncated = "(\n    chemicals: [\n        (\n";
+        let shown = fold_ron(truncated, false);
+        assert!(
+            shown.iter().any(|l| l.folded),
+            "a table that never closes produced no summary at all: {:?}",
+            shown.iter().map(|l| &l.text).collect::<Vec<_>>()
+        );
+    }
+}
