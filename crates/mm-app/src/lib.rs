@@ -52,6 +52,13 @@ pub mod library;
 pub mod optics;
 pub mod params;
 pub mod phantom;
+/// [`theme`] in egui's vocabulary: the style, the fonts, and the widgets the panels are built
+/// from.
+///
+/// Behind the `render` feature because it is the only half of the theme that needs a toolkit.
+/// The half worth testing is [`theme`], which has no egui in it at all.
+#[cfg(feature = "render")]
+pub mod skin;
 pub mod slide;
 pub mod theme;
 /// Rayon's pool, pinned to the cores worth having. A scheduling hint and nothing more.

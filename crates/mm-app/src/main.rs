@@ -98,7 +98,9 @@ use mm_app::engine::{Engine, Published, Rate};
 use mm_app::inspector::Inspection;
 use mm_app::library;
 use mm_app::params;
+use mm_app::skin;
 use mm_app::slide::{self, Frame, Lod, Slide};
+use mm_app::theme::{self, Mood, Role};
 use mm_app::tools::{self, ToolEvent};
 use mm_app::ui::{self, Dock, Ecology, Focus, Panel, Panels, Rect, Target};
 use mm_app::wiki;
@@ -2897,11 +2899,21 @@ fn panels(
     mut view: ResMut<View>,
     mut exit: MessageWriter<AppExit>,
     diagnostics: Res<DiagnosticsStore>,
+    mut dressed: Local<bool>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
     let ctx = ctx.clone();
+
+    // The theme, once. Here rather than in a startup system because the context does not exist
+    // until this schedule runs — which is the same reason the interface is in this schedule at
+    // all — and a `Local` is cheaper than a resource for a flag nothing else reads.
+    if !*dressed {
+        skin::apply(&ctx);
+        *dressed = true;
+    }
+
     let frame = sim.latest.frame.clone();
 
     // egui 0.35 replaced `SidePanel` and `TopBottomPanel` with one `Panel`, and a panel is now
@@ -2979,7 +2991,8 @@ fn panels(
 /// it is hollow, and a greyed item that says which milestone owns it is honest in a way that
 /// an item which silently does nothing is not.
 fn soon(ui: &mut egui::Ui, label: &str, shortcut: &str, why: &str) {
-    ui.add_enabled(false, egui::Button::new(label).shortcut_text(shortcut))
+    ui.add_enabled_ui(false, |ui| skin::menu_item(ui, label, shortcut))
+        .inner
         .on_disabled_hover_text(why);
 }
 
@@ -3085,14 +3098,15 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
     egui::Panel::top("menu_bar").show(root, |ui| {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
+                skin::menu_caption(ui, "slide files");
                 soon(ui, "New slide…", "Ctrl+N", LATER);
                 soon(ui, "Open slide…", "Ctrl+O", LATER);
                 soon(ui, "Save slide", "Ctrl+S", LATER);
                 soon(ui, "Save slide as…", "", LATER);
-                ui.separator();
+                skin::menu_rule(ui);
                 soon(ui, "Export…", "", LATER);
-                ui.separator();
-                if ui.button("Quit").clicked() {
+                skin::menu_rule(ui);
+                if skin::menu_item(ui, "Quit", "Ctrl+Q").clicked() {
                     *quit = true;
                     ui.close();
                 }
@@ -3247,42 +3261,40 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
 
             ui.menu_button("Simulation", |ui| {
                 let running = sim.engine.rate().is_running();
-                if ui
-                    .add(
-                        egui::Button::new(if running { "Pause" } else { "Run" })
-                            .shortcut_text("Space"),
-                    )
-                    .clicked()
-                {
+                if skin::menu_item(ui, if running { "Pause" } else { "Run" }, "Space").clicked() {
                     view.paused = !sim.engine.toggle_pause().is_running();
                     ui.close();
                 }
-                if ui
-                    .add(egui::Button::new("Step one tick").shortcut_text("."))
-                    .clicked()
-                {
+                if skin::menu_item(ui, "Step one tick", ".").clicked() {
                     sim.engine.step();
                 }
-                ui.menu_button("Speed", |ui| {
-                    for (label, key, rate) in [
-                        ("paused", "0", Rate::Paused),
-                        ("½× — 30 ticks a second", "`", Rate::half()),
-                        ("1× — 60 ticks a second", "-", Rate::times(1)),
+
+                // Speed is a live control and not a submenu (UI.md §8.7). `Simulation ▸ Speed ▸
+                // 1×` is three levels to change one thing, and the menu shuts on the click — so
+                // comparing ½× against 8× meant opening it twice. Here the menu stays up and the
+                // row is the answer, for the same reason the toolbox is a panel: a thing you
+                // adjust while watching has to stay where you can reach it.
+                skin::menu_caption(ui, "speed");
+                let now = sim.engine.rate();
+                if let Some(rate) = skin::segmented(
+                    ui,
+                    &[
+                        ("pause", "0", Rate::Paused),
+                        ("½×", "`", Rate::half()),
+                        ("1×", "-", Rate::times(1)),
                         ("8×", "=", Rate::times(8)),
-                        ("as fast as it will go", "backspace", Rate::Unlimited),
-                    ] {
-                        let now = sim.engine.rate() == rate;
-                        if ui
-                            .add(egui::Button::new(label).shortcut_text(key).selected(now))
-                            .clicked()
-                        {
-                            sim.engine.set_rate(rate);
-                            view.paused = rate == Rate::Paused;
-                            ui.close();
-                        }
-                    }
-                });
-                ui.separator();
+                        ("max", "⌫", Rate::Unlimited),
+                    ],
+                    now,
+                ) {
+                    sim.engine.set_rate(rate);
+                    view.paused = rate == Rate::Paused;
+                }
+                ui.label(skin::text(
+                    Role::Small,
+                    "½× is 30 ticks a second, for watching a division rather than catching one.",
+                ));
+                skin::menu_rule(ui);
                 let count = sim.latest.interventions.len();
                 let showing =
                     view.panels.is_open(Panel::Ecology) && view.ecology == Ecology::Interventions;
@@ -3467,7 +3479,11 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
             // The transport, at the right-hand end, mirroring the keys rather than replacing
             // them. `right_to_left` so it stays pinned to the edge as the window resizes.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("⏭").on_hover_text("step one tick  (.)").clicked() {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                if skin::chip(ui, "⏭", None, false)
+                    .on_hover_text("step one tick  (.)")
+                    .clicked()
+                {
                     sim.engine.step();
                 }
                 // Slowest last, because the layout is right-to-left: this reads ½× 1× 8× max
@@ -3479,22 +3495,19 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                     ("1×", Rate::times(1)),
                     ("½×", Rate::half()),
                 ] {
-                    if ui
-                        .add(egui::Button::new(label).selected(sim.engine.rate() == rate))
-                        .clicked()
-                    {
+                    if skin::chip(ui, label, None, sim.engine.rate() == rate).clicked() {
                         sim.engine.set_rate(rate);
                         view.paused = false;
                     }
                 }
                 let running = sim.engine.rate().is_running();
-                if ui
-                    .button(if running { "⏸" } else { "▶" })
+                if skin::chip(ui, if running { "⏸" } else { "▶" }, None, running)
                     .on_hover_text("run / pause  (space)")
                     .clicked()
                 {
                     view.paused = !sim.engine.toggle_pause().is_running();
                 }
+                ui.label(skin::text(Role::Section, "transport"));
             });
         });
     });
@@ -3597,21 +3610,15 @@ fn drawer(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
         .size_range(120.0..=760.0)
         .show(root, |ui| {
             ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
                 for panel in Panel::ALL.into_iter().filter(|p| p.dock() == Dock::Drawer) {
-                    if ui
-                        .add(
-                            egui::Button::new(panel.title())
-                                .shortcut_text(panel.key())
-                                .selected(panel == showing),
-                        )
-                        .clicked()
+                    if skin::chip(ui, panel.title(), Some(panel.key()), panel == showing).clicked()
                     {
                         view.panels.drawer = Some(panel);
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .button("▼")
+                    if skin::chip(ui, "▼", None, false)
                         .on_hover_text("collapse the drawer")
                         .clicked()
                     {
@@ -3619,7 +3626,9 @@ fn drawer(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
                     }
                 });
             });
-            ui.separator();
+            ui.add_space(2.0);
+            skin::hairline(ui);
+            ui.add_space(4.0);
             // egui 0.35's `Panel` sizes to its content unless the content claims the space, so
             // `default_size` alone gave a drawer as tall as whatever was in it — 120 pixels for
             // the genome listing, which is two lines of it. Claiming the height makes the
@@ -3766,20 +3775,13 @@ fn toolbox_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
         .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(3.0, 3.0);
                 for (tool, key) in TOOLS {
-                    if ui
-                        .add(
-                            egui::Button::new(tool.name())
-                                .shortcut_text(key)
-                                .selected(view.tool == tool),
-                        )
-                        .clicked()
-                    {
+                    if skin::chip(ui, tool.name(), Some(key), view.tool == tool).clicked() {
                         view.tool = tool;
                     }
                 }
             });
-            ui.small("right-click the slide to use the selected tool; drag to pan.");
             ui.add_space(6.0);
             ui.separator();
 
@@ -4026,15 +4028,23 @@ fn budget_view(ui: &mut egui::Ui, sim: &SlideRes) {
                 ));
             }
             ui.small("income");
-            sparkline(ui, &income.normalised());
+            skin::sparkline(ui, &income.normalised(), Mood::Good.rgb());
             ui.small("dissipated as heat");
-            sparkline(ui, &heat.normalised());
+            skin::sparkline(ui, &heat.normalised(), Mood::Bad.rgb());
             if now.exported > 0 || now.energy_exported > 0 {
                 ui.small("carried off the slide in matter");
-                sparkline(ui, &history.series(|s| s.exported).normalised());
+                skin::sparkline(
+                    ui,
+                    &history.series(|s| s.exported).normalised(),
+                    Mood::Bad.rgb(),
+                );
             }
             ui.small(format!("held by living things — now {}", now.energy_stored));
-            sparkline(ui, &history.series(|s| s.energy_stored).normalised());
+            skin::sparkline(
+                ui,
+                &history.series(|s| s.energy_stored).normalised(),
+                skin::plot_neutral(),
+            );
 
             ui.add_space(8.0);
             ui.separator();
@@ -4060,11 +4070,23 @@ fn budget_view(ui: &mut egui::Ui, sim: &SlideRes) {
             // shapes, which is what says whether it is *settling* or merely balanced today.
             if open {
                 ui.small("arriving from off-slide");
-                sparkline(ui, &history.series(|s| s.influx).normalised());
+                skin::sparkline(
+                    ui,
+                    &history.series(|s| s.influx).normalised(),
+                    Mood::Good.rgb(),
+                );
                 ui.small("leaving over the edge");
-                sparkline(ui, &history.series(|s| s.efflux).normalised());
+                skin::sparkline(
+                    ui,
+                    &history.series(|s| s.efflux).normalised(),
+                    Mood::Bad.rgb(),
+                );
                 ui.small("total on the slide");
-                sparkline(ui, &history.series(|s| s.total_matter).normalised());
+                skin::sparkline(
+                    ui,
+                    &history.series(|s| s.total_matter).normalised(),
+                    skin::plot_neutral(),
+                );
                 ui.add_space(6.0);
             }
 
@@ -4747,7 +4769,7 @@ fn interventions_view(ui: &mut egui::Ui, sim: &SlideRes) {
 /// The legend: what the colours on the slide mean, and what they are scaled against.
 fn legend_body(ui: &mut egui::Ui, sim: &SlideRes, view: &View, frame: &Frame) {
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("overlays").strong());
+        ui.label(skin::text(Role::Section, "overlays"));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             // One button, both directions, labelled with the one it will do. "none" while
             // anything is showing, so it is always the way out of what you are looking at;
@@ -4804,21 +4826,10 @@ fn legend_body(ui: &mut egui::Ui, sim: &SlideRes, view: &View, frame: &Frame) {
     for (c, name) in sim.chem_names.iter().enumerate() {
         let on = sim.engine.overlay_enabled(c);
         let rgb = sim.chem_colours.get(c).copied().unwrap_or([160, 160, 160]);
-        let swatch = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
         ui.horizontal(|ui| {
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(11.0, 11.0), egui::Sense::hover());
             // Filled when it is on, outlined when it is not, so the state reads at a glance
             // down the column rather than needing the highlight to be noticed.
-            if on {
-                ui.painter().rect_filled(rect, 2.0, swatch);
-            } else {
-                ui.painter().rect_stroke(
-                    rect,
-                    2.0,
-                    egui::Stroke::new(1.0, swatch),
-                    egui::StrokeKind::Inside,
-                );
-            }
+            skin::swatch(ui, rgb, on);
             let label = match peaks.get(&c) {
                 Some((peak, _)) => {
                     format!("{name}   {:.1}", *peak as f32 / mm_core::Q10_ONE as f32)
@@ -4846,37 +4857,81 @@ fn legend_body(ui: &mut egui::Ui, sim: &SlideRes, view: &View, frame: &Frame) {
 
 /// The live metric plots.
 fn metrics_body(ui: &mut egui::Ui, sim: &SlideRes) {
-    ui.label(egui::RichText::new("metrics").strong());
+    skin::section(ui, "metrics", false);
     let history = &sim.latest.history;
     if history.is_empty() {
-        ui.weak("no samples yet");
+        ui.label(skin::text(Role::Small, "no samples yet"));
         return;
     }
-    // One plotted series: its label, and how to get its value out of a sample.
-    type Series<'a> = (&'a str, Box<dyn Fn(&Sample) -> i64>);
+    // One plotted series: its label, how to get its value out of a sample, and what colour it
+    // is drawn in. The colour is a reading about the reading — income is good news, dissipation
+    // is energy leaving — and it is what stops four lines in one rail from being four identical
+    // green wobbles that have to be told apart by their captions.
+    type Series<'a> = (&'a str, Box<dyn Fn(&Sample) -> i64>, theme::Rgb);
     let series: [Series; 4] = [
-        ("population", Box::new(|s: &Sample| s.population as i64)),
-        ("dissipation", Box::new(|s: &Sample| s.dissipation)),
-        ("light income ‰", Box::new(|s: &Sample| s.trophic_light)),
+        (
+            "population",
+            Box::new(|s: &Sample| s.population as i64),
+            skin::plot_neutral(),
+        ),
+        (
+            "dissipation",
+            Box::new(|s: &Sample| s.dissipation),
+            Mood::Bad.rgb(),
+        ),
+        (
+            "light income ‰",
+            Box::new(|s: &Sample| s.trophic_light),
+            Mood::Good.rgb(),
+        ),
         (
             "distinct genomes",
             Box::new(|s: &Sample| s.distinct_genomes as i64),
+            skin::plot_neutral(),
         ),
     ];
-    for (name, pick) in series {
+    for (name, pick, colour) in series {
         let s = history.series(pick);
-        ui.label(format!("{name}  {}", s.values.last().copied().unwrap_or(0)));
-        sparkline(ui, &s.normalised());
+        // The value on the same line as the name, right-aligned, so the column of current
+        // readings can be scanned down without stopping at four plots on the way.
+        skin::stat(ui, name, &s.values.last().copied().unwrap_or(0).to_string());
+        skin::sparkline(ui, &s.normalised(), colour);
     }
     if let Some(latest) = history.latest() {
-        ui.separator();
-        ui.label(format!(
-            "fidelity {:.2}",
-            latest.mean_fidelity as f32 / mm_core::Q10_ONE as f32
-        ));
-        ui.label(format!("loadouts {}", latest.distinct_loadouts));
-        ui.label(format!("matter {}", latest.total_matter));
+        ui.add_space(theme::SECTION_GAP);
+        skin::hairline(ui);
+        ui.add_space(4.0);
+        skin::stat(
+            ui,
+            "fidelity",
+            &format!(
+                "{:.2}",
+                latest.mean_fidelity as f32 / mm_core::Q10_ONE as f32
+            ),
+        );
+        skin::stat(ui, "loadouts", &latest.distinct_loadouts.to_string());
+        skin::stat(ui, "matter", &thousands(latest.total_matter));
     }
+}
+
+/// A big number with its thousands parted, because `80535715840` is not a number anybody reads
+/// and `80 535 715 840` is.
+///
+/// A thin space rather than a comma: the readings either side of it are decimal, and a comma in
+/// a column of decimals is a decimal point somewhere in the world.
+fn thousands(v: i64) -> String {
+    let digits = v.unsigned_abs().to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3 + 1);
+    if v < 0 {
+        out.push('-');
+    }
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push('\u{2009}');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// The genome of the selected cell, live (`g`).
@@ -5094,55 +5149,70 @@ fn cell_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
     let chem_names = sim.chem_names.clone();
 
     // --- who and where ---
+    skin::section(ui, "cell", false);
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new(sim.latest.species.clone())
-                .strong()
-                .size(14.0),
+                .italics()
+                .size(15.0)
+                .color(skin::col(Role::Value.ink().unwrap_or(theme::DIM))),
         );
-        if ui
-            .selectable_label(view.follow, "track")
-            .on_hover_text("keep the camera centred on this cell (t)")
-            .clicked()
-        {
-            view.follow = !view.follow;
-        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if skin::chip(ui, "track", None, view.follow)
+                .on_hover_text("keep the camera centred on this cell (t)")
+                .clicked()
+            {
+                view.follow = !view.follow;
+            }
+        });
     });
-    ui.weak(format!(
-        "age {}  born tick {}  at ({:.1}, {:.1})",
-        c.age,
-        c.birth_tick,
-        c.x as f32 / mm_core::fixed::POS_ONE as f32,
-        c.y as f32 / mm_core::fixed::POS_ONE as f32
+    ui.label(skin::text(
+        Role::Label,
+        format!(
+            "age {} · born {} · ({:.1}, {:.1})",
+            c.age,
+            c.birth_tick,
+            c.x as f32 / mm_core::fixed::POS_ONE as f32,
+            c.y as f32 / mm_core::fixed::POS_ONE as f32
+        ),
     ));
 
-    // --- the bars that say whether it is doing well ---
-    ui.add_space(4.0);
-    bar(
+    // --- the readings that say whether it is doing well ---
+    //
+    // 400, 120 and 40 are reference points and not ceilings — energy and mass have no maximum —
+    // so the bar clamps at them and the number beside it is what is actually true.
+    ui.add_space(6.0);
+    skin::row(
         ui,
         "energy",
-        q10(c.energy),
-        400.0,
-        egui::Color32::from_rgb(230, 200, 90),
+        Some(q10(c.energy) / 400.0),
+        &format!("{:.1}", q10(c.energy)),
+        Mood::Warn.rgb(),
     );
-    bar(
+    skin::row(
         ui,
         "mass",
-        q10(c.mass),
-        120.0,
-        egui::Color32::from_rgb(140, 190, 230),
+        Some(q10(c.mass) / 120.0),
+        &format!("{:.1}", q10(c.mass)),
+        // No mood: mass being high is not good news or bad news, it is just mass. The design
+        // gives this bar a blue that is the accent in all but name, and the accent means
+        // selection. A reading with nothing to say about itself is drawn in ink.
+        Role::Value.ink().unwrap_or(theme::DIM),
     );
-    if c.damage > 0 {
-        bar(
-            ui,
-            "damage",
-            q10(c.damage),
-            40.0,
-            egui::Color32::from_rgb(220, 110, 110),
-        );
-    }
+    skin::row(
+        ui,
+        "damage",
+        Some(q10(c.damage) / 40.0),
+        &format!("{:.1}", q10(c.damage)),
+        if c.damage > 0 {
+            Mood::Bad.rgb()
+        } else {
+            theme::DIM
+        },
+    );
 
-    ui.separator();
+    ui.add_space(theme::SECTION_GAP);
+    skin::hairline(ui);
 
     // --- the schematic ---
     let placed = mm_app::inspector::placements(&c.slots);
@@ -5305,28 +5375,6 @@ fn cell_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
     });
 }
 
-/// A labelled bar, for the two or three numbers worth seeing at a glance rather than reading.
-///
-/// `full` is what counts as a full bar. There is no maximum for energy or mass, so it is a
-/// reference point rather than a limit and the bar clamps at it.
-fn bar(ui: &mut egui::Ui, label: &str, value: f32, full: f32, colour: egui::Color32) {
-    let (rect, _) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), 16.0), egui::Sense::hover());
-    let painter = ui.painter();
-    painter.rect_filled(rect, 2.0, egui::Color32::from_black_alpha(120));
-    let fraction = (value / full).clamp(0.0, 1.0);
-    let mut filled = rect;
-    filled.set_width(rect.width() * fraction);
-    painter.rect_filled(filled, 2.0, colour.gamma_multiply(0.55));
-    painter.text(
-        rect.left_center() + egui::vec2(6.0, 0.0),
-        egui::Align2::LEFT_CENTER,
-        format!("{label}  {value:.1}"),
-        egui::FontId::proportional(11.0),
-        egui::Color32::from_gray(230),
-    );
-}
-
 /// Refresh the ecology pane's copy of the world's history, if it needs it.
 ///
 /// The one place this pane reaches into the world. Everything the three views draw comes out of
@@ -5373,11 +5421,9 @@ fn refresh_ecology(sim: &mut SlideRes, view: &View) {
 fn ecology_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
     refresh_ecology(sim, view);
     ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
         for which in Ecology::ALL {
-            if ui
-                .selectable_label(view.ecology == which, which.title())
-                .clicked()
-            {
+            if skin::chip(ui, which.title(), None, view.ecology == which).clicked() {
                 view.ecology = which;
             }
         }
@@ -5714,7 +5760,7 @@ fn species_page(ui: &mut egui::Ui, sim: &SlideRes, view: &mut View) {
     ui.separator();
     ui.label(format!("population — peak {}", page.curve_peak));
     let values: Vec<f32> = page.curve.iter().map(|(_, v)| *v).collect();
-    sparkline(ui, &values);
+    skin::sparkline(ui, &values, Mood::Good.rgb());
     ui.separator();
     ui.small(format!(
         "founder genome, {} bytes, fingerprint {:016x}",
@@ -6123,30 +6169,3 @@ fn unwound(vm: &mm_core::vm::Vm) -> Vec<i16> {
         .collect()
 }
 
-/// A minimal line plot. Values are already `0..=1`.
-fn sparkline(ui: &mut egui::Ui, values: &[f32]) {
-    let (rect, _) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), 34.0), egui::Sense::hover());
-    let painter = ui.painter();
-    painter.rect_filled(rect, 2.0, egui::Color32::from_black_alpha(90));
-    if values.len() < 2 {
-        return;
-    }
-    let step = rect.width() / (values.len() - 1) as f32;
-    let points: Vec<egui::Pos2> = values
-        .iter()
-        .enumerate()
-        .map(|(i, v)| {
-            egui::pos2(
-                rect.left() + i as f32 * step,
-                // Higher values draw higher up, which is the only way round anybody reads a
-                // plot, and the opposite of how screen y runs.
-                rect.bottom() - v * rect.height(),
-            )
-        })
-        .collect();
-    painter.add(egui::Shape::line(
-        points,
-        egui::Stroke::new(1.2, egui::Color32::from_rgb(120, 200, 160)),
-    ));
-}
