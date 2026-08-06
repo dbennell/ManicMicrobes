@@ -4456,68 +4456,172 @@ fn toolbox_work(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
         );
     });
 
-    // The flux already on the slide. Listing them is the only way to *find* one: a source is an
-    // area of water that behaves differently, and until it has filled up there is nothing there
-    // to see but its outline.
+    // Everything the tools have put on the slide (UI.md §9.3), not only the flux.
     //
-    // A table rather than a sentence each. Four sources described in prose are four sentences to
-    // read; in columns they are four rows to scan, and the chemical, the rectangle and the rate
-    // line up down the page.
-    let flux = {
+    // The flux list was here because a source that has not filled up yet is invisible, and
+    // without a list a rectangle dragged in the wrong place cannot be found again let alone
+    // removed. Every word of that argument is true of an authored wall — which is a dark square
+    // among dark squares — and of a hand-placed founder, which is one cell among however many
+    // have since been born from it. One table, one lock.
+    let (flux, barriers, inhabitants) = {
         let held = sim.engine.handle();
         let slide = held.slide();
-        slide.world().flux().to_vec()
+        let world = slide.world();
+        let scenario = world.scenario();
+        (
+            world.flux().to_vec(),
+            scenario.barriers.clone(),
+            scenario.inhabitants.clone(),
+        )
     };
     ui.add_space(theme::SECTION_GAP);
     skin::hairline(ui);
-    skin::section(ui, "sources and drains on the slide", true);
-    if flux.is_empty() {
+    skin::section(ui, "what is on the slide", true);
+    if flux.is_empty() && barriers.is_empty() && inhabitants.is_empty() {
         ui.label(skin::text(
             Role::Small,
-            "none. Pick source or drain and drag a rectangle on the slide.",
+            "nothing yet. Draw a wall, paint a chemical, drag a source, or seed a founder — \
+             each one writes itself into the scenario as well as onto the slide.",
         ));
         return;
     }
     let mut remove = None;
     egui::ScrollArea::vertical()
-        .id_salt("flux")
+        .id_salt("on_slide")
         .auto_shrink([false, false])
         .show(ui, |ui| {
             for (i, f) in flux.iter().enumerate() {
                 let (kind, chemical, rect, rate) = flux_columns(f, &sim.chem_names);
                 let rgb = chem_rgb(f, &sim.chem_colours);
-                ui.horizontal(|ui| {
-                    skin::swatch(ui, rgb, kind == "source");
-                    ui.label(
-                        skin::text(Role::Label, kind).color(skin::col(if kind == "source" {
-                            Mood::Good.rgb()
-                        } else {
-                            Mood::Bad.rgb()
-                        })),
-                    );
-                    ui.add_sized(
-                        egui::vec2(108.0, theme::row::HEIGHT),
-                        egui::Label::new(skin::text(Role::Value, chemical)).truncate(),
-                    );
-                    ui.add_sized(
-                        egui::vec2(130.0, theme::row::HEIGHT),
-                        egui::Label::new(skin::text(Role::Label, rect)),
-                    );
-                    ui.label(skin::text(Role::Label, rate));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if skin::chip(ui, "×", None, false)
-                            .on_hover_text("remove")
-                            .clicked()
-                        {
-                            remove = Some(i);
-                        }
-                    });
-                });
+                // Only the flux can be removed from here. A wall comes off with the eraser,
+                // which already exists and already knows how to take a square out of an
+                // authored shape; a second way to do it would be a second thing to get wrong.
+                if let Some(i) = on_slide_row(
+                    ui,
+                    rgb,
+                    kind == "source",
+                    kind,
+                    if kind == "source" {
+                        Mood::Good.rgb()
+                    } else {
+                        Mood::Bad.rgb()
+                    },
+                    &chemical,
+                    &rect,
+                    &rate,
+                    Some(i),
+                ) {
+                    remove = Some(i);
+                }
+            }
+            for barrier in &barriers {
+                let (what, rect) = barrier_columns(barrier);
+                on_slide_row(
+                    ui,
+                    theme::RULE,
+                    true,
+                    "wall",
+                    skin::plot_neutral(),
+                    what,
+                    &rect,
+                    "erase to remove",
+                    None,
+                );
+            }
+            for cell in &inhabitants {
+                let where_ = match cell.at {
+                    Some((x, y)) => format!("({x}, {y})"),
+                    None => "spread over the slide".to_string(),
+                };
+                on_slide_row(
+                    ui,
+                    [0x8a, 0xb0, 0x98],
+                    true,
+                    "founders",
+                    Mood::Good.rgb(),
+                    &cell.genome,
+                    &where_,
+                    &format!("× {}", cell.count),
+                    None,
+                );
             }
         });
     if let Some(i) = remove {
         let held = sim.engine.handle();
         held.slide().world_mut().remove_flux(i);
+    }
+}
+
+/// One row of "what is on the slide": a swatch, what kind of thing it is, what it is of, where
+/// it is, and the one number that matters to it.
+#[allow(clippy::too_many_arguments)]
+fn on_slide_row(
+    ui: &mut egui::Ui,
+    rgb: [u8; 3],
+    filled: bool,
+    kind: &str,
+    kind_colour: [u8; 3],
+    what: &str,
+    rect: &str,
+    extra: &str,
+    removable: Option<usize>,
+) -> Option<usize> {
+    let mut removed = None;
+    ui.horizontal(|ui| {
+        skin::swatch(ui, rgb, filled);
+        ui.add_sized(
+            egui::vec2(58.0, theme::row::HEIGHT),
+            egui::Label::new(skin::text(Role::Label, kind).color(skin::col(kind_colour))),
+        );
+        ui.add_sized(
+            egui::vec2(120.0, theme::row::HEIGHT),
+            egui::Label::new(skin::text(Role::Value, what)).truncate(),
+        );
+        ui.add_sized(
+            egui::vec2(150.0, theme::row::HEIGHT),
+            egui::Label::new(skin::text(Role::Label, rect)),
+        );
+        // A fixed column rather than a right-aligned one, so the × sits beside the row it
+        // removes instead of a hundred points away at the far edge of a wide drawer.
+        ui.add_sized(
+            egui::vec2(120.0, theme::row::HEIGHT),
+            egui::Label::new(skin::text(Role::Label, extra)),
+        );
+        if let Some(i) = removable {
+            if skin::chip(ui, "×", None, false)
+                .on_hover_text("remove")
+                .clicked()
+            {
+                removed = Some(i);
+            }
+        }
+    });
+    removed
+}
+
+/// An authored barrier as the table draws it: what shape it is, and where.
+fn barrier_columns(barrier: &mm_core::Barrier) -> (&'static str, String) {
+    match barrier {
+        mm_core::Barrier::Square { x, y } => ("square", format!("({x}, {y})")),
+        mm_core::Barrier::Rect {
+            x,
+            y,
+            width,
+            height,
+        } => ("rectangle", format!("({x}, {y}) {width}×{height}")),
+        mm_core::Barrier::WallWithGap {
+            at,
+            vertical,
+            gap_start,
+            gap_len,
+        } => (
+            "wall with a gap",
+            format!(
+                "{} {at} · gap {gap_start}..{}",
+                if *vertical { "column" } else { "row" },
+                gap_start + gap_len
+            ),
+        ),
     }
 }
 
