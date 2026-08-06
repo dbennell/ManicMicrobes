@@ -6754,120 +6754,198 @@ fn editor_body(ui: &mut egui::Ui, sim: &mut SlideRes) {
 /// Breakpoints act on the viewer; instruction stepping acts on a sandbox. Neither can reach
 /// the simulation — see `debugger.rs` for why that is structural rather than careful.
 fn debugger_body(ui: &mut egui::Ui, sim: &mut SlideRes) {
-    // --- breakpoints, over the live world ---
-    ui.label("breakpoints");
-    if let Some(tripped) = sim.breakpoints.tripped() {
-        ui.colored_label(
-            egui::Color32::from_rgb(240, 200, 120),
-            format!("stopped: {}", tripped.describe()),
-        );
-        if ui.button("continue").clicked() {
-            sim.breakpoints.rearm();
-            // At the speed you were running at when it tripped, not at 1×: a breakpoint set
-            // while watching something slowly is set *because* you were watching it slowly.
-            sim.engine.unpause();
-        }
-    }
+    // The drawer's shape (UI.md §8.6). The trace and the disassembly are what wants the width;
+    // breakpoints and the step controls are a column of switches beside them.
     let tick = sim.latest.frame.tick;
-    ui.horizontal(|ui| {
-        if ui.button("+1,000 ticks").clicked() {
-            sim.breakpoints.add(Breakpoint::AtTick(tick + 1_000));
-        }
-        if ui.button("on death").clicked() {
-            if let Some(cell) = sim.selected {
-                sim.breakpoints.add(Breakpoint::CellDies(cell));
-            }
-        }
-        if ui.button("clear").clicked() {
-            sim.breakpoints.clear();
-        }
-    });
-    let listed: Vec<String> = sim
+    let world_tick = tick;
+
+    // Everything the column needs, gathered before the split so neither half borrows `sim`
+    // while the other is drawing.
+    let tripped = sim.breakpoints.tripped().map(|b| b.describe());
+    let listed: Vec<(bool, String)> = sim
         .breakpoints
         .iter()
-        .map(|(p, on)| format!("{} {}", if on { "●" } else { "○" }, p.describe()))
+        .map(|(p, on)| (on, p.describe()))
         .collect();
-    for text in listed {
-        ui.small(text);
-    }
-    ui.separator();
+    let mut add: Option<Breakpoint> = None;
+    let mut clear = false;
+    let mut rearm = false;
+    let mut take = false;
+    let mut steps = 0u32;
+    let mut step_tick = false;
+    let selected = sim.selected;
 
-    // --- the sandbox, for instruction stepping ---
-    ui.label("sandbox");
-    let world_tick = sim.latest.frame.tick;
-    if ui.button("take from selected cell").clicked() {
+    skin::drawer_split(
+        ui,
+        "debugger_controls",
+        |ui| {
+            let Some(sandbox) = sim.sandbox.as_mut() else {
+                ui.label(skin::text(
+                    Role::Small,
+                    "select a cell and take a copy — the sandbox is a private world, so \
+                     stepping it cannot touch the slide.",
+                ));
+                return;
+            };
+            let behind = world_tick.saturating_sub(sandbox.taken_at_tick);
+            skin::section(ui, "sandbox", false);
+            if behind > 0 {
+                // Said plainly, so nobody reads a sandbox as the live cell.
+                ui.label(skin::moody(
+                    Role::Label,
+                    Mood::Warn,
+                    format!("a copy, taken {behind} ticks ago — the live cell has moved on"),
+                ));
+            }
+            ui.horizontal(|ui| {
+                skin::stat(ui, "ip", &sandbox.vm.ip.to_string());
+            });
+            ui.horizontal(|ui| {
+                ui.label(skin::text(
+                    Role::Label,
+                    format!(
+                        "next {}",
+                        sandbox
+                            .next_op()
+                            .map_or("-".to_string(), |op| op.name().to_string())
+                    ),
+                ));
+                ui.label(skin::text(
+                    Role::Label,
+                    format!(
+                        "ran {} ({}/{} this tick)",
+                        sandbox.executed,
+                        sandbox.in_tick,
+                        sandbox.budget()
+                    ),
+                ));
+                if sandbox.vm.halted {
+                    ui.label(skin::moody(Role::Label, Mood::Warn, "halted"));
+                }
+            });
+
+            skin::section(ui, "stack · top last", true);
+            ui.label(skin::text(Role::Value, format!("{:?}", unwound(&sandbox.vm))));
+
+            skin::section(ui, "disassembly", true);
+            let listing = mm_asm::disassemble(sandbox.genome.bytes());
+            let here = u32::from(sandbox.vm.ip);
+            egui::ScrollArea::vertical()
+                .id_salt("disasm")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    for line in &listing.lines {
+                        let current = line.offset == here;
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                skin::text(Role::Code, if current { "▶" } else { " " })
+                                    .color(skin::col(Mood::Good.rgb())),
+                            );
+                            ui.label(
+                                skin::text(
+                                    Role::Code,
+                                    format!("{:>5}  {}", line.offset, line.to_source()),
+                                )
+                                .color(skin::col(if current {
+                                    Role::Value.ink().unwrap_or(theme::DIM)
+                                } else {
+                                    Role::Label.ink().unwrap_or(theme::DIM)
+                                })),
+                            );
+                        });
+                    }
+                });
+        },
+        |ui| {
+            skin::section(ui, "breakpoints", false);
+            if let Some(what) = &tripped {
+                ui.label(skin::moody(Role::Label, Mood::Warn, format!("stopped: {what}")));
+                if skin::chip(ui, "continue", None, false).clicked() {
+                    rearm = true;
+                }
+            }
+            for (on, what) in &listed {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        skin::text(Role::Label, if *on { "●" } else { "○" }).color(skin::col(
+                            if *on { Mood::Bad.rgb() } else { theme::DIM },
+                        )),
+                    );
+                    ui.label(skin::text(Role::Label, what));
+                });
+            }
+            if listed.is_empty() && tripped.is_none() {
+                ui.label(skin::text(Role::Small, "none set"));
+            }
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(3.0, 3.0);
+                if skin::chip(ui, "+1 000 ticks", None, false).clicked() {
+                    add = Some(Breakpoint::AtTick(tick + 1_000));
+                }
+                if skin::chip(ui, "on death", None, false).clicked() {
+                    if let Some(cell) = selected {
+                        add = Some(Breakpoint::CellDies(cell));
+                    }
+                }
+                if skin::chip(ui, "clear", None, false).clicked() {
+                    clear = true;
+                }
+            });
+
+            skin::section(ui, "step", true);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(3.0, 3.0);
+                if skin::chip(ui, "take from cell", None, false).clicked() {
+                    take = true;
+                }
+                if skin::chip(ui, "instruction", None, false).clicked() {
+                    steps = 1;
+                }
+                if skin::chip(ui, "×16", None, false).clicked() {
+                    steps = 16;
+                }
+                if skin::chip(ui, "tick", None, false).clicked() {
+                    step_tick = true;
+                }
+            });
+            ui.add_space(theme::SECTION_GAP);
+            ui.label(skin::text(
+                Role::Body,
+                "World-facing reads return zero in a sandbox: there is nothing to eat, nothing \
+                 to sense and nobody to join. What it tells you is what the program does, not \
+                 what the world would have done to it.",
+            ));
+        },
+    );
+
+    // Applied after the split, because both halves wanted `sim` and only one can have it.
+    if rearm {
+        sim.breakpoints.rearm();
+        // At the speed you were running at when it tripped, not at 1×: a breakpoint set while
+        // watching something slowly is set *because* you were watching it slowly.
+        sim.engine.unpause();
+    }
+    if let Some(point) = add {
+        sim.breakpoints.add(point);
+    }
+    if clear {
+        sim.breakpoints.clear();
+    }
+    if take {
         let held = sim.engine.handle();
         let taken = sim
             .selected
             .and_then(|cell| Sandbox::of(held.slide().world(), cell));
         sim.sandbox = taken;
     }
-    let Some(sandbox) = sim.sandbox.as_mut() else {
-        ui.weak("select a cell and take a copy");
-        return;
-    };
-    let behind = world_tick.saturating_sub(sandbox.taken_at_tick);
-    if behind > 0 {
-        // Said plainly, so nobody reads a sandbox as the live cell.
-        ui.colored_label(
-            egui::Color32::from_rgb(200, 180, 120),
-            format!("a copy, taken {behind} ticks ago — the live cell has moved on"),
-        );
-    }
-    ui.horizontal(|ui| {
-        if ui.button("step").clicked() {
+    if let Some(sandbox) = sim.sandbox.as_mut() {
+        for _ in 0..steps {
             sandbox.step();
         }
-        if ui.button("step tick").clicked() {
+        if step_tick {
             sandbox.step_tick();
         }
-        if ui.button("×16").clicked() {
-            for _ in 0..16 {
-                sandbox.step();
-            }
-        }
-    });
-    ui.label(format!(
-        "ip {}  next {}  ran {} ({}/{} this tick){}",
-        sandbox.vm.ip,
-        sandbox
-            .next_op()
-            .map_or("-".to_string(), |op| op.name().to_string()),
-        sandbox.executed,
-        sandbox.in_tick,
-        sandbox.budget(),
-        if sandbox.vm.halted { "  HALTED" } else { "" }
-    ));
-    ui.separator();
-    ui.label("stack (top last)");
-    ui.small(format!("{:?}", unwound(&sandbox.vm)));
-    ui.collapsing("registers", |ui| {
-        ui.small(format!("{:?}", sandbox.vm.regs));
-    });
-    ui.collapsing("ram", |ui| {
-        ui.small(format!("{:?}", sandbox.vm.ram));
-    });
-    ui.collapsing("disassembly", |ui| {
-        let listing = mm_asm::disassemble(sandbox.genome.bytes());
-        let here = sandbox.vm.ip as u32;
-        egui::ScrollArea::vertical()
-            .max_height(180.0)
-            .id_salt("disasm")
-            .show(ui, |ui| {
-                for line in &listing.lines {
-                    let marker = if line.offset == here { "▶ " } else { "  " };
-                    ui.small(
-                        egui::RichText::new(format!(
-                            "{marker}{:>5}  {}",
-                            line.offset,
-                            line.to_source()
-                        ))
-                        .monospace(),
-                    );
-                }
-            });
-    });
-    ui.small("world-facing reads return zero in a sandbox: there is nothing to eat.");
+    }
 }
 
 /// The data stack in push order, top last — the same unwinding the inspector does.

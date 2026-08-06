@@ -1099,9 +1099,7 @@ fraction of a fraction, came out at 120 points, and wrapped its own headings. Be
 `380 + CONTEXT_COLUMN` the column is dropped rather than squeezed — a tab that has lost its
 work area is useless, one that has lost its notes is merely quieter.
 
-**Toolbox, parameters, ecology, genome and editor are on it. The debugger is not**, and it is
-the outstanding work in M10.6: its breakpoints and step controls belong in the column with the
-trace given the width.
+All six tabs are on it.
 
 ### 8.7 The menus
 

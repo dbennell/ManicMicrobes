@@ -488,7 +488,11 @@ pub fn drawer_split(
             egui::vec2(total - column, height),
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
-                ui.set_min_height(height);
+                // Both dimensions, not just the height. `allocate_ui_with_layout` reports the
+                // rect its content *used*, so a work area whose content is one short label —
+                // the debugger before a sandbox is taken — shrank to the width of that label
+                // and handed the rest of the drawer to the context column.
+                ui.set_min_size(egui::vec2(total - column, height));
                 work(ui);
             },
         );
