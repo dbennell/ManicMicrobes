@@ -137,6 +137,31 @@ struct State {
     /// where the vertices are and nothing else. If those do not measure where they were put, the
     /// disagreement is in the picture's coordinates and not in the field.
     rounded: bool,
+    /// Draw through `cellpipe::DotMaterial` — the narrow layout the microscope uses below
+    /// `slide::Lod::Packed` — instead of `CellMaterial`.
+    ///
+    /// **This exists to be photographed twice.** The dot shader is meant to draw the identical
+    /// picture wherever no seam is cutting, and "meant to" is the kind of claim that stops being
+    /// true the first time someone edits one of the two and not the other. With `MM_BENCH_CAP=0`
+    /// every cell has an empty seam list and a swell of exactly one — which is precisely what
+    /// `slide.rs` hands the renderer below the tier — so the two materials are being given the
+    /// same data and must produce the same pixels:
+    ///
+    /// ```text
+    /// MM_BENCH_CAP=0 MM_BENCH_PANEL=0 MM_BENCH_AT=30 MM_BENCH_SHOT=/tmp/seamed.png ./shaderbench
+    /// MM_BENCH_CAP=0 MM_BENCH_PANEL=0 MM_BENCH_AT=30 MM_BENCH_DOTS=1 \
+    ///   MM_BENCH_SHOT=/tmp/plain.png ./shaderbench
+    /// tools/compare_shots.py /tmp/seamed_000.png /tmp/plain_000.png --max-delta 2 --max-pixels 100
+    /// ```
+    ///
+    /// **Not `cmp`, and the reason is the whole point of the tool.** The two are the same picture
+    /// but not the same bytes: the driver may reassociate `mix` and `smax`, which moves the
+    /// outline by a unit in the last place, which moves the antialiasing ramp by a level of grey.
+    /// The note above `DotVertex` in `cell.wgsl` works through why. What that measures today is 14
+    /// pixels of 921,600, worst delta 2 of 255, 13 of them on an edge — so the tolerance above is
+    /// roughly seven times the observed difference and still nowhere near what a real divergence
+    /// would produce.
+    dots: bool,
 }
 
 impl State {
@@ -199,6 +224,7 @@ impl State {
             dump,
             show_panel: num("MM_BENCH_PANEL", 1.0) > 0.5,
             rounded: num("MM_BENCH_ROUNDED", 1.0) > 0.5,
+            dots: num("MM_BENCH_DOTS", 0.0) > 0.5,
         }
     }
 }
@@ -220,8 +246,10 @@ struct CellMesh;
 
 fn setup(
     mut commands: Commands,
+    state: Res<State>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<cellpipe::CellMaterial>>,
+    mut dot_materials: ResMut<Assets<cellpipe::DotMaterial>>,
 ) {
     // Order -1 so egui composites over the slide, as the microscope does it.
     commands.spawn((
@@ -231,15 +259,24 @@ fn setup(
             ..default()
         },
     ));
-    commands.spawn((
-        CellMesh,
-        // The vertices are rewritten every frame in screen space, so the bounding box Bevy
-        // computes from the first frame is wrong by the second.
-        NoFrustumCulling,
-        Mesh2d(meshes.add(cellpipe::empty_mesh())),
-        MeshMaterial2d(materials.add(cellpipe::CellMaterial {})),
-        Transform::from_xyz(0.0, 0.0, 1.0),
-    ));
+    // The vertices are rewritten every frame in screen space, so the bounding box Bevy
+    // computes from the first frame is wrong by the second.
+    let common = (CellMesh, NoFrustumCulling, Transform::from_xyz(0.0, 0.0, 1.0));
+    // One or the other, chosen once. The bench never crosses a tier mid-run — the whole point of
+    // it is that a frame is a pure function of its number — so there is nothing to switch.
+    if state.dots {
+        commands.spawn((
+            common,
+            Mesh2d(meshes.add(cellpipe::dot_mesh())),
+            MeshMaterial2d(dot_materials.add(cellpipe::DotMaterial {})),
+        ));
+    } else {
+        commands.spawn((
+            common,
+            Mesh2d(meshes.add(cellpipe::empty_mesh())),
+            MeshMaterial2d(materials.add(cellpipe::CellMaterial {})),
+        ));
+    }
 }
 
 fn keys(input: Res<ButtonInput<KeyCode>>, mut state: ResMut<State>) {
@@ -380,8 +417,15 @@ fn redraw(
 
     let outline = state.outline;
     let rounded = if state.rounded { 1.0 } else { 0.0 };
+    // Whichever layout `setup` spawned a mesh for. The zoom does not choose it here as it does in
+    // the microscope: the bench's subject is the seams, so which material draws them is a knob.
+    let detail = if state.dots {
+        cellmesh::Detail::Plain
+    } else {
+        cellmesh::Detail::Seamed
+    };
     let buffers = &mut state.buffers;
-    buffers.begin(cells.len() * if outline { 4 } else { 1 });
+    buffers.begin(cells.len() * if outline { 4 } else { 1 }, detail);
     for cell in &cells {
         let at = to_screen(cell.blob.x, cell.blob.y);
         // Exactly what the microscope computes, and for the same reasons — see `main::redraw`.
@@ -435,9 +479,11 @@ fn redraw(
         }
     }
 
-    for handle in &mesh {
+    // Exactly one, as in the microscope and for the same reason: `upload` swaps the vertices
+    // across rather than copying them, so a second mesh here would get the frame before last.
+    if let Ok(handle) = mesh.single() {
         if let Some(mut m) = meshes.get_mut(&handle.0) {
-            cellpipe::upload(&mut m, &state.buffers);
+            cellpipe::upload(&mut m, &mut state.buffers);
         }
     }
 }

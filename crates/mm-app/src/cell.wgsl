@@ -97,6 +97,71 @@ fn vertex(vertex: Vertex) -> Output {
     return out;
 }
 
+// --- the same cell, below `Lod::Packed` ---------------------------------------------------
+//
+// A second pair of entry points over a narrower vertex layout: position, corner, colour, shape,
+// and nothing else. See `cellpipe::DotMaterial` for what it is worth in bandwidth.
+//
+// **It draws the identical picture, and that is a claim about arithmetic rather than about
+// taste.** Below `Lod::Packed` the CPU does not solve for seams at all — `slide.rs` hands every
+// cell twelve `NO_SQUASH` sentinels and a swell of one — and every step the seams feed then
+// collapses to a constant:
+//
+// * `nearest` is 8, so `pressure` is `clamp((1 - 8) / 0.25, 0, 1)`, which is exactly 0, so
+//   `slack` is exactly 1 and the wobble is untouched.
+// * `swell` is 1, so `bare` is `0.65 / 1`, exactly 0.65.
+// * `edge_cos` is `5.2 / 0.65`, exactly 8, and `dot(dir, n)` can never exceed 1 — so every
+//   `seam_room` is `1 - smoothstep(7.75, 8.0, <= 1)`, which is exactly 1, and so is their `min`.
+// * `mix(bare, x, 1.0)` is `bare * 0 + x * 1`, exactly `x`. The `bare` end drops out.
+// * a quad corner is at most `sqrt(2)` from the centre, so `dot(p, d) - 5.2` is at most -3.79
+//   while `field` is at least about -0.78 — every `smax` gets `h` clamped to exactly 1 and
+//   returns `mix(b, a, 1) + k * 1 * 0`, which is exactly `a`. The field is unchanged, twelve
+//   times over.
+//
+// So the seam block is not approximately dead at this tier, it is exactly dead, and the two entry
+// points share every line that is *not* dead through `outline_radius` and `blob`.
+//
+// **They are still not bit-identical, and it is worth knowing why rather than assuming a bug.**
+// Every step above is exact in real arithmetic and exact in `f32` *as the WGSL spec writes it* —
+// `mix(e1, e2, e3)` is defined as `e1*(1-e3) + e2*e3`, which at `e3 = 1` is exactly `e2`. Drivers
+// are free to evaluate it as `e1 + e3*(e2 - e1)` instead, and that is `e1 + (e2 - e1)`, which is
+// `e2` to within a unit in the last place and not always `e2`. The `smax` chain reassociates the
+// same way. One ulp of radius lands on the antialiasing ramp, where a level or two of grey either
+// way is a different byte.
+//
+// Measured, on the nine-cell bench at frame 30 with `MM_BENCH_CAP=0`: **14 pixels of 921,600
+// differ, none by more than 2 of 255, and 13 of the 14 sit on an edge.** That is the tolerance to
+// hold this to. A real divergence — a line added to one entry point and not the other — moves
+// thousands of pixels by tens of levels, and does it in the middle of cells as well as at their
+// rims. `MM_BENCH_DOTS=1` and `tools/compare_shots.py` are how to check.
+struct DotVertex {
+    @builtin(instance_index) instance_index: u32,
+    @location(0) position: vec3<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) colour: vec4<f32>,
+    @location(3) shape: vec4<f32>,
+};
+
+struct DotOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) @interpolate(flat) colour: vec4<f32>,
+    @location(2) @interpolate(flat) shape: vec4<f32>,
+};
+
+@vertex
+fn dot_vertex(vertex: DotVertex) -> DotOutput {
+    var out: DotOutput;
+    out.clip_position = mesh2d_position_local_to_clip(
+        get_world_from_local(vertex.instance_index),
+        vec4<f32>(vertex.position, 1.0),
+    );
+    out.uv = vertex.uv;
+    out.colour = vertex.colour;
+    out.shape = vertex.shape;
+    return out;
+}
+
 // Intersection with a rounded corner, rather than a mitred one.
 //
 // A plain `max` is a clean geometric intersection and it looks like scissors: the cell arrives
@@ -146,6 +211,79 @@ const TAPER: f32 = 0.25;
 fn seam_room(dir: vec2<f32>, n: vec2<f32>, face: f32, bare: f32) -> f32 {
     let edge_cos = face / max(bare, 0.0001);
     return 1.0 - smoothstep(edge_cos - TAPER, edge_cos, dot(dir, n));
+}
+
+/// Where the outline sits in direction `theta`, in field units. Shared by both fragment stages.
+///
+/// Three harmonics of angle, with amplitudes and phases from the cell's own seed. Small enough
+/// that the blob stays a blob: past about 0.2 total it reads as a splat, and past 0.35 the
+/// outline folds back on itself.
+///
+/// `slack` damps the wobble by how hard the cell is being pressed, and that is what makes a clump
+/// look like a clump. A seam is a straight line agreed by two cells from their own centres, but
+/// the wobble is each cell's private business — so a cell whose outline happens to wander
+/// *inwards* towards its neighbour stops short of the seam it agreed to, and leaves a gap exactly
+/// where the two are supposed to be pressed together. It reads as cells floating near each other
+/// rather than packed.
+///
+/// A cell being squashed flat by its neighbours has no business being knobbly anyway: the
+/// pressure that makes the seam is the same pressure that would smooth the membrane out. So the
+/// irregularity is a luxury of having room, and a cell in a crowd gives it up.
+///
+/// 0.65 is `cellmesh::FIELD_FILL` and the two must agree. The margin is not slack: the wobble adds
+/// up to a fifth, and the fade needs room outside that or it runs off the quad's corners and the
+/// cell is drawn as a square.
+///
+/// Swollen only where there is room for it: between `bare` at a facet's edge and the full 0.65 out
+/// in a free arc, which is the taper `seam_room` computes.
+///
+/// The wobble goes on the *free* end of the mix and not on the whole of it. Multiplying the mixed
+/// radius applies it to `bare` as well — and `bare` is the agreed wall, the one number two cells
+/// compute independently and must both honour. A fifth of a radius of private knobbliness laid on
+/// top of that is a cell's outline crossing its own shared wall wherever one of its three lobes
+/// happens to point, which is one cell drawn over another with no seam between them however
+/// correct the seam was.
+///
+/// It flickered because `slack` is `1 - 0.96 * pressure` and `pressure` comes off the *nearest*
+/// seam: a clump jostling by a fraction of a square swings the wobble amplitude by twenty-five
+/// times, so the lobe grows over the neighbour and shrinks back with nothing having moved. That is
+/// the same lobe, the same direction every time, appearing and disappearing — a cell with nine
+/// neighbours and no shortage of seam slots included.
+///
+/// Now: at a facet the outline is exactly `bare` and the wall is kept, and out in a free arc it is
+/// the full knobbly `0.65`, which is where the irregularity was always meant to live.
+fn outline_radius(
+    seed: f32,
+    integrity: f32,
+    theta: f32,
+    slack: f32,
+    room: f32,
+    bare: f32,
+) -> f32 {
+    let a1 = (0.055 + 0.045 * hash11(seed)) * slack;
+    let a2 = (0.030 + 0.030 * hash11(seed + 7.0)) * slack;
+    let a3 = (0.015 + 0.020 * hash11(seed + 13.0)) * slack;
+    let wobble = a1 * sin(3.0 * theta + hash11(seed + 3.0) * 6.2831853)
+        + a2 * sin(5.0 * theta + hash11(seed + 11.0) * 6.2831853)
+        + a3 * sin(7.0 * theta + hash11(seed + 17.0) * 6.2831853);
+    // A damaged cell loses its shape: the outline roughens as the membrane goes, which is a thing
+    // the baked version could not do at all because the shape was fixed before the cell existed.
+    let wear = (1.0 - integrity) * 0.09 * sin(11.0 * theta + hash11(seed + 23.0) * 6.2831853);
+    return mix(bare, 0.65 * (1.0 + wobble + wear), room);
+}
+
+/// How wide the antialiased edge is, in the field's own units. Shared by both fragment stages.
+///
+/// `fwidth` is one pixel in this field's units, so the fade is a pixel wide however far the cell
+/// is zoomed — which is the whole reason this is worth doing per pixel. Widened by the defocus, so
+/// depth of field is a genuinely softer outline rather than a fainter square.
+///
+/// Capped, and the cap is not a nicety. A cell four pixels across has `fwidth(r)` of about a half,
+/// so the fade spans the entire quad and the smoothstep never reaches zero before the corner — the
+/// cell renders as a soft *square*. At whole-slide zoom that made the population a mix of squares
+/// and blobs depending on how big each one happened to be, which read as two renderers fighting.
+fn edge_width(r: f32, softness: f32, radius: f32) -> f32 {
+    return min(fwidth(r) * 1.5 + softness, radius * 0.35);
 }
 
 @fragment
@@ -269,52 +407,10 @@ fn fragment(in: Output) -> @location(0) vec4<f32> {
     // So the irregularity is a luxury of having room, and a cell in a crowd gives it up.
     let theta = atan2(p.y, p.x);
     let slack = 1.0 - 0.96 * pressure;
-    let a1 = (0.055 + 0.045 * hash11(seed)) * slack;
-    let a2 = (0.030 + 0.030 * hash11(seed + 7.0)) * slack;
-    let a3 = (0.015 + 0.020 * hash11(seed + 13.0)) * slack;
-    let wobble = a1 * sin(3.0 * theta + hash11(seed + 3.0) * 6.2831853)
-        + a2 * sin(5.0 * theta + hash11(seed + 11.0) * 6.2831853)
-        + a3 * sin(7.0 * theta + hash11(seed + 17.0) * 6.2831853);
-    // A damaged cell loses its shape: the outline roughens as the membrane goes, which is a
-    // thing the baked version could not do at all because the shape was fixed before the cell
-    // existed.
-    let wear = (1.0 - integrity) * 0.09 * sin(11.0 * theta + hash11(seed + 23.0) * 6.2831853);
-    // 0.65 is `cellmesh::FIELD_FILL` and the two must agree. The margin is not slack: the
-    // wobble adds up to a fifth, and the fade needs room outside that or it runs off the
-    // quad's corners and the cell is drawn as a square.
-    //
-    // Swollen only where there is room for it. Between `bare` at a facet's edge and the full
-    // 0.65 out in a free arc, which is the taper above.
-    //
-    // The wobble goes on the *free* end of the mix and not on the whole of it. Multiplying the
-    // mixed radius applies it to `bare` as well — and `bare` is the agreed wall, the one number
-    // two cells compute independently and must both honour. A fifth of a radius of private
-    // knobbliness laid on top of that is a cell's outline crossing its own shared wall wherever
-    // one of its three lobes happens to point, which is one cell drawn over another with no seam
-    // between them however correct the seam was.
-    //
-    // It flickers because `slack` is `1 - 0.96 * pressure` and `pressure` comes off the *nearest*
-    // seam: a clump jostling by a fraction of a square swings the wobble amplitude by twenty-five
-    // times, so the lobe grows over the neighbour and shrinks back with nothing having moved.
-    // That is the same lobe, the same direction every time, appearing and disappearing — a cell
-    // with nine neighbours and no shortage of seam slots included.
-    //
-    // Now: at a facet the outline is exactly `bare` and the wall is kept, and out in a free arc
-    // it is the full knobbly `0.65`, which is where the irregularity was always meant to live.
-    let radius = mix(bare, 0.65 * (1.0 + wobble + wear), room);
+    let radius = outline_radius(seed, integrity, theta, slack, room, bare);
 
     // --- the edge ---
-    //
-    // `fwidth` is one pixel in this field's units, so the fade is a pixel wide however far the
-    // cell is zoomed — which is the whole reason this is worth doing per pixel. Widened by the
-    // defocus, so depth of field is a genuinely softer outline rather than a fainter square.
-    //
-    // Capped, and the cap is not a nicety. A cell four pixels across has `fwidth(r)` of about
-    // a half, so the fade spans the entire quad and the smoothstep never reaches zero before
-    // the corner — the cell renders as a soft *square*. At whole-slide zoom that made the
-    // population a mix of squares and blobs depending on how big each one happened to be,
-    // which read as two renderers fighting.
-    let edge = min(fwidth(r) * 1.5 + softness, radius * 0.35);
+    let edge = edge_width(r, softness, radius);
 
     // --- where the neighbours press in ---
     //
@@ -359,6 +455,57 @@ fn fragment(in: Output) -> @location(0) vec4<f32> {
     field = smax(field, dot(p, d10) - faces3.z, shoulder);
     field = smax(field, dot(p, d11) - faces3.w, shoulder);
 
+    return blob(in.colour, p, r, field, radius, edge, integrity, seed);
+}
+
+/// The same cell with no seam cutting it, over the narrow vertex layout.
+///
+/// Every line it does not run is one the note above `DotVertex` proves is dead below
+/// `Lod::Packed`: the twelve `unpack2x16snorm`, the twelve `seam_room`, the twelve `smax`, and
+/// the pressure and the swell they feed. What is left is *shared* with `fragment` through
+/// `outline_radius` and `blob` rather than copied, so the picture cannot drift across the tier
+/// boundary — which a second shader file would have made only a matter of time.
+@fragment
+fn dot_fragment(in: DotOutput) -> @location(0) vec4<f32> {
+    let p = in.uv;
+    let r = length(p);
+    let seed = in.shape.x;
+    let softness = in.shape.y;
+    let integrity = clamp(in.shape.z, 0.0, 1.0);
+    let rounded = in.shape.w > 0.5;
+
+    if (!rounded) {
+        // The flat look, through the same draw call. A square is a square.
+        return in.colour;
+    }
+
+    // Nothing is cutting, so the cell is under no pressure, is not swollen, and keeps all of its
+    // wobble: `slack` and `room` are one and `bare` is `FIELD_FILL`. These are exactly the values
+    // the seam block above arrives at from twelve sentinels; they are written down here instead
+    // of computed.
+    let theta = atan2(p.y, p.x);
+    let radius = outline_radius(seed, integrity, theta, 1.0, 1.0, 0.65);
+    let edge = edge_width(r, softness, radius);
+    let field = r - radius;
+    return blob(in.colour, p, r, field, radius, edge, integrity, seed);
+}
+
+/// The cell itself, once the field is known: the antialiased edge, the body and the membrane.
+///
+/// Shared by both fragment entry points, so the look at either side of `Lod::Packed` is one piece
+/// of code. Takes `field` rather than computing it, because that is the one thing the two tiers
+/// genuinely disagree about — above the tier it has been cut by twelve seams, below it there are
+/// none to cut with.
+fn blob(
+    colour: vec4<f32>,
+    p: vec2<f32>,
+    r: f32,
+    field: f32,
+    radius: f32,
+    edge: f32,
+    integrity: f32,
+    seed: f32,
+) -> vec4<f32> {
     let alpha = 1.0 - smoothstep(-edge, edge, field);
     if (alpha <= 0.001) {
         discard;
@@ -455,7 +602,7 @@ fn fragment(in: Output) -> @location(0) vec4<f32> {
     // than the cell it bounds has nothing to contrast against, and a packed sheet with no walls
     // reads as one lumpy object rather than as cells. A third is still plainly darker than any
     // body colour on the slide.
-    let body = in.colour.rgb * lum;
-    let rgb = mix(body, in.colour.rgb * 0.34, membrane);
-    return vec4<f32>(rgb, in.colour.a * alpha);
+    let body = colour.rgb * lum;
+    let rgb = mix(body, colour.rgb * 0.34, membrane);
+    return vec4<f32>(rgb, colour.a * alpha);
 }
