@@ -318,6 +318,22 @@ pub fn zoom_about(
     (centre.0 + offset.0 * shift, centre.1 + offset.1 * shift)
 }
 
+/// Whether the slide is being *authored* rather than watched (M10.7, `docs/UI.md` §9.1).
+///
+/// A slide stopped at tick 0 is a recipe you are writing. The moment it has run a tick it is a
+/// state you are watching, and the tools stop being reproducible: an edit made while the world
+/// is running is not recorded as an intervention, so a slide edited mid-run does not replay from
+/// its scenario. That is the whole difference, and until M10.7 nothing in the window said which
+/// of the two you were looking at.
+///
+/// **A predicate and not a flag.** A flag would have to be cleared when you press play, and the
+/// first time somebody forgets, the window is claiming reproducibility for a world that has been
+/// running for an hour. Derived from the two facts that decide it, it cannot be stale.
+#[must_use]
+pub fn authoring(tick: u64, running: bool) -> bool {
+    tick == 0 && !running
+}
+
 /// The least height a docked rail can be given and still be worth drawing.
 ///
 /// Two rows of readings and a section header. Below this a rail is a sliver you cannot read and
@@ -411,6 +427,14 @@ pub enum Panel {
     Ecology,
     Editor,
     Debugger,
+    /// The scenario the slide would be saved as: its outline, and the RON that Save would
+    /// write (M10.7).
+    ///
+    /// A tab rather than a takeover of the two rails, which is where the design puts it. §2
+    /// spent a milestone deciding that the left rail is *what is selected* and the right is
+    /// *what the world is doing*; a second layout that means something else while a mode is on
+    /// is how both end up half-learned.
+    Scenario,
     /// The tools and their settings, for building a slide rather than watching one.
     ///
     /// A panel and not a menu, and that is the whole reason it exists. The settings began in the
@@ -475,13 +499,14 @@ pub enum Dock {
 }
 
 impl Panel {
-    pub const ALL: [Panel; 9] = [
+    pub const ALL: [Panel; 10] = [
         Panel::Cell,
         Panel::Metrics,
         Panel::Legend,
         Panel::Genome,
         Panel::Ecology,
         Panel::Toolbox,
+        Panel::Scenario,
         Panel::Parameters,
         Panel::Editor,
         Panel::Debugger,
@@ -496,6 +521,7 @@ impl Panel {
             Panel::Genome => "genome",
             Panel::Ecology => "ecology",
             Panel::Toolbox => "toolbox",
+            Panel::Scenario => "scenario",
             Panel::Parameters => "parameters",
             Panel::Editor => "editor",
             Panel::Debugger => "debugger",
@@ -515,6 +541,7 @@ impl Panel {
             Panel::Editor => "E",
             Panel::Debugger => "D",
             Panel::Toolbox => "T",
+            Panel::Scenario => "S",
         }
     }
 
@@ -528,6 +555,7 @@ impl Panel {
             | Panel::Parameters
             | Panel::Editor
             | Panel::Debugger
+            | Panel::Scenario
             | Panel::Toolbox => Dock::Drawer,
         }
     }
@@ -772,6 +800,31 @@ mod tests {
                 _ => assert_eq!(dock, Dock::Drawer, "{} is not in the drawer", panel.title()),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod authoring_tests {
+    use super::*;
+
+    #[test]
+    fn a_stopped_slide_at_tick_zero_is_being_authored() {
+        assert!(authoring(0, false));
+    }
+
+    #[test]
+    fn a_world_that_has_run_is_never_being_authored_again() {
+        // Not even when paused. Pausing at tick 40,000 does not make the edits you make there
+        // reproducible, and this is the claim the caption makes on the interface's behalf.
+        assert!(!authoring(1, false));
+        assert!(!authoring(40_000, false));
+        assert!(!authoring(u64::MAX, false));
+    }
+
+    #[test]
+    fn a_running_world_is_never_being_authored() {
+        assert!(!authoring(0, true));
+        assert!(!authoring(1, true));
     }
 }
 

@@ -368,6 +368,16 @@ fn arrange(spec: &str, sim: &mut SlideRes, view: &mut View) {
                 view.panels.set(Panel::Genome, true);
             }
             "toolbox" => view.panels.set(Panel::Toolbox, true),
+            "scenario" => view.panels.set(Panel::Scenario, true),
+            // An empty stopped slide, which is the state the authoring caption exists for and
+            // the one a running default slide can never be photographed in.
+            "newscenario" => {
+                sim.new_scenario(96);
+                view.centre = Vec2::splat(48.0);
+                view.zoom = (BASE_SCALE * 6.0 / 96.0).clamp(0.05, 40.0);
+                view.tool = Tool::Paint;
+                view.panels.set(Panel::Scenario, true);
+            }
             "ecology" => {
                 view.panels.set(Panel::Ecology, true);
                 view.ecology = match sub {
@@ -599,6 +609,13 @@ struct SlideRes {
     /// not need to be a frame old; a couple of seconds is imperceptible and costs the
     /// simulation nothing measurable.
     ecology: Option<EcologyView>,
+    /// The scenario pane's copy of what Save would write (M10.7).
+    ///
+    /// Cached for the same reason the ecology pane's is: serialising a scenario means cloning
+    /// its barrier, seeding, inhabitant and flux lists under the world's lock, and a slide that
+    /// has been painted on has thousands of `Seeding::Spike` entries. Twice a second is
+    /// imperceptible for a preview of a file and costs the simulation nothing.
+    scenario_view: Option<ScenarioView>,
     /// The parameter editor's working copy, and the two things it is compared against.
     ///
     /// Edits are applied on a button rather than on a keystroke, because every apply is an
@@ -625,7 +642,24 @@ struct EcologyView {
 /// Two seconds at 1x. A chart of what has already happened does not become wrong because a
 /// hundred more ticks have passed, and the alternative is holding the world still while
 /// somebody reads it.
+/// What the scenario pane is showing: the recipe, and the file it would be written to.
+struct ScenarioView {
+    scenario: Scenario,
+    /// The RON, as `library::save` would write it — or the reason it could not be written.
+    ron: Result<String, String>,
+    /// Frames until this is re-read. See [`SCENARIO_STALE_AFTER`].
+    stale_in: u32,
+}
+
 const ECOLOGY_STALE_AFTER: u64 = 120;
+
+/// Frames between re-reads of the scenario pane's copy of the recipe.
+///
+/// Frames rather than ticks, unlike the ecology pane's, and that is not an oversight: the pane
+/// matters most while the world is *stopped at tick 0*, which is exactly when a tick-based
+/// staleness check never fires. What goes stale here is the author's own edits, and those happen
+/// in wall-clock.
+const SCENARIO_STALE_AFTER: u32 = 30;
 
 /// The world's environment: what falls on it and what moves through it.
 ///
@@ -710,6 +744,7 @@ impl SlideRes {
             listing: mm_app::inspector::Listing::default(),
             editing: None,
             ecology: None,
+            scenario_view: None,
             draft: None,
         }
     }
@@ -1212,6 +1247,11 @@ struct View {
     species: Option<mm_core::phylogeny::SpeciesId>,
     /// Which of the ecology pane's three views is showing (M10.4).
     ecology: Ecology,
+    /// Whether the scenario pane's RON preview shows the chemical table (M10.7).
+    ///
+    /// Off, because it is four hundred lines of a four-hundred-and-twenty line file and the
+    /// preview exists to show the twenty.
+    ron_chemicals: bool,
     /// Which page of the parameter editor is showing (M10.6).
     ///
     /// On `View` rather than on `Draft` because the draft is dropped whenever the tab is not
@@ -1304,6 +1344,7 @@ impl Default for View {
             place_count: 1,
             species: None,
             ecology: Ecology::Tree,
+            ron_chemicals: false,
             // Metabolism, because it is the group with sixteen fields and the one being tuned.
             params_page: ParamPage::Group(params::Group::Metabolism),
             tree_floor: 2,
@@ -1788,6 +1829,7 @@ fn panel_key(panel: Panel) -> KeyCode {
         Panel::Editor => KeyCode::KeyE,
         Panel::Debugger => KeyCode::KeyD,
         Panel::Toolbox => KeyCode::KeyT,
+        Panel::Scenario => KeyCode::KeyS,
     }
 }
 
@@ -3582,6 +3624,28 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                     view.paused = !sim.engine.toggle_pause().is_running();
                 }
                 ui.label(skin::text(Role::Section, "transport"));
+
+                // Which of the two things you are looking at (UI.md §9.1). A slide stopped at
+                // tick 0 is a recipe you are writing and the tools reach the `Scenario`; one
+                // that has run is a state you are watching and they do not. Nothing said so.
+                //
+                // The transport beside it stays live, which is where this departs from the
+                // design. Playing a stopped scenario from tick 0 *is* the reproducible path, so
+                // the control that starts it is the last one to take away.
+                if ui::authoring(sim.latest.frame.tick, sim.engine.rate().is_running()) {
+                    ui.add_space(10.0);
+                    ui.label(skin::moody(
+                        Role::Section,
+                        Mood::Warn,
+                        "editing a scenario · stopped at tick 0",
+                    ))
+                    .on_hover_text(
+                        "The tools write to the scenario as well as to the slide, so what you \
+                         build here is what comes back when you open it. Once the world has run \
+                         a tick that stops being true — an edit made while running is not \
+                         recorded as an intervention.",
+                    );
+                }
             });
         });
     });
@@ -3811,6 +3875,7 @@ fn drawer(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
                 Panel::Genome => genome_body(ui, sim, view),
                 Panel::Ecology => ecology_body(ui, sim, view),
                 Panel::Toolbox => toolbox_body(ui, sim, view),
+                Panel::Scenario => scenario_body(ui, sim, view),
                 Panel::Parameters => parameters_body(ui, sim, view),
                 Panel::Editor => editor_body(ui, sim),
                 Panel::Debugger => debugger_body(ui, sim),
@@ -3933,6 +3998,333 @@ fn token_colour(kind: mm_asm::highlight::TokenKind) -> egui::Color32 {
         T::Unknown => ink_colour(Ink::Miss, false),
         T::Comment => egui::Color32::from_gray(105),
         T::Space => ink_colour(Ink::Note, false),
+    }
+}
+
+/// The scenario the slide would be saved as (M10.7, `docs/UI.md` §9.2).
+///
+/// Two things, in the drawer's shape: the recipe's outline in the work area, and **the RON that
+/// Save would actually write** in the context column, live.
+///
+/// The preview is the reason this pane exists. "A scenario is a recipe and not a state" is
+/// asserted in §4 and asserted again in this pane's own footnote, and until you can see the file
+/// it would produce, it is only ever an assertion — you cannot tell by looking at a slide
+/// whether the wall you drew reached the `Scenario` or only the substrate, which is exactly the
+/// class of bug §4 had to go and fix three of.
+///
+/// Read-only, deliberately. Everything here is authored with the tools on the slide; a second
+/// way to set the light regime would be a second thing to keep in step with the first.
+fn scenario_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
+    refresh_scenario(sim);
+    let Some(cached) = sim.scenario_view.as_ref() else {
+        return;
+    };
+    let scenario = cached.scenario.clone();
+    let ron = cached.ron.clone();
+    let authoring = ui::authoring(sim.latest.frame.tick, sim.engine.rate().is_running());
+
+    let mut save = false;
+    skin::drawer_split(
+        ui,
+        "scenario_ron",
+        |ui| {
+            skin::section(ui, "scenario", false);
+            ui.label(
+                egui::RichText::new(&scenario.name)
+                    .size(15.0)
+                    .color(skin::col(Role::Value.ink().unwrap_or(theme::DIM))),
+            );
+            ui.label(skin::text(
+                Role::Label,
+                format!(
+                    "seed {} · isa {} · {} × {} squares",
+                    scenario.seed, scenario.isa_version, scenario.width, scenario.height
+                ),
+            ));
+
+            egui::ScrollArea::vertical()
+                .id_salt("scenario_outline")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    for (title, count, rows) in outline_of(&scenario) {
+                        ui.horizontal(|ui| {
+                            ui.label(skin::text(Role::Section, &title));
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| ui.label(skin::text(Role::Label, count)),
+                            );
+                        });
+                        for (label, value) in rows {
+                            skin::stat(ui, &label, &value);
+                        }
+                        ui.add_space(4.0);
+                    }
+                });
+
+            skin::hairline(ui);
+            ui.add_space(3.0);
+            ui.horizontal(|ui| {
+                ui.label(skin::text(Role::Label, "save to"));
+                ui.add(
+                    egui::TextEdit::singleline(&mut view.file_path)
+                        .desired_width(220.0)
+                        .font(skin::font(Role::Value))
+                        .hint_text("scenarios/the_drift.ron"),
+                );
+                if ui
+                    .add_enabled(
+                        !view.file_path.trim().is_empty(),
+                        egui::Button::new(skin::text(Role::Label, "Save scenario")),
+                    )
+                    .on_hover_text("writes exactly the RON in the column beside this")
+                    .clicked()
+                {
+                    save = true;
+                }
+                if let Some(note) = &view.file_note {
+                    match note {
+                        Ok(m) => ui.label(skin::moody(Role::Label, Mood::Good, m.clone())),
+                        Err(m) => ui.label(skin::moody(Role::Label, Mood::Bad, m.clone())),
+                    };
+                }
+            });
+        },
+        |ui| {
+            skin::section(ui, "what save will write", false);
+            match &ron {
+                Ok(text) => {
+                    let total = text.lines().count();
+                    ui.horizontal(|ui| {
+                        ui.label(skin::text(Role::Label, format!("{total} lines")));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if skin::chip(ui, "chemistry", None, view.ron_chemicals)
+                                .on_hover_text(
+                                    "the chemical table, which is four hundred lines of a \
+                                     four-hundred-and-twenty line file and is the same in every \
+                                     scenario until somebody changes it",
+                                )
+                                .clicked()
+                            {
+                                view.ron_chemicals = !view.ron_chemicals;
+                            }
+                        });
+                    });
+                    egui::ScrollArea::both()
+                        .id_salt("ron_preview")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            for line in library::fold_ron(text, view.ron_chemicals) {
+                                let dim = line.folded || line.text.trim_start().starts_with('/');
+                                ui.label(skin::text(Role::Code, &line.text).color(skin::col(
+                                    if dim {
+                                        theme::DIM
+                                    } else {
+                                        Role::Label.ink().unwrap_or(theme::DIM)
+                                    },
+                                )));
+                            }
+                        });
+                }
+                Err(why) => {
+                    ui.label(skin::moody(Role::Body, Mood::Bad, why.clone()));
+                }
+            }
+            ui.add_space(theme::SECTION_GAP);
+            skin::hairline(ui);
+            ui.label(skin::text(
+                Role::Body,
+                if authoring {
+                    "Stopped at tick 0, so what you build here is what comes back when you open \
+                     it. Everything below is written by the tools on the slide."
+                } else {
+                    "This world has already run. A scenario is a recipe and not a state, so \
+                     saving now writes the founders that were placed, not the population that \
+                     grew from them — and edits made while running are not recorded as \
+                     interventions, so it will not replay to what you are looking at. For the \
+                     world as it stands there is Save slide."
+                },
+            ));
+        },
+    );
+
+    if save {
+        let path = std::path::PathBuf::from(view.file_path.trim());
+        let mut scenario = scenario;
+        // A slide built from `New scenario…` is still called "untitled", and a library full of
+        // untitleds is a library you cannot read. The file name is the one thing the author has
+        // definitely already chosen.
+        if scenario.name == "untitled" {
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                scenario.name = stem.replace('_', " ");
+            }
+        }
+        view.file_note = Some(match library::save(&path, &scenario) {
+            Ok(written) => Ok(format!("wrote {}", written.display())),
+            Err(e) => Err(e.to_string()),
+        });
+        // The name may have just changed, and the preview should say so before the next refresh
+        // would have got round to it.
+        sim.scenario_view = None;
+    }
+}
+
+/// Re-read the scenario pane's copy of the recipe, if it is due.
+fn refresh_scenario(sim: &mut SlideRes) {
+    if let Some(view) = sim.scenario_view.as_mut() {
+        if view.stale_in > 0 {
+            view.stale_in -= 1;
+            return;
+        }
+    }
+    let scenario = {
+        let held = sim.engine.handle();
+        let slide = held.slide();
+        slide.world().scenario().clone()
+    };
+    let ron = scenario
+        .to_ron()
+        .map_err(|e| format!("this scenario cannot be written out: {e:?}"));
+    sim.scenario_view = Some(ScenarioView {
+        scenario,
+        ron,
+        stale_in: SCENARIO_STALE_AFTER,
+    });
+}
+
+/// The recipe, section by section: what each part is set to, and how many of it there are.
+///
+/// Reads the `Scenario` and says what it holds. Deliberately not a second way to *set* any of
+/// it — the tools on the slide are the way, and a control here would be a second thing to keep
+/// in step with them.
+fn outline_of(scenario: &Scenario) -> Vec<(String, String, Vec<(String, String)>)> {
+    use mm_core::light::CurrentField as C;
+    use mm_core::LightRegime as L;
+
+    let light = match &scenario.light {
+        L::Uniform { intensity } => (
+            "uniform".to_string(),
+            vec![("intensity".to_string(), intensity.to_string())],
+        ),
+        L::DayNight {
+            period_ticks,
+            day,
+            night,
+        } => (
+            "day / night".to_string(),
+            vec![
+                ("period".to_string(), format!("{period_ticks} ticks")),
+                ("day".to_string(), day.to_string()),
+                ("night".to_string(), night.to_string()),
+            ],
+        ),
+        L::Directional { bright, dark, from } => (
+            "directional".to_string(),
+            vec![
+                ("bright".to_string(), bright.to_string()),
+                ("dark".to_string(), dark.to_string()),
+                ("from".to_string(), format!("{from:?}").to_lowercase()),
+            ],
+        ),
+        L::PointSource {
+            x,
+            y,
+            intensity,
+            half_life_squares,
+        } => (
+            "point source".to_string(),
+            vec![
+                ("at".to_string(), format!("{x}, {y}")),
+                ("intensity".to_string(), intensity.to_string()),
+                ("half life".to_string(), format!("{half_life_squares} sq")),
+            ],
+        ),
+        L::SlowDecline {
+            start,
+            end,
+            over_ticks,
+        } => (
+            "slow decline".to_string(),
+            vec![
+                ("from".to_string(), start.to_string()),
+                ("to".to_string(), end.to_string()),
+                ("over".to_string(), format!("{over_ticks} ticks")),
+            ],
+        ),
+        L::Seasonal {
+            day_ticks,
+            year_ticks,
+            summer_day,
+            winter_day,
+            night,
+        } => (
+            "seasonal".to_string(),
+            vec![
+                ("day".to_string(), format!("{day_ticks} ticks")),
+                ("year".to_string(), format!("{year_ticks} ticks")),
+                ("summer".to_string(), summer_day.to_string()),
+                ("winter".to_string(), winter_day.to_string()),
+                ("night".to_string(), night.to_string()),
+            ],
+        ),
+    };
+
+    let current = match &scenario.current {
+        C::Still => ("still".to_string(), Vec::new()),
+        C::Uniform { vx, vy } => (
+            "uniform".to_string(),
+            vec![("velocity".to_string(), format!("{vx}, {vy}"))],
+        ),
+        C::Rotational { strength } => (
+            "rotational".to_string(),
+            vec![("strength".to_string(), strength.to_string())],
+        ),
+        C::Shear { strength } => (
+            "shear".to_string(),
+            vec![("strength".to_string(), strength.to_string())],
+        ),
+        C::Convergent { strength } => (
+            "convergent".to_string(),
+            vec![("strength".to_string(), strength.to_string())],
+        ),
+    };
+
+    let founders: u32 = scenario.inhabitants.iter().map(|i| i.count).sum();
+    vec![
+        ("light".to_string(), light.0, light.1),
+        ("current".to_string(), current.0, current.1),
+        (
+            "seeding".to_string(),
+            plural(scenario.seeding.len(), "entry", "entries"),
+            Vec::new(),
+        ),
+        (
+            "barriers".to_string(),
+            plural(scenario.barriers.len(), "shape", "shapes"),
+            Vec::new(),
+        ),
+        (
+            "sources and drains".to_string(),
+            plural(scenario.flux.len(), "area", "areas"),
+            Vec::new(),
+        ),
+        (
+            "inhabitants".to_string(),
+            plural(founders as usize, "founder", "founders"),
+            scenario
+                .inhabitants
+                .iter()
+                .map(|i| (i.genome.clone(), format!("× {}", i.count)))
+                .collect(),
+        ),
+    ]
+}
+
+/// `1 founder`, `2 founders`, and — the case that matters — `no founders` rather than `0`.
+fn plural(n: usize, one: &str, many: &str) -> String {
+    match n {
+        0 => format!("no {many}"),
+        1 => format!("1 {one}"),
+        n => format!("{n} {many}"),
     }
 }
 
