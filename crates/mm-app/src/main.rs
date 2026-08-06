@@ -1314,9 +1314,22 @@ struct FlowArrow(usize);
 #[derive(Component)]
 struct FluxMark(usize);
 
-/// The one entity the whole population is drawn as.
+/// The entity the whole population is drawn as at [`Lod::Packed`] and above.
+///
+/// One of a pair. Both exist for the life of the application and exactly one is ever visible —
+/// see [`DotMesh`] and the tier switch in [`redraw`]. Two entities rather than one mesh that
+/// changes its attributes, because a `Material2d` pipeline is specialised against a vertex layout
+/// and swapping the layout under it means discarding and recompiling the pipeline on the frame a
+/// person crosses the tier, which is a hitch exactly where they are already moving.
 #[derive(Component)]
 struct CellMesh;
+
+/// The entity the whole population is drawn as below [`Lod::Packed`], over a quarter of the data.
+///
+/// See `cellpipe::DotMaterial`. The other half of the pair with [`CellMesh`]; the one that is not
+/// being drawn keeps last frame's vertices, hidden, and costs nothing until the tier changes back.
+#[derive(Component)]
+struct DotMesh;
 
 /// The baked cell atlas, uploaded once (M10.5).
 ///
@@ -1361,6 +1374,7 @@ fn setup(
     mut layouts: ResMut<Assets<TextureAtlasLayout>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut cell_materials: ResMut<Assets<cellpipe::CellMaterial>>,
+    mut dot_materials: ResMut<Assets<cellpipe::DotMaterial>>,
 ) {
     // Order -1 so the slide is composited *before* anything egui draws. bevy_egui attaches its
     // context to a camera, and with both at the default order the tie-break is spawn order —
@@ -1428,6 +1442,18 @@ fn setup(
         Mesh2d(meshes.add(cells)),
         MeshMaterial2d(cell_materials.add(cellpipe::CellMaterial {})),
         // Above the chemical field, below the organelles.
+        Transform::from_xyz(0.0, 0.0, 1.0),
+    ));
+
+    // And the same population below `Lod::Packed`, at a quarter of the vertex data. Spawned here
+    // rather than when the tier is first crossed, so that crossing it is a change of `Visibility`
+    // and not a pipeline compile — see `DotMesh`. At the same z, because only one is ever visible.
+    let dots = cellpipe::dot_mesh();
+    commands.spawn((
+        DotMesh,
+        NoFrustumCulling,
+        Mesh2d(meshes.add(dots)),
+        MeshMaterial2d(dot_materials.add(cellpipe::DotMaterial {})),
         Transform::from_xyz(0.0, 0.0, 1.0),
     ));
 
@@ -2112,7 +2138,8 @@ fn redraw(
         ),
     >,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut cell_mesh: Query<(&Mesh2d, &mut Visibility), With<CellMesh>>,
+    mut cell_mesh: Query<(&Mesh2d, &mut Visibility), (With<CellMesh>, Without<DotMesh>)>,
+    mut dot_mesh: Query<(&Mesh2d, &mut Visibility), (With<DotMesh>, Without<CellMesh>)>,
     mut motes: Query<
         (&MoteSprite, &mut Sprite, &mut Transform),
         (
@@ -2587,7 +2614,17 @@ fn redraw(
     // fragment shader evaluates a signed-distance field per pixel per cell, so every cell has
     // its own outline, it stays crisp at any magnification, and a failing membrane roughens it.
     // The baked atlas could do none of that; it is still what organelles and dust wear.
-    cellmesh::build(&mut art_handles.cells, &frame.cells, |dot| {
+    //
+    // Below `Lod::Packed` this goes through the narrow layout instead — a quarter of the vertex
+    // data and a fragment shader with the twelve seams taken out of it, for a picture that is the
+    // same one. See `cellpipe::DotMaterial`, and the note above `DotVertex` in `cell.wgsl` for
+    // why "the same" is arithmetic rather than judgement.
+    let detail = if frame.lod.resolves_packing() {
+        cellmesh::Detail::Seamed
+    } else {
+        cellmesh::Detail::Plain
+    };
+    cellmesh::build(&mut art_handles.cells, &frame.cells, detail, |dot| {
         let at = to_screen(dot.x, dot.y);
         // Off screen: no quad, no organelles, nothing uploaded.
         if at.x < cull.min_x || at.x > cull.max_x || at.y < cull.min_y || at.y > cull.max_y {
@@ -2740,22 +2777,41 @@ fn redraw(
         }
     }
 
-    // One mesh, and it now has to be exactly one rather than merely happening to be: `upload`
-    // swaps the vertices across instead of copying them, so a second entity reaching this would
-    // be handed the frame *before* last. `setup` spawns one, and this is the line that has to
-    // change if that ever stops being true.
+    // Into whichever of the two meshes this tier draws through, and the other one goes dark.
+    //
+    // Exactly one entity each, and that now has to be true rather than merely happening to be:
+    // `upload` swaps the vertices across instead of copying them, so a second entity reaching
+    // this would be handed the frame *before* last. `setup` spawns one of each, and these are
+    // the lines that have to change if that ever stops being true.
+    let seamed = detail == cellmesh::Detail::Seamed;
+    // Asked before the swap, because after it the buffers hold the last frame.
+    //
+    // An empty mesh is a validation error in some backends and a wasted draw in the rest. A slide
+    // with nothing alive on it simply does not draw the layer, and nor does the tier that is not
+    // in force.
+    let drawn = art_handles.cells.cells() > 0;
     if let Ok((mesh_handle, mut visibility)) = cell_mesh.single_mut() {
-        if let Some(mut mesh) = meshes.get_mut(&mesh_handle.0) {
-            let buffers = &mut art_handles.cells;
-            // Asked before the swap, because after it the buffers hold the last frame.
-            *visibility = if buffers.cells() == 0 {
-                // An empty mesh is a validation error in some backends and a wasted draw in the
-                // rest. A slide with nothing alive on it simply does not draw the layer.
-                Visibility::Hidden
-            } else {
-                Visibility::Visible
-            };
-            cellpipe::upload(&mut mesh, buffers);
+        *visibility = if seamed && drawn {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+        if seamed {
+            if let Some(mut mesh) = meshes.get_mut(&mesh_handle.0) {
+                cellpipe::upload(&mut mesh, &mut art_handles.cells);
+            }
+        }
+    }
+    if let Ok((mesh_handle, mut visibility)) = dot_mesh.single_mut() {
+        *visibility = if !seamed && drawn {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+        if !seamed {
+            if let Some(mut mesh) = meshes.get_mut(&mesh_handle.0) {
+                cellpipe::upload(&mut mesh, &mut art_handles.cells);
+            }
         }
     }
 

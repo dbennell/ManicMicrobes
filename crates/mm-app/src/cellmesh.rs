@@ -20,9 +20,14 @@
 //! and it is what `docs/UI.md` §7 ultimately describes. It also means a `SpecializedMeshPipeline`,
 //! a custom `RenderCommand`, and your own extract, prepare and queue systems — the part of Bevy
 //! with the least documentation and the most churn between releases. This gets the same look and
-//! the same one draw call through `Material2d`, which is a supported, stable surface. The cost
-//! is bandwidth: about 7 MB a frame at fifty thousand cells, which is a fifth of what the
-//! chemical field texture was already costing and nobody noticed.
+//! the same one draw call through `Material2d`, which is a supported, stable surface.
+//!
+//! The cost is bandwidth, and the figure here read 7 MB a frame at fifty thousand cells for a
+//! long time after it stopped being true — it was written when a cell carried four seams. Twelve
+//! of them is 152 bytes a vertex, four vertices a cell, so **32 MB a frame at fifty thousand
+//! cells**, and two thirds of that is seams that below `Lod::Packed` are all the same sentinel.
+//! It used to be twice that again, because `cellpipe::upload` cloned every attribute on the way
+//! in; it now swaps them across instead, which is why [`Buffers::begin`] must clear.
 //!
 //! Nothing here knows Bevy exists except through plain arrays. The vertex buffers are built by
 //! [`build`], which is arithmetic over a [`Frame`] and is tested without a graphics stack.
@@ -93,9 +98,27 @@ pub fn pack_normal(nx: f32, ny: f32) -> f32 {
     f32::from_bits(q(nx) | (q(ny) << 16))
 }
 
+/// Which vertex layout a frame is being built for.
+///
+/// A property of the *frame*, like [`crate::slide::Lod`] itself, and for the same reason: below
+/// `Lod::Packed` no cell has a seam to draw, so filling seven vectors with the sentinel is work
+/// that ends in a shader which — see the note above `DotVertex` in `cell.wgsl` — provably ignores
+/// it. This is what says not to bother.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Detail {
+    /// Position, corner, colour and shape. What `cellpipe::DotMaterial` draws.
+    Plain,
+    /// Those, and the twelve seams and the swell. What `cellpipe::CellMaterial` draws.
+    #[default]
+    Seamed,
+}
+
 /// The vertex buffers for one frame's worth of cells.
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Buffers {
+    /// What [`Buffers::begin`] was last told to fill. Private, because a caller that changed it
+    /// mid-frame would produce a mesh with four full attributes and seven half-full ones.
+    detail: Detail,
     pub positions: Vec<[f32; 3]>,
     pub uvs: Vec<[f32; 2]>,
     pub colours: Vec<[f32; 4]>,
@@ -133,10 +156,20 @@ impl Buffers {
     /// to the mesh and takes the mesh's back rather than copying, so on arrival here they hold
     /// the frame before last — full, and with its allocation, which is the point. Pushing
     /// without this appends to a frame that is already on screen.
-    pub fn begin(&mut self, expect: usize) {
+    ///
+    /// `detail` decides whether the seams get filled at all, and is remembered so that
+    /// `cellpipe::upload` knows which of the two meshes these buffers are for.
+    pub fn begin(&mut self, expect: usize, detail: Detail) {
         self.clear();
+        self.detail = detail;
         self.positions.reserve(expect * 4);
         self.indices.reserve(expect * 6);
+    }
+
+    /// Which layout these buffers were last filled for.
+    #[must_use]
+    pub fn detail(&self) -> Detail {
+        self.detail
     }
 
     /// Add one quad.
@@ -151,6 +184,30 @@ impl Buffers {
             return;
         }
         let base = self.positions.len() as u32;
+        // Anticlockwise from the top left, matching the corners in `uv` — the corner is what the
+        // whole signed-distance field is evaluated against, so it has to be exact.
+        const CORNERS: [(f32, f32); 4] = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)];
+        for (dx, dy) in CORNERS {
+            self.positions
+                .push([p.x + dx * p.half, p.y + dy * p.half, 0.0]);
+            self.uvs.push([dx, dy]);
+            self.colours.push(p.rgba);
+            self.shapes.push([
+                p.shape.seed,
+                p.shape.softness,
+                p.shape.integrity,
+                p.shape.rounded,
+            ]);
+        }
+        self.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+
+        // Below `Lod::Packed` these are twelve sentinels and a one, twelve times a cell, for a
+        // shader that provably ignores them. One branch a quad to not write 100 of the 152 bytes
+        // a vertex — see `cellpipe::DotMaterial`.
+        if self.detail == Detail::Plain {
+            return;
+        }
         let dirs = [
             pack_normal(p.squash[0].nx, p.squash[0].ny),
             pack_normal(p.squash[1].nx, p.squash[1].ny),
@@ -187,19 +244,7 @@ impl Buffers {
             p.squash[10].face,
             p.squash[11].face,
         ];
-        // Anticlockwise from the top left, matching the corners in `uv` — the corner is what
-        // the whole signed-distance field is evaluated against, so it has to be exact.
-        for (dx, dy) in [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
-            self.positions
-                .push([p.x + dx * p.half, p.y + dy * p.half, 0.0]);
-            self.uvs.push([dx, dy]);
-            self.colours.push(p.rgba);
-            self.shapes.push([
-                p.shape.seed,
-                p.shape.softness,
-                p.shape.integrity,
-                p.shape.rounded,
-            ]);
+        for _ in CORNERS {
             self.squash_dirs.push(dirs);
             self.squash_faces.push(faces);
             self.squash_dirs2.push(dirs2);
@@ -208,10 +253,11 @@ impl Buffers {
             self.squash_faces3.push(faces3);
             self.swells.push(p.swell);
         }
-        self.indices
-            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
 
+    /// Every vector, whatever `detail` says. A tier change has to leave nothing of the old one
+    /// behind: `Seamed` then `Plain` would otherwise keep the last seamed frame's seams, and
+    /// upload them against four attributes of a completely different length.
     fn clear(&mut self) {
         self.positions.clear();
         self.uvs.clear();
@@ -259,8 +305,13 @@ pub struct Placed {
 /// `place` decides where each cell goes and returns `None` for one that should not be drawn —
 /// off-screen, or dead this frame. Reuses the buffers so a steady population allocates nothing
 /// after the first frame.
-pub fn build(into: &mut Buffers, cells: &[CellDot], place: impl Fn(&CellDot) -> Option<Placed>) {
-    into.begin(cells.len());
+pub fn build(
+    into: &mut Buffers,
+    cells: &[CellDot],
+    detail: Detail,
+    place: impl Fn(&CellDot) -> Option<Placed>,
+) {
+    into.begin(cells.len(), detail);
     for dot in cells {
         if let Some(p) = place(dot) {
             into.push(p);
@@ -330,7 +381,7 @@ mod tests {
     #[test]
     fn every_cell_becomes_one_quad() {
         let mut buf = Buffers::default();
-        build(&mut buf, &dots(5), placed);
+        build(&mut buf, &dots(5), Detail::Seamed, placed);
         assert_eq!(buf.cells(), 5);
         assert_eq!(buf.positions.len(), 20);
         assert_eq!(buf.uvs.len(), 20);
@@ -344,7 +395,7 @@ mod tests {
         // A mesh whose attributes disagree is a validation error at draw time, several layers
         // from whichever `push` was forgotten.
         let mut buf = Buffers::default();
-        build(&mut buf, &dots(9), placed);
+        build(&mut buf, &dots(9), Detail::Seamed, placed);
         let n = buf.positions.len();
         assert_eq!(buf.uvs.len(), n);
         assert_eq!(buf.colours.len(), n);
@@ -355,7 +406,7 @@ mod tests {
     fn no_index_points_past_the_end() {
         // The other way to get a validation error, and the one that reads as a driver crash.
         let mut buf = Buffers::default();
-        build(&mut buf, &dots(7), placed);
+        build(&mut buf, &dots(7), Detail::Seamed, placed);
         let n = buf.positions.len() as u32;
         assert!(
             buf.indices.iter().all(|i| *i < n),
@@ -369,7 +420,7 @@ mod tests {
         // of them have to be exactly the corners of -1..1. Anything else and the blob is clipped
         // or floating in the middle of its own quad.
         let mut buf = Buffers::default();
-        build(&mut buf, &dots(1), placed);
+        build(&mut buf, &dots(1), Detail::Seamed, placed);
         let mut corners = buf.uvs.clone();
         corners.sort_by(|a, b| a.partial_cmp(b).unwrap());
         assert_eq!(
@@ -387,7 +438,7 @@ mod tests {
             radius: 3.0,
             ..dots(1).remove(0)
         }];
-        build(&mut buf, &one, placed);
+        build(&mut buf, &one, Detail::Seamed, placed);
         let xs: Vec<f32> = buf.positions.iter().map(|p| p[0]).collect();
         let ys: Vec<f32> = buf.positions.iter().map(|p| p[1]).collect();
         assert_eq!(xs.iter().cloned().fold(f32::MAX, f32::min), 7.0);
@@ -399,7 +450,7 @@ mod tests {
     #[test]
     fn a_cell_the_caller_refuses_costs_nothing() {
         let mut buf = Buffers::default();
-        build(&mut buf, &dots(4), |dot| {
+        build(&mut buf, &dots(4), Detail::Seamed, |dot| {
             if dot.x < 2.0 {
                 None
             } else {
@@ -414,7 +465,7 @@ mod tests {
     #[test]
     fn a_cell_with_no_size_is_dropped_rather_than_drawn_as_nothing() {
         let mut buf = Buffers::default();
-        build(&mut buf, &dots(3), |dot| {
+        build(&mut buf, &dots(3), Detail::Seamed, |dot| {
             Some(Placed {
                 half: 0.0,
                 ..placed(dot).unwrap()
@@ -429,8 +480,8 @@ mod tests {
         // The buffers are reused every frame. One missed `clear` and the mesh grows without
         // bound until the machine stops.
         let mut buf = Buffers::default();
-        build(&mut buf, &dots(6), placed);
-        build(&mut buf, &dots(2), placed);
+        build(&mut buf, &dots(6), Detail::Seamed, placed);
+        build(&mut buf, &dots(2), Detail::Seamed, placed);
         assert_eq!(buf.cells(), 2);
         assert_eq!(buf.indices.len(), 12);
     }

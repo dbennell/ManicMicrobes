@@ -155,6 +155,17 @@ impl Material2d for CellMaterial {
         layout: &MeshVertexBufferLayoutRef,
         _key: Material2dKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
+        // **Named, and this is not tidiness.** `entry_point: None` means "the only entry point
+        // for this stage", and it was correct for exactly as long as `cell.wgsl` had one
+        // `@vertex` and one `@fragment`. The moment [`DotMaterial`] added a second of each it
+        // became ambiguous — and what that produced was not a validation error naming the
+        // shader. It was a heap abort inside the driver before a single line of log, with the
+        // dot pipeline compiling perfectly because it had named its own. An hour, bisected
+        // against the shader file, to find a default that had quietly stopped having one answer.
+        descriptor.vertex.entry_point = Some("vertex".into());
+        if let Some(fragment) = descriptor.fragment.as_mut() {
+            fragment.entry_point = Some("fragment".into());
+        }
         // The locations here are the locations in `cell.wgsl`, and the two have to agree
         // exactly — a mismatch is a validation failure at draw time with nothing to say which
         // end is wrong.
@@ -175,6 +186,72 @@ impl Material2d for CellMaterial {
     }
 }
 
+/// The same population below [`crate::slide::Lod::Packed`], over a quarter of the vertex data.
+///
+/// Four attributes rather than eleven: position, corner, colour and shape. The twelve seam
+/// directions, the twelve seam distances and the swell are **100 of the 152 bytes a vertex** and
+/// below that tier every one of them is the same constant — `slide.rs` does not solve for seams
+/// at all there, so each cell ships twelve `NO_SQUASH` sentinels and a swell of one, sixty
+/// thousand times over. At sixteen thousand cells that is 10 MB a frame of the number 8.
+///
+/// | | bytes a vertex | bytes a cell, with indices |
+/// |---|---|---|
+/// | [`CellMaterial`] | 152 | 632 |
+/// | `DotMaterial` | 52 | 232 |
+///
+/// The fragment shader sheds the same work: no `unpack2x16snorm`, no `seam_room`, no `smax`,
+/// twelve of each. The note above `DotVertex` in `cell.wgsl` is the proof that all of it is dead
+/// arithmetic at this tier rather than detail being given up, and the two stages share every line
+/// that is *not* dead — one file, one wobble, one membrane.
+///
+/// `shape` stays a whole `vec4` though `integrity` is always one here and `rounded` is the same
+/// for every cell in a frame. Both could go, for eight more bytes a vertex; keeping one [`Shape`]
+/// across both materials is worth more than that.
+///
+/// [`Shape`]: crate::cellmesh::Shape
+#[derive(Asset, TypePath, AsBindGroup, Clone, Default)]
+pub struct DotMaterial {}
+
+impl Material2d for DotMaterial {
+    fn vertex_shader() -> ShaderRef {
+        ShaderRef::Handle(CELL_SHADER)
+    }
+
+    fn fragment_shader() -> ShaderRef {
+        ShaderRef::Handle(CELL_SHADER)
+    }
+
+    /// Blend, for every reason [`CellMaterial::alpha_mode`] gives. An opaque cell here would be
+    /// drawn two pixels bigger than its own outline, exactly as it was there.
+    fn alpha_mode(&self) -> AlphaMode2d {
+        AlphaMode2d::Blend
+    }
+
+    fn specialize(
+        descriptor: &mut RenderPipelineDescriptor,
+        layout: &MeshVertexBufferLayoutRef,
+        _key: Material2dKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        // The same four locations `cell.wgsl` gives `DotVertex`, and the same first four the
+        // full layout uses — so a cell means the same thing to both pipelines.
+        descriptor.vertex.buffers = vec![layout.0.get_layout(&[
+            Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
+            Mesh::ATTRIBUTE_UV_0.at_shader_location(1),
+            Mesh::ATTRIBUTE_COLOR.at_shader_location(2),
+            ATTRIBUTE_SHAPE.at_shader_location(3),
+        ])?];
+        // Two entry points in one shader rather than two shader files. `Material2d::specialize`
+        // runs last of everything that touches the descriptor, so this is the place it can be
+        // done at all — and it is what keeps the wobble, the shading and the membrane from
+        // existing twice and drifting apart at the tier boundary.
+        descriptor.vertex.entry_point = Some("dot_vertex".into());
+        if let Some(fragment) = descriptor.fragment.as_mut() {
+            fragment.entry_point = Some("dot_fragment".into());
+        }
+        Ok(())
+    }
+}
+
 /// Register the shader and the material.
 ///
 /// Must be added *after* `DefaultPlugins`, not before: the macro writes straight into
@@ -184,6 +261,7 @@ impl Material2d for CellMaterial {
 pub fn plugin(app: &mut App) {
     load_internal_asset!(app, CELL_SHADER, "cell.wgsl", Shader::from_wgsl);
     app.add_plugins(Material2dPlugin::<CellMaterial>::default());
+    app.add_plugins(Material2dPlugin::<DotMaterial>::default());
 }
 
 /// Replace the compiled-in shader with whatever is on disk now.
@@ -227,6 +305,25 @@ pub fn empty_mesh() -> Mesh {
     mesh.insert_attribute(ATTRIBUTE_SQUASH_DIR3, Vec::<[f32; 4]>::new());
     mesh.insert_attribute(ATTRIBUTE_SQUASH_FACE3, Vec::<[f32; 4]>::new());
     mesh.insert_attribute(ATTRIBUTE_SWELL, Vec::<f32>::new());
+    mesh.insert_indices(Indices::U32(Vec::new()));
+    mesh
+}
+
+/// An empty mesh carrying the four attributes [`DotMaterial`]'s layout asks for, and no more.
+///
+/// Deliberately *not* [`empty_mesh`] with seven attributes left empty. An attribute the pipeline
+/// was not specialised for is still packed and still uploaded — the whole saving is in the seven
+/// that are not here at all.
+#[must_use]
+pub fn dot_mesh() -> Mesh {
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, Vec::<[f32; 3]>::new());
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, Vec::<[f32; 2]>::new());
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, Vec::<[f32; 4]>::new());
+    mesh.insert_attribute(ATTRIBUTE_SHAPE, Vec::<[f32; 4]>::new());
     mesh.insert_indices(Indices::U32(Vec::new()));
     mesh
 }
@@ -289,7 +386,10 @@ macro_rules! swap_attribute {
 /// The contract that makes it safe is [`cellmesh::Buffers::begin`], which clears before it
 /// fills. Every caller goes through it, directly or through [`cellmesh::build`]. A caller that
 /// pushed without it would be appending to the frame before last.
+/// Which of the two it is for is decided by [`cellmesh::Buffers::detail`], because the buffers
+/// know what was filled into them and the mesh does not.
 pub fn upload(mesh: &mut Mesh, buffers: &mut cellmesh::Buffers) {
+    // The four both layouts share.
     swap_attribute!(
         mesh,
         Mesh::ATTRIBUTE_POSITION,
@@ -299,6 +399,25 @@ pub fn upload(mesh: &mut Mesh, buffers: &mut cellmesh::Buffers) {
     swap_attribute!(mesh, Mesh::ATTRIBUTE_UV_0, Float32x2, &mut buffers.uvs);
     swap_attribute!(mesh, Mesh::ATTRIBUTE_COLOR, Float32x4, &mut buffers.colours);
     swap_attribute!(mesh, ATTRIBUTE_SHAPE, Float32x4, &mut buffers.shapes);
+
+    // Indices are not an attribute and have their own accessor, but the same trade.
+    let swapped = match mesh.indices_mut() {
+        Some(Indices::U32(theirs)) => {
+            std::mem::swap(theirs, &mut buffers.indices);
+            true
+        }
+        _ => false,
+    };
+    if !swapped {
+        mesh.insert_indices(Indices::U32(std::mem::take(&mut buffers.indices)));
+    }
+
+    // And the seven that only the seamed layout has. Skipped rather than swapped-as-empty: a
+    // `Plain` frame never filled them, and handing seven empty vectors to a mesh whose other
+    // four have sixty thousand entries is a mesh that does not draw.
+    if buffers.detail() == cellmesh::Detail::Plain {
+        return;
+    }
     swap_attribute!(
         mesh,
         ATTRIBUTE_SQUASH_DIR,
@@ -336,29 +455,21 @@ pub fn upload(mesh: &mut Mesh, buffers: &mut cellmesh::Buffers) {
         &mut buffers.squash_faces3
     );
     swap_attribute!(mesh, ATTRIBUTE_SWELL, Float32, &mut buffers.swells);
-
-    // Indices are not an attribute and have their own accessor, but the same trade.
-    let swapped = match mesh.indices_mut() {
-        Some(Indices::U32(theirs)) => {
-            std::mem::swap(theirs, &mut buffers.indices);
-            true
-        }
-        _ => false,
-    };
-    if !swapped {
-        mesh.insert_indices(Indices::U32(std::mem::take(&mut buffers.indices)));
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cellmesh::{Buffers, Placed, Shape};
+    use crate::cellmesh::{Buffers, Detail, Placed, Shape};
 
     /// `n` quads, each carrying `mark` everywhere a number will fit, so that a frame can be told
     /// apart from the one before it by looking at any attribute.
     fn frame(buffers: &mut Buffers, n: usize, mark: f32) {
-        buffers.begin(n);
+        frame_at(buffers, n, mark, Detail::Seamed);
+    }
+
+    fn frame_at(buffers: &mut Buffers, n: usize, mark: f32, detail: Detail) {
+        buffers.begin(n, detail);
         for i in 0..n {
             buffers.push(Placed {
                 x: mark + i as f32,
@@ -462,6 +573,83 @@ mod tests {
         upload(&mut mesh, &mut buffers);
         assert_eq!(positions(&mesh).len(), 2 * 4);
         assert_eq!(mesh.indices().map(bevy::mesh::Indices::len), Some(2 * 6));
+    }
+
+    #[test]
+    fn the_plain_tier_never_builds_a_seam() {
+        // The saving, stated as a number rather than as an intention: 100 of the 152 bytes a
+        // vertex are the seams and the swell, and at this tier they are not written at all.
+        let mut buffers = Buffers::default();
+        frame_at(&mut buffers, 7, 1.0, Detail::Plain);
+        assert_eq!(buffers.cells(), 7);
+        assert_eq!(buffers.positions.len(), 7 * 4);
+        assert_eq!(buffers.shapes.len(), 7 * 4);
+        assert_eq!(buffers.indices.len(), 7 * 6);
+        assert!(buffers.squash_dirs.is_empty());
+        assert!(buffers.squash_faces.is_empty());
+        assert!(buffers.squash_dirs2.is_empty());
+        assert!(buffers.squash_faces2.is_empty());
+        assert!(buffers.squash_dirs3.is_empty());
+        assert!(buffers.squash_faces3.is_empty());
+        assert!(buffers.swells.is_empty());
+    }
+
+    #[test]
+    fn the_dot_mesh_carries_four_attributes_and_the_cell_mesh_eleven() {
+        let dots = dot_mesh();
+        for id in [
+            Mesh::ATTRIBUTE_POSITION,
+            Mesh::ATTRIBUTE_UV_0,
+            Mesh::ATTRIBUTE_COLOR,
+            ATTRIBUTE_SHAPE,
+        ] {
+            assert!(dots.attribute(id).is_some(), "{} is missing", id.name);
+        }
+        for id in [ATTRIBUTE_SQUASH_DIR, ATTRIBUTE_SQUASH_FACE, ATTRIBUTE_SWELL] {
+            assert!(
+                dots.attribute(id).is_none(),
+                "{} is on the dot mesh, and paying for itself every frame",
+                id.name
+            );
+        }
+        assert!(empty_mesh().attribute(ATTRIBUTE_SWELL).is_some());
+    }
+
+    #[test]
+    fn a_plain_frame_fills_the_dot_mesh_and_leaves_no_ragged_attribute() {
+        // The failure this guards: uploading a `Plain` frame through the seamed path would swap
+        // seven *empty* vectors against four with sixty thousand entries in them, and a mesh
+        // whose attributes disagree in length does not draw at all.
+        let mut mesh = dot_mesh();
+        let mut buffers = Buffers::default();
+        frame_at(&mut buffers, 5, 1.0, Detail::Plain);
+        upload(&mut mesh, &mut buffers);
+        for id in [
+            Mesh::ATTRIBUTE_POSITION,
+            Mesh::ATTRIBUTE_UV_0,
+            Mesh::ATTRIBUTE_COLOR,
+            ATTRIBUTE_SHAPE,
+        ] {
+            assert_eq!(mesh.attribute(id).map(VertexAttributeValues::len), Some(20));
+        }
+        assert_eq!(mesh.indices().map(bevy::mesh::Indices::len), Some(30));
+    }
+
+    #[test]
+    fn crossing_the_tier_leaves_nothing_of_the_other_one_behind() {
+        // A `Seamed` frame then a `Plain` one: `begin` clears every vector, not only the ones
+        // this tier is about to fill, so the seams of the frame before do not survive into a
+        // frame that has none.
+        let mut buffers = Buffers::default();
+        frame_at(&mut buffers, 6, 1.0, Detail::Seamed);
+        assert_eq!(buffers.swells.len(), 24);
+        frame_at(&mut buffers, 6, 2.0, Detail::Plain);
+        assert!(buffers.swells.is_empty());
+        assert!(buffers.squash_dirs.is_empty());
+        // And back again, into the same allocation.
+        frame_at(&mut buffers, 6, 3.0, Detail::Seamed);
+        assert_eq!(buffers.swells.len(), 24);
+        assert!(buffers.swells.iter().all(|s| *s == 3.0));
     }
 
     #[test]
