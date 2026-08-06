@@ -318,6 +318,51 @@ pub fn zoom_about(
     (centre.0 + offset.0 * shift, centre.1 + offset.1 * shift)
 }
 
+/// How wide a scale bar should be, and what it measures.
+///
+/// Returns `(squares, pixels)`: how many substrate squares the bar spans, and how long to draw
+/// it. The bar is the longest of `1, 2, 5, 10, 20, 50, …` squares that fits in `max_pixels`, so
+/// it changes length as you zoom but never reads as an awkward number.
+///
+/// # Squares, not microns
+///
+/// `docs/UI.md` §2 sketches this bar as `├─── 200 µm ───┤`, and it is not drawn in microns,
+/// because nothing anywhere says how large a substrate square is. Picking a figure here would
+/// invent a physical scale for a world that does not have one and then print it as though it
+/// were measured — and a scale bar whose whole job is to say how big things are is the last
+/// place to do that. The square is the unit the simulation actually has. If a physical size is
+/// ever wanted it belongs in `SPEC.md` as a stated conversion, and this can then use it.
+///
+/// A degenerate scale returns one square and no length rather than dividing by it: the caller's
+/// zoom is clamped, but this is reached from a saved view file.
+#[must_use]
+// `!(x > 0.0)` and not `x <= 0.0`, which clippy would prefer and which is not the same
+// statement: a NaN fails every comparison, so `<=` lets it straight through into the loop and
+// out the other side as a bar of NaN pixels. `a_degenerate_scale_does_not_divide_by_it` covers
+// it, and would fail on the "tidier" form.
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
+pub fn scale_bar(pixels_per_square: f32, max_pixels: f32) -> (u32, f32) {
+    if !(pixels_per_square > 0.0) || !(max_pixels > 0.0) {
+        return (1, 0.0);
+    }
+    let mut best = (1u32, pixels_per_square);
+    // 1, 2, 5 and then the same again ten times bigger, which is how every scale bar and every
+    // axis anybody has ever read is stepped.
+    for decade in 0..8u32 {
+        for step in [1u32, 2, 5] {
+            let Some(squares) = step.checked_mul(10u32.pow(decade)) else {
+                return best;
+            };
+            let pixels = squares as f32 * pixels_per_square;
+            if pixels > max_pixels {
+                return best;
+            }
+            best = (squares, pixels);
+        }
+    }
+    best
+}
+
 /// Everything that can be shown.
 ///
 /// An enum rather than a pile of booleans so the View menu is generated from the same list the
@@ -700,6 +745,72 @@ mod tests {
                 _ => assert_eq!(dock, Dock::Drawer, "{} is not in the drawer", panel.title()),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod scale_tests {
+    use super::*;
+
+    #[test]
+    fn a_bar_never_exceeds_the_room_it_is_given() {
+        for ppq in [0.4f32, 1.0, 8.0, 63.5, 320.0] {
+            for room in [40.0f32, 112.0, 300.0] {
+                let (squares, pixels) = scale_bar(ppq, room);
+                assert!(pixels <= room || squares == 1, "{ppq} in {room}: {pixels}");
+                assert!(squares >= 1);
+            }
+        }
+    }
+
+    #[test]
+    fn a_bar_is_a_number_somebody_would_say() {
+        // 1, 2, 5 and the same again ten times bigger. A bar of 37 squares is arithmetic
+        // showing through, and the whole point of the thing is to be read at a glance.
+        for ppq in [0.05f32, 0.7, 3.0, 8.0, 100.0] {
+            let (squares, _) = scale_bar(ppq, 112.0);
+            let mantissa = {
+                let mut s = squares;
+                while s % 10 == 0 && s > 1 {
+                    s /= 10;
+                }
+                s
+            };
+            assert!(
+                matches!(mantissa, 1 | 2 | 5),
+                "{squares} squares is not a round number"
+            );
+        }
+    }
+
+    #[test]
+    fn zooming_in_shortens_the_bar_in_squares() {
+        // The bar measures the same *distance* until it cannot, so magnifying can only ever
+        // reduce how many squares fit in it.
+        let mut previous = u32::MAX;
+        for ppq in [0.5f32, 1.0, 2.0, 4.0, 8.0, 16.0, 64.0, 256.0] {
+            let (squares, _) = scale_bar(ppq, 112.0);
+            assert!(squares <= previous, "{ppq} gave {squares} after {previous}");
+            previous = squares;
+        }
+    }
+
+    #[test]
+    fn a_degenerate_scale_does_not_divide_by_it() {
+        // Reached from a saved view, so it cannot assume the caller's clamp held.
+        assert_eq!(scale_bar(0.0, 112.0), (1, 0.0));
+        assert_eq!(scale_bar(-1.0, 112.0), (1, 0.0));
+        assert_eq!(scale_bar(8.0, 0.0), (1, 0.0));
+        assert_eq!(scale_bar(f32::NAN, 112.0), (1, 0.0));
+    }
+
+    #[test]
+    fn a_square_wider_than_the_bar_still_reports_one() {
+        // Zoomed until one square is wider than the whole status bar. One square is the
+        // smallest true statement available, so it is what gets made.
+        let (squares, pixels) = scale_bar(400.0, 112.0);
+        assert_eq!(squares, 1);
+        assert_eq!(pixels, 400.0);
     }
 }
 

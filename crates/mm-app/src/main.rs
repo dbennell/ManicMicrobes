@@ -3593,74 +3593,135 @@ fn status_bar(
     frame: &Frame,
     diagnostics: &DiagnosticsStore,
 ) {
-    egui::Panel::bottom("status_bar").show(root, |ui| {
-        ui.horizontal(|ui| {
-            if sim.reading().is_some() {
-                ui.label(egui::RichText::new(&sim.latest.species).italics().strong());
-                ui.separator();
-            }
-            ui.label(format!("tick {}", frame.tick));
-            ui.separator();
-            ui.label(format!("{} cells", frame.population));
-            if frame.largest_cluster > 1 {
-                ui.separator();
-                ui.label(format!("largest organism {}", frame.largest_cluster));
-            }
-            ui.separator();
-            // What the last file operation said. In the status bar rather than in the menu that
-            // triggered it, because that menu closed on the click — and an error nobody sees is
-            // an error that looks like nothing happening.
-            if let Some(note) = &view.file_note {
-                match note {
-                    Ok(m) => ui.weak(m.clone()),
-                    Err(m) => ui.colored_label(egui::Color32::from_rgb(240, 140, 120), m.clone()),
+    egui::Panel::bottom("status_bar")
+        .frame(
+            skin::panel_frame().inner_margin(egui::Margin {
+                left: 12,
+                right: 12,
+                top: 3,
+                bottom: 3,
+            }),
+        )
+        .show(root, |ui| {
+            ui.horizontal(|ui| {
+                if sim.reading().is_some() {
+                    ui.label(
+                        egui::RichText::new(&sim.latest.species)
+                            .italics()
+                            .size(Role::Body.size())
+                            .color(skin::col(Role::Body.ink().unwrap_or(theme::DIM))),
+                    );
+                    tick(ui);
                 }
-                .on_hover_text("the last file this session opened or wrote");
-                ui.separator();
-            }
-            ui.label(match view.tool {
-                // Only where it means something. A width beside "select" is noise.
-                Tool::DrawBarrier | Tool::EraseBarrier => {
-                    format!("tool: {} ×{}", view.tool.name(), view.brush)
+                ui.label(skin::text(Role::Label, format!("tick {}", thousands(frame.tick as i64))));
+                tick(ui);
+                ui.label(skin::text(
+                    Role::Label,
+                    format!("{} cells", thousands(frame.population as i64)),
+                ));
+                if frame.largest_cluster > 1 {
+                    tick(ui);
+                    ui.label(skin::text(
+                        Role::Label,
+                        format!("largest organism {}", frame.largest_cluster),
+                    ));
                 }
-                _ => format!("tool: {}", view.tool.name()),
-            });
+                tick(ui);
+                // What the last file operation said. In the status bar rather than in the menu
+                // that triggered it, because that menu closed on the click — and an error nobody
+                // sees is an error that looks like nothing happening.
+                if let Some(note) = &view.file_note {
+                    match note {
+                        Ok(m) => ui.label(skin::text(Role::Label, m.clone())),
+                        Err(m) => ui.label(skin::moody(Role::Label, Mood::Bad, m.clone())),
+                    }
+                    .on_hover_text("the last file this session opened or wrote");
+                    tick(ui);
+                }
+                ui.label(skin::text(
+                    Role::Label,
+                    match view.tool {
+                        // Only where it means something. A width beside "select" is noise.
+                        Tool::DrawBarrier | Tool::EraseBarrier => {
+                            format!("tool {} · brush {}", view.tool.name(), view.brush)
+                        }
+                        _ => format!("tool {}", view.tool.name()),
+                    },
+                ));
 
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // Magnification is reported the way the objective would: relative to the base
-                // scale, so "1×" is one substrate square to eight pixels.
-                ui.label(format!("{:.0}×", view.zoom * 100.0));
-                ui.separator();
-                ui.label(match frame.lod {
-                    Lod::Dots => "points",
-                    Lod::Packed => "packed",
-                    Lod::Organelles => "organelles",
-                    Lod::Full => "full",
-                });
-                ui.separator();
-                // The two halves of the working target, side by side and never added together
-                // (`docs/MILESTONES.md`). Until M10.1 there was only one number here and it was
-                // both of them at once, which is how a slow tick and a slow frame became
-                // indistinguishable.
-                let fps = diagnostics
-                    .get(&FrameTimeDiagnosticsPlugin::FPS)
-                    .and_then(Diagnostic::smoothed)
-                    .unwrap_or(0.0);
-                ui.label(
-                    egui::RichText::new(format!(
-                        "{:.0} fps · {} t/s",
-                        fps,
-                        sim.engine.ticks_per_second()
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // The two halves of the working target, side by side and never added
+                    // together (`docs/MILESTONES.md`). Until M10.1 there was only one number
+                    // here and it was both of them at once, which is how a slow tick and a slow
+                    // frame became indistinguishable.
+                    let fps = diagnostics
+                        .get(&FrameTimeDiagnosticsPlugin::FPS)
+                        .and_then(Diagnostic::smoothed)
+                        .unwrap_or(0.0);
+                    ui.label(skin::text(
+                        Role::Label,
+                        format!("{:.0} fps · {} t/s", fps, sim.engine.ticks_per_second()),
                     ))
-                    .monospace(),
-                )
-                .on_hover_text(
-                    "frames a second and ticks a second, measured separately. The working \
-                     target is 50,000 cells at 30 of each.",
-                );
+                    .on_hover_text(
+                        "frames a second and ticks a second, measured separately. The working \
+                         target is 50,000 cells at 30 of each.",
+                    );
+                    tick(ui);
+                    ui.label(skin::text(
+                        Role::Label,
+                        match frame.lod {
+                            Lod::Dots => "points",
+                            Lod::Packed => "packed",
+                            Lod::Organelles => "organelles",
+                            Lod::Full => "full",
+                        },
+                    ));
+                    tick(ui);
+                    // Magnification is reported the way the objective would: relative to the
+                    // base scale, so "1×" is one substrate square to eight pixels.
+                    ui.label(skin::text(Role::Label, format!("{:.0}×", view.zoom * 100.0)));
+                    ui.add_space(8.0);
+                    scale_bar(ui, BASE_SCALE * view.zoom);
+                });
             });
         });
-    });
+}
+
+/// A separator between two readings in the status bar: a short vertical tick, not a full-height
+/// rule, so the bar reads as one line of readings rather than as a row of boxes.
+fn tick(ui: &mut egui::Ui) {
+    ui.add_space(5.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(1.0, 11.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 0.0, skin::col(theme::RULE));
+    ui.add_space(5.0);
+}
+
+/// The microscope's scale bar: how far across the slide a stretch of screen actually is.
+///
+/// The thing in the corner of every frame of the footage this is modelled on, and the only
+/// honest answer to "how big is that". Measured in substrate squares rather than in the microns
+/// `docs/UI.md` §2 sketches — see [`ui::scale_bar`] for why that is not a detail.
+fn scale_bar(ui: &mut egui::Ui, pixels_per_square: f32) {
+    const ROOM: f32 = 112.0;
+    let (squares, length) = ui::scale_bar(pixels_per_square, ROOM);
+    let length = length.min(ROOM);
+    ui.label(skin::text(
+        Role::Label,
+        format!("{squares} {}", if squares == 1 { "square" } else { "squares" }),
+    ));
+    ui.add_space(6.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(length, 9.0), egui::Sense::hover());
+    let ink = skin::col(theme::DIM);
+    let y = rect.center().y;
+    ui.painter()
+        .hline(rect.x_range(), y, egui::Stroke::new(1.0, ink));
+    for x in [rect.left(), rect.right() - 1.0] {
+        ui.painter().vline(
+            x,
+            egui::Rangef::new(y - 3.5, y + 3.5),
+            egui::Stroke::new(1.0, ink),
+        );
+    }
 }
 
 /// The bottom drawer: one tab at a time, for everything that wants width rather than height.

@@ -1125,7 +1125,23 @@ so the way to find your own edit is to open all six headers and read. Three addi
 The group list moves to a 150px rail on the left with a count per group, which pins the column
 header and makes finding a field a click instead of an expand-scan-collapse.
 
-### 8.9 What is not taken from the design
+### 8.9 The scale bar is in squares, and §2 is wrong about it
+
+§2 sketches the status bar's scale bar as `├─── 200 µm ───┤`, and it is not drawn that way.
+
+**Nothing anywhere says how large a substrate square is.** `SPEC.md` mentions microns once, in
+prose about anoxic cores, and defines no conversion. Printing a micron figure here would invent
+a physical scale for a world that has not got one and then display it as a measurement — in the
+one widget whose entire job is to say honestly how big things are.
+
+So the bar is `├────┤ 20 squares`, in the unit the simulation actually has, stepped 1 · 2 · 5 ·
+10 · 20 · 50 so it is always a number somebody would say out loud. The arithmetic is
+`ui::scale_bar`, which is pure and tested without a graphics stack like the rest of that module.
+
+If a physical size for a square is ever wanted, it belongs in `SPEC.md` as a stated conversion
+and this can then use it. **This is a decision made mid-implementation and it needs review.**
+
+### 8.10 What is not taken from the design
 
 - **The mock's slide.** Its warm blooms and vignette are painted decoration, and §1 forbids
   drawing what the simulation did not produce. The renderer already does this properly and is
@@ -1134,7 +1150,7 @@ header and makes finding a field a click instead of an expand-scan-collapse.
   something that does not look like a web modal at a 23px row height.
 - **Fixed rail widths.** The rails stay resizable, as §2 has them.
 
-### 8.10 Where the tokens live
+### 8.11 Where the tokens live
 
 `theme.rs`, in `mm-app`, **with no egui in it**. The palette is `[u8; 3]`, the type scale is
 `f32`, and the roles are an enum — so the whole thing compiles and is tested without a graphics
