@@ -2920,6 +2920,97 @@ fn soon(ui: &mut egui::Ui, label: &str, shortcut: &str, why: &str) {
         .on_disabled_hover_text(why);
 }
 
+/// A drag value with how far along its range it stands painted behind the number.
+///
+/// A bare `DragValue` is a flat filled box, and a flat filled box reads as a bar that is either
+/// empty or full — so the only thing that moves while you drag is the number, which is the thing
+/// you are least likely to be watching when your hand is on the pointer. 180 and 900 look
+/// identical at a glance on a control whose range is 16 to 1024.
+///
+/// The fill is computed *after* `add` has run, from the value the drag has already written this
+/// frame, so it tracks the pointer rather than arriving once the pointer stops. That ordering is
+/// the whole of it: the widget both reads and writes the value, and reading it beforehand paints
+/// last frame's answer.
+///
+/// The track is ours rather than egui's because the drag value paints its own background, and
+/// anything painted after the widget covers the number instead of sitting under it. Hence the
+/// two reserved shapes before it and the transparent `weak_bg_fill` inside: what egui would have
+/// drawn as the background is drawn here, in the same colour it would have used, with the fill
+/// on top of it and the number on top of that.
+fn ranged_drag(
+    ui: &mut egui::Ui,
+    value: &mut u32,
+    range: std::ops::RangeInclusive<u32>,
+    speed: f32,
+    prefix: &str,
+    suffix: &str,
+) -> egui::Response {
+    let (lo, hi) = (*range.start(), *range.end());
+
+    let track = ui.painter().add(egui::Shape::Noop);
+    let fill = ui.painter().add(egui::Shape::Noop);
+
+    let response = ui
+        .scope(|ui| {
+            let widgets = &mut ui.style_mut().visuals.widgets;
+            widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+            widgets.hovered.weak_bg_fill = egui::Color32::TRANSPARENT;
+            widgets.active.weak_bg_fill = egui::Color32::TRANSPARENT;
+            ui.add(
+                egui::DragValue::new(value)
+                    .range(lo..=hi)
+                    .speed(speed)
+                    .prefix(prefix)
+                    .suffix(suffix),
+            )
+        })
+        .inner;
+
+    // Clicking a drag value turns it into a text field. A bar behind a caret is a bar behind
+    // half-typed digits that do not mean anything yet, so there isn't one.
+    if response.has_focus() {
+        return response;
+    }
+
+    let visuals = *ui.style().interact(&response);
+    let rect = response.rect;
+    let radius = visuals.corner_radius;
+    ui.painter().set(
+        track,
+        egui::Shape::rect_filled(rect, radius, visuals.weak_bg_fill),
+    );
+
+    let span = hi.saturating_sub(lo);
+    let along = (*value).clamp(lo, hi).saturating_sub(lo);
+    let fraction = if span == 0 {
+        0.0
+    } else {
+        along as f32 / span as f32
+    };
+    let mut bar = rect;
+    bar.max.x = rect.min.x + rect.width() * fraction;
+    // Square on the leading edge, so that a bar a fifth of the way along is a bar and not a
+    // small pill sitting on the left — egui shrinks a corner radius to fit whatever it is
+    // rounding, and a narrow rounded rectangle stops looking like a measurement.
+    let ends = if fraction > 0.999 {
+        radius
+    } else {
+        egui::CornerRadius {
+            ne: 0,
+            se: 0,
+            ..radius
+        }
+    };
+    if bar.width() >= 1.0 {
+        ui.painter().set(
+            fill,
+            egui::Shape::rect_filled(bar, ends, ui.visuals().selection.bg_fill),
+        );
+    }
+
+    response
+}
+
 /// The menu bar, and the transport controls at its right-hand end.
 ///
 /// Every keyboard shortcut in `keyboard` appears against its menu item, and no shortcut exists
@@ -2947,28 +3038,18 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
             ui.menu_button("Slide", |ui| {
                 ui.menu_button("New slide…", |ui| {
                     ui.label("start again, at a size you choose");
-                    ui.add(
-                        egui::DragValue::new(&mut view.new_size)
-                            .range(16..=1024)
-                            .speed(4.0)
-                            .prefix("slide  ")
-                            .suffix(" squares"),
-                    )
-                    .on_hover_text(
-                        "the slide is square. Everything scales with the area: the matter \
-                         seeded into it, the carrying capacity, and how long a population \
-                         takes to fill it",
-                    );
-                    ui.add(
-                        egui::DragValue::new(&mut view.new_founders)
-                            .range(1..=64)
-                            .prefix("founders  "),
-                    )
-                    .on_hover_text(
-                        "how many ancestors to start with, spread evenly over the slide. One \
-                         is a clean experiment — everything that follows descends from it. \
-                         Sixteen grow as sixteen colonies and keep far more diversity",
-                    );
+                    ranged_drag(ui, &mut view.new_size, 16..=1024, 4.0, "slide  ", " squares")
+                        .on_hover_text(
+                            "the slide is square. Everything scales with the area: the matter \
+                             seeded into it, the carrying capacity, and how long a population \
+                             takes to fill it",
+                        );
+                    ranged_drag(ui, &mut view.new_founders, 1..=64, 0.25, "founders  ", "")
+                        .on_hover_text(
+                            "how many ancestors to start with, spread evenly over the slide. \
+                             One is a clean experiment — everything that follows descends from \
+                             it. Sixteen grow as sixteen colonies and keep far more diversity",
+                        );
                     ui.separator();
                     if ui
                         .button("Create")
@@ -2993,12 +3074,7 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                          you want on it with the tools, seed it, then Save below — and what \
                          comes back when you open it is what you built.",
                     );
-                    ui.add(
-                        egui::DragValue::new(&mut view.new_size)
-                            .speed(4.0)
-                            .range(16..=1024)
-                            .prefix("size "),
-                    );
+                    ranged_drag(ui, &mut view.new_size, 16..=1024, 4.0, "size  ", " squares");
                     ui.separator();
                     if ui
                         .button("Create")
