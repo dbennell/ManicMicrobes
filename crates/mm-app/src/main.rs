@@ -5481,7 +5481,18 @@ fn genome_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
     // every frame it is on screen.
     let chase = view.genome_follow_ip && view.genome_scrolled_to != Some(c.ip);
 
-    ui.separator();
+    ui.add_space(2.0);
+    skin::hairline(ui);
+
+    // The genes and the diagnostics go in the column (UI.md §8.6): what the listing is made of
+    // and whether it is sound are both things about the listing that the listing cannot say
+    // about itself.
+    let genes = gene_spans(&c.genome);
+    let genome_len = c.genome_len;
+    skin::drawer_split(
+        ui,
+        "genome_genes",
+        |ui| {
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -5550,6 +5561,46 @@ fn genome_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
                 }
             }
         });
+        },
+        |ui| {
+            skin::section(ui, "genes", false);
+            if genes.is_empty() {
+                ui.label(skin::text(
+                    Role::Small,
+                    "no GENE headers. Every byte of this genome is one straight run, which the \
+                     VM executes from offset zero and wraps.",
+                ));
+            }
+            let longest = genes.iter().map(|(_, n)| *n).max().unwrap_or(1).max(1);
+            for (name, bytes) in &genes {
+                skin::row(
+                    ui,
+                    name,
+                    Some((*bytes as f32 / longest as f32, skin::plot_neutral())),
+                    &format!("{bytes} B"),
+                    Role::Value.ink().unwrap_or(theme::DIM),
+                );
+            }
+
+            skin::section(ui, "diagnostics", true);
+            skin::stat(ui, "bytes", &format!("{genome_len} B"));
+            skin::stat(ui, "nucleus", &c.nucleus_capacity.to_string());
+            skin::stat(ui, "genes", &genes.len().to_string());
+            if over_nucleus {
+                ui.label(skin::moody(
+                    Role::Body,
+                    Mood::Bad,
+                    "Longer than its nucleus, so every daughter gets it cut short. The lineage \
+                     will stop without an error (SPEC §4.1).",
+                ));
+            } else {
+                ui.label(skin::text(
+                    Role::Body,
+                    "Fits its nucleus, so it copies whole into every daughter.",
+                ));
+            }
+        },
+    );
     if chase {
         view.genome_scrolled_to = Some(c.ip);
     }
@@ -5559,6 +5610,30 @@ fn genome_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
         let event = tools::rewrite_genome(held.slide().world_mut(), c.id, bytes);
         sim.last_tool = Some(event);
     }
+}
+
+/// Each gene's name and how many bytes it runs for.
+///
+/// A gene runs from its own `GENE` header to the next one, and the last runs to the end of the
+/// genome — which is what the VM does with it, since execution simply carries on. Named through
+/// `inspector::gene_label` so that this list and the listing beside it cannot disagree about
+/// which gene is which.
+fn gene_spans(genome: &mm_core::Genome) -> Vec<(String, u32)> {
+    let promoters = genome.promoters();
+    let end = genome.len() as u32;
+    promoters
+        .iter()
+        .enumerate()
+        .map(|(nth, p)| {
+            let next = promoters
+                .get(nth + 1)
+                .map_or(end, |q| u32::from(q.offset));
+            (
+                mm_app::inspector::gene_label(nth),
+                next.saturating_sub(u32::from(p.offset)),
+            )
+        })
+        .collect()
 }
 
 /// Where the pointer is, in substrate squares. `None` if there is no window or no cursor.
@@ -6492,15 +6567,19 @@ fn edge_of(rect: egui::Rect, dir: egui::Vec2, pad: f32) -> egui::Pos2 {
 /// language the way a second, approximate definition in the front-end would.
 fn editor_body(ui: &mut egui::Ui, sim: &mut SlideRes) {
     ui.horizontal(|ui| {
-        ui.label("name:");
-        ui.text_edit_singleline(&mut sim.editor.name);
-        if ui.button("assemble").clicked() {
+        ui.label(skin::text(Role::Label, "name"));
+        ui.add(
+            egui::TextEdit::singleline(&mut sim.editor.name)
+                .desired_width(180.0)
+                .font(skin::font(Role::Value)),
+        );
+        if skin::chip(ui, "assemble", None, false).clicked() {
             sim.editor.assemble();
         }
-        if ui.button("export").clicked() {
+        if skin::chip(ui, "export", None, false).clicked() {
             sim.last_export = sim.editor.export().map(|f| f.to_text());
         }
-        if ui.button("from selected cell").clicked() {
+        if skin::chip(ui, "from selected cell", None, false).clicked() {
             if let Some(cell) = sim.selected {
                 let held = sim.engine.handle();
                 let file = tools::copy_genome(held.slide().world(), cell);
@@ -6510,8 +6589,10 @@ fn editor_body(ui: &mut egui::Ui, sim: &mut SlideRes) {
             }
         }
     });
-    ui.label(sim.editor.status());
-    ui.separator();
+    ui.label(skin::text(Role::Label, sim.editor.status()));
+    ui.add_space(2.0);
+    skin::hairline(ui);
+    ui.add_space(3.0);
 
     // Diagnostics first: they are why anyone opened this panel.
     let mut source = sim.editor.source().to_string();
@@ -6526,33 +6607,68 @@ fn editor_body(ui: &mut egui::Ui, sim: &mut SlideRes) {
     // below can mark them where you are actually looking rather than only in a list.
     let bad_lines: std::collections::BTreeSet<u32> = errors.iter().map(|(l, _, _)| *l).collect();
 
-    if !errors.is_empty() {
+    // Beside the buffer rather than above it (UI.md §8.6). Above, a long list of errors pushed
+    // the very line you were fixing off the bottom of the pane — the panel is at its most
+    // useful exactly when it has the most to say, which is when it took the most room away.
+    let quoted: Vec<(u32, u32, String, String)> = {
         let lines: Vec<&str> = source.lines().collect();
-        egui::ScrollArea::vertical()
-            .max_height(120.0)
-            .id_salt("diagnostics")
-            .show(ui, |ui| {
-                for (line, col, message) in &errors {
-                    ui.horizontal(|ui| {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(230, 120, 110),
-                            format!("{line}:{col}"),
-                        );
-                        ui.label(message);
-                        // The offending line, quoted. `3:12` means counting to line three
-                        // otherwise, and counting to line three is the part nobody enjoys.
-                        if let Some(text) = lines.get(line.saturating_sub(1) as usize) {
-                            ui.label(
-                                egui::RichText::new(text.trim())
-                                    .monospace()
-                                    .color(egui::Color32::from_gray(140)),
-                            );
-                        }
-                    });
-                }
+        errors
+            .iter()
+            .map(|(line, col, message)| {
+                (
+                    *line,
+                    *col,
+                    message.clone(),
+                    lines
+                        .get(line.saturating_sub(1) as usize)
+                        .map(|t| t.trim().to_string())
+                        .unwrap_or_default(),
+                )
+            })
+            .collect()
+    };
+    // "Assembles clean" is a claim, and an empty buffer that has never been assembled has not
+    // earned it. Said only where there are bytes to say it about.
+    let assembled = sim.editor.build().bytes().map(<[u8]>::len);
+    let diagnostics = move |ui: &mut egui::Ui| {
+        skin::section(ui, "diagnostics · live", false);
+        match (quoted.is_empty(), assembled) {
+            (true, Some(bytes)) => {
+                ui.label(skin::moody(
+                    Role::Label,
+                    Mood::Good,
+                    format!("assembles clean · {bytes} B"),
+                ));
+            }
+            (true, None) => {
+                ui.label(skin::text(Role::Label, "nothing assembled yet"));
+            }
+            (false, _) => {}
+        }
+        for (line, col, message, text) in &quoted {
+            // A warm left edge and the position in mono, so a list of six errors is six things
+            // rather than six sentences.
+            ui.horizontal(|ui| {
+                let (edge, _) = ui.allocate_exact_size(egui::vec2(2.0, 30.0), egui::Sense::hover());
+                ui.painter()
+                    .rect_filled(edge, 0.0, skin::col(Mood::Bad.rgb()));
+                ui.vertical(|ui| {
+                    ui.label(skin::moody(Role::Label, Mood::Bad, format!("{line}:{col} {message}")));
+                    // The offending line, quoted. `3:12` means counting to line three
+                    // otherwise, and counting to line three is the part nobody enjoys.
+                    if !text.is_empty() {
+                        ui.label(skin::text(Role::Label, text));
+                    }
+                });
             });
-        ui.separator();
-    }
+        }
+        ui.add_space(theme::SECTION_GAP);
+        ui.label(skin::text(
+            Role::Body,
+            "The buffer reassembles on every keystroke, so the line numbers in an error always \
+             point at the text as it is now.",
+        ));
+    };
 
     // The source, highlighted as you type.
     //
@@ -6565,6 +6681,10 @@ fn editor_body(ui: &mut egui::Ui, sim: &mut SlideRes) {
     // with the language about what an opcode is. Called on the widget's live text rather than
     // through `Editor::highlight`, which reads the last text handed to `set_source` and is
     // therefore one keystroke behind.
+    skin::drawer_split(
+        ui,
+        "editor_diagnostics",
+        |ui| {
     egui::ScrollArea::vertical()
         .id_salt("source")
         .show(ui, |ui| {
@@ -6614,16 +6734,19 @@ fn editor_body(ui: &mut egui::Ui, sim: &mut SlideRes) {
             }
         });
 
-    if let Some(text) = &sim.last_export {
-        ui.separator();
-        ui.label("exported — copy this:");
-        let mut shown = text.clone();
-        ui.add(
-            egui::TextEdit::multiline(&mut shown)
-                .code_editor()
-                .desired_rows(4),
-        );
-    }
+            if let Some(text) = &sim.last_export {
+                skin::hairline(ui);
+                ui.label(skin::text(Role::Label, "exported — copy this:"));
+                let mut shown = text.clone();
+                ui.add(
+                    egui::TextEdit::multiline(&mut shown)
+                        .code_editor()
+                        .desired_rows(4),
+                );
+            }
+        },
+        diagnostics,
+    );
 }
 
 /// The debugger (M6).
