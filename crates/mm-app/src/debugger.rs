@@ -31,7 +31,7 @@
 
 use mm_core::config::VmConfig;
 use mm_core::genome::Genome;
-use mm_core::host::NullHost;
+use mm_core::host::Host;
 use mm_core::rng::RandCtx;
 use mm_core::vm::Vm;
 use mm_core::{CellId, World};
@@ -172,8 +172,9 @@ impl Breakpoints {
 /// is a stronger guarantee than a promise not to.
 #[derive(Clone, Debug)]
 pub struct Sandbox {
-    /// Which cell this was taken from, and when.
-    pub cell: CellId,
+    /// Which cell this was taken from, or `None` when it was built from an editor buffer and
+    /// never had one (M10.8).
+    pub cell: Option<CellId>,
     pub taken_at_tick: u64,
     pub genome: Arc<Genome>,
     pub vm: Vm,
@@ -184,6 +185,84 @@ pub struct Sandbox {
     pub executed: u32,
     /// Instructions run in the current simulated tick, against the budget.
     pub in_tick: u32,
+    /// What the genome has asked the world for since the sandbox was taken.
+    pub asked: ScratchHost,
+    /// How many times each gene has been reached by `EXPRESS`, indexed as
+    /// `Genome::promoters` is.
+    ///
+    /// Counted by *watching*, not by instrumenting the VM: see [`Sandbox::step`]. Nothing in
+    /// `mm-core` knows this is being counted, and nothing in the world does either.
+    pub gene_hits: Vec<u32>,
+}
+
+/// What a genome asked the world for, in a world that answers nothing.
+///
+/// A [`NullHost`] that keeps a note. Every *read* is left at the trait's default and therefore
+/// still answers zero — which is the sandbox's one honest limitation and the reason
+/// [`Sandbox::step`] says so out loud. Every *write* is recorded instead of being thrown away.
+///
+/// Not `mm_core::host::RecordingHost`, which exists and looks like the right type, and is not:
+/// its `eat` returns the full amount asked for. In a test of a replication loop that is a
+/// convenience; in a debugger it is a lie, because it would show a scratch cell being fed by a
+/// world that is not there. The distinction is exactly the one `Sandbox::step` was written to
+/// preserve.
+#[derive(Clone, Default, Debug)]
+pub struct ScratchHost {
+    /// `(param, type, slot)` per `BUILD`, in the order they were asked for.
+    pub builds: Vec<(i16, i16, i16)>,
+    pub tears: Vec<i16>,
+    /// `(amount, chemical)` per `EAT`. Each returned nothing.
+    pub eats: Vec<(i16, i16)>,
+    pub emits: Vec<(i16, i16)>,
+    /// How many times `BUD` was reached.
+    pub buds: u32,
+    /// How many times `SPLIT` was reached — **not** how many times it divided. A scratch cell
+    /// has no world to divide into, and counting these as divisions is the one number a preview
+    /// of a genome must not invent.
+    pub splits: u32,
+    /// Bytes written by `COPYB` towards a daughter that will never exist.
+    pub copied: u32,
+    /// How many times `INJECT` was reached: this genome writes to other cells' nuclei.
+    pub injects: u32,
+}
+
+impl Host for ScratchHost {
+    fn build(&mut self, param: i16, ty: i16, slot: i16) {
+        self.builds.push((param, ty, slot));
+    }
+
+    fn tear(&mut self, slot: i16) {
+        self.tears.push(slot);
+    }
+
+    fn eat(&mut self, amount: i16, chem: i16) -> i16 {
+        self.eats.push((amount, chem));
+        // Nothing. There is no water under a scratch cell.
+        0
+    }
+
+    fn emit(&mut self, amount: i16, chem: i16) -> i16 {
+        self.emits.push((amount, chem));
+        0
+    }
+
+    fn bud(&mut self, _size: i16) -> i16 {
+        self.buds = self.buds.saturating_add(1);
+        0
+    }
+
+    fn copy_byte(&mut self, _dst: u16, _src: u8) {
+        self.copied = self.copied.saturating_add(1);
+    }
+
+    fn split(&mut self) {
+        self.splits = self.splits.saturating_add(1);
+    }
+
+    fn inject(&mut self, _jidx: i16, _dst: u16, _src: u8) -> i16 {
+        self.injects = self.injects.saturating_add(1);
+        0
+    }
 }
 
 impl Sandbox {
@@ -191,17 +270,58 @@ impl Sandbox {
     #[must_use]
     pub fn of(world: &World, cell: CellId) -> Option<Sandbox> {
         let i = world.cells().index(cell)?;
+        let genome = Arc::clone(&world.cells().genome[i]);
         Some(Sandbox {
-            cell,
+            cell: Some(cell),
             taken_at_tick: world.tick_count(),
-            genome: Arc::clone(&world.cells().genome[i]),
+            gene_hits: vec![0; genome.promoters().len()],
+            genome,
             vm: world.cells().vm[i].clone(),
             cfg: world.scenario().vm,
             seed: world.scenario().seed,
             ordering_key: cell.ordering_key(),
             executed: 0,
             in_tick: 0,
+            asked: ScratchHost::default(),
         })
+    }
+
+    /// A scratch cell running a genome that is not in the world and never was (M10.8).
+    ///
+    /// The editor's buffer, assembled. `Sandbox::of` reads five things out of a `World` to build
+    /// itself and none of them need a world to exist, which is why this is a constructor rather
+    /// than new machinery — the stepping, the budget and the host are the same code, and the
+    /// answer to "does this program run" must not depend on which of the two it came through.
+    ///
+    /// `None` if the bytes are not a genome — over the length a nucleus can hold, in practice.
+    #[must_use]
+    pub fn from_genome(bytes: &[u8], cfg: VmConfig, seed: u64) -> Option<Sandbox> {
+        let genome = Arc::new(Genome::new(bytes.to_vec()).ok()?);
+        Some(Sandbox {
+            cell: None,
+            taken_at_tick: 0,
+            gene_hits: vec![0; genome.promoters().len()],
+            genome,
+            vm: Vm::new(),
+            cfg,
+            seed,
+            // Some fixed key, so two runs of the same buffer are the same run. Zero is as good
+            // as any: what it feeds is `RandCtx`, and a scratch cell has no neighbours to be
+            // ordered against.
+            ordering_key: 0,
+            executed: 0,
+            in_tick: 0,
+            asked: ScratchHost::default(),
+        })
+    }
+
+    /// Start again from the top with the same genome.
+    pub fn reset(&mut self) {
+        self.vm = Vm::new();
+        self.executed = 0;
+        self.in_tick = 0;
+        self.asked = ScratchHost::default();
+        self.gene_hits = vec![0; self.genome.promoters().len()];
     }
 
     /// The instruction budget one tick gives a cell.
@@ -212,18 +332,24 @@ impl Sandbox {
 
     /// Execute exactly one instruction.
     ///
-    /// World-facing opcodes go to a [`NullHost`]: in a sandbox there is nothing to eat and
+    /// World-facing opcodes go to a [`ScratchHost`]: in a sandbox there is nothing to eat and
     /// nowhere to emit. So arithmetic, control flow and the stack are exact, and anything that
     /// reads the world reads zero. That limit is real and is why the panel says so — a
     /// debugger that invented plausible sensor readings would be worse than one that admitted
-    /// it had none.
+    /// it had none. What the host adds over a [`mm_core::host::NullHost`] is a note of what was
+    /// *asked for*, which is a different thing from what was got and is the only one of the two
+    /// a scratch cell knows.
     pub fn step(&mut self) -> bool {
         if self.vm.halted && self.in_tick > 0 {
             return false;
         }
         let ctx = RandCtx::new(self.seed, self.taken_at_tick, self.ordering_key);
-        let mut host = NullHost;
-        let ran = self.vm.run(&self.genome, &self.cfg, &ctx, &mut host, 1);
+        // What was about to run, so that where it went can be read afterwards.
+        let was = self.next_op();
+        let ran = self.vm.run(&self.genome, &self.cfg, &ctx, &mut self.asked, 1);
+        if ran > 0 && was == Some(mm_core::isa::Op::Express) {
+            self.note_expression();
+        }
         self.executed = self.executed.saturating_add(ran);
         self.in_tick = self.in_tick.saturating_add(ran);
         if self.in_tick >= self.budget() {
@@ -232,6 +358,31 @@ impl Sandbox {
             self.vm.halted = false;
         }
         ran > 0
+    }
+
+    /// Attribute an `EXPRESS` that has just run to the gene it reached.
+    ///
+    /// By watching, not by counting inside the VM. `EXPRESS` either found a promoter and jumped
+    /// to its entry, or found none and fell through — so after the instruction has run, the
+    /// pointer is either at some `promoters()[i].entry` or it is not. The rule that decided it
+    /// is the real one, because it is the real one that just ran; nothing here re-implements the
+    /// match, which is the mistake an approximate second definition in a front end always is.
+    ///
+    /// A promoter's entry is just past its own `GENE` and template, so no two share one, and
+    /// this cannot attribute a hit to the wrong gene. Fall-through lands on the byte after the
+    /// `EXPRESS` and its template, which is not an entry.
+    fn note_expression(&mut self) {
+        let at = self.vm.ip;
+        if let Some(nth) = self
+            .genome
+            .promoters()
+            .iter()
+            .position(|p| p.entry == at)
+        {
+            if let Some(count) = self.gene_hits.get_mut(nth) {
+                *count = count.saturating_add(1);
+            }
+        }
     }
 
     /// Run to the end of the current tick's budget, or until it halts.
@@ -520,5 +671,126 @@ mod tests {
         assert_eq!(sandbox.ticks_behind(&world), 0);
         world.run(35);
         assert_eq!(sandbox.ticks_behind(&world), 35);
+    }
+}
+
+#[cfg(test)]
+mod scratch_tests {
+    use super::*;
+
+    /// Two genes and a driver that expresses each once. `genomes/expression.mm` in miniature.
+    const TWO_GENES: &str = "\
+        EXPRESS #forage\n\
+        EXPRESS #excrete\n\
+        HALT\n\
+        GENE    #forage\n\
+        IMM     20\n\
+        IMM     3\n\
+        EAT\n\
+        DROP\n\
+        RET\n\
+        GENE    #excrete\n\
+        IMM     4\n\
+        IMM     9\n\
+        EMIT\n\
+        DROP\n\
+        RET\n";
+
+    fn scratch(src: &str) -> Sandbox {
+        let built = mm_asm::assemble(src).expect("the test genome assembles");
+        Sandbox::from_genome(&built.bytes, VmConfig::default(), 1)
+            .expect("the test genome is a genome")
+    }
+
+    #[test]
+    fn a_genome_runs_without_a_world_behind_it() {
+        let mut s = scratch(TWO_GENES);
+        assert_eq!(s.cell, None, "a scratch cell is not a cell in the world");
+        for _ in 0..40 {
+            s.step();
+        }
+        assert!(s.executed > 0, "nothing ran");
+    }
+
+    #[test]
+    fn expressing_a_gene_is_attributed_to_that_gene() {
+        // The claim the panel makes. Two genes, one EXPRESS each, so after enough steps both
+        // tallies are non-zero — and there are exactly two of them, because there are exactly
+        // two GENE headers.
+        let mut s = scratch(TWO_GENES);
+        assert_eq!(s.gene_hits.len(), 2, "the promoter table is the wrong size");
+        for _ in 0..60 {
+            s.step();
+        }
+        assert!(
+            s.gene_hits.iter().all(|n| *n > 0),
+            "some gene was never reached: {:?}",
+            s.gene_hits
+        );
+    }
+
+    #[test]
+    fn nothing_is_attributed_to_a_genome_with_no_genes() {
+        // EXPRESS with no promoter to find falls through, and falling through must not be
+        // counted as reaching anything.
+        let mut s = scratch("EXPRESS #nothing\nHALT\n");
+        assert!(s.gene_hits.is_empty());
+        for _ in 0..20 {
+            s.step();
+        }
+        assert!(s.gene_hits.is_empty());
+    }
+
+    #[test]
+    fn a_scratch_cell_is_fed_by_nothing() {
+        // The one honest limitation, and the reason this host is not `RecordingHost`: that one
+        // returns the full amount asked for, which would show a cell being fed by a world that
+        // is not there.
+        let mut s = scratch(TWO_GENES);
+        for _ in 0..60 {
+            s.step();
+        }
+        assert!(!s.asked.eats.is_empty(), "EAT was never reached");
+        // It asked for twenty of chemical three, and the stack got nothing back.
+        assert!(s.asked.eats.iter().any(|(amount, chem)| *amount == 20 && *chem == 3));
+    }
+
+    #[test]
+    fn what_it_asked_to_build_is_what_it_asked_for() {
+        let mut s = scratch("IMM 7\nIMM 2\nIMM 1\nBUILD\nHALT\n");
+        for _ in 0..10 {
+            s.step();
+        }
+        assert_eq!(s.asked.builds.len(), 1, "{:?}", s.asked.builds);
+    }
+
+    #[test]
+    fn reaching_split_is_not_dividing() {
+        // The number the design would have called "divisions". A scratch cell has no world to
+        // divide into; what happened is that SPLIT was reached.
+        let mut s = scratch("SPLIT\nSPLIT\nHALT\n");
+        for _ in 0..10 {
+            s.step();
+        }
+        assert_eq!(s.asked.splits, 2);
+    }
+
+    #[test]
+    fn a_reset_run_is_the_same_run_again() {
+        // Two runs of one buffer have to agree, or "does this program run" depends on how many
+        // times you have asked.
+        let mut s = scratch(TWO_GENES);
+        for _ in 0..60 {
+            s.step();
+        }
+        let (first_hits, first_eats) = (s.gene_hits.clone(), s.asked.eats.clone());
+        s.reset();
+        assert_eq!(s.executed, 0);
+        assert!(s.gene_hits.iter().all(|n| *n == 0));
+        for _ in 0..60 {
+            s.step();
+        }
+        assert_eq!(s.gene_hits, first_hits);
+        assert_eq!(s.asked.eats, first_eats);
     }
 }
