@@ -369,6 +369,24 @@ fn arrange(spec: &str, sim: &mut SlideRes, view: &mut View) {
             }
             "toolbox" => view.panels.set(Panel::Toolbox, true),
             "scenario" => view.panels.set(Panel::Scenario, true),
+            // The sheets, so each can be photographed.
+            "newslide" => view.sheet = Some(Sheet::NewSlide),
+            "newscen" => view.sheet = Some(Sheet::NewScenario),
+            "library" => {
+                view.sheet = Some(Sheet::Library);
+                // `library:the_drift` picks one, so the read state can be photographed too.
+                if !sub.is_empty() {
+                    let want = sub.replace('_', " ");
+                    if let Some(e) = library::scenarios().into_iter().find(|e| e.label == want) {
+                        view.library_detail = Some(
+                            library::load(&e.path)
+                                .map(Box::new)
+                                .map_err(|err| err.to_string()),
+                        );
+                        view.library_pick = Some(e.path);
+                    }
+                }
+            }
             // An empty stopped slide, which is the state the authoring caption exists for and
             // the one a running default slide can never be photographed in.
             "newscenario" => {
@@ -1247,6 +1265,15 @@ struct View {
     species: Option<mm_core::phylogeny::SpeciesId>,
     /// Which of the ecology pane's three views is showing (M10.4).
     ecology: Ecology,
+    /// The sheet on screen, if any (M10.7).
+    sheet: Option<Sheet>,
+    /// Which scenario the library sheet has selected, and what reading it said.
+    ///
+    /// A directory listing is genuinely all the library knows until you pick one — the label is
+    /// the file name and nothing else is in it — so the detail is read from the `.ron` on
+    /// selection and cached against the path it came from.
+    library_pick: Option<std::path::PathBuf>,
+    library_detail: Option<Result<Box<Scenario>, String>>,
     /// Whether the scenario pane's RON preview shows the chemical table (M10.7).
     ///
     /// Off, because it is four hundred lines of a four-hundred-and-twenty line file and the
@@ -1269,6 +1296,19 @@ struct View {
     /// What the last file operation said, kept until the next one so a menu that closed on
     /// the click still gets to report what happened.
     file_note: Option<Result<String, String>>,
+}
+
+/// A window that stays until it is dismissed (M10.7, `docs/UI.md` §9.4).
+///
+/// `New slide…` was a submenu holding two sliders, and a menu closes the moment you look away —
+/// which is the complaint that moved the toolbox out of the Tools menu in §4.3, still standing
+/// one menu over. Anything you have to *set up* before committing to it needs to stay on screen
+/// while you set it up.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Sheet {
+    NewSlide,
+    NewScenario,
+    Library,
 }
 
 /// Which page of the parameter editor is showing.
@@ -1344,6 +1384,9 @@ impl Default for View {
             place_count: 1,
             species: None,
             ecology: Ecology::Tree,
+            sheet: None,
+            library_pick: None,
+            library_detail: None,
             ron_chemicals: false,
             // Metabolism, because it is the group with sixteen fields and the one being tuned.
             params_page: ParamPage::Group(params::Group::Metabolism),
@@ -3041,6 +3084,7 @@ fn panels(
     // between them.
     let mut quit = false;
     menu_bar(&mut root, &mut sim, &mut view, &mut quit);
+    sheets(&mut root, &mut sim, &mut view);
     status_bar(&mut root, &sim, &view, &frame, &diagnostics);
     // The parameter draft belongs to the panel that edits it: when that tab is not the one on
     // show, the draft goes with it, so reopening reads the world afresh rather than presenting
@@ -3096,6 +3140,285 @@ fn panels(
     if quit {
         exit.write(AppExit::Success);
     }
+}
+
+/// Whichever sheet is open, over the slide (M10.7, `docs/UI.md` §9.4).
+///
+/// An `egui::Window` and therefore inside the viewport rectangle, which [`ui::route`] already
+/// accounts for: `egui_wants_pointer` covers the windows that float over the slide, and that
+/// half of the routing rule exists precisely so a thing like this cannot leak a click through
+/// to the plate underneath.
+fn sheets(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
+    let Some(which) = view.sheet else {
+        return;
+    };
+    let title = match which {
+        Sheet::NewSlide => "New slide",
+        Sheet::NewScenario => "New scenario",
+        Sheet::Library => "Scenario library",
+    };
+    let mut open = true;
+    egui::Window::new(skin::text(Role::Body, title))
+        .collapsible(false)
+        .resizable(which == Sheet::Library)
+        .open(&mut open)
+        .frame(skin::sheet_frame())
+        .default_width(if which == Sheet::Library { 720.0 } else { 400.0 })
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, -40.0))
+        .show(root.ctx(), |ui| match which {
+            Sheet::NewSlide => new_slide_sheet(ui, sim, view),
+            Sheet::NewScenario => new_scenario_sheet(ui, sim, view),
+            Sheet::Library => library_sheet(ui, sim, view),
+        });
+    if !open {
+        view.sheet = None;
+    }
+}
+
+/// A lit petri dish, seeded, that starts running.
+fn new_slide_sheet(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
+    ui.label(skin::text(
+        Role::Body,
+        "A lit petri dish, seeded with the default chemistry, ancestors spread over it. Starts \
+         at tick 0 and runs.",
+    ));
+    ui.add_space(theme::SECTION_GAP);
+
+    skin::section(ui, "size", false);
+    ranged_drag(ui, &mut view.new_size, 16..=1024, 4.0, "", " squares");
+    ui.label(skin::text(
+        Role::Small,
+        "The slide is square. Everything scales with the area: the matter seeded into it, the \
+         carrying capacity, and how long a population takes to fill it.",
+    ));
+
+    skin::section(ui, "founders", true);
+    ranged_drag(ui, &mut view.new_founders, 1..=64, 0.25, "", "");
+    ui.label(skin::text(
+        Role::Small,
+        "One is a clean experiment — everything that follows descends from it. Sixteen grow as \
+         sixteen colonies and keep far more diversity.",
+    ));
+
+    ui.add_space(theme::SECTION_GAP);
+    skin::hairline(ui);
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label(skin::moody(
+            Role::Small,
+            Mood::Bad,
+            "Throws away what is on the slide now.",
+        ));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if skin::chip(ui, "Create", None, true).clicked() {
+                let size = view.new_size;
+                sim.new_slide(size, view.new_founders);
+                look_at(view, size);
+                view.sheet = None;
+            }
+            if skin::chip(ui, "Cancel", None, false).clicked() {
+                view.sheet = None;
+            }
+        });
+    });
+}
+
+/// An empty stopped slide to build a scenario on.
+fn new_scenario_sheet(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
+    ui.label(skin::text(
+        Role::Body,
+        "An empty slide, stopped, to build one on. No light gradient, no chemistry, no walls, \
+         nobody home.",
+    ));
+    ui.add_space(theme::SECTION_GAP);
+
+    skin::section(ui, "size", false);
+    ranged_drag(ui, &mut view.new_size, 16..=1024, 4.0, "", " squares");
+
+    skin::section(ui, "what you get", true);
+    for (field, value) in [
+        ("light", "Uniform(intensity: 0)"),
+        ("current", "Still"),
+        ("seeding", "[]"),
+        ("barriers", "[]"),
+        ("inhabitants", "[]"),
+    ] {
+        skin::stat(ui, field, value);
+    }
+
+    ui.add_space(theme::SECTION_GAP);
+    skin::hairline(ui);
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label(skin::text(Role::Small, "Opens with paint selected."));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if skin::chip(ui, "Create", None, true).clicked() {
+                let size = view.new_size;
+                sim.new_scenario(size);
+                look_at(view, size);
+                // Straight into the tool you need first: a blank slide is a slide with nothing
+                // to select.
+                view.tool = Tool::Paint;
+                view.panels.set(Panel::Scenario, true);
+                view.sheet = None;
+            }
+            if skin::chip(ui, "Cancel", None, false).clicked() {
+                view.sheet = None;
+            }
+        });
+    });
+}
+
+/// What is in `scenarios/`, and what the one you have picked actually says.
+fn library_sheet(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
+    let found = library::scenarios();
+    ui.label(skin::text(
+        Role::Label,
+        format!(
+            "./scenarios — {}",
+            plural(found.len(), "file", "files")
+        ),
+    ));
+    ui.add_space(4.0);
+    if found.is_empty() {
+        ui.label(skin::text(
+            Role::Small,
+            "no scenarios/ directory here. Open one by path from the Slide menu.",
+        ));
+        return;
+    }
+
+    let mut open_now: Option<std::path::PathBuf> = None;
+    ui.horizontal_top(|ui| {
+        ui.allocate_ui_with_layout(
+            egui::vec2(230.0, 300.0),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                ui.set_min_size(egui::vec2(230.0, 300.0));
+                egui::ScrollArea::vertical()
+                    .id_salt("library_list")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for entry in &found {
+                            let picked = view.library_pick.as_ref() == Some(&entry.path);
+                            if ui
+                                .selectable_label(picked, skin::text(Role::Body, &entry.label))
+                                .on_hover_text(entry.path.display().to_string())
+                                .clicked()
+                            {
+                                view.library_pick = Some(entry.path.clone());
+                                // Read on selection, not on listing. A directory listing knows
+                                // the file name and nothing else, and loading eleven scenarios
+                                // to draw a list of eleven names is eleven parses nobody asked
+                                // for.
+                                view.library_detail = Some(
+                                    library::load(&entry.path)
+                                        .map(Box::new)
+                                        .map_err(|e| e.to_string()),
+                                );
+                            }
+                        }
+                    });
+            },
+        );
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), 300.0),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                ui.set_min_height(300.0);
+                match view.library_detail.as_ref() {
+                    None => {
+                        ui.label(skin::text(Role::Small, "pick one to read it"));
+                    }
+                    Some(Err(why)) => {
+                        ui.label(skin::moody(Role::Body, Mood::Bad, why.clone()));
+                    }
+                    Some(Ok(scenario)) => {
+                        ui.label(
+                            egui::RichText::new(&scenario.name)
+                                .size(15.0)
+                                .color(skin::col(Role::Value.ink().unwrap_or(theme::DIM))),
+                        );
+                        ui.label(skin::text(
+                            Role::Label,
+                            format!(
+                                "{} × {} squares · seed {} · isa {}",
+                                scenario.width,
+                                scenario.height,
+                                scenario.seed,
+                                scenario.isa_version
+                            ),
+                        ));
+                        ui.add_space(6.0);
+                        egui::ScrollArea::vertical()
+                            .id_salt("library_detail")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                for (title, count, rows) in outline_of(scenario) {
+                                    ui.horizontal(|ui| {
+                                        ui.label(skin::text(Role::Section, &title));
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| ui.label(skin::text(Role::Label, count)),
+                                        );
+                                    });
+                                    for (label, value) in rows {
+                                        skin::stat(ui, &label, &value);
+                                    }
+                                    ui.add_space(3.0);
+                                }
+                            });
+                    }
+                }
+            },
+        );
+    });
+
+    ui.add_space(4.0);
+    skin::hairline(ui);
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label(skin::text(
+            Role::Small,
+            "Opening throws away the world on the slide and starts at tick 0.",
+        ));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let ready = matches!(view.library_detail, Some(Ok(_)));
+            if ui
+                .add_enabled(
+                    ready,
+                    // Near-black on the accent, as `skin::chip` does — label ink on a light
+                    // fill is the one combination the palette has no contrast guarantee for.
+                    egui::Button::new(
+                        skin::text(Role::Label, "Open").color(skin::col(theme::on_selected())),
+                    )
+                    .fill(skin::col(theme::selected()))
+                        .corner_radius(egui::CornerRadius::same(3)),
+                )
+                .clicked()
+            {
+                open_now = view.library_pick.clone();
+            }
+            if skin::chip(ui, "Cancel", None, false).clicked() {
+                view.sheet = None;
+            }
+        });
+    });
+
+    if let Some(path) = open_now {
+        open_scenario(sim, view, &path);
+        view.sheet = None;
+    }
+}
+
+/// Point the camera at a slide of this size, and at all of it.
+///
+/// The camera stays where it was told to be otherwise, and making a sixteen-square slide while
+/// parked over the middle of a five-hundred-square one leaves you staring at open water with no
+/// clue that anything happened.
+fn look_at(view: &mut View, size: u32) {
+    view.centre = Vec2::splat(size as f32 / 2.0);
+    view.zoom = (BASE_SCALE * 6.0 / size as f32).clamp(0.05, 40.0);
 }
 
 /// A menu item that is designed but not built yet.
@@ -3226,77 +3549,18 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
             });
 
             ui.menu_button("Slide", |ui| {
-                ui.menu_button("New slide…", |ui| {
-                    ui.label("start again, at a size you choose");
-                    ranged_drag(ui, &mut view.new_size, 16..=1024, 4.0, "slide  ", " squares")
-                        .on_hover_text(
-                            "the slide is square. Everything scales with the area: the matter \
-                             seeded into it, the carrying capacity, and how long a population \
-                             takes to fill it",
-                        );
-                    ranged_drag(ui, &mut view.new_founders, 1..=64, 0.25, "founders  ", "")
-                        .on_hover_text(
-                            "how many ancestors to start with, spread evenly over the slide. \
-                             One is a clean experiment — everything that follows descends from \
-                             it. Sixteen grow as sixteen colonies and keep far more diversity",
-                        );
-                    ui.separator();
-                    if ui
-                        .button("Create")
-                        .on_hover_text("throws away what is on the slide now")
-                        .clicked()
-                    {
-                        let size = view.new_size;
-                        sim.new_slide(size, view.new_founders);
-                        // Look at it. The camera stays where it was told to be otherwise, and
-                        // making a sixteen-square slide while parked over the middle of a
-                        // five-hundred-square one leaves you staring at open water with no clue
-                        // that anything happened.
-                        view.centre = Vec2::splat(size as f32 / 2.0);
-                        view.zoom = (BASE_SCALE * 6.0 / size as f32).clamp(0.05, 40.0);
-                        ui.close();
-                    }
-                });
-                ui.menu_button("New scenario…", |ui| {
-                    ui.label("an empty slide, stopped, to build one on");
-                    ui.small(
-                        "No light gradient, no chemistry, no walls, nobody home. Paint what \
-                         you want on it with the tools, seed it, then Save below — and what \
-                         comes back when you open it is what you built.",
-                    );
-                    ranged_drag(ui, &mut view.new_size, 16..=1024, 4.0, "size  ", " squares");
-                    ui.separator();
-                    if ui
-                        .button("Create")
-                        .on_hover_text("throws away what is on the slide now")
-                        .clicked()
-                    {
-                        let size = view.new_size;
-                        sim.new_scenario(size);
-                        view.centre = Vec2::splat(size as f32 / 2.0);
-                        view.zoom = (BASE_SCALE * 6.0 / size as f32).clamp(0.05, 40.0);
-                        // Straight into the tool you need first: a blank slide is a slide with
-                        // nothing to select.
-                        view.tool = Tool::Paint;
-                        ui.close();
-                    }
-                });
-                ui.menu_button("Scenario library", |ui| {
-                    let found = library::scenarios();
-                    if found.is_empty() {
-                        ui.weak("no scenarios/ directory here");
-                    }
-                    for entry in found {
-                        if ui
-                            .button(&entry.label)
-                            .on_hover_text(entry.path.display().to_string())
-                            .clicked()
-                        {
-                            open_scenario(sim, view, &entry.path);
-                            ui.close();
-                        }
-                    }
-                });
+                if skin::menu_item(ui, "New slide…", "Ctrl+N").clicked() {
+                    view.sheet = Some(Sheet::NewSlide);
+                    ui.close();
+                }
+                if skin::menu_item(ui, "New scenario…", "").clicked() {
+                    view.sheet = Some(Sheet::NewScenario);
+                    ui.close();
+                }
+                if skin::menu_item(ui, "Scenario library…", "").clicked() {
+                    view.sheet = Some(Sheet::Library);
+                    ui.close();
+                }
                 ui.menu_button("Open scenario…", |ui| {
                     ui.label("a .ron, by path");
                     ui.text_edit_singleline(&mut view.file_path);

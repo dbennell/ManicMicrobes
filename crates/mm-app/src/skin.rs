@@ -93,6 +93,16 @@ fn dress(style: &mut egui::Style) {
     ]
     .into();
 
+    // No fades. egui animates a window in over its `animation_time`, and a sheet fading in over
+    // a lit microscope slide is transparent for every frame of the fade — which is exactly the
+    // ghost-text failure `docs/UI.md` §4 recorded when the parameter editor was a floating
+    // window. Nothing else in this interface animates and nothing wants to: a panel you can
+    // read the slide through is a panel you cannot read.
+    //
+    // It also makes a screenshot deterministic, which matters more here than in most
+    // applications, because several of this project's tests *are* screenshots.
+    style.animation_time = 0.0;
+
     let s = &mut style.spacing;
     // Tighter than egui's 8×3. The rails are lists of readings and the readings want to be
     // near each other; the air belongs between *groups*, which is what `SECTION_GAP` is for.
@@ -189,6 +199,27 @@ pub fn panel_frame() -> egui::Frame {
             right: 12,
             top: 9,
             bottom: 8,
+        })
+}
+
+/// The frame a sheet is drawn in: a filled, bordered, shadowed card over the slide.
+///
+/// **Explicit, because egui's default window frame draws no fill in this build.** `docs/UI.md`
+/// §4 already recorded this once — the parameter editor started as a floating window and came
+/// out as ghost text with cells swimming through it, over a lit microscope slide. A sheet is
+/// the same shape of thing over the same slide and inherits the same problem, so it inherits
+/// the same fix rather than rediscovering it.
+pub fn sheet_frame() -> egui::Frame {
+    egui::Frame::new()
+        .fill(col(Ground::Panel.rgb()))
+        .stroke(egui::Stroke::new(1.0, col(theme::RULE)))
+        .corner_radius(egui::CornerRadius::same(5))
+        .inner_margin(egui::Margin::symmetric(14, 12))
+        .shadow(egui::epaint::Shadow {
+            offset: [0, 10],
+            blur: 24,
+            spread: 0,
+            color: egui::Color32::from_black_alpha(180),
         })
 }
 
