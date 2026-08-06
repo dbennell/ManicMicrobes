@@ -26,6 +26,7 @@
 //! - [`wiki`] — the species wiki, the phylogenetic tree and the world timeline.
 //! - [`tools`] — tweezers and barriers: the one place that is *meant* to touch the world.
 //! - [`params`] — what the parameter editor calls each knob (M10.2).
+//! - [`theme`] — the palette and the type scale, as numbers rather than as a stylesheet.
 //! - [`ui`] — the shell: pointer routing, panel state, camera arithmetic.
 //! - [`threads`] — which cores rayon runs the simulation on.
 //!
@@ -52,6 +53,7 @@ pub mod optics;
 pub mod params;
 pub mod phantom;
 pub mod slide;
+pub mod theme;
 /// Rayon's pool, pinned to the cores worth having. A scheduling hint and nothing more.
 pub mod threads;
 pub mod tools;
