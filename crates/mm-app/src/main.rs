@@ -87,6 +87,8 @@ use bevy::mesh::Mesh2d;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::sprite_render::MeshMaterial2d;
 use bevy::window::PrimaryWindow;
+use bevy::window::SystemCursorIcon;
+use bevy::window::CursorIcon;
 use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 
 use mm_app::art;
@@ -1328,6 +1330,8 @@ struct View {
     /// Asked for by the window buttons, applied by `window_chrome`.
     want_minimise: bool,
     want_maximise: bool,
+    /// Which resize cursor is currently set, so it is only written when it changes.
+    cursor_edge: Option<SystemCursorIcon>,
     /// Where the caret was in the editor last frame, as a character index (M10.8).
     ///
     /// Last frame's, because the right rail is laid out beside the buffer and the buffer only
@@ -1457,6 +1461,7 @@ impl Default for View {
             on_edge: false,
             want_minimise: false,
             want_maximise: false,
+            cursor_edge: None,
             editor_caret: 0,
             sheet: None,
             library_pick: None,
@@ -3127,6 +3132,7 @@ fn window_chrome(
     buttons: Res<ButtonInput<MouseButton>>,
     mut window: Query<(Entity, &mut Window), With<PrimaryWindow>>,
     mut contexts: EguiContexts,
+    mut commands: Commands,
     // Forces this system onto the main thread, which is where the thread-local below lives.
     // Off it, `WINIT_WINDOWS` is a freshly constructed empty one and every lookup silently
     // misses — a window that cannot be moved and no error to say why.
@@ -3162,7 +3168,34 @@ fn window_chrome(
         (pointer.x, pointer.y),
         (size.x, size.y),
         ui::RESIZE_BAND,
+        ui::RESIZE_CORNER,
     );
+
+    // The cursor, which is the whole of how a frameless window's grab handles are discovered.
+    // Without it the band is findable only by somebody who already knows the number, which is
+    // what the first build of this was: it worked, and it took a minute of hunting to prove it.
+    let want = match edge {
+        Some(ui::Edge::North | ui::Edge::South) => Some(SystemCursorIcon::NsResize),
+        Some(ui::Edge::East | ui::Edge::West) => Some(SystemCursorIcon::EwResize),
+        Some(ui::Edge::NorthWest | ui::Edge::SouthEast) => Some(SystemCursorIcon::NwseResize),
+        Some(ui::Edge::NorthEast | ui::Edge::SouthWest) => Some(SystemCursorIcon::NeswResize),
+        None => None,
+    };
+    // Only on a change. `CursorIcon` is a component, and rewriting it every frame is a change
+    // detection storm that reaches the winit event loop sixty times a second to say the same
+    // thing.
+    if want != view.cursor_edge {
+        view.cursor_edge = want;
+        let mut cmd = commands.entity(entity);
+        match want {
+            Some(icon) => {
+                cmd.insert(CursorIcon::System(icon));
+            }
+            None => {
+                cmd.remove::<CursorIcon>();
+            }
+        }
+    }
 
     // Remembered so `handle_input` can refuse a press that belongs to the window frame — a drag
     // that starts on the edge must not also pan the slide behind it.
@@ -3731,7 +3764,19 @@ fn ranged_drag(
 fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut bool) {
     const LATER: &str = "M10.2 — configuration and slide files";
 
-    egui::Panel::top("menu_bar").show(root, |ui| {
+    egui::Panel::top("menu_bar")
+        // Taller than a bare menu bar, because it is not one any more: since M10.9 it is also
+        // the title bar, and the strip you drag a window by wants to be a strip rather than a
+        // line. Eight points either side of the row rather than egui's default two.
+        .frame(
+            skin::panel_frame().inner_margin(egui::Margin {
+                left: 8,
+                right: 8,
+                top: 8,
+                bottom: 8,
+            }),
+        )
+        .show(root, |ui| {
         // The bar's own rectangle, minus nothing: `window_chrome` only drags where egui did not
         // claim the pointer, so the gap between the menus and the transport is what is left and
         // is exactly the strip a title bar would be.

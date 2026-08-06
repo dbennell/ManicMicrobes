@@ -1197,21 +1197,31 @@ pub enum Edge {
     SouthWest,
 }
 
-/// How wide the grab band around a borderless window is, in points.
+/// How wide the grab band along a borderless window's *sides* is, in points.
 ///
-/// Six. Four is what most toolkits use and is a pixel-hunt on a high-DPI screen; ten starts
-/// stealing clicks from whatever is against the edge — which here is a rail full of readings.
-pub const RESIZE_BAND: f32 = 6.0;
+/// Eight. Six was the first guess and it is findable only if you already know it is there —
+/// which is the whole complaint about a window with no frame: a grab handle you cannot see has
+/// to be one you can hit without aiming.
+pub const RESIZE_BAND: f32 = 8.0;
+
+/// How far a *corner* reaches along each edge, in points.
+///
+/// Much larger than the side band, and every toolkit does this. A corner resizes both axes at
+/// once, so it is the one people reach for — and it is also the smallest target, because it is
+/// the intersection of two thin strips rather than the length of one. Making it an L twenty
+/// points long each way costs nothing: the pixels it takes from the sides still resize, just in
+/// one axis instead of two.
+pub const RESIZE_CORNER: f32 = 20.0;
 
 /// The edge under the pointer, if any.
 ///
 /// Corners win over sides, which is the whole reason this is a function and not two
-/// comparisons: inside the top-left square, both the north band and the west band contain the
+/// comparisons: inside the top-left region both the north band and the west band contain the
 /// pointer, and answering "north" there makes the corner impossible to grab diagonally.
 ///
 /// A window with no area has no edges rather than eight overlapping ones.
 #[must_use]
-pub fn resize_edge(pointer: (f32, f32), size: (f32, f32), band: f32) -> Option<Edge> {
+pub fn resize_edge(pointer: (f32, f32), size: (f32, f32), band: f32, corner: f32) -> Option<Edge> {
     let (x, y) = pointer;
     let (w, h) = size;
     if w <= 0.0 || h <= 0.0 || band <= 0.0 {
@@ -1226,15 +1236,30 @@ pub fn resize_edge(pointer: (f32, f32), size: (f32, f32), band: f32) -> Option<E
     if w < band * 2.0 || h < band * 2.0 {
         return None;
     }
-    let west = x <= band;
-    let east = x >= w - band;
-    let north = y <= band;
-    let south = y >= h - band;
+    // A corner may not eat more than a third of an edge, so there is always a middle third
+    // that resizes in one axis. Clamping to *half* — which was the first guess — leaves the two
+    // corners meeting exactly in the middle on a small window, and an edge with no side on it
+    // cannot be dragged in one axis at all.
+    let reach = corner.max(band).min(w / 3.0).min(h / 3.0);
+    let (west, east) = (x <= band, x >= w - band);
+    let (north, south) = (y <= band, y >= h - band);
+    let (near_west, near_east) = (x <= reach, x >= w - reach);
+    let (near_north, near_south) = (y <= reach, y >= h - reach);
+
+    // A corner is *either* strip within reach of the other axis — the L, not the small square
+    // where the two thin bands cross.
+    let corner_here = |a: bool, b: bool| a && b;
+    if corner_here(north || south, near_west || near_east)
+        || corner_here(west || east, near_north || near_south)
+    {
+        return Some(match (near_north, near_west) {
+            (true, true) => Edge::NorthWest,
+            (true, false) => Edge::NorthEast,
+            (false, true) => Edge::SouthWest,
+            (false, false) => Edge::SouthEast,
+        });
+    }
     match (north, south, east, west) {
-        (true, _, true, _) => Some(Edge::NorthEast),
-        (true, _, _, true) => Some(Edge::NorthWest),
-        (_, true, true, _) => Some(Edge::SouthEast),
-        (_, true, _, true) => Some(Edge::SouthWest),
         (true, ..) => Some(Edge::North),
         (_, true, ..) => Some(Edge::South),
         (_, _, true, _) => Some(Edge::East),
@@ -1248,58 +1273,79 @@ mod edge_tests {
     use super::*;
 
     const SIZE: (f32, f32) = (1280.0, 720.0);
-    const BAND: f32 = 6.0;
+    const BAND: f32 = RESIZE_BAND;
+    const CORNER: f32 = RESIZE_CORNER;
+
+    fn at(x: f32, y: f32) -> Option<Edge> {
+        resize_edge((x, y), SIZE, BAND, CORNER)
+    }
 
     #[test]
     fn the_middle_of_the_window_is_not_an_edge() {
-        assert_eq!(resize_edge((640.0, 360.0), SIZE, BAND), None);
+        assert_eq!(at(640.0, 360.0), None);
     }
 
     #[test]
     fn each_side_is_its_own_edge() {
-        assert_eq!(resize_edge((640.0, 1.0), SIZE, BAND), Some(Edge::North));
-        assert_eq!(resize_edge((640.0, 719.0), SIZE, BAND), Some(Edge::South));
-        assert_eq!(resize_edge((1279.0, 360.0), SIZE, BAND), Some(Edge::East));
-        assert_eq!(resize_edge((1.0, 360.0), SIZE, BAND), Some(Edge::West));
+        assert_eq!(at(640.0, 1.0), Some(Edge::North));
+        assert_eq!(at(640.0, 719.0), Some(Edge::South));
+        assert_eq!(at(1279.0, 360.0), Some(Edge::East));
+        assert_eq!(at(1.0, 360.0), Some(Edge::West));
     }
 
     #[test]
     fn a_corner_beats_the_two_sides_that_meet_there() {
-        // The reason this is a function. Inside the top-left square the pointer is in the north
-        // band *and* the west band, and answering "north" makes the corner undraggable.
-        assert_eq!(resize_edge((2.0, 2.0), SIZE, BAND), Some(Edge::NorthWest));
-        assert_eq!(resize_edge((1278.0, 2.0), SIZE, BAND), Some(Edge::NorthEast));
-        assert_eq!(resize_edge((2.0, 718.0), SIZE, BAND), Some(Edge::SouthWest));
-        assert_eq!(
-            resize_edge((1278.0, 718.0), SIZE, BAND),
-            Some(Edge::SouthEast)
-        );
+        assert_eq!(at(2.0, 2.0), Some(Edge::NorthWest));
+        assert_eq!(at(1278.0, 2.0), Some(Edge::NorthEast));
+        assert_eq!(at(2.0, 718.0), Some(Edge::SouthWest));
+        assert_eq!(at(1278.0, 718.0), Some(Edge::SouthEast));
+    }
+
+    #[test]
+    fn a_corner_is_an_l_and_not_the_little_square_where_two_bands_cross() {
+        // The fix for a corner nobody could hit. Fifteen points along the top edge is past the
+        // eight-point west band, so the small-square version answered `North` there and the
+        // diagonal resize was a four-by-four pixel target.
+        assert_eq!(at(15.0, 3.0), Some(Edge::NorthWest));
+        assert_eq!(at(3.0, 15.0), Some(Edge::NorthWest));
+        assert_eq!(at(1265.0, 717.0), Some(Edge::SouthEast));
+        // And past the corner's reach it is a side again.
+        assert_eq!(at(40.0, 3.0), Some(Edge::North));
+        assert_eq!(at(3.0, 40.0), Some(Edge::West));
     }
 
     #[test]
     fn the_band_is_the_width_it_says_it_is() {
-        // On the band is in; one point past it is out. A band that is off by one is a band
-        // people miss.
-        assert_eq!(resize_edge((BAND, 360.0), SIZE, BAND), Some(Edge::West));
-        assert_eq!(resize_edge((BAND + 1.0, 360.0), SIZE, BAND), None);
+        assert_eq!(at(BAND, 360.0), Some(Edge::West));
+        assert_eq!(at(BAND + 1.0, 360.0), None);
     }
 
     #[test]
     fn outside_the_window_belongs_to_whatever_is_out_there() {
-        assert_eq!(resize_edge((-1.0, 360.0), SIZE, BAND), None);
-        assert_eq!(resize_edge((640.0, 721.0), SIZE, BAND), None);
+        assert_eq!(at(-1.0, 360.0), None);
+        assert_eq!(at(640.0, 721.0), None);
     }
 
     #[test]
     fn a_window_too_small_to_have_two_bands_has_none() {
-        // Every point in it would be both edges at once, and resizing the wrong way is worse
-        // than not resizing.
-        assert_eq!(resize_edge((5.0, 5.0), (10.0, 10.0), BAND), None);
-        assert_eq!(resize_edge((5.0, 5.0), (0.0, 0.0), BAND), None);
+        assert_eq!(resize_edge((5.0, 5.0), (10.0, 10.0), BAND, CORNER), None);
+        assert_eq!(resize_edge((5.0, 5.0), (0.0, 0.0), BAND, CORNER), None);
+    }
+
+    #[test]
+    fn a_corner_reach_wider_than_the_window_does_not_swallow_the_sides() {
+        // Clamped to half, or a small window is nothing but corners and cannot be resized in
+        // one axis at all.
+        let small = (60.0, 60.0);
+        assert_eq!(resize_edge((30.0, 1.0), small, BAND, 200.0), Some(Edge::North));
+        assert_eq!(
+            resize_edge((1.0, 1.0), small, BAND, 200.0),
+            Some(Edge::NorthWest)
+        );
     }
 
     #[test]
     fn a_bandless_window_cannot_be_grabbed_anywhere() {
-        assert_eq!(resize_edge((0.0, 0.0), SIZE, 0.0), None);
+        assert_eq!(resize_edge((0.0, 0.0), SIZE, 0.0, CORNER), None);
     }
 }

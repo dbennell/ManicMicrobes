@@ -1334,11 +1334,16 @@ than adding one.
 `winit` has `drag_window` and `drag_resize_window`, both supported on X11 and Wayland (only
 macOS lacks the second). They hand the gesture to the window manager, so snapping, tiling, the
 drop shadow, the minimum size and the multi-monitor arithmetic stay somebody else's and stay
-correct. What is ours is the decision of *when* to hand over, which is a hit test:
-`ui::resize_edge`, six points of band, corners taking precedence over the sides that meet there.
-
+correct. What is ours is the decision of *when* to hand over, which is a hit test: `ui::resize_edge`.
 Pure and tested, because a corner that answers "north" cannot be dragged diagonally and that is
 not a thing anyone would find except by trying it.
+
+**A corner is an L, not the little square where two thin bands cross.** Six points of band with
+corners at the intersection worked and was a four-by-four-pixel target — findable only by
+somebody who already knew the number. Sides are eight points; a corner reaches twenty along each
+edge, capped at a third of it so there is always a middle that resizes in one axis. And the
+cursor changes, which is the whole of how a frameless window's handles are discovered: without
+it the band is a secret, whatever its width.
 
 Two orderings matter. `window_chrome` runs **after** the interface, so it cannot steal a press
 egui wanted — the rails go right to the edge, and six points is the difference between grabbing
