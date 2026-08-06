@@ -128,6 +128,11 @@ impl Buffers {
     ///
     /// Four vertices and six indices each, so a burst of divisions does not reallocate
     /// mid-frame.
+    ///
+    /// **The clear is load-bearing and not merely tidy.** `cellpipe::upload` hands these vectors
+    /// to the mesh and takes the mesh's back rather than copying, so on arrival here they hold
+    /// the frame before last — full, and with its allocation, which is the point. Pushing
+    /// without this appends to a frame that is already on screen.
     pub fn begin(&mut self, expect: usize) {
         self.clear();
         self.positions.reserve(expect * 4);

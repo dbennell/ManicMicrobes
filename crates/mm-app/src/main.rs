@@ -2740,19 +2740,23 @@ fn redraw(
         }
     }
 
-    for (mesh_handle, mut visibility) in &mut cell_mesh {
-        let Some(mut mesh) = meshes.get_mut(&mesh_handle.0) else {
-            continue;
-        };
-        let buffers = &art_handles.cells;
-        *visibility = if buffers.cells() == 0 {
-            // An empty mesh is a validation error in some backends and a wasted draw in the
-            // rest. A slide with nothing alive on it simply does not draw the layer.
-            Visibility::Hidden
-        } else {
-            Visibility::Visible
-        };
-        cellpipe::upload(&mut mesh, buffers);
+    // One mesh, and it now has to be exactly one rather than merely happening to be: `upload`
+    // swaps the vertices across instead of copying them, so a second entity reaching this would
+    // be handed the frame *before* last. `setup` spawns one, and this is the line that has to
+    // change if that ever stops being true.
+    if let Ok((mesh_handle, mut visibility)) = cell_mesh.single_mut() {
+        if let Some(mut mesh) = meshes.get_mut(&mesh_handle.0) {
+            let buffers = &mut art_handles.cells;
+            // Asked before the swap, because after it the buffers hold the last frame.
+            *visibility = if buffers.cells() == 0 {
+                // An empty mesh is a validation error in some backends and a wasted draw in the
+                // rest. A slide with nothing alive on it simply does not draw the layer.
+                Visibility::Hidden
+            } else {
+                Visibility::Visible
+            };
+            cellpipe::upload(&mut mesh, buffers);
+        }
     }
 
     // Junctions. A stretched, rotated sprite per link: hard ones solid because they are

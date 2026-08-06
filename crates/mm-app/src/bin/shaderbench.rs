@@ -435,9 +435,11 @@ fn redraw(
         }
     }
 
-    for handle in &mesh {
+    // Exactly one, as in the microscope and for the same reason: `upload` swaps the vertices
+    // across rather than copying them, so a second mesh here would get the frame before last.
+    if let Ok(handle) = mesh.single() {
         if let Some(mut m) = meshes.get_mut(&handle.0) {
-            cellpipe::upload(&mut m, &state.buffers);
+            cellpipe::upload(&mut m, &mut state.buffers);
         }
     }
 }

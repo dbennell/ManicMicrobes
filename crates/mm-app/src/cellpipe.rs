@@ -12,7 +12,7 @@
 //! reason `lib.rs` gives.
 
 use bevy::asset::{load_internal_asset, uuid_handle, RenderAssetUsages};
-use bevy::mesh::{Indices, MeshVertexAttribute, MeshVertexBufferLayoutRef};
+use bevy::mesh::{Indices, MeshVertexAttribute, MeshVertexBufferLayoutRef, VertexAttributeValues};
 use bevy::prelude::*;
 use bevy::render::render_resource::{
     AsBindGroup, PrimitiveTopology, RenderPipelineDescriptor, SpecializedMeshPipelineError,
@@ -231,18 +231,262 @@ pub fn empty_mesh() -> Mesh {
     mesh
 }
 
-/// Put one frame's worth of vertices into the mesh.
-pub fn upload(mesh: &mut Mesh, buffers: &cellmesh::Buffers) {
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, buffers.positions.clone());
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, buffers.uvs.clone());
-    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, buffers.colours.clone());
-    mesh.insert_attribute(ATTRIBUTE_SHAPE, buffers.shapes.clone());
-    mesh.insert_attribute(ATTRIBUTE_SQUASH_DIR, buffers.squash_dirs.clone());
-    mesh.insert_attribute(ATTRIBUTE_SQUASH_FACE, buffers.squash_faces.clone());
-    mesh.insert_attribute(ATTRIBUTE_SQUASH_DIR2, buffers.squash_dirs2.clone());
-    mesh.insert_attribute(ATTRIBUTE_SQUASH_FACE2, buffers.squash_faces2.clone());
-    mesh.insert_attribute(ATTRIBUTE_SQUASH_DIR3, buffers.squash_dirs3.clone());
-    mesh.insert_attribute(ATTRIBUTE_SQUASH_FACE3, buffers.squash_faces3.clone());
-    mesh.insert_attribute(ATTRIBUTE_SWELL, buffers.swells.clone());
-    mesh.insert_indices(Indices::U32(buffers.indices.clone()));
+/// Hand one attribute's vector to the mesh and take the mesh's back, or insert it if the mesh
+/// has not got that attribute at all.
+///
+/// The insert cannot be reached through [`empty_mesh`], which puts every attribute in at the
+/// format the layout asks for. It is here because the alternative to guessing wrong is an
+/// attribute left silently empty, and a mesh whose attributes disagree in length does not draw —
+/// several layers away from whichever line was wrong. One copy is a better failure than that.
+fn swap_attribute<T>(
+    mesh: &mut Mesh,
+    attribute: MeshVertexAttribute,
+    mine: &mut Vec<T>,
+    theirs: fn(&mut VertexAttributeValues) -> Option<&mut Vec<T>>,
+) where
+    Vec<T>: Into<VertexAttributeValues>,
+{
+    // The borrow of `mesh` has to end before the fallback can take it again, so the match
+    // yields a `bool` rather than wrapping the insert in its own arm.
+    let swapped = match mesh.attribute_mut(attribute).and_then(theirs) {
+        Some(slot) => {
+            std::mem::swap(slot, mine);
+            true
+        }
+        None => false,
+    };
+    if !swapped {
+        mesh.insert_attribute(attribute, std::mem::take(mine));
+    }
+}
+
+/// [`swap_attribute`] with the variant to unwrap, since every one of them is the same four lines.
+macro_rules! swap_attribute {
+    ($mesh:expr, $attribute:expr, $variant:ident, $mine:expr) => {
+        swap_attribute($mesh, $attribute, $mine, |values| match values {
+            VertexAttributeValues::$variant(vec) => Some(vec),
+            _ => None,
+        })
+    };
+}
+
+/// Give the mesh one frame's worth of vertices, and take the last frame's back.
+///
+/// **A swap and not a copy, and that is the whole point of it.** `insert_attribute` takes its
+/// values by value, so this was eleven `clone()`s — which allocated and copied the entire
+/// population every frame and then dropped the lot. At 152 bytes a vertex over four vertices a
+/// cell that is 10 MB a frame at sixteen thousand cells and 32 MB at fifty thousand, none of
+/// which the renderer ever needed a second copy of.
+///
+/// Bevy then re-packs those attributes into one interleaved buffer and uploads them, and that
+/// cost is real and is not avoidable from here. The clone was the half that bought nothing.
+///
+/// What comes back in `buffers` is the *previous* frame's vertices, still allocated. That is not
+/// a leftover to be tidied away: it is the allocation the next frame gets built in, so a steady
+/// population allocates nothing at all after the first couple of frames — the two sets of
+/// vectors ping-pong between the mesh and the caller, each holding the high-water mark.
+///
+/// The contract that makes it safe is [`cellmesh::Buffers::begin`], which clears before it
+/// fills. Every caller goes through it, directly or through [`cellmesh::build`]. A caller that
+/// pushed without it would be appending to the frame before last.
+pub fn upload(mesh: &mut Mesh, buffers: &mut cellmesh::Buffers) {
+    swap_attribute!(
+        mesh,
+        Mesh::ATTRIBUTE_POSITION,
+        Float32x3,
+        &mut buffers.positions
+    );
+    swap_attribute!(mesh, Mesh::ATTRIBUTE_UV_0, Float32x2, &mut buffers.uvs);
+    swap_attribute!(mesh, Mesh::ATTRIBUTE_COLOR, Float32x4, &mut buffers.colours);
+    swap_attribute!(mesh, ATTRIBUTE_SHAPE, Float32x4, &mut buffers.shapes);
+    swap_attribute!(
+        mesh,
+        ATTRIBUTE_SQUASH_DIR,
+        Float32x4,
+        &mut buffers.squash_dirs
+    );
+    swap_attribute!(
+        mesh,
+        ATTRIBUTE_SQUASH_FACE,
+        Float32x4,
+        &mut buffers.squash_faces
+    );
+    swap_attribute!(
+        mesh,
+        ATTRIBUTE_SQUASH_DIR2,
+        Float32x4,
+        &mut buffers.squash_dirs2
+    );
+    swap_attribute!(
+        mesh,
+        ATTRIBUTE_SQUASH_FACE2,
+        Float32x4,
+        &mut buffers.squash_faces2
+    );
+    swap_attribute!(
+        mesh,
+        ATTRIBUTE_SQUASH_DIR3,
+        Float32x4,
+        &mut buffers.squash_dirs3
+    );
+    swap_attribute!(
+        mesh,
+        ATTRIBUTE_SQUASH_FACE3,
+        Float32x4,
+        &mut buffers.squash_faces3
+    );
+    swap_attribute!(mesh, ATTRIBUTE_SWELL, Float32, &mut buffers.swells);
+
+    // Indices are not an attribute and have their own accessor, but the same trade.
+    let swapped = match mesh.indices_mut() {
+        Some(Indices::U32(theirs)) => {
+            std::mem::swap(theirs, &mut buffers.indices);
+            true
+        }
+        _ => false,
+    };
+    if !swapped {
+        mesh.insert_indices(Indices::U32(std::mem::take(&mut buffers.indices)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cellmesh::{Buffers, Placed, Shape};
+
+    /// `n` quads, each carrying `mark` everywhere a number will fit, so that a frame can be told
+    /// apart from the one before it by looking at any attribute.
+    fn frame(buffers: &mut Buffers, n: usize, mark: f32) {
+        buffers.begin(n);
+        for i in 0..n {
+            buffers.push(Placed {
+                x: mark + i as f32,
+                y: mark,
+                half: 1.0,
+                rgba: [mark; 4],
+                shape: Shape {
+                    seed: mark,
+                    softness: 0.0,
+                    integrity: 1.0,
+                    rounded: 1.0,
+                },
+                squash: Default::default(),
+                swell: mark,
+            });
+        }
+    }
+
+    fn positions(mesh: &Mesh) -> Vec<[f32; 3]> {
+        match mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
+            Some(VertexAttributeValues::Float32x3(v)) => v.clone(),
+            other => panic!("positions are not Float32x3: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_mesh_gets_the_frame_it_was_given() {
+        let mut mesh = empty_mesh();
+        let mut buffers = Buffers::default();
+        frame(&mut buffers, 3, 1.0);
+        let want = buffers.positions.clone();
+        upload(&mut mesh, &mut buffers);
+        assert_eq!(positions(&mesh), want);
+    }
+
+    #[test]
+    fn the_mesh_gets_this_frame_and_never_the_last_one() {
+        // The failure the swap makes possible, and the reason it is worth a test: the vectors
+        // that arrive back from the mesh are full, so a frame built without clearing them —
+        // or handed to a second mesh — is last frame's cells, on screen, one behind.
+        let mut mesh = empty_mesh();
+        let mut buffers = Buffers::default();
+        frame(&mut buffers, 3, 1.0);
+        upload(&mut mesh, &mut buffers);
+
+        frame(&mut buffers, 3, 2.0);
+        let want = buffers.positions.clone();
+        upload(&mut mesh, &mut buffers);
+
+        assert_eq!(positions(&mesh), want);
+        // And again on an attribute the quad's corners do not move: a position is the centre
+        // plus or minus `half`, so it can never read back as the mark itself.
+        let swells = match mesh.attribute(ATTRIBUTE_SWELL) {
+            Some(VertexAttributeValues::Float32(v)) => v.clone(),
+            other => panic!("swells are not Float32: {other:?}"),
+        };
+        assert!(
+            swells.iter().all(|s| *s == 2.0),
+            "the mesh is holding a frame it was not given: {swells:?}"
+        );
+    }
+
+    #[test]
+    fn every_attribute_arrives_and_they_all_agree_in_length() {
+        // A mesh whose attributes disagree is a validation error at draw time, several layers
+        // from whichever swap was forgotten. Eleven of them and one set of indices.
+        let mut mesh = empty_mesh();
+        let mut buffers = Buffers::default();
+        frame(&mut buffers, 5, 1.0);
+        upload(&mut mesh, &mut buffers);
+
+        let n = 5 * 4;
+        for id in [
+            Mesh::ATTRIBUTE_POSITION,
+            Mesh::ATTRIBUTE_UV_0,
+            Mesh::ATTRIBUTE_COLOR,
+            ATTRIBUTE_SHAPE,
+            ATTRIBUTE_SQUASH_DIR,
+            ATTRIBUTE_SQUASH_FACE,
+            ATTRIBUTE_SQUASH_DIR2,
+            ATTRIBUTE_SQUASH_FACE2,
+            ATTRIBUTE_SQUASH_DIR3,
+            ATTRIBUTE_SQUASH_FACE3,
+            ATTRIBUTE_SWELL,
+        ] {
+            let values = mesh
+                .attribute(id)
+                .unwrap_or_else(|| panic!("{} never reached the mesh", id.name));
+            assert_eq!(values.len(), n, "{} is the wrong length", id.name);
+        }
+        assert_eq!(mesh.indices().map(bevy::mesh::Indices::len), Some(5 * 6));
+    }
+
+    #[test]
+    fn a_shrinking_frame_does_not_leave_the_tail_of_a_larger_one() {
+        let mut mesh = empty_mesh();
+        let mut buffers = Buffers::default();
+        frame(&mut buffers, 9, 1.0);
+        upload(&mut mesh, &mut buffers);
+        frame(&mut buffers, 2, 2.0);
+        upload(&mut mesh, &mut buffers);
+        assert_eq!(positions(&mesh).len(), 2 * 4);
+        assert_eq!(mesh.indices().map(bevy::mesh::Indices::len), Some(2 * 6));
+    }
+
+    #[test]
+    fn a_steady_population_stops_allocating() {
+        // The reason for the swap rather than a `take`: both sets of vectors keep their
+        // allocation, so after they have both been grown once nothing is asked of the allocator
+        // again. A `take` would leave the caller empty and reallocate the lot every frame.
+        let mut mesh = empty_mesh();
+        let mut buffers = Buffers::default();
+        for mark in 0..4 {
+            frame(&mut buffers, 64, mark as f32);
+            upload(&mut mesh, &mut buffers);
+        }
+        let settled: Vec<usize> = (0..4)
+            .map(|mark| {
+                frame(&mut buffers, 64, mark as f32);
+                let capacity = buffers.positions.capacity();
+                upload(&mut mesh, &mut buffers);
+                capacity
+            })
+            .collect();
+        assert!(
+            settled.windows(2).all(|w| w[0] == w[1]),
+            "the buffers are still growing after four frames of the same size: {settled:?}"
+        );
+        assert!(settled[0] >= 64 * 4);
+    }
 }
