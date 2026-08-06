@@ -318,6 +318,33 @@ pub fn zoom_about(
     (centre.0 + offset.0 * shift, centre.1 + offset.1 * shift)
 }
 
+/// The least height a docked rail can be given and still be worth drawing.
+///
+/// Two rows of readings and a section header. Below this a rail is a sliver you cannot read and
+/// cannot resize, and its scrollbar is longer than its contents.
+pub const RAIL_MIN_HEIGHT: f32 = 48.0;
+
+/// Whether the rails should be drawn at all, given what the drawer has left them.
+///
+/// # The artefact this exists to prevent
+///
+/// The drawer can be dragged until it fills the window, which is the right thing to be able to
+/// do — a genome listing or a parameter table wants every pixel. But the rails are laid out
+/// *after* the drawer, so when it takes everything they are handed a region of zero or negative
+/// height, and a rectangle whose top is below its bottom is inverted rather than empty.
+///
+/// egui draws a resizable panel's separator along that rectangle's cross range, and an inverted
+/// range still has two ends: the line comes out spanning the full height of the window,
+/// straight down through the drawer, at the x the rail would have had. A stripe through the
+/// middle of the pane you just expanded, belonging to a panel that is not on screen.
+///
+/// So the rail goes rather than shrinking. A rail with no room is not a thin rail, it is no
+/// rail, and saying so here is what keeps `panels` from drawing one.
+#[must_use]
+pub fn rails_fit(available_height: f32) -> bool {
+    available_height >= RAIL_MIN_HEIGHT
+}
+
 /// How wide a scale bar should be, and what it measures.
 ///
 /// Returns `(squares, pixels)`: how many substrate squares the bar spans, and how long to draw
@@ -745,6 +772,26 @@ mod tests {
                 _ => assert_eq!(dock, Dock::Drawer, "{} is not in the drawer", panel.title()),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod rail_tests {
+    use super::*;
+
+    #[test]
+    fn a_rail_with_no_room_is_not_drawn_at_all() {
+        // The drawer dragged to fill the window. Zero is the boundary case; negative is what
+        // actually happens, because the drawer is allowed to ask for more than is left.
+        assert!(!rails_fit(0.0));
+        assert!(!rails_fit(-120.0));
+        assert!(!rails_fit(RAIL_MIN_HEIGHT - 1.0));
+    }
+
+    #[test]
+    fn an_ordinary_window_has_room_for_its_rails() {
+        assert!(rails_fit(RAIL_MIN_HEIGHT));
+        assert!(rails_fit(640.0));
     }
 }
 

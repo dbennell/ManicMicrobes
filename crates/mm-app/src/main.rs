@@ -3008,7 +3008,13 @@ fn panels(
     }
     drawer(&mut root, &mut sim, &mut view);
 
-    if view.panels.cell {
+    // What the drawer left. The rails come last, so this is their whole allowance — and when
+    // the drawer has been dragged to fill the window it is zero or less, at which point a rail
+    // must not be added at all. See [`ui::rails_fit`] for the stripe that turns up if it is.
+    let room = root.available_rect_before_wrap().height();
+    let rails = ui::rails_fit(room);
+
+    if view.panels.cell && rails {
         egui::Panel::left("rail_left")
             .resizable(true)
             .default_size(270.0)
@@ -3018,7 +3024,7 @@ fn panels(
                 egui::ScrollArea::vertical().show(ui, |ui| cell_body(ui, &mut sim, &mut view));
             });
     }
-    if view.panels.metrics || view.panels.legend {
+    if (view.panels.metrics || view.panels.legend) && rails {
         egui::Panel::right("rail_right")
             .resizable(true)
             .default_size(260.0)
@@ -3654,38 +3660,67 @@ fn status_bar(
                     // together (`docs/MILESTONES.md`). Until M10.1 there was only one number
                     // here and it was both of them at once, which is how a slow tick and a slow
                     // frame became indistinguishable.
+                    // Padded to a fixed number of characters, which in a monospace face is a
+                    // fixed width. These are laid out right to left, so anything that changes
+                    // width shoves everything to its left along with it — and the frame rate
+                    // changes every frame, so the magnification, the level of detail and the
+                    // scale bar all shuffled sideways continuously while you watched. A
+                    // reading you cannot look at because it will not stay still is not a
+                    // reading. The padding is generous rather than exact: it only has to be
+                    // wide enough that the common case never grows.
                     let fps = diagnostics
                         .get(&FrameTimeDiagnosticsPlugin::FPS)
                         .and_then(Diagnostic::smoothed)
                         .unwrap_or(0.0);
-                    ui.label(skin::text(
-                        Role::Label,
-                        format!("{:.0} fps · {} t/s", fps, sim.engine.ticks_per_second()),
-                    ))
-                    .on_hover_text(
-                        "frames a second and ticks a second, measured separately. The working \
-                         target is 50,000 cells at 30 of each.",
-                    );
+                    // Fixed-width cells, so that a frame rate that changes every frame does not
+                    // drag everything to its left along with it. See `skin::fixed_width`.
+                    skin::fixed_width(ui, RATE_WIDTH, |ui| {
+                        ui.label(skin::text(
+                            Role::Label,
+                            format!("{fps:.0} fps · {} t/s", sim.engine.ticks_per_second()),
+                        ))
+                        .on_hover_text(
+                            "frames a second and ticks a second, measured separately. The \
+                             working target is 50,000 cells at 30 of each.",
+                        );
+                    });
                     tick(ui);
-                    ui.label(skin::text(
-                        Role::Label,
-                        match frame.lod {
-                            Lod::Dots => "points",
-                            Lod::Packed => "packed",
-                            Lod::Organelles => "organelles",
-                            Lod::Full => "full",
-                        },
-                    ));
+                    skin::fixed_width(ui, LOD_WIDTH, |ui| {
+                        ui.label(skin::text(
+                            Role::Label,
+                            match frame.lod {
+                                Lod::Dots => "points",
+                                Lod::Packed => "packed",
+                                Lod::Organelles => "organelles",
+                                Lod::Full => "full",
+                            },
+                        ));
+                    });
                     tick(ui);
                     // Magnification is reported the way the objective would: relative to the
                     // base scale, so "1×" is one substrate square to eight pixels.
-                    ui.label(skin::text(Role::Label, format!("{:.0}×", view.zoom * 100.0)));
+                    skin::fixed_width(ui, ZOOM_WIDTH, |ui| {
+                        ui.label(skin::text(
+                            Role::Label,
+                            format!("{:.0}×", view.zoom * 100.0),
+                        ));
+                    });
                     ui.add_space(8.0);
                     scale_bar(ui, BASE_SCALE * view.zoom);
                 });
             });
         });
 }
+
+/// How wide the status bar's volatile readings are held at, in points.
+///
+/// Wide enough for the worst case each can reach — `1234 fps · 99999 t/s`, `organelles`,
+/// `4000×`, `500 squares` — because a cell that is not wide enough for its contents grows, and
+/// a cell that grows is the thing these exist to prevent.
+const RATE_WIDTH: f32 = 138.0;
+const LOD_WIDTH: f32 = 72.0;
+const ZOOM_WIDTH: f32 = 40.0;
+const SQUARES_WIDTH: f32 = 80.0;
 
 /// A separator between two readings in the status bar: a short vertical tick, not a full-height
 /// rule, so the bar reads as one line of readings rather than as a row of boxes.
@@ -3703,12 +3738,20 @@ fn tick(ui: &mut egui::Ui) {
 /// `docs/UI.md` §2 sketches — see [`ui::scale_bar`] for why that is not a detail.
 fn scale_bar(ui: &mut egui::Ui, pixels_per_square: f32) {
     const ROOM: f32 = 112.0;
+
     let (squares, length) = ui::scale_bar(pixels_per_square, ROOM);
     let length = length.min(ROOM);
-    ui.label(skin::text(
-        Role::Label,
-        format!("{squares} {}", if squares == 1 { "square" } else { "squares" }),
-    ));
+    skin::fixed_width(ui, SQUARES_WIDTH, |ui| {
+        // Fixed for the same reason the readings beside it are: the count changes as you zoom,
+        // and a zoom is a continuous drag.
+        ui.label(skin::text(
+            Role::Label,
+            format!(
+                "{squares} {}",
+                if squares == 1 { "square" } else { "squares" }
+            ),
+        ));
+    });
     ui.add_space(6.0);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(length, 9.0), egui::Sense::hover());
     let ink = skin::col(theme::DIM);

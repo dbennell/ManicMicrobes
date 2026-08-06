@@ -192,6 +192,30 @@ pub fn panel_frame() -> egui::Frame {
         })
 }
 
+/// A cell of exactly `width`, with its contents against the right of it.
+///
+/// For a reading that changes width while you watch. The status bar's right-hand run is laid
+/// out right to left, so anything that grows or shrinks shoves everything to its left along
+/// with it — and the frame rate changes every frame, which set the magnification, the level of
+/// detail and the scale bar shuffling sideways continuously. A reading you cannot look at
+/// because it will not hold still is not a reading.
+///
+/// An allocated width and not a padded string, which was the first attempt and does not work:
+/// `format!("{:>19}", …)` pins the character count, but egui does not give the leading spaces
+/// their width, so a two-digit frame rate still came out a character narrower than a
+/// three-digit one and the whole run moved.
+pub fn fixed_width<R>(ui: &mut egui::Ui, width: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, ui.available_height()),
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| {
+            ui.set_min_width(width);
+            add(ui)
+        },
+    )
+    .inner
+}
+
 /// A group's name, above the group.
 ///
 /// The cheapest legibility in the design: a rail of undifferentiated rows becomes four named
