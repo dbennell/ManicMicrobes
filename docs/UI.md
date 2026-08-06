@@ -87,22 +87,24 @@ layout mode before the first one has been used is how both end up mediocre.
 ### The menu bar
 
 ```
-File      New slide…              Ctrl+N      from a scenario
+File      MAKE
+          New slide…              Ctrl+N      a lit dish, seeded, that runs
+          New scenario…                       an empty stopped slide to build one on
+          Reseed                  R           the same recipe again, differently
+          ──
+          SCENARIOS — THE RECIPE
+          Scenario library…                   whatever is in scenarios/, read on selection
+          Open scenario…                      .ron, by path
+          Save scenario…          S           opens the scenario pane, which holds the path
+                                              field and the RON that saving will write
+          ──
+          SLIDES — THE WORLD AS IT STANDS
           Open slide…             Ctrl+O      .mmslide, resumes where it was saved
           Save slide              Ctrl+S
-          Save slide as…          Ctrl+Shift+S
-          Recent slides           ▸
-          ──
-          Export                  ▸           species archive · metrics · genome · screenshot
+          Save slide as…
+          Export…                             species archive · metrics · genome · screenshot
           ──
           Quit                    Ctrl+Q
-
-Slide     Scenario library        ▸           whatever is in scenarios/, by name
-          Open scenario…                      .ron, by path
-          Parameters…             ,           the editor described in §4
-          Save parameters as…                 the running world's config, back out as .ron
-          ──
-          Reseed                  R
 
 View      Panels                  ▸           cell · metrics · legend · genome · ecology ·
                                               parameters · editor · debugger
@@ -133,6 +135,14 @@ Help      Keys
 Every keyboard shortcut already in `handle_input` appears next to its menu item, and no
 shortcut exists that is not in a menu. The current build has fourteen single-key bindings and
 no way to discover any of them.
+
+**There is no Slide menu either, and the merge fixed three things rather than tidying one.**
+File and Slide were both about documents — a scenario is a recipe and a slide is a state, and
+both are files — so the split was never on a real seam. Between them they had `New slide…
+Ctrl+N` **twice**, once live in Slide and once dead in File under an M10.2 placeholder;
+`Parameters…` in Slide as well as in View, which lists it because it is a panel; and a
+`Save parameters as…` which wrote the *whole scenario* under the name of one part of it, and
+which the scenario pane of §9.2 now does properly and with a preview of the file.
 
 **There is no Simulation menu, and that is deliberate.** It held Run/Pause, Step and a Speed
 submenu, and the transport in the same bar — four inches to the right of it — held all four of

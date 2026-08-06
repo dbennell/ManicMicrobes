@@ -3784,21 +3784,12 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
         view.title_bar = Rect::new(bar.min.x, bar.min.y, bar.max.x, bar.max.y);
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
-                skin::menu_caption(ui, "slide files");
-                soon(ui, "New slide…", "Ctrl+N", LATER);
-                soon(ui, "Open slide…", "Ctrl+O", LATER);
-                soon(ui, "Save slide", "Ctrl+S", LATER);
-                soon(ui, "Save slide as…", "", LATER);
-                skin::menu_rule(ui);
-                soon(ui, "Export…", "", LATER);
-                skin::menu_rule(ui);
-                if skin::menu_item(ui, "Quit", "Ctrl+Q").clicked() {
-                    *quit = true;
-                    ui.close();
-                }
-            });
-
-            ui.menu_button("Slide", |ui| {
+                // One menu for documents, both kinds of them (M10.9). This was two — a File
+                // menu whose every item was disabled, and a Slide menu that did the work — and
+                // between them they had `New slide… Ctrl+N` *twice*, once live and once dead,
+                // `Parameters…` in a second place View already listed, and a `Save parameters
+                // as…` that saved the whole scenario and was named for a part of it.
+                skin::menu_caption(ui, "make");
                 if skin::menu_item(ui, "New slide…", "Ctrl+N").clicked() {
                     view.sheet = Some(Sheet::NewSlide);
                     ui.close();
@@ -3807,6 +3798,13 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                     view.sheet = Some(Sheet::NewScenario);
                     ui.close();
                 }
+                if skin::menu_item(ui, "Reseed", "R").clicked() {
+                    sim.reseed();
+                    ui.close();
+                }
+
+                skin::menu_rule(ui);
+                skin::menu_caption(ui, "scenarios — the recipe");
                 if skin::menu_item(ui, "Scenario library…", "").clicked() {
                     view.sheet = Some(Sheet::Library);
                     ui.close();
@@ -3820,68 +3818,25 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                         ui.close();
                     }
                 });
-                if ui
-                    .add(
-                        egui::Button::new("Parameters…")
-                            .shortcut_text(Panel::Parameters.key())
-                            .selected(view.panels.is_open(Panel::Parameters)),
-                    )
-                    .on_hover_text("every cost, rate and mutation the living half runs on")
-                    .clicked()
-                {
-                    view.panels.toggle(Panel::Parameters);
+                if skin::menu_item(ui, "Save scenario…", Panel::Scenario.key()).clicked() {
+                    // The scenario pane, not a dialogue: it holds the path field *and* the RON
+                    // that saving will write. This used to be `Save parameters as…`, a nested
+                    // menu that wrote the whole scenario under the name of one part of it and
+                    // showed you none of what it was about to do.
+                    view.panels.set(Panel::Scenario, true);
                     ui.close();
                 }
-                ui.menu_button("Save parameters as…", |ui| {
-                    ui.label("the running world's scenario, back out as a .ron");
-                    ui.small(
-                        "every parameter as it stands now, including anything changed \
-                         mid-run — which is how a setting you tuned by hand becomes a \
-                         scenario you can start ten runs from.",
-                    );
-                    ui.text_edit_singleline(&mut view.file_path);
-                    if ui.button("Save").clicked() {
-                        let path = std::path::PathBuf::from(view.file_path.trim());
-                        let mut scenario = {
-                            let held = sim.engine.handle();
-                            let slide = held.slide();
-                            slide.world().scenario().clone()
-                        };
-                        // A slide built from `New scenario…` is still called "untitled", and a
-                        // library full of untitleds is a library you cannot read. The file name
-                        // is the one thing the author has definitely already chosen.
-                        if scenario.name == "untitled" {
-                            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                                scenario.name = stem.replace('_', " ");
-                            }
-                        }
-                        view.file_note = Some(match library::save(&path, &scenario) {
-                            Ok(written) => Ok(format!("wrote {}", written.display())),
-                            Err(e) => Err(e.to_string()),
-                        });
-                        ui.close();
-                    }
-                });
-                ui.separator();
-                if ui
-                    .add(egui::Button::new("Reseed").shortcut_text("R"))
-                    .on_hover_text("wipe the slide and start the ancestor over")
-                    .clicked()
-                {
-                    sim.reseed();
-                    ui.close();
-                }
-                if ui
-                    .button("Packing bench")
-                    .on_hover_text(
-                        "a slide with the biology switched off: cells that cannot divide, \
-                         die or grow, and no Brownian jitter, gathered by gravity towards \
-                         the middle. For looking at how volumes behave without wondering \
-                         whether what you are seeing is the simulation",
-                    )
-                    .clicked()
-                {
-                    sim.bench();
+
+                skin::menu_rule(ui);
+                skin::menu_caption(ui, "slides — the world as it stands");
+                soon(ui, "Open slide…", "Ctrl+O", LATER);
+                soon(ui, "Save slide", "Ctrl+S", LATER);
+                soon(ui, "Save slide as…", "", LATER);
+                soon(ui, "Export…", "", LATER);
+
+                skin::menu_rule(ui);
+                if skin::menu_item(ui, "Quit", "Ctrl+Q").clicked() {
+                    *quit = true;
                     ui.close();
                 }
             });
