@@ -104,19 +104,11 @@ Slide     Scenario library        ▸           whatever is in scenarios/, by na
           ──
           Reseed                  R
 
-Simulation  Run / Pause           Space     resumes at the speed it was paused at, not 1×
-            Step one tick         .
-            Speed                 ▸           paused · ½× · 1× · 8× · unlimited
-                                              (½× is 30 ticks a second, for watching a
-                                              division rather than catching one)
-            Breakpoints…
-            ──
-            Interventions…                    what has been changed mid-run, and when
-                                              (opens the ecology pane on that view)
-
 View      Panels                  ▸           cell · metrics · legend · genome · ecology ·
                                               parameters · editor · debugger
                                                                        (each a checkbox)
+          Interventions…                      what has been changed mid-run, and when
+                                              (opens the ecology pane on that view)
           Overlays                ▸           one per chemical, 1–9
                                               (the fast path is the legend, see §4)
           Flow                    V           which way the water is going
@@ -141,6 +133,14 @@ Help      Keys
 Every keyboard shortcut already in `handle_input` appears next to its menu item, and no
 shortcut exists that is not in a menu. The current build has fourteen single-key bindings and
 no way to discover any of them.
+
+**There is no Simulation menu, and that is deliberate.** It held Run/Pause, Step and a Speed
+submenu, and the transport in the same bar — four inches to the right of it — held all four of
+those as buttons. A menu that is a second copy of the controls beside it is not discoverability,
+it is two places to keep in step. `Interventions…` moved to View, which is the menu that opens
+panes, and the seven keys the Simulation menu was writing down (`space`, `.`, `0`, `` ` ``, `-`,
+`=`, `backspace`) are now in the transport buttons' hover text — which is the rule above
+satisfied by a different surface, not abandoned.
 
 ---
 

@@ -3886,65 +3886,6 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                 }
             });
 
-            ui.menu_button("Simulation", |ui| {
-                let running = sim.engine.rate().is_running();
-                if skin::menu_item(ui, if running { "Pause" } else { "Run" }, "Space").clicked() {
-                    view.paused = !sim.engine.toggle_pause().is_running();
-                    ui.close();
-                }
-                if skin::menu_item(ui, "Step one tick", ".").clicked() {
-                    sim.engine.step();
-                }
-
-                // Speed is a live control and not a submenu (UI.md §8.7). `Simulation ▸ Speed ▸
-                // 1×` is three levels to change one thing, and the menu shuts on the click — so
-                // comparing ½× against 8× meant opening it twice. Here the menu stays up and the
-                // row is the answer, for the same reason the toolbox is a panel: a thing you
-                // adjust while watching has to stay where you can reach it.
-                skin::menu_caption(ui, "speed");
-                let now = sim.engine.rate();
-                if let Some(rate) = skin::segmented(
-                    ui,
-                    &[
-                        ("pause", "0", Rate::Paused),
-                        ("½×", "`", Rate::half()),
-                        ("1×", "-", Rate::times(1)),
-                        ("8×", "=", Rate::times(8)),
-                        ("max", "⌫", Rate::Unlimited),
-                    ],
-                    now,
-                ) {
-                    sim.engine.set_rate(rate);
-                    view.paused = rate == Rate::Paused;
-                }
-                ui.label(skin::text(
-                    Role::Small,
-                    "½× is 30 ticks a second, for watching a division rather than catching one.",
-                ));
-                skin::menu_rule(ui);
-                let count = sim.latest.interventions.len();
-                let showing =
-                    view.panels.is_open(Panel::Ecology) && view.ecology == Ecology::Interventions;
-                if ui
-                    .add(
-                        egui::Button::new(if count == 0 {
-                            "Interventions…".to_string()
-                        } else {
-                            format!("Interventions… ({count})")
-                        })
-                        .selected(showing),
-                    )
-                    .on_hover_text("what has been changed in this world, and when")
-                    .clicked()
-                {
-                    // Opens the ecology pane on that view, as `f` does for the food web,
-                    // rather than toggling: the pane is where the log lives now.
-                    view.panels.set(Panel::Ecology, true);
-                    view.ecology = Ecology::Interventions;
-                    ui.close();
-                }
-            });
-
             ui.menu_button("View", |ui| {
                 for panel in Panel::ALL {
                     let mut open = view.panels.is_open(panel);
@@ -3960,7 +3901,28 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                         view.panels.set(panel, open);
                     }
                 }
-                ui.separator();
+                let count = sim.latest.interventions.len();
+                let showing =
+                    view.panels.is_open(Panel::Ecology) && view.ecology == Ecology::Interventions;
+                if ui
+                    .add(
+                        egui::Button::new(if count == 0 {
+                            "Interventions…".to_string()
+                        } else {
+                            format!("Interventions… ({count})")
+                        })
+                        .selected(showing),
+                    )
+                    .on_hover_text("what has been changed in this world, and when")
+                    .clicked()
+                {
+                    // Opens the ecology pane on that view rather than toggling: the pane is
+                    // where the log lives now.
+                    view.panels.set(Panel::Ecology, true);
+                    view.ecology = Ecology::Interventions;
+                    ui.close();
+                }
+                skin::menu_rule(ui);
                 ui.menu_button("Overlays", |ui| {
                     for (i, name) in sim.chem_names.clone().into_iter().enumerate() {
                         let on = sim.engine.overlay_enabled(i);
@@ -4135,7 +4097,7 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                 ui.add_space(12.0);
 
                 if skin::chip(ui, "⏭", None, false)
-                    .on_hover_text("step one tick  (.)")
+                    .on_hover_text("step one tick  (.)  ·  paused: 0")
                     .clicked()
                 {
                     sim.engine.step();
@@ -4143,13 +4105,20 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                 // Slowest last, because the layout is right-to-left: this reads ½× 1× 8× max
                 // on screen, which is the order the keys are in and the order a speed control
                 // is in everywhere else.
-                for (label, rate) in [
-                    ("max", Rate::Unlimited),
-                    ("8×", Rate::times(8)),
-                    ("1×", Rate::times(1)),
-                    ("½×", Rate::half()),
+                // The keys, in the hover text. UI.md §2 asks that no shortcut exist which is
+                // not written down somewhere reachable, and the Simulation menu is where these
+                // seven used to be written — it was deleted because everything else in it was
+                // a second copy of these very buttons. The transport inherits the job.
+                for (label, key, rate) in [
+                    ("max", "backspace", Rate::Unlimited),
+                    ("8×", "=", Rate::times(8)),
+                    ("1×", "-", Rate::times(1)),
+                    ("½×", "`", Rate::half()),
                 ] {
-                    if skin::chip(ui, label, None, sim.engine.rate() == rate).clicked() {
+                    if skin::chip(ui, label, None, sim.engine.rate() == rate)
+                        .on_hover_text(format!("{label}  ({key})"))
+                        .clicked()
+                    {
                         sim.engine.set_rate(rate);
                         view.paused = false;
                     }
