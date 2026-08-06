@@ -29,7 +29,7 @@ pub enum Ground {
     Slide,
     /// Every rail and the drawer.
     Panel,
-    /// The trough of a bar, the well of a value field.
+    /// The well of a value field, and the ground a drawer's table rows sit in.
     Sunk,
     /// A hovered menu item, a pressed chip.
     Raised,
@@ -51,6 +51,14 @@ impl Ground {
 
 /// A border between two regions — a rail against the viewport, the drawer against the rails.
 pub const RULE: Rgb = [0x23, 0x27, 0x2e];
+
+/// The empty part of a bar.
+///
+/// Light enough to be seen against the panel it sits on, which the design's `#181b20` is not:
+/// the first build of the row grammar drew a reading at twenty per cent as a coloured dot
+/// floating in the dark, because the track it was twenty per cent *of* was invisible. A bar
+/// without a visible track is a dot, and a dot is not a reading.
+pub const TROUGH: Rgb = [0x1e, 0x23, 0x2a];
 
 /// A rule *inside* a region, between two groups of the same panel. Fainter than [`RULE`] on
 /// purpose: a hairline that is as strong as a region border reads as a region border, and a
@@ -210,12 +218,13 @@ impl Mood {
 /// a colour that appears here twice is a colour with two meanings, and the test says so. Keep
 /// it in step when adding a colour — a colour that is not in this list is not checked by
 /// anything.
-pub const PALETTE: [(&str, Rgb); 13] = [
+pub const PALETTE: [(&str, Rgb); 14] = [
     ("slide", Ground::Slide.rgb()),
     ("panel", Ground::Panel.rgb()),
     ("sunk", Ground::Sunk.rgb()),
     ("raised", Ground::Raised.rgb()),
     ("rule", RULE),
+    ("trough", TROUGH),
     ("hair", HAIR),
     ("value", [0xe6, 0xe9, 0xed]),
     ("body", [0xc6, 0xcd, 0xd5]),
@@ -272,9 +281,9 @@ pub mod row {
     /// How tall a row of label-bar-value is, bar included.
     pub const HEIGHT: f32 = 16.0;
     /// The label column.
-    pub const LABEL: f32 = 62.0;
+    pub const LABEL: f32 = 52.0;
     /// The value column, right-aligned inside it.
-    pub const VALUE: f32 = 52.0;
+    pub const VALUE: f32 = 46.0;
     /// Between any two of the three columns.
     pub const GUTTER: f32 = 8.0;
 

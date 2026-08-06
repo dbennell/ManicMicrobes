@@ -380,7 +380,25 @@ fn arrange(spec: &str, sim: &mut SlideRes, view: &mut View) {
             }
             "editor" => view.panels.set(Panel::Editor, true),
             "debugger" => view.panels.set(Panel::Debugger, true),
-            "params" => view.panels.set(Panel::Parameters, true),
+            "params" => {
+                view.panels.set(Panel::Parameters, true);
+                // `params:metabolism` names the page, the way `ecology:web` names the view.
+                // Without it a screenshot of the editor is always whichever page was last
+                // looked at, which is not a thing a script can rely on.
+                if let Some(group) = params::Group::ALL.iter().find(|g| g.title() == sub) {
+                    view.params_page = ParamPage::Group(*group);
+                } else if !sub.is_empty() {
+                    view.params_page = match sub {
+                        "environment" => ParamPage::Environment,
+                        "pathways" => ParamPage::Pathways,
+                        "catalogue" => ParamPage::Catalogue,
+                        other => {
+                            eprintln!("MM_SHOT_VIEW: no such parameter page `{other}`");
+                            view.params_page
+                        }
+                    };
+                }
+            }
             "interventions" => {
                 view.panels.set(Panel::Ecology, true);
                 view.ecology = Ecology::Interventions;
@@ -1194,6 +1212,12 @@ struct View {
     species: Option<mm_core::phylogeny::SpeciesId>,
     /// Which of the ecology pane's three views is showing (M10.4).
     ecology: Ecology,
+    /// Which page of the parameter editor is showing (M10.6).
+    ///
+    /// On `View` rather than on `Draft` because the draft is dropped whenever the tab is not
+    /// the one on show — which is right for the *edits*, and wrong for where you were looking:
+    /// coming back to the metabolism page you left is not an edit, it is not losing your place.
+    params_page: ParamPage,
     /// Hide species whose peak population never reached this. A long run makes thousands of
     /// them, most one cell that divided twice.
     tree_floor: u32,
@@ -1205,6 +1229,43 @@ struct View {
     /// What the last file operation said, kept until the next one so a menu that closed on
     /// the click still gets to report what happened.
     file_note: Option<Result<String, String>>,
+}
+
+/// Which page of the parameter editor is showing.
+///
+/// A rail of pages rather than a stack of collapsing headers. Fifty-one fields under six
+/// headers meant that finding one was expand, scan, collapse, expand — and that the column
+/// header scrolled away with the group it belonged to, so three screens down the value column
+/// was a column of numbers with nothing saying what they were.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ParamPage {
+    /// The light falling on the slide and the water moving under it.
+    Environment,
+    Group(params::Group),
+    /// Which reactions this world offers.
+    Pathways,
+    /// What each organelle costs to build and to keep.
+    Catalogue,
+}
+
+impl ParamPage {
+    /// The rail, in order.
+    fn all() -> Vec<ParamPage> {
+        let mut out = vec![ParamPage::Environment];
+        out.extend(params::Group::ALL.map(ParamPage::Group));
+        out.push(ParamPage::Pathways);
+        out.push(ParamPage::Catalogue);
+        out
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            ParamPage::Environment => "environment",
+            ParamPage::Group(g) => g.title(),
+            ParamPage::Pathways => "pathways",
+            ParamPage::Catalogue => "catalogue",
+        }
+    }
 }
 
 impl Default for View {
@@ -1243,6 +1304,8 @@ impl Default for View {
             place_count: 1,
             species: None,
             ecology: Ecology::Tree,
+            // Metabolism, because it is the group with sixteen fields and the one being tuned.
+            params_page: ParamPage::Group(params::Group::Metabolism),
             tree_floor: 2,
             scrub: None,
             file_path: String::new(),
@@ -2950,6 +3013,7 @@ fn panels(
             .resizable(true)
             .default_size(270.0)
             .size_range(210.0..=460.0)
+            .frame(skin::panel_frame())
             .show(&mut root, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| cell_body(ui, &mut sim, &mut view));
             });
@@ -2959,6 +3023,7 @@ fn panels(
             .resizable(true)
             .default_size(260.0)
             .size_range(210.0..=460.0)
+            .frame(skin::panel_frame())
             .show(&mut root, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     if view.panels.metrics {
@@ -3501,7 +3566,10 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                     }
                 }
                 let running = sim.engine.rate().is_running();
-                if skin::chip(ui, if running { "⏸" } else { "▶" }, None, running)
+                // Never accented: run and pause are one *action* whose label already says which
+                // way it goes, and the accent means state. The speed chips beside it carry the
+                // state, and two lit chips side by side say nothing at all.
+                if skin::chip(ui, if running { "⏸" } else { "▶" }, None, false)
                     .on_hover_text("run / pause  (space)")
                     .clicked()
                 {
@@ -3608,6 +3676,7 @@ fn drawer(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
         .resizable(true)
         .default_size(300.0)
         .size_range(120.0..=760.0)
+        .frame(skin::panel_frame())
         .show(root, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
@@ -3638,7 +3707,7 @@ fn drawer(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
                 Panel::Genome => genome_body(ui, sim, view),
                 Panel::Ecology => ecology_body(ui, sim, view),
                 Panel::Toolbox => toolbox_body(ui, sim, view),
-                Panel::Parameters => parameters_body(ui, sim),
+                Panel::Parameters => parameters_body(ui, sim, view),
                 Panel::Editor => editor_body(ui, sim),
                 Panel::Debugger => debugger_body(ui, sim),
                 // The rails' panels are never the drawer's tab; `Panels::set` will not put
@@ -3770,121 +3839,195 @@ fn token_colour(kind: mm_asm::highlight::TokenKind) -> egui::Color32 {
 /// paint, open again. Anything you adjust *while* working has to stay on screen while you work,
 /// and building a slide is nothing but adjusting and working.
 fn toolbox_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
-    egui::ScrollArea::vertical()
-        .id_salt("toolbox")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(3.0, 3.0);
-                for (tool, key) in TOOLS {
-                    if skin::chip(ui, tool.name(), Some(key), view.tool == tool).clicked() {
-                        view.tool = tool;
-                    }
-                }
-            });
-            ui.add_space(6.0);
-            ui.separator();
-
-            ui.add(
-                egui::Slider::new(&mut view.brush, ui::BRUSH_MIN..=ui::BRUSH_MAX).text("thickness"),
-            )
-            .on_hover_text(
-                "how wide a stroke of the wall, erase, paint and unpaint tools is, in \
-                 substrate squares. The eraser is the same width as the pen, so it can always \
-                 take back what the pen just drew.",
-            );
-
-            ui.add_space(6.0);
-            ui.label("chemistry");
-            ui.small(
-                "One chemical for all four of paint, unpaint, source and drain — they are four \
-                 things you do to a chemical, and four separate settings would be four places \
+    // The drawer's shape (UI.md §8.6): a wide work area, and the prose in the column.
+    //
+    // This tab is why the rule exists. It was a vertical stack of a slider, a combo box, a drag
+    // value and a text edit with four paragraphs of explanation *between* the controls — a
+    // narrow column in the widest space in the window, which is the exact failure
+    // `ui::Panel::dock` has a test against. The prose is worth reading; it is not worth reading
+    // between two settings you are comparing.
+    skin::drawer_split(
+        ui,
+        "toolbox_notes",
+        |ui| toolbox_work(ui, sim, view),
+        |ui| {
+            skin::section(ui, "why this is a panel", false);
+            ui.label(skin::text(
+                Role::Body,
+                "A menu shuts the moment you click the slide, so changing a dose between two \
+                 strokes was open, change, close, paint, and open again. Anything you adjust \
+                 while working has to stay on screen while you work.",
+            ));
+            skin::section(ui, "one chemical, four tools", true);
+            ui.label(skin::text(
+                Role::Body,
+                "Paint, unpaint, source and drain all use the chemical above — they are four \
+                 things you do to one chemical, and four separate settings would be four places \
                  to notice you had the wrong one.",
-            );
-            ui.horizontal_wrapped(|ui| {
-                egui::ComboBox::from_id_salt("tool chemical")
-                    .selected_text(
-                        sim.chem_names
-                            .get(view.load)
-                            .cloned()
-                            .unwrap_or_else(|| view.load.to_string()),
-                    )
-                    .show_ui(ui, |ui| {
-                        for (i, name) in sim.chem_names.iter().enumerate() {
-                            ui.selectable_value(&mut view.load, i, name);
-                        }
-                    });
-                ui.add(
-                    egui::DragValue::new(&mut view.dose)
-                        .speed(256.0)
-                        .range(0..=1_000_000)
-                        .prefix("dose "),
-                )
-                .on_hover_text(
-                    "how much one stamp of the brush puts in a square, and how much a new \
-                     source supplies per step. 1024 is one unit.",
-                );
-            });
-            ui.add(
-                egui::Slider::new(&mut view.drain_rate, 1..=mm_core::Q10_ONE)
-                    .text("drain")
-                    .logarithmic(true),
-            )
-            .on_hover_text(
-                "what share of a square a new drain takes each step, out of 1024. A fraction \
-                 rather than an amount, so a drain settles into balance with whatever reaches \
-                 it instead of scouring the slide dry.",
-            );
-
-            ui.add_space(6.0);
-            ui.label("seeding");
-            ui.horizontal_wrapped(|ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut view.place_genome)
-                        .desired_width(140.0)
-                        .hint_text("ancestor.mm"),
-                )
-                .on_hover_text("a file in genomes/. The seed tool drops founders of it.");
-                ui.add(
-                    egui::DragValue::new(&mut view.place_count)
-                        .speed(0.2)
-                        .range(1..=64)
-                        .prefix("× "),
-                );
-            });
-
-            // The flux already on the slide. Listing them is the only way to *find* one: a
-            // source is an area of water that behaves differently, and until it has filled up
-            // there is nothing there to see but its outline.
-            let flux = {
-                let held = sim.engine.handle();
-                let slide = held.slide();
-                slide.world().flux().to_vec()
-            };
-            ui.add_space(6.0);
-            ui.separator();
-            ui.label("sources and drains");
-            if flux.is_empty() {
-                ui.small("none. Pick source or drain and drag a rectangle on the slide.");
-            }
-            let mut remove = None;
-            for (i, f) in flux.iter().enumerate() {
-                ui.horizontal(|ui| {
-                    if ui.small_button("x").on_hover_text("remove").clicked() {
-                        remove = Some(i);
-                    }
-                    ui.small(describe_flux(f, &sim.chem_names));
-                });
-            }
-            if let Some(i) = remove {
-                let held = sim.engine.handle();
-                held.slide().world_mut().remove_flux(i);
-            }
-        });
+            ));
+            skin::section(ui, "a brush is a disc", true);
+            ui.label(skin::text(
+                Role::Body,
+                "The eraser is the same width as the pen, so it can always take back what the \
+                 pen just drew. Three squares is the narrowest stroke that is solid on the \
+                 diagonal; at one, a diagonal run touches only at its corners and a cell fits \
+                 through the gap.",
+            ));
+            skin::section(ui, "dose and drain", true);
+            ui.label(skin::text(
+                Role::Body,
+                "A dose is what one stamp puts in a square, and what a new source supplies per \
+                 step; 1024 is one unit. A drain takes a share of a square rather than an \
+                 amount, so it settles into balance with whatever reaches it instead of \
+                 scouring the slide dry.",
+            ));
+        },
+    );
 }
 
-/// One line describing a source or a drain, for the list that lets you delete it.
-fn describe_flux(f: &mm_core::Flux, names: &[String]) -> String {
+/// The toolbox's work area: the tools, their settings in one row, and the flux table.
+fn toolbox_work(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(3.0, 3.0);
+        for (tool, key) in TOOLS {
+            if skin::chip(ui, tool.name(), Some(key), view.tool == tool).clicked() {
+                view.tool = tool;
+            }
+        }
+    });
+    ui.label(skin::text(
+        Role::Small,
+        "right-click the slide to use the selected tool; drag to pan.",
+    ));
+
+    // All three settings groups on one line, which is what the width is for.
+    ui.add_space(theme::SECTION_GAP);
+    ui.horizontal_wrapped(|ui| {
+        ui.label(skin::text(Role::Label, "brush"));
+        ui.add(egui::Slider::new(&mut view.brush, ui::BRUSH_MIN..=ui::BRUSH_MAX).show_value(false));
+        ui.label(skin::text(Role::Value, view.brush.to_string()));
+        ui.label(skin::text(Role::Small, "squares · a disc, not a box"));
+
+        ui.add_space(10.0);
+        ui.label(skin::text(Role::Label, "loaded"));
+        if let Some(rgb) = sim.chem_colours.get(view.load).copied() {
+            skin::swatch(ui, rgb, true);
+        }
+        egui::ComboBox::from_id_salt("tool chemical")
+            .selected_text(skin::text(
+                Role::Value,
+                sim.chem_names
+                    .get(view.load)
+                    .cloned()
+                    .unwrap_or_else(|| view.load.to_string()),
+            ))
+            .show_ui(ui, |ui| {
+                for (i, name) in sim.chem_names.iter().enumerate() {
+                    ui.selectable_value(&mut view.load, i, name);
+                }
+            });
+        ui.label(skin::text(Role::Label, "dose"));
+        ui.add(
+            egui::DragValue::new(&mut view.dose)
+                .speed(256.0)
+                .range(0..=1_000_000),
+        );
+        ui.label(skin::text(Role::Label, "drain"));
+        ui.add(
+            egui::Slider::new(&mut view.drain_rate, 1..=mm_core::Q10_ONE)
+                .logarithmic(true)
+                .show_value(false),
+        );
+        ui.label(skin::text(
+            Role::Value,
+            format!("{}/1024", view.drain_rate),
+        ));
+
+        ui.add_space(10.0);
+        ui.label(skin::text(Role::Label, "seed"));
+        ui.add(
+            egui::TextEdit::singleline(&mut view.place_genome)
+                .desired_width(150.0)
+                .font(skin::font(Role::Value))
+                .hint_text("ancestor.mm"),
+        )
+        .on_hover_text("a file in genomes/. The seed tool drops founders of it.");
+        ui.add(
+            egui::DragValue::new(&mut view.place_count)
+                .speed(0.2)
+                .range(1..=64)
+                .prefix("× "),
+        );
+    });
+
+    // The flux already on the slide. Listing them is the only way to *find* one: a source is an
+    // area of water that behaves differently, and until it has filled up there is nothing there
+    // to see but its outline.
+    //
+    // A table rather than a sentence each. Four sources described in prose are four sentences to
+    // read; in columns they are four rows to scan, and the chemical, the rectangle and the rate
+    // line up down the page.
+    let flux = {
+        let held = sim.engine.handle();
+        let slide = held.slide();
+        slide.world().flux().to_vec()
+    };
+    ui.add_space(theme::SECTION_GAP);
+    skin::hairline(ui);
+    skin::section(ui, "sources and drains on the slide", true);
+    if flux.is_empty() {
+        ui.label(skin::text(
+            Role::Small,
+            "none. Pick source or drain and drag a rectangle on the slide.",
+        ));
+        return;
+    }
+    let mut remove = None;
+    egui::ScrollArea::vertical()
+        .id_salt("flux")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            for (i, f) in flux.iter().enumerate() {
+                let (kind, chemical, rect, rate) = flux_columns(f, &sim.chem_names);
+                let rgb = chem_rgb(f, &sim.chem_colours);
+                ui.horizontal(|ui| {
+                    skin::swatch(ui, rgb, kind == "source");
+                    ui.label(
+                        skin::text(Role::Label, kind).color(skin::col(if kind == "source" {
+                            Mood::Good.rgb()
+                        } else {
+                            Mood::Bad.rgb()
+                        })),
+                    );
+                    ui.add_sized(
+                        egui::vec2(108.0, theme::row::HEIGHT),
+                        egui::Label::new(skin::text(Role::Value, chemical)).truncate(),
+                    );
+                    ui.add_sized(
+                        egui::vec2(130.0, theme::row::HEIGHT),
+                        egui::Label::new(skin::text(Role::Label, rect)),
+                    );
+                    ui.label(skin::text(Role::Label, rate));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if skin::chip(ui, "×", None, false)
+                            .on_hover_text("remove")
+                            .clicked()
+                        {
+                            remove = Some(i);
+                        }
+                    });
+                });
+            }
+        });
+    if let Some(i) = remove {
+        let held = sim.engine.handle();
+        held.slide().world_mut().remove_flux(i);
+    }
+}
+
+/// A source or drain split into the four columns the table draws, rather than the one sentence
+/// it used to be.
+fn flux_columns(f: &mm_core::Flux, names: &[String]) -> (&'static str, String, String, String) {
     let named = |c: usize| {
         names
             .get(c)
@@ -3899,9 +4042,11 @@ fn describe_flux(f: &mm_core::Flux, names: &[String]) -> String {
             width,
             height,
             per_tick,
-        } => format!(
-            "source · {} · {width}×{height} at {x},{y} · {per_tick}/step",
-            named(*chemical)
+        } => (
+            "source",
+            named(*chemical),
+            format!("({x}, {y}) {width}×{height}"),
+            format!("+{:.2} / tick", *per_tick as f32 / mm_core::Q10_ONE as f32),
         ),
         mm_core::Flux::Drain {
             chemical,
@@ -3910,11 +4055,22 @@ fn describe_flux(f: &mm_core::Flux, names: &[String]) -> String {
             width,
             height,
             rate,
-        } => format!(
-            "drain · {} · {width}×{height} at {x},{y} · {rate}/1024 per step",
-            named(*chemical)
+        } => (
+            "drain",
+            named(*chemical),
+            format!("({x}, {y}) {width}×{height}"),
+            format!("−{rate}/1024 / tick"),
         ),
     }
+}
+
+/// The chemical colour a flux row is swatched in. Out of the scenario, like every chemical
+/// colour, and not restyled.
+fn chem_rgb(f: &mm_core::Flux, colours: &[[u8; 3]]) -> [u8; 3] {
+    let c = match f {
+        mm_core::Flux::Source { chemical, .. } | mm_core::Flux::Drain { chemical, .. } => *chemical,
+    };
+    colours.get(c).copied().unwrap_or([160, 160, 160])
 }
 
 /// The world's books: what energy comes in against what leaves, and where the matter is.
@@ -4147,7 +4303,7 @@ fn budget_view(ui: &mut egui::Ui, sim: &SlideRes) {
 /// in this build — over a lit microscope slide that came out as ghost text with cells swimming
 /// through it. The drawer paints its own background and takes its space from the viewport, so
 /// the numbers are legible and the slide above them is unobscured.
-fn parameters_body(ui: &mut egui::Ui, sim: &mut SlideRes) {
+fn parameters_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
     // Read lazily, against the world as it stands. Taking the lock once on open rather than
     // every frame is the whole reason this is cheap enough to leave sitting there. `panels`
     // drops the draft when this tab is not the one on show.
@@ -4176,87 +4332,181 @@ fn parameters_body(ui: &mut egui::Ui, sim: &mut SlideRes) {
     let mut apply = false;
     let mut apply_env = false;
 
+    // How far the world has drifted from the file that describes it, and how much of that is
+    // not in force yet. Two different questions, and the editor answered neither: one global
+    // "not applied" label said that *something* had been touched, and with fifty-one fields
+    // under six collapsed headers the only way to find out what was to open all six and read.
     let dirty = draft.editing != draft.live;
-    ui.horizontal(|ui| {
-        if ui
-            .add_enabled(dirty, egui::Button::new("apply"))
-            .on_hover_text(
-                "change the running world. Recorded as an intervention, so the run \
-                 still replays exactly and the timeline says when you did it.",
-            )
-            .clicked()
-        {
-            apply = true;
-        }
-        if ui
-            .add_enabled(dirty, egui::Button::new("discard"))
-            .on_hover_text("back to what the world is running on")
-            .clicked()
-        {
-            draft.editing = draft.live.clone();
-        }
-        if ui
-            .add_enabled(
-                draft.editing != draft.founding,
-                egui::Button::new("back to the scenario"),
-            )
-            .on_hover_text("every value as the scenario file has it")
-            .clicked()
-        {
-            draft.editing = draft.founding.clone();
-        }
-        ui.separator();
-        if dirty {
-            ui.colored_label(egui::Color32::from_rgb(240, 200, 120), "not applied");
-        } else {
-            ui.weak("in force");
-        }
-    });
-    ui.separator();
+    let drifted: usize = params::FIELDS
+        .iter()
+        .filter(|f| {
+            let now = mm_core::params::get(&draft.editing, f.path);
+            now.is_some() && now != mm_core::params::get(&draft.founding, f.path)
+        })
+        .count();
 
-    egui::ScrollArea::vertical()
-        .id_salt("parameters")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            egui::CollapsingHeader::new("environment")
-                .default_open(true)
-                .show(ui, |ui| {
-                    environment_editor(ui, &mut draft, &mut apply_env);
-                });
-            for group in params::Group::ALL {
-                egui::CollapsingHeader::new(group.title())
-                    .default_open(group == params::Group::Metabolism)
-                    .show(ui, |ui| {
-                        egui::Grid::new(group.title())
-                            .num_columns(3)
-                            .striped(true)
-                            .show(ui, |ui| {
-                                for field in params::group(group) {
-                                    parameter_row(ui, &mut draft, field, &sim.chem_names);
-                                    ui.end_row();
+    skin::drawer_split(
+        ui,
+        "parameters_notes",
+        |ui| {
+            let height = ui.available_height() - FOOTER_HEIGHT;
+            ui.horizontal_top(|ui| {
+                // The rail of pages.
+                ui.allocate_ui_with_layout(
+                    egui::vec2(theme::GROUP_COLUMN, height),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_min_size(egui::vec2(theme::GROUP_COLUMN, height));
+                        let edge = ui.max_rect();
+                        ui.painter().vline(
+                            edge.right(),
+                            edge.y_range(),
+                            egui::Stroke::new(1.0, skin::col(theme::HAIR)),
+                        );
+                        for page in ParamPage::all() {
+                            let count = match page {
+                                ParamPage::Group(g) => params::group(g).len(),
+                                _ => 0,
+                            };
+                            let on = view.params_page == page;
+                            ui.horizontal(|ui| {
+                                if skin::chip(ui, page.title(), None, on).clicked() {
+                                    view.params_page = page;
+                                }
+                                if count > 0 {
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| ui.label(skin::text(Role::Label, count.to_string())),
+                                    );
                                 }
                             });
-                    });
-            }
-            // Both of these are tables rather than forms: four reactions of four
-            // chemicals, and sixteen catalogue entries of seven costs.
-            egui::CollapsingHeader::new("metabolic pathways")
-                .default_open(true)
-                .show(ui, |ui| {
-                    ui.small(
-                        "Which reactions this world offers. An organelle picks one \
-                         with its second control word, so a mitochondrion can only \
-                         burn what it is set to burn — and a lineage must either make \
-                         that substrate itself or eat something that does.",
-                    );
-                    pathway_grid(ui, &mut draft, &sim.chem_names);
+                        }
+                    },
+                );
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), height),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_min_size(egui::vec2(ui.available_width(), height));
+                        match view.params_page {
+                            ParamPage::Environment => {
+                                environment_editor(ui, &mut draft, &mut apply_env);
+                            }
+                            ParamPage::Group(group) => {
+                                parameter_table(ui, &mut draft, group, &sim.chem_names);
+                            }
+                            ParamPage::Pathways => {
+                                ui.label(skin::text(
+                                    Role::Small,
+                                    "Which reactions this world offers. An organelle picks one \
+                                     with its second control word, so a mitochondrion can only \
+                                     burn what it is set to burn — and a lineage must either \
+                                     make that substrate itself or eat something that does.",
+                                ));
+                                egui::ScrollArea::vertical()
+                                    .id_salt("pathways_scroll")
+                                    .auto_shrink([false, false])
+                                    .show(ui, |ui| {
+                                        pathway_grid(ui, &mut draft, &sim.chem_names);
+                                    });
+                            }
+                            ParamPage::Catalogue => {
+                                egui::ScrollArea::vertical()
+                                    .id_salt("catalogue_scroll")
+                                    .auto_shrink([false, false])
+                                    .show(ui, |ui| catalogue_grid(ui, &mut draft));
+                            }
+                        }
+                    },
+                );
+            });
+
+            // The footer, which is where applying happens and where it says what applying will
+            // cost. The tick is named before you commit rather than described afterwards in a
+            // tooltip: an intervention is a permanent entry on the world's record.
+            skin::hairline(ui);
+            ui.add_space(3.0);
+            ui.horizontal(|ui| {
+                if drifted > 0 {
+                    ui.label(skin::moody(
+                        Role::Label,
+                        Mood::Warn,
+                        format!(
+                            "{drifted} field{} changed from the scenario",
+                            if drifted == 1 { "" } else { "s" }
+                        ),
+                    ));
+                } else {
+                    ui.label(skin::text(Role::Label, "as the scenario has it"));
+                }
+                ui.label(skin::text(
+                    Role::Small,
+                    if dirty {
+                        format!(
+                            "Applying records an intervention at tick {}.",
+                            sim.latest.frame.tick
+                        )
+                    } else {
+                        "In force.".to_string()
+                    },
+                ));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add_enabled(dirty, egui::Button::new(skin::text(Role::Label, "apply")))
+                        .on_hover_text(
+                            "change the running world. Recorded as an intervention, so the run \
+                             still replays exactly and the timeline says when you did it.",
+                        )
+                        .clicked()
+                    {
+                        apply = true;
+                    }
+                    if ui
+                        .add_enabled(dirty, egui::Button::new(skin::text(Role::Label, "discard")))
+                        .on_hover_text("back to what the world is running on")
+                        .clicked()
+                    {
+                        draft.editing = draft.live.clone();
+                    }
+                    if ui
+                        .add_enabled(
+                            draft.editing != draft.founding,
+                            egui::Button::new(skin::text(Role::Label, "revert all")),
+                        )
+                        .on_hover_text("every value as the scenario file has it")
+                        .clicked()
+                    {
+                        draft.editing = draft.founding.clone();
+                    }
                 });
-            egui::CollapsingHeader::new("organelle catalogue")
-                .default_open(false)
-                .show(ui, |ui| {
-                    catalogue_grid(ui, &mut draft);
-                });
-        });
+            });
+        },
+        |ui| {
+            skin::section(ui, "what applying does", false);
+            ui.label(skin::text(
+                Role::Body,
+                "A change is folded into the scenario at tick 0 and an intervention recorded \
+                 after it, so the run still reproduces exactly and the timeline says when you \
+                 did it. That is why applying is a button and not a keystroke: one intervention \
+                 per keypress is a record nobody can read.",
+            ));
+            skin::section(ui, "value, and default", true);
+            ui.label(skin::text(
+                Role::Body,
+                "The default column is what the scenario file says. A value that differs from \
+                 it is marked, and the footer counts them — so a world that has drifted from \
+                 the file describing it says so, rather than looking freshly loaded.",
+            ));
+            skin::section(ui, "the raw number is the truth", true);
+            ui.label(skin::text(
+                Role::Body,
+                "The editable field is always the raw integer, because that is what the \
+                 scenario holds and what somebody comparing two files will see. The unit \
+                 column is the courtesy: 20480 is unreadable and 20.00 is obvious, but only \
+                 one of them is what is written down.",
+            ));
+        },
+    );
 
     if apply {
         let held = sim.engine.handle();
@@ -4553,6 +4803,101 @@ fn default_current(kind: &str) -> mm_core::light::CurrentField {
 }
 
 /// One labelled parameter: its value, its reading, and whether it has been moved.
+/// How tall the parameter editor's footer is, reserved out of the table's height so that Apply
+/// does not scroll away from the thing it applies.
+const FOOTER_HEIGHT: f32 = 26.0;
+
+/// The five columns a parameter is drawn in, and their widths.
+///
+/// `field`, `value`, `unit`, `default`, and the note — which takes whatever is left. The unit
+/// and the default are the two the editor did not have: without a default there is no way to
+/// see that a value has moved without remembering where it started, and without the note
+/// visible the explanation is one hover at a time through fifty-one fields.
+const PARAM_COLUMNS: [f32; 4] = [186.0, 84.0, 66.0, 70.0];
+
+/// A cell of the parameter table, at an exact place.
+///
+/// Laid out from the row's left edge rather than by following the previous cell, and this is
+/// the whole reason it exists. `allocate_ui_with_layout` hands back the rect its content
+/// *used*, not the one it asked for, so a `DragValue` that sizes itself to `42` leaves the next
+/// column starting thirty points to the left of where `8192` leaves it — and a table whose
+/// columns move with the width of their contents is not a table. Absolute offsets cannot drift.
+fn param_cell<R>(
+    ui: &mut egui::Ui,
+    row: egui::Rect,
+    x: f32,
+    width: f32,
+    right: bool,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(row.left() + x, row.top()),
+        egui::vec2(width, row.height()),
+    );
+    let layout = if right {
+        egui::Layout::right_to_left(egui::Align::Center)
+    } else {
+        egui::Layout::left_to_right(egui::Align::Center)
+    };
+    ui.scope_builder(
+        egui::UiBuilder::new().max_rect(rect).layout(layout),
+        |ui| add(ui),
+    )
+    .inner
+}
+
+/// Where each column starts, from the row's left edge.
+fn param_column_x(i: usize) -> f32 {
+    PARAM_COLUMNS
+        .iter()
+        .take(i)
+        .map(|w| w + theme::row::GUTTER)
+        .sum()
+}
+
+/// One group's fields, as a table with a header that does not scroll away.
+fn parameter_table(
+    ui: &mut egui::Ui,
+    draft: &mut Draft,
+    group: params::Group,
+    chemicals: &[String],
+) {
+    let (row, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), theme::row::HEIGHT),
+        egui::Sense::hover(),
+    );
+    for (i, head) in ["field", "value", "unit", "default"].into_iter().enumerate() {
+        param_cell(
+            ui,
+            row,
+            param_column_x(i),
+            PARAM_COLUMNS[i],
+            i == 1 || i == 3,
+            |ui| ui.label(skin::text(Role::Section, head)),
+        );
+    }
+    param_cell(
+        ui,
+        row,
+        param_column_x(4),
+        row.width() - param_column_x(4),
+        false,
+        |ui| ui.label(skin::text(Role::Section, "what it does")),
+    );
+    skin::hairline(ui);
+
+    egui::ScrollArea::vertical()
+        .id_salt("parameters")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            for field in params::group(group) {
+                parameter_row(ui, draft, field, chemicals);
+            }
+        });
+}
+
+/// One parameter: what it is called, what it is set to, what that means, what the scenario said,
+/// and what it does.
 fn parameter_row(
     ui: &mut egui::Ui,
     draft: &mut Draft,
@@ -4561,51 +4906,90 @@ fn parameter_row(
 ) {
     use mm_core::params::Value;
 
+    let (row, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), theme::row::HEIGHT),
+        egui::Sense::hover(),
+    );
+
     let Some(value) = mm_core::params::get(&draft.editing, field.path) else {
-        ui.weak(field.label);
-        ui.weak("unreadable");
+        param_cell(ui, row, 0.0, PARAM_COLUMNS[0], false, |ui| {
+            ui.label(skin::text(Role::Label, field.label))
+        });
+        param_cell(ui, row, param_column_x(1), PARAM_COLUMNS[1], false, |ui| {
+            ui.label(skin::moody(Role::Label, Mood::Bad, "unreadable"))
+        });
         return;
     };
 
     // Marked when it differs from the file, so a world that has drifted from the scenario
-    // describing it says so rather than looking freshly loaded.
-    let moved = mm_core::params::get(&draft.founding, field.path) != Some(value);
-    let label = if moved {
-        egui::RichText::new(format!("• {}", field.label))
-            .color(egui::Color32::from_rgb(230, 200, 130))
-    } else {
-        egui::RichText::new(field.label)
-    };
-    ui.label(label).on_hover_text(field.note);
+    // describing it says so rather than looking freshly loaded. A warm ground and a warm left
+    // edge as well as a warm number, because one coloured value in a column of fifty-one is a
+    // thing you find by looking for it rather than a thing you notice.
+    let founding = mm_core::params::get(&draft.founding, field.path);
+    let moved = founding != Some(value);
+    if moved {
+        ui.painter().rect_filled(
+            row,
+            0.0,
+            skin::col(Mood::Warn.rgb()).gamma_multiply(0.10),
+        );
+        ui.painter().rect_filled(
+            egui::Rect::from_min_size(row.min, egui::vec2(2.0, row.height())),
+            0.0,
+            skin::col(Mood::Warn.rgb()),
+        );
+    } else if response.hovered() {
+        ui.painter()
+            .rect_filled(row, 0.0, skin::col(theme::Ground::Sunk.rgb()));
+    }
+
+    param_cell(ui, row, 6.0, PARAM_COLUMNS[0] - 6.0, false, |ui| {
+        ui.add(egui::Label::new(skin::text(Role::Label, field.label)).truncate())
+    });
 
     let mut edited = None;
-    if let Value::Bool(b) = value {
-        let mut b = b;
-        if ui.checkbox(&mut b, "").changed() {
-            edited = Some(Value::Bool(b));
+    param_cell(ui, row, param_column_x(1), PARAM_COLUMNS[1], true, |ui| {
+        if let Value::Bool(b) = value {
+            let mut b = b;
+            if ui.checkbox(&mut b, "").changed() {
+                edited = Some(Value::Bool(b));
+            }
+        } else {
+            let mut v = value.as_int();
+            // A tenth of the current magnitude per pixel, so a value of twenty thousand drags
+            // in useful steps and a value of three does not leap past itself.
+            let speed = (v.abs() as f64 / 100.0).max(1.0);
+            if ui.add(egui::DragValue::new(&mut v).speed(speed)).changed() {
+                edited = Some(Value::Int(v));
+            }
         }
-    } else {
-        let mut v = value.as_int();
-        // A tenth of the current magnitude per pixel, so a value of twenty thousand drags in
-        // useful steps and a value of three does not leap past itself.
-        let speed = (v.abs() as f64 / 100.0).max(1.0);
-        if ui
-            .add(egui::DragValue::new(&mut v).speed(speed))
-            .on_hover_text(field.note)
-            .changed()
-        {
-            edited = Some(Value::Int(v));
-        }
-    }
+    });
 
-    match field.reading(value, chemicals) {
-        Some(reading) => {
-            ui.weak(reading);
+    param_cell(ui, row, param_column_x(2), PARAM_COLUMNS[2], false, |ui| {
+        ui.label(skin::text(
+            Role::Small,
+            field.reading(value, chemicals).unwrap_or_default(),
+        ))
+    });
+    param_cell(ui, row, param_column_x(3), PARAM_COLUMNS[3], true, |ui| {
+        match founding {
+            // Only where it has moved. A default printed against every one of fifty-one
+            // unchanged rows is a second column of the same numbers, and the eye stops reading
+            // the column that is always the same as the one beside it.
+            Some(was) if moved => ui.label(skin::text(
+                Role::Label,
+                field
+                    .reading(was, chemicals)
+                    .unwrap_or_else(|| was.as_int().to_string()),
+            )),
+            _ => ui.label(skin::text(Role::Label, "·")),
         }
-        None => {
-            ui.label("");
-        }
-    }
+    });
+    let note_x = param_column_x(4);
+    param_cell(ui, row, note_x, (row.width() - note_x).max(0.0), false, |ui| {
+        ui.add(egui::Label::new(skin::text(Role::Small, field.note)).truncate())
+    });
+    response.on_hover_text(field.note);
 
     if let Some(value) = edited {
         // Refused rather than clamped when it does not fit — see `mm_core::params::set`. The
@@ -4926,7 +5310,7 @@ fn thousands(v: i64) -> String {
         out.push('-');
     }
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push('\u{2009}');
         }
         out.push(c);
@@ -5737,35 +6121,49 @@ fn species_page(ui: &mut egui::Ui, sim: &SlideRes, view: &mut View) {
         return;
     };
 
-    ui.heading(&page.name);
-    ui.label(&page.description);
-    ui.separator();
-    ui.label(format!(
-        "founded {}  ·  {} births  ·  {} deaths  ·  {} generations deep",
-        page.founded_tick, page.births, page.deaths, page.depth
-    ));
+    // A species name is a binomial and is set in italics, which is the one typographic
+    // convention this application inherits from outside itself.
+    ui.label(
+        egui::RichText::new(&page.name)
+            .italics()
+            .size(15.0)
+            .color(skin::col(Role::Value.ink().unwrap_or(theme::DIM))),
+    );
+    ui.label(skin::text(Role::Body, &page.description));
+
+    ui.add_space(theme::SECTION_GAP);
+    skin::stat(ui, "founded", &thousands(page.founded_tick as i64));
+    skin::stat(ui, "births", &thousands(page.births as i64));
+    skin::stat(ui, "deaths", &thousands(page.deaths as i64));
+    skin::stat(ui, "depth", &page.depth.to_string());
+
     if let Some((id, name)) = &page.parent {
-        if ui.link(format!("diverged from {name}")).clicked() {
+        if ui.link(skin::text(Role::Label, format!("diverged from {name}"))).clicked() {
             view.species = Some(*id);
         }
     }
     if !page.children.is_empty() {
-        ui.label(format!("{} descendant species:", page.children.len()));
+        skin::section(ui, format!("{} descendants", page.children.len()).as_str(), true);
         for (id, name) in page.children.iter().take(8) {
-            if ui.link(format!("  {name}")).clicked() {
+            if ui.link(skin::text(Role::Label, name)).clicked() {
                 view.species = Some(*id);
             }
         }
     }
-    ui.separator();
-    ui.label(format!("population — peak {}", page.curve_peak));
+
+    skin::section(ui, "population", true);
+    ui.label(skin::text(Role::Label, format!("peak {}", page.curve_peak)));
     let values: Vec<f32> = page.curve.iter().map(|(_, v)| *v).collect();
     skin::sparkline(ui, &values, Mood::Good.rgb());
-    ui.separator();
-    ui.small(format!(
-        "founder genome, {} bytes, fingerprint {:016x}",
-        page.founder_genome.len(),
-        page.fingerprint
+
+    skin::section(
+        ui,
+        format!("founder genome · {} B", page.founder_genome.len()).as_str(),
+        true,
+    );
+    ui.label(skin::text(
+        Role::Label,
+        format!("{:016x}", page.fingerprint),
     ));
     let hex: String = page
         .founder_genome
@@ -5773,7 +6171,7 @@ fn species_page(ui: &mut egui::Ui, sim: &SlideRes, view: &mut View) {
         .take(64)
         .map(|b| format!("{b:02x}"))
         .collect();
-    ui.small(egui::RichText::new(hex).monospace());
+    ui.label(skin::text(Role::Small, hex).monospace());
 }
 
 /// The food web (M8).
@@ -5788,12 +6186,21 @@ fn foodweb_body(ui: &mut egui::Ui, sim: &SlideRes) {
     let web = sim.latest.web.clone();
     let peak = web.peak() as f32;
 
-    ui.label(web.summary());
-    ui.weak(format!("averaged over {} ticks", web.window_ticks));
-    ui.separator();
+    ui.horizontal(|ui| {
+        ui.label(skin::text(Role::Body, web.summary()));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(skin::text(
+                Role::Label,
+                format!("averaged over {} ticks", web.window_ticks),
+            ));
+        });
+    });
+    ui.add_space(4.0);
 
     let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), 220.0),
+        // Four trophic levels want room. Below this the bands are twenty points apart and
+        // every edge comes out near-horizontal, which says nothing about who is above whom.
+        egui::vec2(ui.available_width(), (ui.available_height() - 34.0).max(230.0)),
         egui::Sense::hover(),
     );
     let painter = ui.painter();
@@ -5809,90 +6216,181 @@ fn foodweb_body(ui: &mut egui::Ui, sim: &SlideRes) {
         let up = node.level() as f32 / 3.0;
         egui::pos2(
             rect.left() + rect.width() * across,
-            rect.bottom() - 12.0 - (rect.height() - 32.0) * up,
+            rect.bottom() - 20.0 - (rect.height() - 44.0) * up,
         )
     };
+
+    // Every chip's rectangle, before any edge is drawn, because an edge has to stop at the
+    // boundary of the box it points at and cannot know where that is until the box exists.
+    //
+    // This is the fix for the picture that was there: edges ran centre to centre and the chips
+    // were painted over them afterwards, so a line vanished under its own node and reappeared
+    // in mid-air on the far side, which reads as an arrow that misses. Nothing was wrong with
+    // the numbers; the drawing was.
+    let label_of = |node: Node, count: u32| -> String {
+        if node.is_source() {
+            node.label().to_string()
+        } else {
+            format!("{} {}", node.label(), count)
+        }
+    };
+    let mut boxes: std::collections::BTreeMap<Node, egui::Rect> = std::collections::BTreeMap::new();
+    for occ in &web.nodes {
+        let galley = painter.layout_no_wrap(
+            label_of(occ.node, occ.count),
+            skin::font(Role::Label),
+            skin::col(Role::Value.ink().unwrap_or(theme::DIM)),
+        );
+        boxes.insert(
+            occ.node,
+            egui::Rect::from_center_size(place(occ.node), galley.size() + egui::vec2(14.0, 7.0)),
+        );
+    }
 
     for edge in &web.edges {
         if edge.weight <= 0 {
             continue;
         }
-        let (a, b) = (place(edge.from), place(edge.to));
+        let (Some(from), Some(to)) = (boxes.get(&edge.from), boxes.get(&edge.to)) else {
+            continue;
+        };
         let width = 1.0 + 5.0 * (edge.weight as f32 / peak).clamp(0.0, 1.0);
         let colour = if edge.is_recycling() {
-            egui::Color32::from_rgb(150, 200, 120)
+            Mood::Good.rgb()
         } else if edge.is_death() {
-            egui::Color32::from_rgb(140, 110, 110)
+            Mood::Bad.rgb()
         } else {
-            egui::Color32::from_rgb(110, 150, 190)
+            skin::plot_neutral()
         };
+        let (a, b) = (from.center(), to.center());
+        let dir = (b - a).normalized();
+        let start = edge_of(*from, dir, 3.0);
+        let head = 7.0 + width * 0.5;
+        let tip = edge_of(*to, -dir, 4.0);
+        let stop = tip - dir * head;
+        let stroke = egui::Stroke::new(width, skin::col(colour));
+
         if edge.basis == Basis::Measured {
-            painter.line_segment([a, b], egui::Stroke::new(width, colour));
+            painter.line_segment([start, stop], stroke);
         } else {
             // Dashed, because the total is measured but who it belongs to is not.
             let steps = 9;
-            for k in 0..steps {
-                if k % 2 == 1 {
-                    continue;
-                }
+            for k in (0..steps).step_by(2) {
                 let t0 = k as f32 / steps as f32;
                 let t1 = (k + 1) as f32 / steps as f32;
-                painter.line_segment(
-                    [a.lerp(b, t0), a.lerp(b, t1)],
-                    egui::Stroke::new(width, colour),
-                );
+                painter.line_segment([start.lerp(stop, t0), start.lerp(stop, t1)], stroke);
             }
         }
+        // The head, so an edge says which way the matter went. A food web without arrows is a
+        // diagram of who is *near* whom.
+        let barb = egui::vec2(-dir.y, dir.x) * head * 0.46;
+        painter.add(egui::Shape::convex_polygon(
+            vec![tip, stop + barb, stop - barb],
+            skin::col(colour),
+            egui::Stroke::NONE,
+        ));
+        // And the weight on the edge rather than in a list underneath it — on a ground of its
+        // own, because a number drawn straight onto a four-pixel line comes out as `61▲00`.
+        // The design achieves this with a stroked outline; egui has no text stroke, so the
+        // ground is a rectangle and the effect is the same.
+        let galley = painter.layout_no_wrap(
+            thousands(edge.weight / mm_core::Q10_ONE as i64),
+            skin::font(Role::Label),
+            skin::col(Role::Label.ink().unwrap_or(theme::DIM)),
+        );
+        // Beside the edge, not on it. A near-vertical edge between two levels is thirty points
+        // long once it has been clipped to both chips, and a plate in the middle of that covers
+        // the whole arrow — so the number is pushed off along the perpendicular, away from the
+        // centre of the picture so it does not land on the edge running parallel beside it.
+        let across = egui::vec2(-dir.y, dir.x);
+        let outward = if (rect.center().x - start.x).signum() == across.x.signum() {
+            -1.0
+        } else {
+            1.0
+        };
+        let mid = start.lerp(stop, 0.5) + across * outward * 11.0;
+        let plate = egui::Rect::from_center_size(mid, galley.size() + egui::vec2(6.0, 2.0));
+        painter.rect_filled(plate, 2.0, skin::col(theme::Ground::Panel.rgb()));
+        painter.galley(plate.center() - galley.size() / 2.0, galley, egui::Color32::WHITE);
     }
 
     for occ in &web.nodes {
-        let at = place(occ.node);
-        let text = if occ.node.is_source() {
-            occ.node.label().to_string()
-        } else {
-            format!("{} {}", occ.node.label(), occ.count)
+        let Some(box_rect) = boxes.get(&occ.node) else {
+            continue;
         };
         let fill = if occ.node.is_source() {
-            egui::Color32::from_black_alpha(200)
+            theme::Ground::Slide.rgb()
         } else {
-            egui::Color32::from_rgb(30, 45, 40)
+            theme::Ground::Raised.rgb()
         };
-        let galley = painter.layout_no_wrap(
-            text,
-            egui::FontId::proportional(11.0),
-            egui::Color32::from_gray(220),
+        painter.rect_filled(*box_rect, 3.0, skin::col(fill));
+        painter.rect_stroke(
+            *box_rect,
+            3.0,
+            egui::Stroke::new(1.0, skin::col(theme::RULE)),
+            egui::StrokeKind::Inside,
         );
-        let box_rect = egui::Rect::from_center_size(at, galley.size() + egui::vec2(10.0, 6.0));
-        painter.rect_filled(box_rect, 3.0, fill);
-        painter.galley(
-            box_rect.center() - galley.size() / 2.0,
-            galley,
-            egui::Color32::WHITE,
+        painter.text(
+            box_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            label_of(occ.node, occ.count),
+            skin::font(Role::Label),
+            skin::col(Role::Value.ink().unwrap_or(theme::DIM)),
         );
     }
 
-    ui.separator();
-    egui::ScrollArea::vertical()
-        .max_height(120.0)
-        .show(ui, |ui| {
-            for edge in &web.edges {
-                if edge.weight <= 0 {
-                    continue;
+    // What the four kinds of line mean. The list of edges that used to sit here said the same
+    // thing in words, one row per edge, directly under a picture that had just said it.
+    skin::hairline(ui);
+    ui.add_space(3.0);
+    ui.horizontal_wrapped(|ui| {
+        for (colour, dashed, what) in [
+            (skin::plot_neutral(), false, "measured"),
+            (skin::plot_neutral(), true, "shared out by population"),
+            (Mood::Bad.rgb(), false, "death"),
+            (Mood::Good.rgb(), false, "recycled"),
+        ] {
+            let (swatch, _) = ui.allocate_exact_size(egui::vec2(24.0, 8.0), egui::Sense::hover());
+            let y = swatch.center().y;
+            let stroke = egui::Stroke::new(if dashed { 2.0 } else { 4.0 }, skin::col(colour));
+            if dashed {
+                for k in [0.0f32, 0.5] {
+                    ui.painter().line_segment(
+                        [
+                            egui::pos2(swatch.left() + swatch.width() * k, y),
+                            egui::pos2(swatch.left() + swatch.width() * (k + 0.35), y),
+                        ],
+                        stroke,
+                    );
                 }
-                ui.small(format!(
-                    "{} → {}: {}{}",
-                    edge.from.label(),
-                    edge.to.label(),
-                    edge.weight / mm_core::Q10_ONE as i64,
-                    if edge.basis == Basis::Measured {
-                        ""
-                    } else {
-                        " (shared out)"
-                    }
-                ))
-                .on_hover_text(edge.note);
+            } else {
+                ui.painter()
+                    .line_segment([egui::pos2(swatch.left(), y), egui::pos2(swatch.right(), y)], stroke);
             }
-        });
+            ui.label(skin::text(Role::Label, what));
+            ui.add_space(6.0);
+        }
+    });
+}
+
+/// Where a ray from a box's centre leaves the box, plus a little clearance.
+///
+/// The arithmetic that makes an arrow touch what it points at. Walking out along the direction
+/// until whichever axis reaches its half-extent first is the box's boundary; without it every
+/// edge is drawn from centre to centre and then buried under the chips painted on top.
+fn edge_of(rect: egui::Rect, dir: egui::Vec2, pad: f32) -> egui::Pos2 {
+    let half = rect.size() / 2.0;
+    let tx = if dir.x.abs() < 1e-6 {
+        f32::INFINITY
+    } else {
+        (half.x + pad) / dir.x.abs()
+    };
+    let ty = if dir.y.abs() < 1e-6 {
+        f32::INFINITY
+    } else {
+        (half.y + pad) / dir.y.abs()
+    };
+    rect.center() + dir * tx.min(ty)
 }
 
 /// The genome editor (M6).

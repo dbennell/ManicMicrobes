@@ -153,7 +153,10 @@ fn dress(style: &mut egui::Style) {
     w.noninteractive.bg_fill = col(Ground::Panel.rgb());
     w.noninteractive.weak_bg_fill = col(Ground::Panel.rgb());
 
-    w.inactive.bg_fill = col(Ground::Sunk.rgb());
+    // A slider's rail is drawn in `inactive.bg_fill`, so it is the trough and not the well —
+    // same reasoning as `theme::TROUGH`, and the same fix: a track you cannot see turns the
+    // handle into a dot with nothing behind it.
+    w.inactive.bg_fill = col(theme::TROUGH);
     w.inactive.weak_bg_fill = col(Ground::Sunk.rgb());
     w.inactive.bg_stroke = egui::Stroke::new(1.0, col(theme::RULE));
 
@@ -170,6 +173,23 @@ fn dress(style: &mut egui::Style) {
     w.open.bg_fill = col(Ground::Raised.rgb());
     w.open.weak_bg_fill = col(Ground::Raised.rgb());
     w.open.bg_stroke = egui::Stroke::new(1.0, col(theme::RULE));
+}
+
+/// The frame a rail or the drawer is drawn in: the panel's fill, its border on the side that
+/// faces the slide, and enough margin that the first section header is not against the glass.
+///
+/// egui's default panel frame has the window margin, which is eight points all round and looks
+/// like a dialogue. Twelve across and nine down is the design's, and it is what makes a rail
+/// read as a column of readings rather than as a form.
+pub fn panel_frame() -> egui::Frame {
+    egui::Frame::new()
+        .fill(col(Ground::Panel.rgb()))
+        .inner_margin(egui::Margin {
+            left: 12,
+            right: 12,
+            top: 9,
+            bottom: 8,
+        })
 }
 
 /// A group's name, above the group.
@@ -237,7 +257,7 @@ pub fn row(ui: &mut egui::Ui, label: &str, fill: Option<f32>, value: &str, colou
             egui::pos2(left, rect.center().y - theme::row::BAR / 2.0),
             egui::vec2(right - left, theme::row::BAR),
         );
-        painter.rect_filled(trough, 2.0, col(Ground::Sunk.rgb()));
+        painter.rect_filled(trough, 2.0, col(theme::TROUGH));
         let mut filled = trough;
         filled.set_width(trough.width() * fraction.clamp(0.0, 1.0));
         painter.rect_filled(filled, 2.0, col(colour));
@@ -418,28 +438,63 @@ pub fn swatch(ui: &mut egui::Ui, rgb: Rgb, on: bool) {
 ///
 /// One shape for all six tabs, so that the genome's gene list, the web's species card and the
 /// toolbox's prose all sit in the same place and the drawer stops being six layouts.
-pub fn context_column<R>(
+/// The drawer's shape, in one place: a wide work area, and the context column beside it.
+///
+/// `id` salts both scroll areas. The split is computed once here rather than in each tab
+/// because it was wrong the first time it was written out by hand — the work area took
+/// `available - CONTEXT_COLUMN`, and then the column asked for `CONTEXT_COLUMN.min(available *
+/// 0.4)` of what was left, which is a fraction of a fraction and came out at 120 points with the
+/// headings wrapping inside it. A measurement that has to be got right in six places is a
+/// measurement that will be got wrong in one.
+///
+/// Below `MIN_WORK + CONTEXT_COLUMN` there is no room for both, and the column goes rather than
+/// squeezing: a tab that has lost its work area is useless, and one that has lost its notes is
+/// merely quieter.
+pub fn drawer_split(
     ui: &mut egui::Ui,
     id: &str,
-    add: impl FnOnce(&mut egui::Ui) -> R,
+    work: impl FnOnce(&mut egui::Ui),
+    context: impl FnOnce(&mut egui::Ui),
 ) {
-    let width = theme::CONTEXT_COLUMN.min(ui.available_width() * 0.4);
-    ui.allocate_ui_with_layout(
-        egui::vec2(width, ui.available_height()),
-        egui::Layout::top_down(egui::Align::Min),
-        |ui| {
-            ui.set_width(width);
-            let rect = ui.max_rect();
-            ui.painter().vline(
-                rect.left(),
-                rect.y_range(),
-                egui::Stroke::new(1.0, col(theme::HAIR)),
-            );
-            ui.add_space(2.0);
-            egui::ScrollArea::vertical()
-                .id_salt(id)
-                .auto_shrink([false, false])
-                .show(ui, add);
-        },
-    );
+    /// The narrowest a work area may be before the context column is dropped instead.
+    const MIN_WORK: f32 = 380.0;
+
+    let height = ui.available_height();
+    let total = ui.available_width();
+    let column = if total >= MIN_WORK + theme::CONTEXT_COLUMN {
+        theme::CONTEXT_COLUMN
+    } else {
+        0.0
+    };
+    ui.horizontal_top(|ui| {
+        ui.allocate_ui_with_layout(
+            egui::vec2(total - column, height),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                ui.set_min_height(height);
+                work(ui);
+            },
+        );
+        if column <= 0.0 {
+            return;
+        }
+        ui.allocate_ui_with_layout(
+            egui::vec2(column, height),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                ui.set_min_size(egui::vec2(column, height));
+                let rect = ui.max_rect();
+                ui.painter().vline(
+                    rect.left(),
+                    rect.y_range(),
+                    egui::Stroke::new(1.0, col(theme::HAIR)),
+                );
+                ui.add_space(2.0);
+                egui::ScrollArea::vertical()
+                    .id_salt(id)
+                    .auto_shrink([false, false])
+                    .show(ui, context);
+            },
+        );
+    });
 }
