@@ -213,7 +213,11 @@ pub fn placements(slots: &[SlotView; SLOT_COUNT]) -> Vec<SlotPlacement> {
 /// Positional rather than looked up in a dictionary of the names the shipped `.mm` files
 /// happen to use. A dictionary would label `ancestor.mm` nicely and have nothing to say about
 /// the evolved descendant anybody actually wants to read, which is the wrong way round.
-fn gene_label(nth: usize) -> String {
+///
+/// Public because the genome pane's gene list has to call the genes the same thing the listing
+/// beside it does, and two positional namings that agree by coincidence would eventually stop.
+#[must_use]
+pub fn gene_label(nth: usize) -> String {
     // a..z, then aa, ab, ... — a genome with more than 26 genes is unusual but not illegal.
     let mut n = nth;
     let mut out = String::new();
