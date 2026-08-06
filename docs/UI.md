@@ -87,36 +87,30 @@ layout mode before the first one has been used is how both end up mediocre.
 ### The menu bar
 
 ```
-File      New slide…              Ctrl+N      from a scenario
+File      MAKE
+          New slide…              Ctrl+N      a lit dish, seeded, that runs
+          New scenario…                       an empty stopped slide to build one on
+          Reseed                  R           the same recipe again, differently
+          ──
+          SCENARIOS — THE RECIPE
+          Scenario library…                   whatever is in scenarios/, read on selection
+          Open scenario…                      .ron, by path
+          Save scenario…          S           opens the scenario pane, which holds the path
+                                              field and the RON that saving will write
+          ──
+          SLIDES — THE WORLD AS IT STANDS
           Open slide…             Ctrl+O      .mmslide, resumes where it was saved
           Save slide              Ctrl+S
-          Save slide as…          Ctrl+Shift+S
-          Recent slides           ▸
-          ──
-          Export                  ▸           species archive · metrics · genome · screenshot
+          Save slide as…
+          Export…                             species archive · metrics · genome · screenshot
           ──
           Quit                    Ctrl+Q
-
-Slide     Scenario library        ▸           whatever is in scenarios/, by name
-          Open scenario…                      .ron, by path
-          Parameters…             ,           the editor described in §4
-          Save parameters as…                 the running world's config, back out as .ron
-          ──
-          Reseed                  R
-
-Simulation  Run / Pause           Space     resumes at the speed it was paused at, not 1×
-            Step one tick         .
-            Speed                 ▸           paused · ½× · 1× · 8× · unlimited
-                                              (½× is 30 ticks a second, for watching a
-                                              division rather than catching one)
-            Breakpoints…
-            ──
-            Interventions…                    what has been changed mid-run, and when
-                                              (opens the ecology pane on that view)
 
 View      Panels                  ▸           cell · metrics · legend · genome · ecology ·
                                               parameters · editor · debugger
                                                                        (each a checkbox)
+          Interventions…                      what has been changed mid-run, and when
+                                              (opens the ecology pane on that view)
           Overlays                ▸           one per chemical, 1–9
                                               (the fast path is the legend, see §4)
           Flow                    V           which way the water is going
@@ -141,6 +135,22 @@ Help      Keys
 Every keyboard shortcut already in `handle_input` appears next to its menu item, and no
 shortcut exists that is not in a menu. The current build has fourteen single-key bindings and
 no way to discover any of them.
+
+**There is no Slide menu either, and the merge fixed three things rather than tidying one.**
+File and Slide were both about documents — a scenario is a recipe and a slide is a state, and
+both are files — so the split was never on a real seam. Between them they had `New slide…
+Ctrl+N` **twice**, once live in Slide and once dead in File under an M10.2 placeholder;
+`Parameters…` in Slide as well as in View, which lists it because it is a panel; and a
+`Save parameters as…` which wrote the *whole scenario* under the name of one part of it, and
+which the scenario pane of §9.2 now does properly and with a preview of the file.
+
+**There is no Simulation menu, and that is deliberate.** It held Run/Pause, Step and a Speed
+submenu, and the transport in the same bar — four inches to the right of it — held all four of
+those as buttons. A menu that is a second copy of the controls beside it is not discoverability,
+it is two places to keep in step. `Interventions…` moved to View, which is the menu that opens
+panes, and the seven keys the Simulation menu was writing down (`space`, `.`, `0`, `` ` ``, `-`,
+`=`, `backspace`) are now in the transport buttons' hover text — which is the rule above
+satisfied by a different surface, not abandoned.
 
 ---
 
@@ -1237,7 +1247,155 @@ people to read it as a score, and that is worth more thought than a milestone de
 
 ---
 
-## 10. Order of work
+## 10. The cell editor (M10.8)
+
+Writing a genome and finding out what it does. The pieces exist and are scattered: the editor
+is a text buffer with diagnostics, the debugger is a sandbox with step controls, the genome pane
+is a reading of a live cell. What is missing is that none of them can answer "what does the line
+I am looking at do", and you cannot run what you are writing without leaving it.
+
+### 10.1 It is not a mode
+
+The design draws the editor as the whole window with a rail either side. That is a state the
+layout already reaches: the drawer goes to full height, and since M10.6 the rails get out of the
+way when it does. So there is no editor mode and no second layout — there is a **width rule**,
+the same one `skin::drawer_split` already applies to the context column: the editor shows its
+left rail when there is room for it and drops it when there is not. One tab that is useful at
+three hundred points and at eight hundred.
+
+### 10.2 The scratch cell is in the editor's left rail
+
+The editor and the debugger are drawer tabs and therefore exclusive — opening one closes the
+other, which is intolerable when the loop is *edit, run, look, edit*. The design solves it by
+promoting the editor to the window and demoting the debugger to a drawer.
+
+Instead: **the scratch cell lives in the editor's left rail.** The editor becomes
+self-sufficient, the debugger tab stays exactly what it is — breakpoints over the *live world*,
+which is a different job — and no tab has to close for another to be useful.
+
+### 10.3 Source is edited; reading is rendered
+
+The design's editor has a comment column, aligned, beside the operands. That cannot live in the
+editable view: egui lays a `TextEdit` out from its buffer and maps the caret to buffer indices,
+so inserting padding to align a column breaks the caret. It does not have to. The design's own
+header carries a `source / reading` toggle, and the aligned columns belong to **reading**, which
+is rendered rather than edited — which is what the genome pane has done since M10.3b.
+
+**Wrapping goes off.** A genome line is short and wrapping helps nobody, and with it off line *n*
+is always visual row *n* — which is what makes a gutter, an instruction-pointer marker and a
+per-line error band correct rather than approximately correct.
+
+### 10.4 What the caret is on
+
+`mm_asm::SourceMap` already exists, and `Build::Ok(Assembled)` already carries it: `Span { byte,
+len, line, col }`, `lookup(byte)` and `byte_of_line(line)`. Every caret-aware panel the design
+asks for is one lookup away from data the editor is already holding and discarding.
+
+So the right rail says what the line under the caret *is*: its opcode, its operand resolved, and
+where a jump would land. Plus the opcode's entry from `Op::note`.
+
+It says so **only while the buffer assembles**, and says that instead when it does not. There is
+no source map for a program that did not compile, and guessing one would be a reading of a genome
+that does not exist.
+
+### 10.5 What it builds, and what it did
+
+Two questions a scratch run can honestly answer, and one it cannot.
+
+- **What it builds** comes from `mm_core::host::RecordingHost`, which already exists for exactly
+  this and whose docstring already says so. It records what the program *asked the world for* —
+  which is the honest claim, and the one the design's own caption makes: *not a promise;
+  expression is gated on internal chemistry.* It needs one field, for `BUILD`, whose default
+  implementation is a no-op so recording it changes no behaviour.
+- **Gene hits** need no change to `mm-core` at all, and in particular none to the VM's hot loop.
+  The sandbox steps the real `Vm`, so where `EXPRESS` went is observable from outside: if the
+  instruction just stepped was `EXPRESS`, the new `ip` either equals some `promoters()[i].entry`
+  or it does not. Attribution by observation, using the real matching rule because it is the real
+  rule that ran. No second implementation to drift, no world state, nothing to serialise.
+- **Divisions cannot be counted**, and the design's "3 divisions" is not true of a scratch cell:
+  there is no world to divide into. What is knowable is `RecordingHost::splits` — *reached SPLIT
+  three times* — and that is what it will say. The difference is the whole point of a sandbox.
+
+`Sandbox::of` already builds a VM that runs against a `NullHost` with no world; it reads five
+things out of a `World` to construct itself, so running an editor buffer instead is a second
+constructor rather than new machinery.
+
+### 10.6 Not in this milestone
+
+**The preview run** (design 3b), for the reasons in §9.5. Deferring it a second time is
+deliberate rather than forgetful.
+
+---
+
+## 11. The window itself (M10.9)
+
+The window manager's title bar is a light GTK strip with an X11 default icon in it, sitting on
+top of a near-black instrument. It belongs to a different application to look at, and §1 asks
+that the chrome be dark so the eye stays on the plate — which it cannot be while thirty-two
+points of somebody else's chrome are nailed to the top of it.
+
+So: `decorations: false`, and **the bar the interface already has becomes the title bar.** Menus
+on the left, window buttons hard against the right corner where every other window on the
+desktop puts them, and the gap between the two is what you drag. That reclaims the strip rather
+than adding one.
+
+### 11.1 Moving and resizing are handed back to the compositor
+
+`winit` has `drag_window` and `drag_resize_window`, both supported on X11 and Wayland (only
+macOS lacks the second). They hand the gesture to the window manager, so snapping, tiling, the
+drop shadow, the minimum size and the multi-monitor arithmetic stay somebody else's and stay
+correct. What is ours is the decision of *when* to hand over, which is a hit test: `ui::resize_edge`.
+Pure and tested, because a corner that answers "north" cannot be dragged diagonally and that is
+not a thing anyone would find except by trying it.
+
+**A corner is an L, not the little square where two thin bands cross.** Six points of band with
+corners at the intersection worked and was a four-by-four-pixel target — findable only by
+somebody who already knew the number. Sides are eight points; a corner reaches twenty along each
+edge, capped at a third of it so there is always a middle that resizes in one axis. And the
+cursor changes, which is the whole of how a frameless window's handles are discovered: without
+it the band is a secret, whatever its width.
+
+Two orderings matter. `window_chrome` runs **after** the interface, so it cannot steal a press
+egui wanted — the rails go right to the edge, and six points is the difference between grabbing
+the window and clicking the first overlay in the legend. And a pointer in the band is routed to
+`Target::Panel`, so a drag that starts on the frame does not also pan the slide behind it.
+
+### 11.2 What this costs, and the way out
+
+A borderless window is one where the usual escape hatches are the only escape hatches. On GNOME,
+`Super`+drag moves and `Super`+middle-drag resizes whatever is under the pointer, decorations or
+not, so a window that somehow becomes ungrabbable is still recoverable without a terminal.
+
+`WinitWindows` is reached through a thread-local rather than a `NonSend` resource — that changed
+in Bevy 0.19 and `bevy_winit`'s own comment calls it temporary. The consequence worth knowing is
+that a system reading it **must** be pinned to the main thread with a `NonSendMarker`: off it,
+the thread-local is a freshly constructed empty one, every window lookup silently misses, and
+the window simply stops being movable with nothing anywhere saying why.
+
+### 11.3 The transport is one control, not seven
+
+A single bordered box with hairline divisions, as the design draws it. Separate chips with gaps
+between them read as separate controls that happen to be adjacent, and these are seven positions
+of one thing.
+
+**Pause and play are two segments and not one toggle.** A toggle makes you read the glyph to
+work out which state you are in; two segments lit differently makes you look at it. Two are lit
+at once while it runs, and they are painted differently on purpose: play takes the **accent** —
+*the world is going* — and the current speed takes a **raised ground** — *this is how fast*.
+Two facts, both true, and a bar that painted them the same could not say so.
+
+`skin::segmented_bar` is where this lives, and the ends keep the box's rounding on their outer
+corners so a lit first or last segment does not square off the corner it sits in.
+
+### 11.4 Glyphs are a gamble that has to be looked at
+
+egui ships Hack and Ubuntu-Light and no more. `✕` (U+2715) is in neither and rendered as a tofu
+box in the close button — which a screenshot showed and nothing else would have. The buttons use
+`—`, `☐` and `×`, and anything outside Latin-1 needs a photograph before it is believed.
+
+---
+
+## 12. Order of work
 
 | step | what | why it is here |
 | --- | --- | --- |
@@ -1247,6 +1405,8 @@ people to read it as a score, and that is worth more thought than a milestone de
 | **M10.4** | ecology pane | The data all exists; this is presentation. |
 | **M10.5** | field texture, instanced cell shader, organelle pass | The biggest piece and the only one with real technical risk. Last, on a shell that is already stable. |
 | **M10.6** | the chrome: theme, type, row grammar, menus, toolbox and parameters | §8. After the renderer, because it must not be moving while the renderer is; and it touches none of the same files, so it cannot be the reason a frame regresses. |
+| **M10.9** | the window itself: borderless, with the menu bar as its title bar | §11. Independent of everything else and the smallest of the four, but last, because it is the only one whose failure mode is a window you cannot move. |
+| **M10.8** | the cell editor: its rails, the caret's reading, the ISA reference, the scratch cell | §10. Last because it is the one that needs `mm-core` to say anything new, and the only new thing it needs is documentation. |
 | **M10.7** | building a scenario: the authoring caption, the scenario pane and its RON preview, what is on the slide, sheets and the library | §9. Almost no new mechanism — §4 built it all and the interface never said so. Last because it is the smallest, and because it is the one whose absence is only ever confusing rather than wrong. |
 
 10.1 first because it is the smallest thing that makes the application usable day to day.
@@ -1257,7 +1417,7 @@ costs nothing to revert.
 
 ---
 
-## 11. What could go wrong
+## 13. What could go wrong
 
 - **The instanced pipeline is the risky part.** Bevy's mid-level render API is the part that
   moves most between releases and has the least documentation. Mitigation: follow the upstream

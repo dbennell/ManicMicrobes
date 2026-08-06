@@ -43,9 +43,15 @@ bevy = { version = "0.19", optional = true, default-features = false, features =
 ] }
 bevy_egui = { version = "0.41", optional = true }
 
+# For `drag_window` and `drag_resize_window` only: a borderless window has no frame for the
+# window manager to grab, so moving and resizing are handed to the compositor by hand (M10.9).
+# The same version Bevy resolves, so there is one winit in the graph and one `Window` type;
+# `bevy_winit` re-exports two items and `ResizeDirection` is not one of them.
+winit = { version = "0.30", optional = true }
+
 [features]
 default = []
-render = ["dep:bevy", "dep:bevy_egui"]
+render = ["dep:bevy", "dep:bevy_egui", "dep:winit"]
 
 [lib]
 name = "mm_app"

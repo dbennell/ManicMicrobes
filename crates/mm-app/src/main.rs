@@ -87,6 +87,8 @@ use bevy::mesh::Mesh2d;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::sprite_render::MeshMaterial2d;
 use bevy::window::PrimaryWindow;
+use bevy::window::SystemCursorIcon;
+use bevy::window::CursorIcon;
 use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 
 use mm_app::art;
@@ -406,7 +408,36 @@ fn arrange(spec: &str, sim: &mut SlideRes, view: &mut View) {
                     _ => Ecology::Tree,
                 };
             }
-            "editor" => view.panels.set(Panel::Editor, true),
+            "editor" => {
+                view.panels.set(Panel::Editor, true);
+                // `editor:ancestor` loads a genome into the buffer, so the pane can be
+                // photographed with something in it rather than empty.
+                if !sub.is_empty() {
+                    let path = std::path::Path::new("genomes").join(format!("{sub}.mm"));
+                    match std::fs::read_to_string(&path) {
+                        Ok(text) => {
+                            // On the first line that actually produces bytes, so a screenshot
+                            // shows the reading panel doing its job rather than reporting a
+                            // comment.
+                            view.editor_caret = text
+                                .split_inclusive('\n')
+                                .scan(0usize, |at, line| {
+                                    let here = *at;
+                                    *at += line.chars().count();
+                                    Some((here, line))
+                                })
+                                .find(|(_, line)| {
+                                    let t = line.trim();
+                                    !t.is_empty() && !t.starts_with(';')
+                                })
+                                .map_or(0, |(at, _)| at);
+                            sim.editor = mm_app::editor::Editor::with_source(text, sub.to_string());
+                            sim.editor.assemble();
+                        }
+                        Err(e) => eprintln!("MM_SHOT_VIEW: {}: {e}", path.display()),
+                    }
+                }
+            }
             "debugger" => view.panels.set(Panel::Debugger, true),
             "params" => {
                 view.panels.set(Panel::Parameters, true);
@@ -544,6 +575,17 @@ fn main() {
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
             title: "Manic Microbes".to_string(),
+            // Borderless (M10.9). The window manager's title bar is a light GTK strip with an
+            // X11 default icon in it, sitting on top of a near-black instrument — it belongs to
+            // a different application to look at. The interface already has a bar across the
+            // top, so the bar it already has becomes the title bar: the menus on the left, the
+            // window buttons on the right, and the space between the two is what you drag.
+            //
+            // What that costs is that moving and resizing become ours. `winit` does both
+            // through the compositor — `drag_window` and `drag_resize_window`, supported on X11
+            // and Wayland — so it is a hit test and two calls, not an implementation of window
+            // management. See `window_chrome` and `ui::resize_edge`.
+            decorations: false,
             ..default()
         }),
         ..default()
@@ -580,6 +622,9 @@ fn main() {
         // published, and `view.viewport` is still read a frame later by `handle_input`, which
         // it always was.
         .add_systems(EguiPrimaryContextPass, panels)
+        // After the interface, because it acts on what the interface decided this frame: a drag
+        // on the menu bar's empty half, or a press in the edge band that egui did not claim.
+        .add_systems(EguiPrimaryContextPass, window_chrome.after(panels))
         .run();
 }
 
@@ -615,6 +660,13 @@ struct SlideRes {
     last_export: Option<String>,
     /// The selected cell's genome, disassembled once and kept until the genome changes.
     listing: mm_app::inspector::Listing,
+    /// The editor's own copy of the same thing (M10.8).
+    ///
+    /// Separate from `listing`, which belongs to the genome pane. `Listing::of` re-disassembles
+    /// only when the hash it is given changes, so one shared between two panes showing two
+    /// different genomes would re-disassemble both of them on every frame — which is the
+    /// caching working exactly backwards.
+    editor_listing: mm_app::inspector::Listing,
     /// Which cell the editor's buffer was loaded from, so "apply to this cell" cannot write a
     /// genome into a cell it was never taken from.
     editing: Option<CellId>,
@@ -760,6 +812,7 @@ impl SlideRes {
             last_tool: None,
             last_export: None,
             listing: mm_app::inspector::Listing::default(),
+            editor_listing: mm_app::inspector::Listing::default(),
             editing: None,
             ecology: None,
             scenario_view: None,
@@ -1265,6 +1318,26 @@ struct View {
     species: Option<mm_core::phylogeny::SpeciesId>,
     /// Which of the ecology pane's three views is showing (M10.4).
     ecology: Ecology,
+    /// The strip of the menu bar that is draggable as a title bar (M10.9).
+    ///
+    /// Recorded by `panels` and read by `window_chrome`, which is the same one-frame-stale
+    /// arrangement `viewport` uses and for the same reason: the interface knows the rectangle
+    /// while it is laying itself out, and the window is somebody else's to move.
+    title_bar: Rect,
+    /// Whether the pointer is in the window's resize band, so a press there does not also reach
+    /// the slide.
+    on_edge: bool,
+    /// Asked for by the window buttons, applied by `window_chrome`.
+    want_minimise: bool,
+    want_maximise: bool,
+    /// Which resize cursor is currently set, so it is only written when it changes.
+    cursor_edge: Option<SystemCursorIcon>,
+    /// Where the caret was in the editor last frame, as a character index (M10.8).
+    ///
+    /// Last frame's, because the right rail is laid out beside the buffer and the buffer only
+    /// reports its caret while it is being drawn. One frame stale for a panel that describes
+    /// where you are typing is invisible; laying the interface out twice to avoid it is not.
+    editor_caret: usize,
     /// The sheet on screen, if any (M10.7).
     sheet: Option<Sheet>,
     /// Which scenario the library sheet has selected, and what reading it said.
@@ -1384,6 +1457,12 @@ impl Default for View {
             place_count: 1,
             species: None,
             ecology: Ecology::Tree,
+            title_bar: Rect::default(),
+            on_edge: false,
+            want_minimise: false,
+            want_maximise: false,
+            cursor_edge: None,
+            editor_caret: 0,
             sheet: None,
             library_pick: None,
             library_detail: None,
@@ -1695,7 +1774,14 @@ fn handle_input(
         .ok()
         .and_then(Window::cursor_position)
         .map(|p| (p.x, p.y));
-    let live = ui::route(pointer, view.viewport, wants_pointer);
+    // The resize band belongs to the window frame, whatever is drawn under it. Without this a
+    // drag that starts one pixel inside the left edge both resizes the window and pans the
+    // slide, and the slide wins the argument by moving.
+    let live = if view.on_edge {
+        Target::Panel
+    } else {
+        ui::route(pointer, view.viewport, wants_pointer)
+    };
 
     // The left button latches its owner for the duration of the drag, so a pan that wanders
     // over a rail does not drop the plate halfway through.
@@ -3031,6 +3117,153 @@ fn redraw(
     }
 }
 
+/// Moving and resizing a window that has no frame to grab (M10.9).
+///
+/// Both go through the compositor rather than through us: `drag_window` and
+/// `drag_resize_window` hand the gesture to the window manager, which is what makes snapping,
+/// tiling, the shadow and the minimum size somebody else's problem and correct. All this system
+/// decides is *when* to hand over.
+///
+/// It runs after [`panels`] because it must not steal a press egui wanted. The edge band is six
+/// points wide and the rails go right up to it, so the order is the difference between grabbing
+/// the window and clicking the first overlay in the legend.
+fn window_chrome(
+    mut view: ResMut<View>,
+    buttons: Res<ButtonInput<MouseButton>>,
+    mut window: Query<(Entity, &mut Window), With<PrimaryWindow>>,
+    mut contexts: EguiContexts,
+    mut commands: Commands,
+    // Forces this system onto the main thread, which is where the thread-local below lives.
+    // Off it, `WINIT_WINDOWS` is a freshly constructed empty one and every lookup silently
+    // misses — a window that cannot be moved and no error to say why.
+    _main_thread: bevy::ecs::system::NonSendMarker,
+) {
+    use winit::window::ResizeDirection;
+
+    let Ok((entity, mut win)) = window.single_mut() else {
+        return;
+    };
+
+    // What the buttons in the menu bar asked for last frame. Applied here because `panels` has
+    // the interface and this system has the window.
+    if view.want_minimise {
+        view.want_minimise = false;
+        win.set_minimized(true);
+    }
+    if view.want_maximise {
+        view.want_maximise = false;
+        let now = maximised(entity);
+        win.set_maximized(!now);
+    }
+
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
+    };
+    let over_ui = ctx.egui_wants_pointer_input() || ctx.is_pointer_over_egui();
+    let Some(pointer) = ctx.pointer_latest_pos() else {
+        return;
+    };
+    let size = ctx.viewport_rect().size();
+    let edge = ui::resize_edge(
+        (pointer.x, pointer.y),
+        (size.x, size.y),
+        ui::RESIZE_BAND,
+        ui::RESIZE_CORNER,
+    );
+
+    // The cursor, which is the whole of how a frameless window's grab handles are discovered.
+    // Without it the band is findable only by somebody who already knows the number, which is
+    // what the first build of this was: it worked, and it took a minute of hunting to prove it.
+    let want = match edge {
+        Some(ui::Edge::North | ui::Edge::South) => Some(SystemCursorIcon::NsResize),
+        Some(ui::Edge::East | ui::Edge::West) => Some(SystemCursorIcon::EwResize),
+        Some(ui::Edge::NorthWest | ui::Edge::SouthEast) => Some(SystemCursorIcon::NwseResize),
+        Some(ui::Edge::NorthEast | ui::Edge::SouthWest) => Some(SystemCursorIcon::NeswResize),
+        None => None,
+    };
+    // Only on a change. `CursorIcon` is a component, and rewriting it every frame is a change
+    // detection storm that reaches the winit event loop sixty times a second to say the same
+    // thing.
+    if want != view.cursor_edge {
+        view.cursor_edge = want;
+        let mut cmd = commands.entity(entity);
+        match want {
+            Some(icon) => {
+                cmd.insert(CursorIcon::System(icon));
+            }
+            None => {
+                cmd.remove::<CursorIcon>();
+            }
+        }
+    }
+
+    // Remembered so `handle_input` can refuse a press that belongs to the window frame — a drag
+    // that starts on the edge must not also pan the slide behind it.
+    view.on_edge = edge.is_some();
+
+    if buttons.just_pressed(MouseButton::Left) {
+        if let Some(edge) = edge {
+            let direction = match edge {
+                ui::Edge::North => ResizeDirection::North,
+                ui::Edge::South => ResizeDirection::South,
+                ui::Edge::East => ResizeDirection::East,
+                ui::Edge::West => ResizeDirection::West,
+                ui::Edge::NorthEast => ResizeDirection::NorthEast,
+                ui::Edge::NorthWest => ResizeDirection::NorthWest,
+                ui::Edge::SouthEast => ResizeDirection::SouthEast,
+                ui::Edge::SouthWest => ResizeDirection::SouthWest,
+            };
+            // Ignored rather than reported: it fails on the platforms that do not support it,
+            // and a log line every click on a Mac would be noise about a thing the user can
+            // already see is not happening.
+            with_window(entity, |w| {
+                let _ = w.drag_resize_window(direction);
+            });
+            return;
+        }
+        // The menu bar's empty half is the title bar. `wants_pointer_input` is false there —
+        // a `MenuBar` claims its buttons and not the gap after them — which is exactly the
+        // question being asked.
+        if !over_ui && view.title_bar.contains(pointer.x, pointer.y) {
+            with_window(entity, |w| {
+                let _ = w.drag_window();
+            });
+        }
+    }
+
+    // Double-click the title bar to maximise, as every other window does.
+    if !over_ui
+        && view.title_bar.contains(pointer.x, pointer.y)
+        && ctx.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary))
+    {
+        let now = maximised(entity);
+        win.set_maximized(!now);
+    }
+}
+
+/// Do something to the real window behind a Bevy window entity.
+///
+/// `WinitWindows` stopped being a `NonSend` resource in Bevy 0.19 and became a thread-local
+/// (`bevy_winit`'s own comment calls it temporary, pending their issue 17667). So it is reached
+/// through `with_borrow` and only from the main thread — which `NonSendMarker` on the caller is
+/// what guarantees.
+///
+/// Does nothing if the window has gone. That is a real frame during shutdown, not a bug.
+fn with_window(entity: Entity, f: impl FnOnce(&winit::window::Window)) {
+    bevy::winit::WINIT_WINDOWS.with_borrow(|windows| {
+        if let Some(window) = windows.get_window(entity) {
+            f(window);
+        }
+    });
+}
+
+/// Whether the real window is maximised. `false` if it has gone.
+fn maximised(entity: Entity) -> bool {
+    let mut out = false;
+    with_window(entity, |w| out = w.is_maximized());
+    out
+}
+
 /// Everything egui draws, and the one place the layout is decided (M10.1).
 ///
 /// Docked panels rather than floating windows. The visible reason is that a rail cannot be
@@ -3531,24 +3764,32 @@ fn ranged_drag(
 fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut bool) {
     const LATER: &str = "M10.2 — configuration and slide files";
 
-    egui::Panel::top("menu_bar").show(root, |ui| {
+    egui::Panel::top("menu_bar")
+        // Taller than a bare menu bar, because it is not one any more: since M10.9 it is also
+        // the title bar, and the strip you drag a window by wants to be a strip rather than a
+        // line. Eight points either side of the row rather than egui's default two.
+        .frame(
+            skin::panel_frame().inner_margin(egui::Margin {
+                left: 8,
+                right: 8,
+                top: 8,
+                bottom: 8,
+            }),
+        )
+        .show(root, |ui| {
+        // The bar's own rectangle, minus nothing: `window_chrome` only drags where egui did not
+        // claim the pointer, so the gap between the menus and the transport is what is left and
+        // is exactly the strip a title bar would be.
+        let bar = ui.max_rect();
+        view.title_bar = Rect::new(bar.min.x, bar.min.y, bar.max.x, bar.max.y);
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
-                skin::menu_caption(ui, "slide files");
-                soon(ui, "New slide…", "Ctrl+N", LATER);
-                soon(ui, "Open slide…", "Ctrl+O", LATER);
-                soon(ui, "Save slide", "Ctrl+S", LATER);
-                soon(ui, "Save slide as…", "", LATER);
-                skin::menu_rule(ui);
-                soon(ui, "Export…", "", LATER);
-                skin::menu_rule(ui);
-                if skin::menu_item(ui, "Quit", "Ctrl+Q").clicked() {
-                    *quit = true;
-                    ui.close();
-                }
-            });
-
-            ui.menu_button("Slide", |ui| {
+                // One menu for documents, both kinds of them (M10.9). This was two — a File
+                // menu whose every item was disabled, and a Slide menu that did the work — and
+                // between them they had `New slide… Ctrl+N` *twice*, once live and once dead,
+                // `Parameters…` in a second place View already listed, and a `Save parameters
+                // as…` that saved the whole scenario and was named for a part of it.
+                skin::menu_caption(ui, "make");
                 if skin::menu_item(ui, "New slide…", "Ctrl+N").clicked() {
                     view.sheet = Some(Sheet::NewSlide);
                     ui.close();
@@ -3557,6 +3798,13 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                     view.sheet = Some(Sheet::NewScenario);
                     ui.close();
                 }
+                if skin::menu_item(ui, "Reseed", "R").clicked() {
+                    sim.reseed();
+                    ui.close();
+                }
+
+                skin::menu_rule(ui);
+                skin::menu_caption(ui, "scenarios — the recipe");
                 if skin::menu_item(ui, "Scenario library…", "").clicked() {
                     view.sheet = Some(Sheet::Library);
                     ui.close();
@@ -3570,127 +3818,25 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                         ui.close();
                     }
                 });
-                if ui
-                    .add(
-                        egui::Button::new("Parameters…")
-                            .shortcut_text(Panel::Parameters.key())
-                            .selected(view.panels.is_open(Panel::Parameters)),
-                    )
-                    .on_hover_text("every cost, rate and mutation the living half runs on")
-                    .clicked()
-                {
-                    view.panels.toggle(Panel::Parameters);
+                if skin::menu_item(ui, "Save scenario…", Panel::Scenario.key()).clicked() {
+                    // The scenario pane, not a dialogue: it holds the path field *and* the RON
+                    // that saving will write. This used to be `Save parameters as…`, a nested
+                    // menu that wrote the whole scenario under the name of one part of it and
+                    // showed you none of what it was about to do.
+                    view.panels.set(Panel::Scenario, true);
                     ui.close();
-                }
-                ui.menu_button("Save parameters as…", |ui| {
-                    ui.label("the running world's scenario, back out as a .ron");
-                    ui.small(
-                        "every parameter as it stands now, including anything changed \
-                         mid-run — which is how a setting you tuned by hand becomes a \
-                         scenario you can start ten runs from.",
-                    );
-                    ui.text_edit_singleline(&mut view.file_path);
-                    if ui.button("Save").clicked() {
-                        let path = std::path::PathBuf::from(view.file_path.trim());
-                        let mut scenario = {
-                            let held = sim.engine.handle();
-                            let slide = held.slide();
-                            slide.world().scenario().clone()
-                        };
-                        // A slide built from `New scenario…` is still called "untitled", and a
-                        // library full of untitleds is a library you cannot read. The file name
-                        // is the one thing the author has definitely already chosen.
-                        if scenario.name == "untitled" {
-                            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                                scenario.name = stem.replace('_', " ");
-                            }
-                        }
-                        view.file_note = Some(match library::save(&path, &scenario) {
-                            Ok(written) => Ok(format!("wrote {}", written.display())),
-                            Err(e) => Err(e.to_string()),
-                        });
-                        ui.close();
-                    }
-                });
-                ui.separator();
-                if ui
-                    .add(egui::Button::new("Reseed").shortcut_text("R"))
-                    .on_hover_text("wipe the slide and start the ancestor over")
-                    .clicked()
-                {
-                    sim.reseed();
-                    ui.close();
-                }
-                if ui
-                    .button("Packing bench")
-                    .on_hover_text(
-                        "a slide with the biology switched off: cells that cannot divide, \
-                         die or grow, and no Brownian jitter, gathered by gravity towards \
-                         the middle. For looking at how volumes behave without wondering \
-                         whether what you are seeing is the simulation",
-                    )
-                    .clicked()
-                {
-                    sim.bench();
-                    ui.close();
-                }
-            });
-
-            ui.menu_button("Simulation", |ui| {
-                let running = sim.engine.rate().is_running();
-                if skin::menu_item(ui, if running { "Pause" } else { "Run" }, "Space").clicked() {
-                    view.paused = !sim.engine.toggle_pause().is_running();
-                    ui.close();
-                }
-                if skin::menu_item(ui, "Step one tick", ".").clicked() {
-                    sim.engine.step();
                 }
 
-                // Speed is a live control and not a submenu (UI.md §8.7). `Simulation ▸ Speed ▸
-                // 1×` is three levels to change one thing, and the menu shuts on the click — so
-                // comparing ½× against 8× meant opening it twice. Here the menu stays up and the
-                // row is the answer, for the same reason the toolbox is a panel: a thing you
-                // adjust while watching has to stay where you can reach it.
-                skin::menu_caption(ui, "speed");
-                let now = sim.engine.rate();
-                if let Some(rate) = skin::segmented(
-                    ui,
-                    &[
-                        ("pause", "0", Rate::Paused),
-                        ("½×", "`", Rate::half()),
-                        ("1×", "-", Rate::times(1)),
-                        ("8×", "=", Rate::times(8)),
-                        ("max", "⌫", Rate::Unlimited),
-                    ],
-                    now,
-                ) {
-                    sim.engine.set_rate(rate);
-                    view.paused = rate == Rate::Paused;
-                }
-                ui.label(skin::text(
-                    Role::Small,
-                    "½× is 30 ticks a second, for watching a division rather than catching one.",
-                ));
                 skin::menu_rule(ui);
-                let count = sim.latest.interventions.len();
-                let showing =
-                    view.panels.is_open(Panel::Ecology) && view.ecology == Ecology::Interventions;
-                if ui
-                    .add(
-                        egui::Button::new(if count == 0 {
-                            "Interventions…".to_string()
-                        } else {
-                            format!("Interventions… ({count})")
-                        })
-                        .selected(showing),
-                    )
-                    .on_hover_text("what has been changed in this world, and when")
-                    .clicked()
-                {
-                    // Opens the ecology pane on that view, as `f` does for the food web,
-                    // rather than toggling: the pane is where the log lives now.
-                    view.panels.set(Panel::Ecology, true);
-                    view.ecology = Ecology::Interventions;
+                skin::menu_caption(ui, "slides — the world as it stands");
+                soon(ui, "Open slide…", "Ctrl+O", LATER);
+                soon(ui, "Save slide", "Ctrl+S", LATER);
+                soon(ui, "Save slide as…", "", LATER);
+                soon(ui, "Export…", "", LATER);
+
+                skin::menu_rule(ui);
+                if skin::menu_item(ui, "Quit", "Ctrl+Q").clicked() {
+                    *quit = true;
                     ui.close();
                 }
             });
@@ -3710,7 +3856,28 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                         view.panels.set(panel, open);
                     }
                 }
-                ui.separator();
+                let count = sim.latest.interventions.len();
+                let showing =
+                    view.panels.is_open(Panel::Ecology) && view.ecology == Ecology::Interventions;
+                if ui
+                    .add(
+                        egui::Button::new(if count == 0 {
+                            "Interventions…".to_string()
+                        } else {
+                            format!("Interventions… ({count})")
+                        })
+                        .selected(showing),
+                    )
+                    .on_hover_text("what has been changed in this world, and when")
+                    .clicked()
+                {
+                    // Opens the ecology pane on that view rather than toggling: the pane is
+                    // where the log lives now.
+                    view.panels.set(Panel::Ecology, true);
+                    view.ecology = Ecology::Interventions;
+                    ui.close();
+                }
+                skin::menu_rule(ui);
                 ui.menu_button("Overlays", |ui| {
                     for (i, name) in sim.chem_names.clone().into_iter().enumerate() {
                         let on = sim.engine.overlay_enabled(i);
@@ -3857,36 +4024,104 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
             // them. `right_to_left` so it stays pinned to the edge as the window resizes.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                if skin::chip(ui, "⏭", None, false)
-                    .on_hover_text("step one tick  (.)")
+                // The window buttons, where a title bar would have them (M10.9). First in a
+                // right-to-left run, so close is hard against the corner the way it is in every
+                // other window on the desktop — muscle memory is the whole of this convention
+                // and there is nothing to be gained by having an opinion about it.
+                // `×`, U+00D7, and not `✕` U+2715 — which is not in Hack and came out as a
+                // tofu box. egui ships Hack and Ubuntu-Light and no more, so a symbol outside
+                // Latin-1 is a gamble that has to be looked at to settle.
+                if skin::chip(ui, "×", None, false)
+                    .on_hover_text("close")
                     .clicked()
                 {
-                    sim.engine.step();
+                    *quit = true;
                 }
-                // Slowest last, because the layout is right-to-left: this reads ½× 1× 8× max
-                // on screen, which is the order the keys are in and the order a speed control
-                // is in everywhere else.
-                for (label, rate) in [
-                    ("max", Rate::Unlimited),
-                    ("8×", Rate::times(8)),
-                    ("1×", Rate::times(1)),
-                    ("½×", Rate::half()),
-                ] {
-                    if skin::chip(ui, label, None, sim.engine.rate() == rate).clicked() {
-                        sim.engine.set_rate(rate);
-                        view.paused = false;
+                if skin::chip(ui, "☐", None, false)
+                    .on_hover_text("maximise / restore  (or double-click the bar)")
+                    .clicked()
+                {
+                    view.want_maximise = true;
+                }
+                if skin::chip(ui, "—", None, false)
+                    .on_hover_text("minimise")
+                    .clicked()
+                {
+                    view.want_minimise = true;
+                }
+                ui.add_space(12.0);
+
+                // The transport, as one segmented control rather than a row of chips (M10.9).
+                // Seven positions of one thing, and separate chips with gaps between them read
+                // as separate controls that happen to be adjacent.
+                //
+                // Pause and play are two segments and not one toggle, which is the design's
+                // arrangement and the better one: a toggle makes you read the glyph to work out
+                // the state, and two lit differently makes you look at it. Two segments *are*
+                // lit at once when it runs — play in the accent, saying the world is going, and
+                // the speed in a raised ground, saying how fast. Different facts, different
+                // paint.
+                let rate = sim.engine.rate();
+                let running = rate.is_running();
+                let icon = Some(26.0);
+                let speeds = [
+                    ("½×", "`", Rate::half()),
+                    ("1×", "-", Rate::times(1)),
+                    ("8×", "=", Rate::times(8)),
+                    ("max", "backspace", Rate::Unlimited),
+                ];
+                let mut segments = vec![
+                    skin::Segment {
+                        label: "⏸",
+                        on: !running,
+                        accent: true,
+                        hover: "pause  (space)".to_string(),
+                        width: icon,
+                    },
+                    skin::Segment {
+                        label: "▶",
+                        on: running,
+                        accent: true,
+                        hover: "run  (space)".to_string(),
+                        width: icon,
+                    },
+                ];
+                segments.extend(speeds.iter().map(|(label, key, at)| skin::Segment {
+                    label,
+                    on: running && rate == *at,
+                    accent: false,
+                    hover: format!("{label}  ({key})"),
+                    width: None,
+                }));
+                segments.push(skin::Segment {
+                    label: "⏭",
+                    on: false,
+                    accent: false,
+                    hover: "step one tick  (.)".to_string(),
+                    width: icon,
+                });
+
+                if let Some(picked) = skin::segmented_bar(ui, &segments) {
+                    match picked {
+                        0 => {
+                            sim.engine.set_rate(Rate::Paused);
+                            view.paused = true;
+                        }
+                        1 => {
+                            // Resumes at the speed it was paused at, not at 1×.
+                            if !running {
+                                view.paused = !sim.engine.toggle_pause().is_running();
+                            }
+                        }
+                        n if n <= speeds.len() + 1 => {
+                            sim.engine.set_rate(speeds[n - 2].2);
+                            view.paused = false;
+                        }
+                        _ => sim.engine.step(),
                     }
                 }
-                let running = sim.engine.rate().is_running();
-                // Never accented: run and pause are one *action* whose label already says which
-                // way it goes, and the accent means state. The speed chips beside it carry the
-                // state, and two lit chips side by side say nothing at all.
-                if skin::chip(ui, if running { "⏸" } else { "▶" }, None, false)
-                    .on_hover_text("run / pause  (space)")
-                    .clicked()
-                {
-                    view.paused = !sim.engine.toggle_pause().is_running();
-                }
+                ui.add_space(8.0);
+
                 ui.label(skin::text(Role::Section, "transport"));
 
                 // Which of the two things you are looking at (UI.md §9.1). A slide stopped at
@@ -4141,7 +4376,7 @@ fn drawer(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
                 Panel::Toolbox => toolbox_body(ui, sim, view),
                 Panel::Scenario => scenario_body(ui, sim, view),
                 Panel::Parameters => parameters_body(ui, sim, view),
-                Panel::Editor => editor_body(ui, sim),
+                Panel::Editor => editor_body(ui, sim, view),
                 Panel::Debugger => debugger_body(ui, sim),
                 // The rails' panels are never the drawer's tab; `Panels::set` will not put
                 // one there.
@@ -7368,7 +7603,16 @@ fn edge_of(rect: egui::Rect, dir: egui::Vec2, pad: f32) -> egui::Pos2 {
 /// Syntax highlighting comes from `mm_asm::highlight`, which classifies against the real
 /// opcode table, and diagnostics come from actually assembling — so neither can drift from the
 /// language the way a second, approximate definition in the front-end would.
-fn editor_body(ui: &mut egui::Ui, sim: &mut SlideRes) {
+/// How wide the editor's left rail is when there is room for it.
+const EDITOR_RAIL: f32 = 236.0;
+
+/// The genome editor (M6, rebuilt for M10.8 — `docs/UI.md` §10).
+///
+/// Three columns when the drawer is tall enough for them: what the buffer *is* on the left, the
+/// buffer in the middle, and what the caret is on plus what went wrong on the right. Not a mode
+/// and not a second layout — the drawer already goes to full height, so the left rail is behind
+/// a width rule and nothing else, exactly as `skin::drawer_split`'s context column is.
+fn editor_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
     ui.horizontal(|ui| {
         ui.label(skin::text(Role::Label, "name"));
         ui.add(
@@ -7391,13 +7635,22 @@ fn editor_body(ui: &mut egui::Ui, sim: &mut SlideRes) {
                 }
             }
         }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            match sim.editor.build().bytes() {
+                Some(bytes) if !sim.editor.is_dirty() => ui.label(skin::moody(
+                    Role::Label,
+                    Mood::Good,
+                    format!("assembles · {} B", bytes.len()),
+                )),
+                Some(_) => ui.label(skin::moody(Role::Label, Mood::Warn, "stale — reassembling")),
+                None => ui.label(skin::text(Role::Label, sim.editor.status())),
+            }
+        });
     });
-    ui.label(skin::text(Role::Label, sim.editor.status()));
     ui.add_space(2.0);
     skin::hairline(ui);
     ui.add_space(3.0);
 
-    // Diagnostics first: they are why anyone opened this panel.
     let mut source = sim.editor.source().to_string();
     let errors: Vec<(u32, u32, String)> = sim
         .editor
@@ -7430,68 +7683,343 @@ fn editor_body(ui: &mut egui::Ui, sim: &mut SlideRes) {
             })
             .collect()
     };
-    // "Assembles clean" is a claim, and an empty buffer that has never been assembled has not
-    // earned it. Said only where there are bytes to say it about.
     let assembled = sim.editor.build().bytes().map(<[u8]>::len);
-    let diagnostics = move |ui: &mut egui::Ui| {
-        skin::section(ui, "diagnostics · live", false);
-        match (quoted.is_empty(), assembled) {
-            (true, Some(bytes)) => {
-                ui.label(skin::moody(
-                    Role::Label,
-                    Mood::Good,
-                    format!("assembles clean · {bytes} B"),
-                ));
-            }
-            (true, None) => {
-                ui.label(skin::text(Role::Label, "nothing assembled yet"));
-            }
-            (false, _) => {}
-        }
-        for (line, col, message, text) in &quoted {
-            // A warm left edge and the position in mono, so a list of six errors is six things
-            // rather than six sentences.
-            ui.horizontal(|ui| {
-                let (edge, _) = ui.allocate_exact_size(egui::vec2(2.0, 30.0), egui::Sense::hover());
-                ui.painter()
-                    .rect_filled(edge, 0.0, skin::col(Mood::Bad.rgb()));
-                ui.vertical(|ui| {
-                    ui.label(skin::moody(Role::Label, Mood::Bad, format!("{line}:{col} {message}")));
-                    // The offending line, quoted. `3:12` means counting to line three
-                    // otherwise, and counting to line three is the part nobody enjoys.
-                    if !text.is_empty() {
-                        ui.label(skin::text(Role::Label, text));
-                    }
-                });
-            });
-        }
-        ui.add_space(theme::SECTION_GAP);
-        ui.label(skin::text(
-            Role::Body,
-            "The buffer reassembles on every keystroke, so the line numbers in an error always \
-             point at the text as it is now.",
-        ));
-    };
+    // What the caret was on last frame, resolved before anything is drawn: the right rail is
+    // laid out beside the buffer, and the buffer's own answer only arrives while it is drawn.
+    let reading = caret_reading(sim, view.editor_caret, &source);
+    let mut next_caret = view.editor_caret;
 
-    // The source, highlighted as you type.
-    //
-    // egui 0.35 takes a `layouter` on `TextEdit`, which lays the buffer out through a closure
-    // of our own — so the colours and the caret come from one widget rather than from a
-    // styled copy sitting beside an editable one. That was the arrangement here before, and
-    // the two halves scrolled independently.
-    //
-    // The lexer is `mm_asm::highlight`, the assembler's own, so the editor cannot disagree
-    // with the language about what an opcode is. Called on the widget's live text rather than
-    // through `Editor::highlight`, which reads the last text handed to `set_source` and is
-    // therefore one keystroke behind.
     skin::drawer_split(
         ui,
-        "editor_diagnostics",
+        "editor_right",
         |ui| {
+            let height = ui.available_height();
+            let room = ui.available_width() >= EDITOR_RAIL + 420.0;
+            ui.horizontal_top(|ui| {
+                if room {
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(EDITOR_RAIL, height),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.set_min_size(egui::vec2(EDITOR_RAIL, height));
+                            let edge = ui.max_rect();
+                            ui.painter().vline(
+                                edge.right(),
+                                edge.y_range(),
+                                egui::Stroke::new(1.0, skin::col(theme::HAIR)),
+                            );
+                            editor_rail(ui, sim);
+                        },
+                    );
+                    ui.add_space(10.0);
+                }
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), height),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_min_size(egui::vec2(ui.available_width(), height));
+                        next_caret = source_view(ui, sim, &mut source, &bad_lines, view);
+                    },
+                );
+            });
+        },
+        move |ui| {
+            skin::section(ui, "reading — line under the caret", false);
+            match &reading {
+                Ok(line) => {
+                    ui.label(skin::text(Role::Code, &line.text));
+                    ui.label(skin::text(Role::Label, &line.where_));
+                    if !line.note.is_empty() {
+                        ui.add_space(4.0);
+                        ui.label(skin::text(Role::Body, &line.note));
+                    }
+                }
+                Err(NoReading::Broken) => {
+                    ui.label(skin::text(
+                        Role::Small,
+                        "the buffer does not assemble, so there is no genome to read this \
+                         line against. Nothing here would be true.",
+                    ));
+                }
+                Err(NoReading::NoBytes) => {
+                    ui.label(skin::text(
+                        Role::Small,
+                        "this line produces no bytes — a comment, a blank, or a label on its \
+                         own.",
+                    ));
+                }
+            }
+
+            skin::section(ui, "diagnostics · live", true);
+            match (quoted.is_empty(), assembled) {
+                (true, Some(bytes)) => {
+                    ui.label(skin::moody(
+                        Role::Label,
+                        Mood::Good,
+                        format!("assembles clean · {bytes} B"),
+                    ));
+                }
+                (true, None) => {
+                    ui.label(skin::text(Role::Label, "nothing assembled yet"));
+                }
+                (false, _) => {}
+            }
+            for (line, col, message, text) in &quoted {
+                ui.horizontal(|ui| {
+                    let (edge, _) =
+                        ui.allocate_exact_size(egui::vec2(2.0, 30.0), egui::Sense::hover());
+                    ui.painter()
+                        .rect_filled(edge, 0.0, skin::col(Mood::Bad.rgb()));
+                    ui.vertical(|ui| {
+                        ui.label(skin::moody(
+                            Role::Label,
+                            Mood::Bad,
+                            format!("{line}:{col} {message}"),
+                        ));
+                        if !text.is_empty() {
+                            ui.label(skin::text(Role::Label, text));
+                        }
+                    });
+                });
+            }
+            ui.add_space(theme::SECTION_GAP);
+            ui.label(skin::text(
+                Role::Body,
+                "The buffer reassembles on every keystroke, so the line numbers in an error \
+                 always point at the text as it is now.",
+            ));
+        },
+    );
+    view.editor_caret = next_caret;
+
+    if let Some(text) = &sim.last_export {
+        skin::hairline(ui);
+        ui.label(skin::text(Role::Label, "exported — copy this:"));
+        let mut shown = text.clone();
+        ui.add(
+            egui::TextEdit::multiline(&mut shown)
+                .code_editor()
+                .desired_rows(3),
+        );
+    }
+}
+
+/// The editor's left rail: what the buffer is, and the scratch cell that runs it.
+///
+/// The scratch cell is here rather than in the debugger tab, and that is the point (UI.md
+/// §10.2). They are both drawer tabs and therefore exclusive, and the loop this pane exists for
+/// is *edit, run, look, edit* — a loop that cannot survive one of its halves closing the other.
+/// The debugger tab keeps its own job: breakpoints over the live world, which is a different
+/// question about a different cell.
+fn editor_rail(ui: &mut egui::Ui, sim: &mut SlideRes) {
     egui::ScrollArea::vertical()
-        .id_salt("source")
+        .id_salt("editor_rail")
+        .auto_shrink([false, false])
         .show(ui, |ui| {
-            let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
+            skin::section(ui, "editing", false);
+            ui.label(skin::text(Role::Value, sim.editor.name.clone()));
+            let built = match sim.editor.build() {
+                mm_app::editor::Build::Ok(a) => Some(a.clone()),
+                _ => None,
+            };
+            ui.label(skin::text(
+                Role::Label,
+                format!("{} lines", sim.editor.source().lines().count()),
+            ));
+
+            skin::section(ui, "genes", true);
+            match &built {
+                Some(a) if !a.promoters.is_empty() => {
+                    for (n, name) in a.promoters.keys().enumerate() {
+                        let hits = sim
+                            .sandbox
+                            .as_ref()
+                            .and_then(|s| s.gene_hits.get(n).copied())
+                            .unwrap_or(0);
+                        skin::stat(
+                            ui,
+                            name,
+                            &if hits > 0 {
+                                format!("{hits}×")
+                            } else {
+                                mm_app::inspector::gene_label(n)
+                            },
+                        );
+                    }
+                    ui.label(skin::text(
+                        Role::Small,
+                        "Counted while the scratch cell runs, by watching where EXPRESS went.",
+                    ));
+                }
+                Some(_) => {
+                    ui.label(skin::text(
+                        Role::Small,
+                        "no GENE headers. One straight run, executed from offset zero and \
+                         wrapped.",
+                    ));
+                }
+                None => {
+                    ui.label(skin::text(Role::Small, "assembles first"));
+                }
+            }
+
+            if let Some(a) = &built {
+                if !a.labels.is_empty() {
+                    skin::section(ui, "labels", true);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(3.0, 3.0);
+                        for name in a.labels.keys() {
+                            ui.label(skin::text(Role::Label, name));
+                        }
+                    });
+                    ui.label(skin::text(
+                        Role::Small,
+                        "Hashed at assembly. A genome that evolved never had them, so they \
+                         exist in the file and not in the cell.",
+                    ));
+                }
+            }
+
+            skin::section(ui, "scratch cell", true);
+            ui.label(skin::text(Role::Small, "no slide, no neighbours"));
+            let ready = built.is_some();
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(3.0, 3.0);
+                if ui
+                    .add_enabled(ready, egui::Button::new(skin::text(Role::Label, "load")))
+                    .on_hover_text("start a scratch cell on the buffer as it stands")
+                    .clicked()
+                {
+                    if let Some(a) = &built {
+                        let (cfg, seed) = {
+                            let held = sim.engine.handle();
+                            let slide = held.slide();
+                            let s = slide.world().scenario();
+                            (s.vm, s.seed)
+                        };
+                        sim.sandbox = Sandbox::from_genome(&a.bytes, cfg, seed);
+                    }
+                }
+                let running = sim.sandbox.is_some();
+                if ui
+                    .add_enabled(running, egui::Button::new(skin::text(Role::Label, "step")))
+                    .clicked()
+                {
+                    if let Some(s) = sim.sandbox.as_mut() {
+                        s.step();
+                    }
+                }
+                if ui
+                    .add_enabled(running, egui::Button::new(skin::text(Role::Label, "tick")))
+                    .clicked()
+                {
+                    if let Some(s) = sim.sandbox.as_mut() {
+                        s.step_tick();
+                    }
+                }
+                if ui
+                    .add_enabled(running, egui::Button::new(skin::text(Role::Label, "×1k")))
+                    .clicked()
+                {
+                    if let Some(s) = sim.sandbox.as_mut() {
+                        for _ in 0..1_000 {
+                            if !s.step() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                if ui
+                    .add_enabled(running, egui::Button::new(skin::text(Role::Label, "reset")))
+                    .clicked()
+                {
+                    if let Some(s) = sim.sandbox.as_mut() {
+                        s.reset();
+                    }
+                }
+            });
+
+            let Some(scratch) = sim.sandbox.as_ref() else {
+                return;
+            };
+            if scratch.cell.is_some() {
+                ui.label(skin::moody(
+                    Role::Small,
+                    Mood::Warn,
+                    "this sandbox came from a cell on the slide, not from the buffer — load to \
+                     replace it",
+                ));
+            }
+            skin::stat(ui, "ip", &scratch.vm.ip.to_string());
+            skin::stat(ui, "ran", &thousands(i64::from(scratch.executed)));
+
+            skin::section(ui, "what it asked for", true);
+            let asked = &scratch.asked;
+            if asked.builds.is_empty() {
+                ui.label(skin::text(Role::Small, "nothing built yet"));
+            }
+            for (param, ty, slot) in &asked.builds {
+                // `from_operand` and not a match on the number: it is total, and it is the
+                // same decode `BUILD` itself does, so the panel cannot name a different
+                // organelle from the one the VM would have started.
+                let kind = mm_core::OrganelleType::from_operand(*ty).name();
+                skin::stat(ui, &format!("slot {slot}"), &format!("{kind} · {param}"));
+            }
+            skin::stat(ui, "ate", &asked.eats.len().to_string());
+            skin::stat(ui, "emitted", &asked.emits.len().to_string());
+            // Reached, not did. A scratch cell has nowhere to divide into, and calling these
+            // divisions is the one number a preview of a genome must not invent.
+            skin::stat(ui, "reached SPLIT", &asked.splits.to_string());
+            if asked.injects > 0 {
+                ui.label(skin::moody(
+                    Role::Small,
+                    Mood::Warn,
+                    format!(
+                        "reached INJECT {}× — this genome writes to other cells' nuclei",
+                        asked.injects
+                    ),
+                ));
+            }
+            ui.add_space(theme::SECTION_GAP);
+            ui.label(skin::text(
+                Role::Body,
+                "A scratch cell has no water to eat from, so EAT returns nothing and the \
+                 chemistry never moves. It answers whether the program runs, not whether it \
+                 lives.",
+            ));
+        });
+}
+
+/// The buffer itself, with its gutter. Returns where the caret ended up.
+///
+/// **Wrapping is off** (UI.md §10.3). A genome line is short, wrapping helps nobody, and with it
+/// off row *n* of the galley is always source line *n* — which is what makes the gutter, the
+/// instruction-pointer marker and the error bands exact rather than nearly right.
+fn source_view(
+    ui: &mut egui::Ui,
+    sim: &mut SlideRes,
+    source: &mut String,
+    bad_lines: &std::collections::BTreeSet<u32>,
+    view: &View,
+) -> usize {
+    let mut caret = view.editor_caret;
+    // Which source line the scratch cell's pointer is on, if there is one and the buffer
+    // assembles. The same map the reading uses, in the other direction.
+    let ip_line = sim.sandbox.as_ref().and_then(|s| {
+        let mm_app::editor::Build::Ok(built) = sim.editor.build() else {
+            return None;
+        };
+        built
+            .source_map
+            .lookup(u32::from(s.vm.ip))
+            .map(|span| span.line)
+    });
+
+    egui::ScrollArea::both()
+        .id_salt("source")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _wrap: f32| {
                 let mut job = egui::text::LayoutJob::default();
                 let font = egui::TextStyle::Monospace.resolve(ui.style());
                 for (n, text) in buf.as_str().split('\n').enumerate() {
@@ -7503,7 +8031,7 @@ fn editor_body(ui: &mut egui::Ui, sim: &mut SlideRes) {
                         );
                     }
                     // A line the assembler rejected, tinted behind its text. The message is
-                    // in the list above; this is what says *there*.
+                    // in the rail; this is what says *there*.
                     let wrong = bad_lines.contains(&(n as u32 + 1));
                     let backing = wrong.then(|| egui::Color32::from_rgb(70, 34, 34));
                     for token in mm_asm::highlight::line(text) {
@@ -7517,40 +8045,152 @@ fn editor_body(ui: &mut egui::Ui, sim: &mut SlideRes) {
                         );
                     }
                 }
-                job.wrap.max_width = wrap_width;
+                // No `job.wrap.max_width`: see this function's own docs.
                 ui.fonts_mut(|f| f.layout_job(job))
             };
-            let response = ui.add(
-                egui::TextEdit::multiline(&mut source)
-                    .code_editor()
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(18)
-                    .layouter(&mut layouter),
-            );
-            if response.changed() {
+            // A *horizontal* indent for the gutter. `add_space` in a top-down layout adds
+            // vertical space, which is how the first attempt at this put a gap above the buffer
+            // and drew the line numbers underneath it.
+            let out = ui
+                .horizontal_top(|ui| {
+                    ui.add_space(GUTTER_WIDTH);
+                    // `show` rather than `add`, because it hands back the caret and where the
+                    // text was actually put — and neither can be recovered from a `Response`.
+                    egui::TextEdit::multiline(source)
+                        .code_editor()
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(18)
+                        .layouter(&mut layouter)
+                        .show(ui)
+                })
+                .inner;
+            if let Some(range) = out.cursor_range {
+                caret = range.primary.index.0;
+            }
+            gutter(ui, &out, ip_line);
+            if out.response.changed() {
                 sim.editor.set_source(source.clone());
                 // Assembled on every change rather than only on the button. Diagnostics that
-                // describe the text as it was several edits ago are worse than none: they
-                // point at line numbers that have since moved. The button stays, because it
-                // is also how you find out that nothing is wrong.
+                // describe the text as it was several edits ago are worse than none: they point
+                // at line numbers that have since moved. The button stays, because it is also
+                // how you find out that nothing is wrong.
                 sim.editor.assemble();
             }
         });
-
-            if let Some(text) = &sim.last_export {
-                skin::hairline(ui);
-                ui.label(skin::text(Role::Label, "exported — copy this:"));
-                let mut shown = text.clone();
-                ui.add(
-                    egui::TextEdit::multiline(&mut shown)
-                        .code_editor()
-                        .desired_rows(4),
-                );
-            }
-        },
-        diagnostics,
-    );
+    caret
 }
+
+/// How much room the line numbers take, in points.
+const GUTTER_WIDTH: f32 = 44.0;
+
+/// Line numbers down the left of the buffer, and a marker on the line the scratch cell is on.
+///
+/// Drawn from `galley_pos` rather than from a scroll offset, so it is correct by construction:
+/// that is where the text actually ended up this frame, however the view has been scrolled. And
+/// with wrapping off, galley row *n* is source line *n*, so a row's y is all the arithmetic
+/// there is.
+fn gutter(ui: &egui::Ui, out: &egui::text_edit::TextEditOutput, ip_line: Option<u32>) {
+    // Widened horizontally: the numbers are drawn to the *left* of the text, so clipping to
+    // the text's own rectangle clips every one of them away. Vertically it still clips, which
+    // is what keeps a four-hundred-line genome from painting numbers over the panel above.
+    let painter = ui.painter_at(out.text_clip_rect.expand2(egui::vec2(GUTTER_WIDTH, 0.0)));
+    for (n, row) in out.galley.rows.iter().enumerate() {
+        let line = n as u32 + 1;
+        let y = out.galley_pos.y + row.min_y() + row.height() / 2.0;
+        if y < out.text_clip_rect.top() - 20.0 || y > out.text_clip_rect.bottom() + 20.0 {
+            continue;
+        }
+        let here = ip_line == Some(line);
+        painter.text(
+            egui::pos2(out.galley_pos.x - 10.0, y),
+            egui::Align2::RIGHT_CENTER,
+            line.to_string(),
+            skin::font(Role::Code),
+            skin::col(if here {
+                Mood::Good.rgb()
+            } else {
+                theme::DIM
+            }),
+        );
+        if here {
+            painter.text(
+                egui::pos2(out.galley_pos.x - 4.0, y),
+                egui::Align2::LEFT_CENTER,
+                "▸",
+                skin::font(Role::Code),
+                skin::col(Mood::Good.rgb()),
+            );
+        }
+    }
+}
+
+/// Why there is nothing to read on the caret's line.
+enum NoReading {
+    /// The buffer does not assemble, so there is no genome to read anything against.
+    Broken,
+    /// It assembles, and this line produced no bytes: a comment, a blank, or a label on its
+    /// own. Which is a completely different statement from the buffer being wrong, and saying
+    /// the wrong one of the two sends somebody hunting for an error that is not there.
+    NoBytes,
+}
+
+/// What the right rail says about the line the caret is on.
+struct CaretReading {
+    /// The instruction, read the way the genome pane reads one.
+    text: String,
+    /// Where it is: line, column and byte.
+    where_: String,
+    /// What that opcode does, from `Op::note`.
+    note: String,
+}
+
+/// Resolve the caret's line through the source map the assembler already produced.
+///
+/// `None` while the buffer does not assemble, and the panel says so rather than guessing. There
+/// is no source map for a program that did not compile, and a reading of a genome that does not
+/// exist is worse than an empty panel.
+fn caret_reading(
+    sim: &mut SlideRes,
+    caret: usize,
+    source: &str,
+) -> Result<CaretReading, NoReading> {
+    let (line, col) = mm_app::editor::line_col_at(source, caret);
+    let mm_app::editor::Build::Ok(built) = sim.editor.build() else {
+        return Err(NoReading::Broken);
+    };
+    let byte = built
+        .source_map
+        .byte_of_line(line)
+        .ok_or(NoReading::NoBytes)?;
+    let bytes = built.bytes.clone();
+    let genome = mm_core::Genome::new(bytes).map_err(|_| NoReading::Broken)?;
+    let cfg = {
+        let held = sim.engine.handle();
+        let slide = held.slide();
+        slide.world().scenario().vm
+    };
+    // The same listing the genome pane draws, so the editor and the microscope cannot disagree
+    // about what an instruction means — and held on `SlideRes` rather than made here, because
+    // `Listing::of` re-disassembles only when the hash changes and a fresh one every frame
+    // defeats that entirely.
+    sim.editor_listing.of(&genome, genome.hash(), cfg);
+    let nth = sim
+        .editor_listing
+        .line_at(byte as u16)
+        .ok_or(NoReading::NoBytes)?;
+    let read = sim
+        .editor_listing
+        .lines()
+        .get(nth)
+        .ok_or(NoReading::NoBytes)?;
+    let op = mm_core::isa::Op::from_byte(genome.byte(byte as usize));
+    Ok(CaretReading {
+        text: read.reading.clone(),
+        where_: format!("line {line} · column {col} · byte {byte}"),
+        note: format!("{}  {}", op.name(), op.note()),
+    })
+}
+
 
 /// The debugger (M6).
 ///

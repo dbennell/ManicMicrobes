@@ -404,6 +404,17 @@ is done by watching, which is what this milestone is for.
   shape, which the toolbox does not have; menus with a shortcut column and a live speed control;
   a parameter editor that says which field you changed. Designed in `docs/UI.md` §8.
 
+- **M10.8 — the cell editor.** Writing a genome and finding out what it does, without leaving
+  the buffer. The editor's rails; the caret's line resolved through the source map `mm-asm`
+  already produces; an opcode reference that lives beside the opcode table; and a scratch cell in
+  the editor's own left rail, so the editor and the debugger stop having to close each other.
+  Designed in `docs/UI.md` §10.
+
+  The only `mm-core` change is documentation — sixty-four one-line opcode notes — plus one
+  recorded field on the `RecordingHost` that already exists for running genomes without a world.
+  **Nothing touches the VM's hot loop.** Gene attribution is done by watching where `EXPRESS`
+  went, which uses the real matching rule because it is the real rule that ran.
+
 - **M10.7 — building a scenario.** The half of §4 the interface never said out loud. Authoring
   is a state — stopped at tick 0 — and the window says so, because that state is the difference
   between a scenario that replays and one that does not. A scenario pane whose context column is

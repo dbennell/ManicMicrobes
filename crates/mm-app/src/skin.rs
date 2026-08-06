@@ -574,3 +574,121 @@ pub fn drawer_split(
         );
     });
 }
+
+/// One segment of a [`segmented_bar`].
+pub struct Segment<'a> {
+    pub label: &'a str,
+    /// Whether this segment is the one in force.
+    pub on: bool,
+    /// Whether being on means the accent rather than a raised ground.
+    ///
+    /// The distinction carries meaning in the transport and is the reason this is a field
+    /// rather than a constant: the accent says *the world is running*, and the raised ground
+    /// says *this is the speed it is running at*. Two different facts, both true at once, and a
+    /// bar that painted them the same could not say so.
+    pub accent: bool,
+    pub hover: String,
+    /// A fixed width, for the icon segments that would otherwise be as narrow as their glyph.
+    pub width: Option<f32>,
+}
+
+/// A row of segments inside one bordered box, divided by hairlines.
+///
+/// The transport, drawn the way the design draws it: a single control with divisions rather
+/// than a handful of separate chips with gaps between them. The difference is not decoration —
+/// separate chips read as separate controls that happen to be adjacent, and these are seven
+/// positions of one thing.
+///
+/// Returns the index of the segment that was clicked.
+pub fn segmented_bar(ui: &mut egui::Ui, segments: &[Segment]) -> Option<usize> {
+    const HEIGHT: f32 = 22.0;
+    /// Space either side of a text segment's label.
+    const PAD: f32 = 9.0;
+
+    let font = font(Role::Label);
+    let widths: Vec<f32> = segments
+        .iter()
+        .map(|seg| {
+            seg.width.unwrap_or_else(|| {
+                let galley = ui.fonts_mut(|f| {
+                    f.layout_no_wrap(seg.label.to_owned(), font.clone(), egui::Color32::WHITE)
+                });
+                galley.size().x + PAD * 2.0
+            })
+        })
+        .collect();
+    // One hairline between each pair, so the box is exactly as wide as its contents.
+    let total: f32 = widths.iter().sum::<f32>() + (segments.len().saturating_sub(1)) as f32;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(total, HEIGHT), egui::Sense::hover());
+    let painter = ui.painter();
+    let radius = egui::CornerRadius::same(4);
+    painter.rect_filled(rect, radius, col(Ground::Sunk.rgb()));
+
+    let mut clicked = None;
+    let mut x = rect.left();
+    for (i, (seg, width)) in segments.iter().zip(&widths).enumerate() {
+        let here = egui::Rect::from_min_size(egui::pos2(x, rect.top()), egui::vec2(*width, rect.height()));
+        let response = ui.interact(here, ui.id().with(("seg", i)), egui::Sense::click());
+        // The ends keep the box's rounding on their outer corners, so a filled first or last
+        // segment does not square off the corner it is sitting in.
+        let mut corners = egui::CornerRadius::ZERO;
+        if i == 0 {
+            corners.nw = radius.nw;
+            corners.sw = radius.sw;
+        }
+        if i + 1 == segments.len() {
+            corners.ne = radius.ne;
+            corners.se = radius.se;
+        }
+        let fill = if seg.on && seg.accent {
+            Some(col(theme::selected()))
+        } else if seg.on {
+            Some(col(Ground::Raised.rgb()))
+        } else if response.hovered() {
+            Some(col(Ground::Raised.rgb()).gamma_multiply(0.6))
+        } else {
+            None
+        };
+        if let Some(fill) = fill {
+            painter.rect_filled(here, corners, fill);
+        }
+        let ink = if seg.on && seg.accent {
+            theme::on_selected()
+        } else if seg.on || response.hovered() {
+            Role::Value.ink().unwrap_or(theme::DIM)
+        } else {
+            Role::Label.ink().unwrap_or(theme::DIM)
+        };
+        painter.text(
+            here.center(),
+            egui::Align2::CENTER_CENTER,
+            seg.label,
+            font.clone(),
+            col(ink),
+        );
+        if i + 1 < segments.len() {
+            let edge = here.right();
+            painter.vline(
+                edge,
+                egui::Rangef::new(rect.top() + 1.0, rect.bottom() - 1.0),
+                egui::Stroke::new(1.0, col(theme::RULE)),
+            );
+        }
+        if !seg.hover.is_empty() {
+            response.clone().on_hover_text(&seg.hover);
+        }
+        if response.clicked() {
+            clicked = Some(i);
+        }
+        x += width + 1.0;
+    }
+    // The border last, over the fills, so a lit end segment sits inside the box rather than on
+    // top of its edge.
+    painter.rect_stroke(
+        rect,
+        radius,
+        egui::Stroke::new(1.0, col(theme::RULE)),
+        egui::StrokeKind::Inside,
+    );
+    clicked
+}

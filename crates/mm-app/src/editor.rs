@@ -356,3 +356,81 @@ mod tests {
         );
     }
 }
+
+/// The 1-based line and column of a character index into `source` (M10.8).
+///
+/// What the caret is on, so the editor can say what the line under it does. A character index
+/// because that is what egui's `CCursor` carries; lines and columns 1-based because that is what
+/// `mm_asm::source_map::Span` uses and what every assembler diagnostic in this project prints.
+///
+/// An index past the end clamps to the end rather than panicking. The caret is state egui owns
+/// and the buffer is state we own, and they are only ever *nearly* in step — a keystroke that
+/// shortens the text arrives in one frame and the cursor from the frame before it is still
+/// sitting in the output.
+#[must_use]
+pub fn line_col_at(source: &str, char_index: usize) -> (u32, u32) {
+    let mut line = 1u32;
+    let mut col = 1u32;
+    for (n, ch) in source.chars().enumerate() {
+        if n >= char_index {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
+}
+
+#[cfg(test)]
+mod caret_tests {
+    use super::*;
+
+    const SRC: &str = "IMM 40\nDUP\n\nEAT\n";
+
+    #[test]
+    fn the_start_of_the_buffer_is_line_one_column_one() {
+        assert_eq!(line_col_at(SRC, 0), (1, 1));
+        assert_eq!(line_col_at("", 0), (1, 1));
+    }
+
+    #[test]
+    fn a_column_counts_from_one_the_way_a_diagnostic_prints_it() {
+        // `3:12 unknown token` has to point at the same character the caret is on, or the
+        // right-hand panel and the error list disagree about where you are.
+        assert_eq!(line_col_at(SRC, 4), (1, 5));
+    }
+
+    #[test]
+    fn a_newline_belongs_to_the_line_it_ends() {
+        // The caret sitting on the newline is still on that line; one past it is the next.
+        assert_eq!(line_col_at(SRC, 6), (1, 7));
+        assert_eq!(line_col_at(SRC, 7), (2, 1));
+    }
+
+    #[test]
+    fn an_empty_line_is_a_line() {
+        // "IMM 40\nDUP\n" is 11 chars, so index 11 is the blank third line.
+        assert_eq!(line_col_at(SRC, 11), (3, 1));
+        assert_eq!(line_col_at(SRC, 12), (4, 1));
+    }
+
+    #[test]
+    fn a_caret_past_the_end_clamps_rather_than_panicking() {
+        // egui owns the cursor and we own the buffer, and after a keystroke that shortens the
+        // text they are one frame out of step. That is a normal frame, not a bug to crash on.
+        let (line, _) = line_col_at(SRC, 9_999);
+        assert_eq!(line, 5, "the buffer ends with a newline, so there is a fifth line");
+    }
+
+    #[test]
+    fn multibyte_characters_count_as_one_column() {
+        // A comment can say anything, and `;` to end of line is not ASCII-only. A caret index
+        // is in characters, so a column must be too, or the marker drifts along the line.
+        let src = "IMM 40 ; ° tick\nDUP\n";
+        assert_eq!(line_col_at(src, 16), (2, 1));
+    }
+}
