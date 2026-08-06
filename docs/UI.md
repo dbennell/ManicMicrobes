@@ -1317,7 +1317,55 @@ deliberate rather than forgetful.
 
 ---
 
-## 11. Order of work
+## 11. The window itself (M10.9)
+
+The window manager's title bar is a light GTK strip with an X11 default icon in it, sitting on
+top of a near-black instrument. It belongs to a different application to look at, and §1 asks
+that the chrome be dark so the eye stays on the plate — which it cannot be while thirty-two
+points of somebody else's chrome are nailed to the top of it.
+
+So: `decorations: false`, and **the bar the interface already has becomes the title bar.** Menus
+on the left, window buttons hard against the right corner where every other window on the
+desktop puts them, and the gap between the two is what you drag. That reclaims the strip rather
+than adding one.
+
+### 11.1 Moving and resizing are handed back to the compositor
+
+`winit` has `drag_window` and `drag_resize_window`, both supported on X11 and Wayland (only
+macOS lacks the second). They hand the gesture to the window manager, so snapping, tiling, the
+drop shadow, the minimum size and the multi-monitor arithmetic stay somebody else's and stay
+correct. What is ours is the decision of *when* to hand over, which is a hit test:
+`ui::resize_edge`, six points of band, corners taking precedence over the sides that meet there.
+
+Pure and tested, because a corner that answers "north" cannot be dragged diagonally and that is
+not a thing anyone would find except by trying it.
+
+Two orderings matter. `window_chrome` runs **after** the interface, so it cannot steal a press
+egui wanted — the rails go right to the edge, and six points is the difference between grabbing
+the window and clicking the first overlay in the legend. And a pointer in the band is routed to
+`Target::Panel`, so a drag that starts on the frame does not also pan the slide behind it.
+
+### 11.2 What this costs, and the way out
+
+A borderless window is one where the usual escape hatches are the only escape hatches. On GNOME,
+`Super`+drag moves and `Super`+middle-drag resizes whatever is under the pointer, decorations or
+not, so a window that somehow becomes ungrabbable is still recoverable without a terminal.
+
+`WinitWindows` is reached through a thread-local rather than a `NonSend` resource — that changed
+in Bevy 0.19 and `bevy_winit`'s own comment calls it temporary. The consequence worth knowing is
+that a system reading it **must** be pinned to the main thread with a `NonSendMarker`: off it,
+the thread-local is a freshly constructed empty one, every window lookup silently misses, and
+the window simply stops being movable with nothing anywhere saying why.
+
+### 11.3 Glyphs are a gamble that has to be looked at
+
+egui ships Hack and Ubuntu-Light and no more. `✕` (U+2715) is in neither and rendered as a tofu
+box in the close button — which a screenshot showed and nothing else would have. The buttons use
+`—`, `☐` and `×`, and anything outside Latin-1 needs a photograph before it is believed.
+
+---
+
+## 12. Order of work
 
 | step | what | why it is here |
 | --- | --- | --- |
@@ -1327,6 +1375,7 @@ deliberate rather than forgetful.
 | **M10.4** | ecology pane | The data all exists; this is presentation. |
 | **M10.5** | field texture, instanced cell shader, organelle pass | The biggest piece and the only one with real technical risk. Last, on a shell that is already stable. |
 | **M10.6** | the chrome: theme, type, row grammar, menus, toolbox and parameters | §8. After the renderer, because it must not be moving while the renderer is; and it touches none of the same files, so it cannot be the reason a frame regresses. |
+| **M10.9** | the window itself: borderless, with the menu bar as its title bar | §11. Independent of everything else and the smallest of the four, but last, because it is the only one whose failure mode is a window you cannot move. |
 | **M10.8** | the cell editor: its rails, the caret's reading, the ISA reference, the scratch cell | §10. Last because it is the one that needs `mm-core` to say anything new, and the only new thing it needs is documentation. |
 | **M10.7** | building a scenario: the authoring caption, the scenario pane and its RON preview, what is on the slide, sheets and the library | §9. Almost no new mechanism — §4 built it all and the interface never said so. Last because it is the smallest, and because it is the one whose absence is only ever confusing rather than wrong. |
 
@@ -1338,7 +1387,7 @@ costs nothing to revert.
 
 ---
 
-## 12. What could go wrong
+## 13. What could go wrong
 
 - **The instanced pipeline is the risky part.** Bevy's mid-level render API is the part that
   moves most between releases and has the least documentation. Mitigation: follow the upstream

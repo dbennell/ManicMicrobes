@@ -573,6 +573,17 @@ fn main() {
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
             title: "Manic Microbes".to_string(),
+            // Borderless (M10.9). The window manager's title bar is a light GTK strip with an
+            // X11 default icon in it, sitting on top of a near-black instrument — it belongs to
+            // a different application to look at. The interface already has a bar across the
+            // top, so the bar it already has becomes the title bar: the menus on the left, the
+            // window buttons on the right, and the space between the two is what you drag.
+            //
+            // What that costs is that moving and resizing become ours. `winit` does both
+            // through the compositor — `drag_window` and `drag_resize_window`, supported on X11
+            // and Wayland — so it is a hit test and two calls, not an implementation of window
+            // management. See `window_chrome` and `ui::resize_edge`.
+            decorations: false,
             ..default()
         }),
         ..default()
@@ -609,6 +620,9 @@ fn main() {
         // published, and `view.viewport` is still read a frame later by `handle_input`, which
         // it always was.
         .add_systems(EguiPrimaryContextPass, panels)
+        // After the interface, because it acts on what the interface decided this frame: a drag
+        // on the menu bar's empty half, or a press in the edge band that egui did not claim.
+        .add_systems(EguiPrimaryContextPass, window_chrome.after(panels))
         .run();
 }
 
@@ -1302,6 +1316,18 @@ struct View {
     species: Option<mm_core::phylogeny::SpeciesId>,
     /// Which of the ecology pane's three views is showing (M10.4).
     ecology: Ecology,
+    /// The strip of the menu bar that is draggable as a title bar (M10.9).
+    ///
+    /// Recorded by `panels` and read by `window_chrome`, which is the same one-frame-stale
+    /// arrangement `viewport` uses and for the same reason: the interface knows the rectangle
+    /// while it is laying itself out, and the window is somebody else's to move.
+    title_bar: Rect,
+    /// Whether the pointer is in the window's resize band, so a press there does not also reach
+    /// the slide.
+    on_edge: bool,
+    /// Asked for by the window buttons, applied by `window_chrome`.
+    want_minimise: bool,
+    want_maximise: bool,
     /// Where the caret was in the editor last frame, as a character index (M10.8).
     ///
     /// Last frame's, because the right rail is laid out beside the buffer and the buffer only
@@ -1427,6 +1453,10 @@ impl Default for View {
             place_count: 1,
             species: None,
             ecology: Ecology::Tree,
+            title_bar: Rect::default(),
+            on_edge: false,
+            want_minimise: false,
+            want_maximise: false,
             editor_caret: 0,
             sheet: None,
             library_pick: None,
@@ -1739,7 +1769,14 @@ fn handle_input(
         .ok()
         .and_then(Window::cursor_position)
         .map(|p| (p.x, p.y));
-    let live = ui::route(pointer, view.viewport, wants_pointer);
+    // The resize band belongs to the window frame, whatever is drawn under it. Without this a
+    // drag that starts one pixel inside the left edge both resizes the window and pans the
+    // slide, and the slide wins the argument by moving.
+    let live = if view.on_edge {
+        Target::Panel
+    } else {
+        ui::route(pointer, view.viewport, wants_pointer)
+    };
 
     // The left button latches its owner for the duration of the drag, so a pan that wanders
     // over a rail does not drop the plate halfway through.
@@ -3075,6 +3112,125 @@ fn redraw(
     }
 }
 
+/// Moving and resizing a window that has no frame to grab (M10.9).
+///
+/// Both go through the compositor rather than through us: `drag_window` and
+/// `drag_resize_window` hand the gesture to the window manager, which is what makes snapping,
+/// tiling, the shadow and the minimum size somebody else's problem and correct. All this system
+/// decides is *when* to hand over.
+///
+/// It runs after [`panels`] because it must not steal a press egui wanted. The edge band is six
+/// points wide and the rails go right up to it, so the order is the difference between grabbing
+/// the window and clicking the first overlay in the legend.
+fn window_chrome(
+    mut view: ResMut<View>,
+    buttons: Res<ButtonInput<MouseButton>>,
+    mut window: Query<(Entity, &mut Window), With<PrimaryWindow>>,
+    mut contexts: EguiContexts,
+    // Forces this system onto the main thread, which is where the thread-local below lives.
+    // Off it, `WINIT_WINDOWS` is a freshly constructed empty one and every lookup silently
+    // misses — a window that cannot be moved and no error to say why.
+    _main_thread: bevy::ecs::system::NonSendMarker,
+) {
+    use winit::window::ResizeDirection;
+
+    let Ok((entity, mut win)) = window.single_mut() else {
+        return;
+    };
+
+    // What the buttons in the menu bar asked for last frame. Applied here because `panels` has
+    // the interface and this system has the window.
+    if view.want_minimise {
+        view.want_minimise = false;
+        win.set_minimized(true);
+    }
+    if view.want_maximise {
+        view.want_maximise = false;
+        let now = maximised(entity);
+        win.set_maximized(!now);
+    }
+
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
+    };
+    let over_ui = ctx.egui_wants_pointer_input() || ctx.is_pointer_over_egui();
+    let Some(pointer) = ctx.pointer_latest_pos() else {
+        return;
+    };
+    let size = ctx.viewport_rect().size();
+    let edge = ui::resize_edge(
+        (pointer.x, pointer.y),
+        (size.x, size.y),
+        ui::RESIZE_BAND,
+    );
+
+    // Remembered so `handle_input` can refuse a press that belongs to the window frame — a drag
+    // that starts on the edge must not also pan the slide behind it.
+    view.on_edge = edge.is_some();
+
+    if buttons.just_pressed(MouseButton::Left) {
+        if let Some(edge) = edge {
+            let direction = match edge {
+                ui::Edge::North => ResizeDirection::North,
+                ui::Edge::South => ResizeDirection::South,
+                ui::Edge::East => ResizeDirection::East,
+                ui::Edge::West => ResizeDirection::West,
+                ui::Edge::NorthEast => ResizeDirection::NorthEast,
+                ui::Edge::NorthWest => ResizeDirection::NorthWest,
+                ui::Edge::SouthEast => ResizeDirection::SouthEast,
+                ui::Edge::SouthWest => ResizeDirection::SouthWest,
+            };
+            // Ignored rather than reported: it fails on the platforms that do not support it,
+            // and a log line every click on a Mac would be noise about a thing the user can
+            // already see is not happening.
+            with_window(entity, |w| {
+                let _ = w.drag_resize_window(direction);
+            });
+            return;
+        }
+        // The menu bar's empty half is the title bar. `wants_pointer_input` is false there —
+        // a `MenuBar` claims its buttons and not the gap after them — which is exactly the
+        // question being asked.
+        if !over_ui && view.title_bar.contains(pointer.x, pointer.y) {
+            with_window(entity, |w| {
+                let _ = w.drag_window();
+            });
+        }
+    }
+
+    // Double-click the title bar to maximise, as every other window does.
+    if !over_ui
+        && view.title_bar.contains(pointer.x, pointer.y)
+        && ctx.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary))
+    {
+        let now = maximised(entity);
+        win.set_maximized(!now);
+    }
+}
+
+/// Do something to the real window behind a Bevy window entity.
+///
+/// `WinitWindows` stopped being a `NonSend` resource in Bevy 0.19 and became a thread-local
+/// (`bevy_winit`'s own comment calls it temporary, pending their issue 17667). So it is reached
+/// through `with_borrow` and only from the main thread — which `NonSendMarker` on the caller is
+/// what guarantees.
+///
+/// Does nothing if the window has gone. That is a real frame during shutdown, not a bug.
+fn with_window(entity: Entity, f: impl FnOnce(&winit::window::Window)) {
+    bevy::winit::WINIT_WINDOWS.with_borrow(|windows| {
+        if let Some(window) = windows.get_window(entity) {
+            f(window);
+        }
+    });
+}
+
+/// Whether the real window is maximised. `false` if it has gone.
+fn maximised(entity: Entity) -> bool {
+    let mut out = false;
+    with_window(entity, |w| out = w.is_maximized());
+    out
+}
+
 /// Everything egui draws, and the one place the layout is decided (M10.1).
 ///
 /// Docked panels rather than floating windows. The visible reason is that a rail cannot be
@@ -3576,6 +3732,11 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
     const LATER: &str = "M10.2 — configuration and slide files";
 
     egui::Panel::top("menu_bar").show(root, |ui| {
+        // The bar's own rectangle, minus nothing: `window_chrome` only drags where egui did not
+        // claim the pointer, so the gap between the menus and the transport is what is left and
+        // is exactly the strip a title bar would be.
+        let bar = ui.max_rect();
+        view.title_bar = Rect::new(bar.min.x, bar.min.y, bar.max.x, bar.max.y);
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
                 skin::menu_caption(ui, "slide files");
@@ -3901,6 +4062,33 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
             // them. `right_to_left` so it stays pinned to the edge as the window resizes.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
+                // The window buttons, where a title bar would have them (M10.9). First in a
+                // right-to-left run, so close is hard against the corner the way it is in every
+                // other window on the desktop — muscle memory is the whole of this convention
+                // and there is nothing to be gained by having an opinion about it.
+                // `×`, U+00D7, and not `✕` U+2715 — which is not in Hack and came out as a
+                // tofu box. egui ships Hack and Ubuntu-Light and no more, so a symbol outside
+                // Latin-1 is a gamble that has to be looked at to settle.
+                if skin::chip(ui, "×", None, false)
+                    .on_hover_text("close")
+                    .clicked()
+                {
+                    *quit = true;
+                }
+                if skin::chip(ui, "☐", None, false)
+                    .on_hover_text("maximise / restore  (or double-click the bar)")
+                    .clicked()
+                {
+                    view.want_maximise = true;
+                }
+                if skin::chip(ui, "—", None, false)
+                    .on_hover_text("minimise")
+                    .clicked()
+                {
+                    view.want_minimise = true;
+                }
+                ui.add_space(12.0);
+
                 if skin::chip(ui, "⏭", None, false)
                     .on_hover_text("step one tick  (.)")
                     .clicked()
