@@ -1237,7 +1237,87 @@ people to read it as a score, and that is worth more thought than a milestone de
 
 ---
 
-## 10. Order of work
+## 10. The cell editor (M10.8)
+
+Writing a genome and finding out what it does. The pieces exist and are scattered: the editor
+is a text buffer with diagnostics, the debugger is a sandbox with step controls, the genome pane
+is a reading of a live cell. What is missing is that none of them can answer "what does the line
+I am looking at do", and you cannot run what you are writing without leaving it.
+
+### 10.1 It is not a mode
+
+The design draws the editor as the whole window with a rail either side. That is a state the
+layout already reaches: the drawer goes to full height, and since M10.6 the rails get out of the
+way when it does. So there is no editor mode and no second layout — there is a **width rule**,
+the same one `skin::drawer_split` already applies to the context column: the editor shows its
+left rail when there is room for it and drops it when there is not. One tab that is useful at
+three hundred points and at eight hundred.
+
+### 10.2 The scratch cell is in the editor's left rail
+
+The editor and the debugger are drawer tabs and therefore exclusive — opening one closes the
+other, which is intolerable when the loop is *edit, run, look, edit*. The design solves it by
+promoting the editor to the window and demoting the debugger to a drawer.
+
+Instead: **the scratch cell lives in the editor's left rail.** The editor becomes
+self-sufficient, the debugger tab stays exactly what it is — breakpoints over the *live world*,
+which is a different job — and no tab has to close for another to be useful.
+
+### 10.3 Source is edited; reading is rendered
+
+The design's editor has a comment column, aligned, beside the operands. That cannot live in the
+editable view: egui lays a `TextEdit` out from its buffer and maps the caret to buffer indices,
+so inserting padding to align a column breaks the caret. It does not have to. The design's own
+header carries a `source / reading` toggle, and the aligned columns belong to **reading**, which
+is rendered rather than edited — which is what the genome pane has done since M10.3b.
+
+**Wrapping goes off.** A genome line is short and wrapping helps nobody, and with it off line *n*
+is always visual row *n* — which is what makes a gutter, an instruction-pointer marker and a
+per-line error band correct rather than approximately correct.
+
+### 10.4 What the caret is on
+
+`mm_asm::SourceMap` already exists, and `Build::Ok(Assembled)` already carries it: `Span { byte,
+len, line, col }`, `lookup(byte)` and `byte_of_line(line)`. Every caret-aware panel the design
+asks for is one lookup away from data the editor is already holding and discarding.
+
+So the right rail says what the line under the caret *is*: its opcode, its operand resolved, and
+where a jump would land. Plus the opcode's entry from `Op::note`.
+
+It says so **only while the buffer assembles**, and says that instead when it does not. There is
+no source map for a program that did not compile, and guessing one would be a reading of a genome
+that does not exist.
+
+### 10.5 What it builds, and what it did
+
+Two questions a scratch run can honestly answer, and one it cannot.
+
+- **What it builds** comes from `mm_core::host::RecordingHost`, which already exists for exactly
+  this and whose docstring already says so. It records what the program *asked the world for* —
+  which is the honest claim, and the one the design's own caption makes: *not a promise;
+  expression is gated on internal chemistry.* It needs one field, for `BUILD`, whose default
+  implementation is a no-op so recording it changes no behaviour.
+- **Gene hits** need no change to `mm-core` at all, and in particular none to the VM's hot loop.
+  The sandbox steps the real `Vm`, so where `EXPRESS` went is observable from outside: if the
+  instruction just stepped was `EXPRESS`, the new `ip` either equals some `promoters()[i].entry`
+  or it does not. Attribution by observation, using the real matching rule because it is the real
+  rule that ran. No second implementation to drift, no world state, nothing to serialise.
+- **Divisions cannot be counted**, and the design's "3 divisions" is not true of a scratch cell:
+  there is no world to divide into. What is knowable is `RecordingHost::splits` — *reached SPLIT
+  three times* — and that is what it will say. The difference is the whole point of a sandbox.
+
+`Sandbox::of` already builds a VM that runs against a `NullHost` with no world; it reads five
+things out of a `World` to construct itself, so running an editor buffer instead is a second
+constructor rather than new machinery.
+
+### 10.6 Not in this milestone
+
+**The preview run** (design 3b), for the reasons in §9.5. Deferring it a second time is
+deliberate rather than forgetful.
+
+---
+
+## 11. Order of work
 
 | step | what | why it is here |
 | --- | --- | --- |
@@ -1247,6 +1327,7 @@ people to read it as a score, and that is worth more thought than a milestone de
 | **M10.4** | ecology pane | The data all exists; this is presentation. |
 | **M10.5** | field texture, instanced cell shader, organelle pass | The biggest piece and the only one with real technical risk. Last, on a shell that is already stable. |
 | **M10.6** | the chrome: theme, type, row grammar, menus, toolbox and parameters | §8. After the renderer, because it must not be moving while the renderer is; and it touches none of the same files, so it cannot be the reason a frame regresses. |
+| **M10.8** | the cell editor: its rails, the caret's reading, the ISA reference, the scratch cell | §10. Last because it is the one that needs `mm-core` to say anything new, and the only new thing it needs is documentation. |
 | **M10.7** | building a scenario: the authoring caption, the scenario pane and its RON preview, what is on the slide, sheets and the library | §9. Almost no new mechanism — §4 built it all and the interface never said so. Last because it is the smallest, and because it is the one whose absence is only ever confusing rather than wrong. |
 
 10.1 first because it is the smallest thing that makes the application usable day to day.
@@ -1257,7 +1338,7 @@ costs nothing to revert.
 
 ---
 
-## 11. What could go wrong
+## 12. What could go wrong
 
 - **The instanced pipeline is the risky part.** Bevy's mid-level render API is the part that
   moves most between releases and has the least documentation. Mitigation: follow the upstream
