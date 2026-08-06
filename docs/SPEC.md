@@ -296,7 +296,7 @@ with the top of stack rightmost.
 | 0C | `RLOAD` | `( idx -- v )` from register |
 | 0D | `RSTORE` | `( v idx -- )` to register |
 | 0E | `RAND` | `( -- v )` deterministic; see §11 |
-| 0F | `RESERVED_0` | no-op |
+| 0F | `SETBADGE` | `( v -- )` set own public badge, 15 bits (ISA 4; took the `RESERVED_0` slot) |
 
 **0x10–0x1F — Arithmetic and logic** (all saturating; `DIV`/`MOD` by zero yield 0)
 
