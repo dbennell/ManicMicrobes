@@ -92,10 +92,10 @@
     until it does the date below is the date this file was written rather than a ship date.
   -->
   <releases>
-    <release version="0.0.1" date="2026-08-07" type="development">
+    <release version="0.1.0" date="2026-08-08" type="development">
       <description>
-        <p>Pre-release. No stable save format yet: a slide written by one version may not open in
-        the next.</p>
+        <p>The first release with anything to download. Pre-release still: no stable save format,
+        so a slide written by one version may not open in the next.</p>
       </description>
     </release>
   </releases>
