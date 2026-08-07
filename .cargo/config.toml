@@ -6,8 +6,10 @@
 # 10 seeds" means. They are the point of the project and they are not negotiable, but they are
 # also not something to sit through between two edits to a shader.
 #
-# Everything else — 401 tests, including every unit test, the totality fuzz, the hard-rule
-# guards and the determinism suite — runs in about sixteen seconds in release.
+# Everything else — around five hundred tests, including every unit test, the totality fuzz, the
+# hard-rule guards and the determinism suite — runs in seconds rather than minutes in release.
+# Measured at 497 passing across thirteen binaries in under seven seconds on twenty cores; the
+# count is worth keeping loose here, because it is wrong again by the next milestone.
 #
 #   cargo fast    the inner loop, after every change
 #   cargo slow    the four long runs, before a commit

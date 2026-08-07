@@ -28,12 +28,23 @@ Two framings share one engine, and neither may compromise the other:
 ## Building and running
 
 Rust stable, edition 2021, MSRV 1.95. No system dependencies beyond a graphics stack for the
-front-end.
+front-end: Bevy comes in with `default-features = false` and neither audio nor gamepad support
+enabled, so there is no ALSA or udev package to install first. On Linux the `x11` feature is on
+and `wayland` is not, so a Wayland session needs XWayland — which almost every distribution
+already ships.
 
 ```sh
 cargo build --workspace
-cargo test  --workspace
+cargo fast          # ~500 tests in seconds; see .cargo/config.toml for what it skips and why
 ```
+
+From a clean clone the first build is the slow one — almost all of it is Bevy, and it leaves
+about 2 GB in `target/`. `mm-cli` is much the quicker of the two, because `mm-core` and `mm-asm`
+have almost no dependencies between them.
+
+**`cargo test --workspace` takes the better part of an hour** — it is four evolutionary
+acceptance runs across ten seeds each, and it is not what you want between two edits. `cargo
+fast` is the one to use; `cargo full` is the hour.
 
 ### The microscope
 
@@ -53,18 +64,30 @@ Release, because a debug build of the fluid solver is not worth watching.
 `mm-cli` is why `mm-core` has no Bevy in it: the simulation runs at a thousand times realtime for
 parameter sweeps, and the renderer can never hold it to a frame budget.
 
+A scenario is a recipe rather than a state: it seeds the water, the light and the chemistry, but
+it puts no cells on the slide. **Every `run` needs a `--genome` to seed with**, or it simulates
+sterile water and reports a population of zero for as long as you let it.
+
 ```sh
+# the first thing to run: an ancestor in the default soup, invariants checked at every sample
+cargo run -p mm-cli --release -- run scenarios/soup.ron --genome genomes/ancestor.mm \
+    --ticks 50000 --check
+
 # run a scenario, sampling metrics as NDJSON
-cargo run -p mm-cli --release -- run scenarios/soup.ron --ticks 1000000 --metrics out.ndjson
+cargo run -p mm-cli --release -- run scenarios/soup.ron --genome genomes/ancestor.mm \
+    --ticks 1000000 --metrics out.ndjson
 
 # the same recipe once per parameter value
-cargo run -p mm-cli --release -- sweep scenarios/soup.ron --param mutation --range 1..64
+cargo run -p mm-cli --release -- sweep scenarios/soup.ron --genome genomes/ancestor.mm \
+    --param mutation --range 1..64
 
 # the state hash, for determinism checks — must match what the microscope reaches
-cargo run -p mm-cli --release -- hash scenarios/soup.ron --ticks 100000
+cargo run -p mm-cli --release -- hash scenarios/soup.ron --genome genomes/ancestor.mm \
+    --ticks 100000
 
 # the species archive from a long run
-cargo run -p mm-cli --release -- run scenarios/soup.ron --archive species.ndjson
+cargo run -p mm-cli --release -- run scenarios/soup.ron --genome genomes/ancestor.mm \
+    --archive species.ndjson
 
 # arena mode: two authored genomes, one slide
 cargo run -p mm-cli --release -- match genomes/hunter.mm genomes/sponge.mm --ticks 20000
@@ -76,11 +99,16 @@ exits non-zero if one breaks, so it is usable directly from CI.
 ### Tests and gates
 
 ```sh
-cargo test --workspace                       # everything
+cargo fast                                   # the inner loop, after every change
+cargo slow                                   # the four evolutionary runs, before a commit
+cargo full                                   # everything, as CI runs it — the better part of an hour
 cargo test -p mm-core                        # the simulation only
 cargo test --release --test totality_fuzz    # the long fuzz; release only
 cargo bench --workspace                      # criterion gates
 ```
+
+The three aliases are defined in `.cargo/config.toml`, which also says what `fast` leaves out and
+why. `full` is `cargo test --release --workspace`.
 
 Benchmarks are gates, not information: a change that regresses a performance gate is not done,
 however correct it is.
@@ -169,4 +197,18 @@ disguise would tune the wrong thing.
 
 ## Licence
 
-MIT OR Apache-2.0.
+Licensed under either of
+
+- Apache License, Version 2.0 ([`LICENSE-APACHE`](LICENSE-APACHE) or
+  <http://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([`LICENSE-MIT`](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
+
+at your option. Apache-2.0 carries an explicit patent grant; MIT is short and — unlike
+Apache-2.0 — compatible with GPLv2, so a GPLv2 project can still use this. Dual gets both.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in
+the work by you, as defined in the Apache-2.0 licence, shall be dual licensed as above, without
+any additional terms or conditions.
+
+The name "Manic Microbes" and the project logo are not covered by either licence and remain the
+property of David Bennell. A licence cannot stop a fork being renamed; this is the part that can.
