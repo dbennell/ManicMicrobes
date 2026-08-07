@@ -47,6 +47,9 @@ pub mod debugger;
 pub mod editor;
 pub mod engine;
 pub mod foodweb;
+/// The window icon, drawn from its geometry rather than decoded. No Bevy in it, and no image
+/// codec either — which is the reason it is drawn.
+pub mod icon;
 pub mod inspector;
 pub mod library;
 pub mod optics;

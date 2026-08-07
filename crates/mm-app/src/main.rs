@@ -104,6 +104,7 @@ use mm_app::cellpipe;
 use mm_app::debugger::{Breakpoint, Breakpoints, Sandbox};
 use mm_app::editor::Editor;
 use mm_app::engine::{Engine, Published, Rate};
+use mm_app::icon;
 use mm_app::inspector::Inspection;
 use mm_app::library;
 use mm_app::params;
@@ -626,7 +627,7 @@ fn main() {
         .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.03)))
         .insert_resource(SlideRes::new())
         .insert_resource(View::default())
-        .add_systems(Startup, setup)
+        .add_systems(Startup, (setup, set_window_icon))
         .add_systems(
             Update,
             (
@@ -3340,6 +3341,34 @@ fn with_window(entity: Entity, f: impl FnOnce(&winit::window::Window)) {
             f(window);
         }
     });
+}
+
+/// Put the mark on the window, once there is a real window to put it on.
+///
+/// A startup system rather than a field on `Window`, because Bevy's `Window` has no icon on it —
+/// the icon belongs to winit, and [`with_window`] is how this file reaches winit.
+///
+/// The window is borderless (M10.9), so this is never a title-bar icon. It is what the taskbar,
+/// the dock and the compositor's alt-tab show, which are the places the application is named
+/// while it is not the thing being looked at.
+///
+/// 64 pixels: every platform scales from it without a visible artefact, and [`icon::rgba`] costs
+/// nothing to run once at startup. If the icon cannot be built, the window keeps the default one
+/// — a missing icon is not worth failing to start over.
+fn set_window_icon(
+    window: Query<Entity, With<PrimaryWindow>>,
+    // The same thread-local as [`with_window`]; off the main thread every lookup silently misses.
+    _main_thread: bevy::ecs::system::NonSendMarker,
+) {
+    const SIZE: u32 = 64;
+
+    let Ok(entity) = window.single() else {
+        return;
+    };
+    let Ok(mark) = winit::window::Icon::from_rgba(icon::rgba(SIZE), SIZE, SIZE) else {
+        return;
+    };
+    with_window(entity, move |w| w.set_window_icon(Some(mark)));
 }
 
 /// Whether the real window is maximised. `false` if it has gone.
