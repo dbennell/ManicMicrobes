@@ -114,7 +114,7 @@ cargo test -p mm-core                        # core only
 cargo test --release --test totality_fuzz    # the long fuzz; release only
 cargo bench --workspace                      # criterion gates
 cargo run -p mm-cli -- run scenarios/soup.ron --ticks 1000000 --metrics out.ndjson
-cargo run -p mm-cli -- sweep scenarios/soup.ron --param mutation_rate --range 1..64
+cargo run -p mm-cli -- sweep scenarios/soup.ron --param mutation --range 1..64  # or duplication, fluid, light
 cargo run -p mm-cli -- hash scenarios/soup.ron --ticks 100000   # determinism check
 cargo run -p mm-cli -- run scenarios/soup.ron --archive species.ndjson   # the species archive
 cargo run -p mm-cli -- match genomes/a.mm genomes/b.mm --ticks 20000     # an arena match
@@ -146,7 +146,10 @@ crates/mm-cli/    headless runner, parameter sweeps, metric export.
 crates/mm-app/    Bevy front-end: microscope, editor, wiki, tools.
 docs/SPEC.md      normative specification.
 docs/MILESTONES.md  delivery plan and acceptance tests.
+docs/UI.md        normative for the front-end, as SPEC.md is for the core.
+docs/CHEMISTRY.md the metabolic pathways, and the investigation behind them.
 docs/OVERLAPS.md  the overlapping cells: what it was, what it was not, and the bench.
+README.md         what this is and where to look. Written for somebody arriving.
 tools/            scripts that turn a screenshot into numbers.
 scenarios/        .ron scenario configs.
 genomes/          .mm assembly sources.
