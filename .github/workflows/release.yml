@@ -204,6 +204,64 @@ jobs:
           fi
           ls -lh "$STAGE_DIR".*
 
+      # An extra Linux asset, beside the tarball rather than instead of it.
+      #
+      # The reason is the icon, not convenience: Wayland has no per-window icon protocol, so the
+      # runtime call that works on X11 does nothing there, and a compositor takes an application's
+      # icon from its .desktop file instead. An AppImage carries one. It also gets a menu entry
+      # and a single file to double-click.
+      #
+      # What it does *not* do is make the binary portable across glibc versions — it bundles the
+      # application, not the C library, so this runs on the runner's Ubuntu and newer. That is why
+      # the tarball stays: this is the convenient one, not the compatible one.
+      #
+      # No StartupWMClass in the desktop entry. It is the field that ties a running window back to
+      # its launcher icon, it has to equal what `xprop WM_CLASS` reports for the window, and a
+      # wrong value matches nothing — which is worse than the absence, because the absence lets
+      # the desktop fall back to its own heuristics. If the running window ever shows the wrong
+      # icon while the menu entry shows the right one, that field is the fix.
+      - name: Build an AppImage
+        if: matrix.name == 'linux-x86_64'
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          appdir="$RUNNER_TEMP/AppDir"
+          mkdir -p "$appdir/usr/bin" "$appdir/usr/share/icons/hicolor/256x256/apps"
+
+          cp target/release/mm-app "$appdir/usr/bin/"
+
+          # From the binary that was just built, so the menu icon, the window icon and the .ico
+          # are three renderings of one drawing.
+          ./target/release/mm-app --emit-iconset "$RUNNER_TEMP/mm.iconset"
+          cp "$RUNNER_TEMP/mm.iconset/icon_256x256.png" "$appdir/manicmicrobes.png"
+          cp "$RUNNER_TEMP/mm.iconset/icon_256x256.png" \
+            "$appdir/usr/share/icons/hicolor/256x256/apps/manicmicrobes.png"
+
+          cat > "$appdir/manicmicrobes.desktop" <<DESKTOP
+          [Desktop Entry]
+          Type=Application
+          Name=Manic Microbes
+          Comment=An open-ended artificial life simulator
+          Exec=mm-app
+          Icon=manicmicrobes
+          Categories=Science;Education;
+          Terminal=false
+          DESKTOP
+
+          printf '#!/bin/sh\nexec "$(dirname "$(readlink -f "$0")")/usr/bin/mm-app" "$@"\n' \
+            > "$appdir/AppRun"
+          chmod +x "$appdir/AppRun"
+
+          curl -sSL -o "$RUNNER_TEMP/appimagetool" \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x "$RUNNER_TEMP/appimagetool"
+
+          # --appimage-extract-and-run twice over: the runner has no FUSE, so neither appimagetool
+          # itself nor anything it produces can be mounted the usual way.
+          ARCH=x86_64 "$RUNNER_TEMP/appimagetool" --appimage-extract-and-run \
+            "$appdir" "dist/manic-microbes-${version}-linux-x86_64.AppImage"
+
+          ls -lh dist/*.AppImage
+
       # Named for the thing rather than the platform. The archive inside has
       # always carried the full name, but GitHub wraps an artefact in a zip
       # called whatever this is — so a hand-run build handed you a file called
@@ -211,7 +269,11 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: manic-microbes-${{ matrix.name }}
-          path: dist/*.${{ matrix.archive }}
+          # The AppImage pattern matches nothing on the two platforms that do not build one,
+          # which is fine: if-no-files-found fires only when every pattern comes up empty.
+          path: |
+            dist/*.${{ matrix.archive }}
+            dist/*.AppImage
           if-no-files-found: error
           retention-days: 7
 
@@ -235,7 +297,7 @@ jobs:
       - name: Checksums
         run: |
           cd dist
-          sha256sum ./*.zip ./*.tar.gz > SHA256SUMS
+          sha256sum ./*.zip ./*.tar.gz ./*.AppImage > SHA256SUMS
           cat SHA256SUMS
 
       - name: Release notes
@@ -250,8 +312,13 @@ jobs:
           install: unpack it and run it.
 
           On macOS the microscope is \`Manic Microbes.app\` — double-click it.
-          Elsewhere it is \`mm-app\` beside \`mm-cli\`. The headless runner is the
-          same everywhere:
+          Elsewhere it is \`mm-app\` beside \`mm-cli\`. On Linux there is also an
+          \`.AppImage\`: one file, a menu entry, and the only version whose icon
+          shows up under Wayland. The tarball is the one to take if your
+          distribution is older than Ubuntu 24.04, since an AppImage bundles the
+          application and not the C library.
+
+          The headless runner is the same everywhere:
 
           \`\`\`
           ./mm-cli run scenarios/soup.ron --genome genomes/ancestor.mm --ticks 50000
@@ -299,4 +366,4 @@ jobs:
             --title "$GITHUB_REF_NAME" \
             --notes-file notes.md \
             $prerelease \
-            dist/*.zip dist/*.tar.gz dist/SHA256SUMS
+            dist/*.zip dist/*.tar.gz dist/*.AppImage dist/SHA256SUMS
