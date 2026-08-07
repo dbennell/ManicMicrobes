@@ -167,6 +167,12 @@ jobs:
 
           mv "dist/$STAGE_DIR/mm-app" "$app/Contents/MacOS/mm-app"
 
+          # Contents/Resources is the third place `mm_asm::locate` looks — `../Resources` from
+          # the executable in Contents/MacOS. A double-clicked bundle gets a working directory of
+          # `/`, so without this copy the library is empty however carefully the archive beside
+          # it is arranged.
+          cp -R scenarios genomes "$app/Contents/Resources/"
+
           cat > "$app/Contents/Info.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -228,6 +234,12 @@ jobs:
           mkdir -p "$appdir/usr/bin" "$appdir/usr/share/icons/hicolor/256x256/apps"
 
           cp target/release/mm-app "$appdir/usr/bin/"
+
+          # Beside the binary, because that is the second place `mm_asm::locate` looks and an
+          # AppImage launched from a menu has a working directory of wherever the menu was.
+          # Without these the scenario library is empty and every genome but the built-in
+          # ancestor is unreachable.
+          cp -R genomes scenarios "$appdir/usr/bin/"
 
           # From the binary that was just built, so the menu icon, the window icon and the .ico
           # are three renderings of one drawing.

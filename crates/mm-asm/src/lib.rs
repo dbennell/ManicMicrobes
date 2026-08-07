@@ -17,6 +17,9 @@
 pub mod asm;
 pub mod disasm;
 pub mod highlight;
+/// Where the shipped `genomes/` and `scenarios/` are at run time — asked of the filesystem
+/// rather than baked in at compile time, which is what a released binary needs.
+pub mod locate;
 pub mod source_map;
 
 pub use asm::{

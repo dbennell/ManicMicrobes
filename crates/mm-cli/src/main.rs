@@ -375,8 +375,14 @@ fn seed_inhabitants(world: &mut World, root: &Path) -> Result<(), String> {
 }
 
 /// Where a scenario's genome names resolve to.
+///
+/// Found rather than baked: this was `CARGO_MANIFEST_DIR` and so pointed at the machine that
+/// compiled the binary, which meant a released `mm-cli` could not resolve the genome names in
+/// the scenarios shipped beside it. Falls back to the source-tree path when nothing exists, so
+/// the error a caller gets still names a directory rather than nothing.
 fn genome_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../genomes")
+    mm_asm::locate::dir("genomes")
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../genomes"))
 }
 
 fn cmd_run(opts: &Options) -> Result<(), String> {

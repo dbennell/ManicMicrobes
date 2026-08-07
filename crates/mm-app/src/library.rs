@@ -24,22 +24,17 @@ use mm_core::{Scenario, ScenarioError};
 
 /// Where the shipped scenarios are, tried in order.
 ///
-/// The working directory first, because that is where they are when the app is run from the
-/// repository, which is every run today. `CARGO_MANIFEST_DIR` second, so a binary launched from
-/// somewhere else during development still finds them — it is baked at compile time and points
-/// into the source tree.
-///
-/// A binary somebody installs will find neither and gets an empty library rather than an error,
-/// which is the right failure: the library is a convenience, and Open still works by path.
+/// This used to say that a binary somebody installs "will find neither and gets an empty library
+/// rather than an error, which is the right failure". That was written when nobody could install
+/// one. With releases it stopped being a graceful degradation and became an empty library for
+/// everybody who did not build the thing themselves — so the roots come from
+/// [`mm_asm::locate`], which also looks beside the executable and inside a macOS bundle.
 #[must_use]
 pub fn search_paths() -> Vec<PathBuf> {
-    let mut out = vec![PathBuf::from("scenarios")];
-    out.push(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../scenarios")
-            .to_path_buf(),
-    );
-    out
+    mm_asm::locate::search_roots()
+        .into_iter()
+        .map(|root| root.join("scenarios"))
+        .collect()
 }
 
 /// One scenario the library found.

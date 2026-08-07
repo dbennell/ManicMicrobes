@@ -1243,19 +1243,45 @@ fn petri_of(size: u32) -> Scenario {
     }
 }
 
-/// Assemble `genomes/ancestor.mm`, or `None` if it cannot be found or does not assemble.
+/// The default ancestor, compiled in.
 ///
-/// Returns rather than panics: a missing genome file should open an empty slide with a
-/// complaint on stderr, not refuse to start the microscope.
+/// The one genome the microscope cannot open without: it is what a fresh slide is seeded with,
+/// so a build that cannot find it opens onto empty water and looks broken. Everything else is a
+/// file somebody chose; this one is the default, and a default that depends on the filesystem is
+/// not a default.
+///
+/// The same argument as `cell.wgsl` in [`mm_app::cellpipe`], and the path is resolved by the
+/// compiler rather than at run time, which is exactly the difference that matters.
+const ANCESTOR: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../genomes/ancestor.mm"
+));
+
+/// Assemble the ancestor, or `None` if the embedded source does not assemble.
+///
+/// Returns rather than panics for the same reason it always did — an empty slide and a complaint
+/// beats refusing to start — though with the source compiled in, the only way here now is an
+/// ancestor that has been edited into something the assembler rejects, which the tests catch.
 fn ancestor_genome() -> Option<Vec<u8>> {
-    genome_bytes("ancestor.mm")
+    match mm_asm::assemble(ANCESTOR) {
+        Ok(out) => Some(out.bytes),
+        Err(e) => {
+            eprintln!("the built-in ancestor does not assemble: {e}");
+            None
+        }
+    }
 }
 
 /// Assemble a genome from `genomes/`, or `None` with a complaint on stderr.
+///
+/// Found by [`mm_asm::locate`] rather than by a compile-time path: this used to look only where
+/// the crate was built, so every released build read from a directory on the machine that
+/// compiled it and found nothing.
 fn genome_bytes(name: &str) -> Option<Vec<u8>> {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../genomes")
-        .join(name);
+    let Some(path) = mm_asm::locate::file("genomes", name) else {
+        eprintln!("cannot find genomes/{name} beside the executable or in the working directory");
+        return None;
+    };
     let src = match std::fs::read_to_string(&path) {
         Ok(src) => src,
         Err(e) => {
