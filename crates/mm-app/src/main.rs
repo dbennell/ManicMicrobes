@@ -3707,18 +3707,35 @@ fn new_scenario_sheet(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
 /// What is in `scenarios/`, and what the one you have picked actually says.
 fn library_sheet(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
     let found = library::scenarios();
+
+    // Name the directory that was actually read. This said "./scenarios" whatever it had found,
+    // which was true while that was the only place it looked and a lie afterwards — and when the
+    // library was empty it pointed at a working directory that may never have been a candidate.
+    let from = library::source_dir();
     ui.label(skin::text(
         Role::Label,
-        format!(
-            "./scenarios — {}",
-            plural(found.len(), "file", "files")
-        ),
+        match &from {
+            Some(dir) => format!(
+                "{} — {}",
+                dir.display(),
+                plural(found.len(), "file", "files")
+            ),
+            None => "no scenarios found".to_string(),
+        },
     ));
     ui.add_space(4.0);
     if found.is_empty() {
         ui.label(skin::text(
             Role::Small,
-            "no scenarios/ directory here. Open one by path from the Slide menu.",
+            "Looked in, and none of these has a .ron in it:",
+        ));
+        for dir in library::searched() {
+            ui.label(skin::text(Role::Small, format!("    {}", dir.display())));
+        }
+        ui.add_space(4.0);
+        ui.label(skin::text(
+            Role::Small,
+            "Open one by path from the Slide menu.",
         ));
         return;
     }

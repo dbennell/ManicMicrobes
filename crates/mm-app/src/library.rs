@@ -78,6 +78,29 @@ pub fn scenarios() -> Vec<Entry> {
     Vec::new()
 }
 
+/// The directory the scenarios came from, or `None` when none of them had any.
+///
+/// So the sheet can name the place it actually read rather than the place it used to be the only
+/// candidate for. When this was one hard-coded `./scenarios`, a header saying so was true; with
+/// four roots it is a guess, and an empty library that blames the working directory sends
+/// somebody looking in the wrong place.
+#[must_use]
+pub fn source_dir() -> Option<PathBuf> {
+    search_paths().into_iter().find(|dir| {
+        std::fs::read_dir(dir).is_ok_and(|mut read| {
+            read.any(|e| {
+                e.is_ok_and(|e| e.path().extension().is_some_and(|ext| ext == "ron"))
+            })
+        })
+    })
+}
+
+/// Every directory that was tried, for an error message that can be acted on.
+#[must_use]
+pub fn searched() -> Vec<PathBuf> {
+    search_paths()
+}
+
 /// What went wrong, in a sentence a person can act on.
 ///
 /// Its own type rather than `String` so the caller can tell "no such file" from "that is not a
