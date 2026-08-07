@@ -47,8 +47,17 @@ pub mod debugger;
 pub mod editor;
 pub mod engine;
 pub mod foodweb;
-/// The window icon, drawn from its geometry rather than decoded. No Bevy in it, and no image
-/// codec either — which is the reason it is drawn.
+/// The window icon, drawn from its geometry rather than decoded — a membrane, the lit arc, a
+/// nucleus and three organelles, on the website's numbers.
+///
+/// No Bevy in it and no image codec either, which is the reason it is drawn rather than unpacked:
+/// this crate takes Bevy with `default-features = false` and never enables `png`, so there is
+/// nothing in the graph that could read one. It writes the two container formats the operating
+/// systems want as files — a `.ico` for the Windows executable, PNG faces for a macOS `.icns` —
+/// so that no part of the build keeps a second copy of the mark.
+///
+/// **The module's own documentation is here rather than in the file.** `build.rs` includes
+/// `src/icon.rs` textually, and an inner doc comment cannot survive a macro expansion.
 pub mod icon;
 pub mod inspector;
 pub mod library;

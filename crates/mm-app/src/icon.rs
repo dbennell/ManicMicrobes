@@ -1,22 +1,29 @@
-//! The window icon, drawn rather than decoded.
-//!
-//! The same mark the website uses: a membrane, the bright arc across it, a nucleus and three
-//! organelles. `icon.svg` in the site repository is the original, and the numbers below are its
-//! numbers — a 32-unit square, so a coordinate here can be read straight off that file.
-//!
-//! **Arithmetic rather than a PNG, because there is no decoder here to decode one.** `mm-app`
-//! takes Bevy with `default-features = false` and does not enable `png`, so the dependency graph
-//! contains no image codec at all; pulling one in to unpack six circles would cost more than
-//! drawing them. It also means the icon renders at whatever size the platform asks for instead of
-//! at whatever size somebody exported, and it cannot go missing — the same reason `cell.wgsl` is
-//! embedded rather than loaded from an `assets/` directory.
-//!
-//! The same argument runs the other way for the two icons the operating system wants as *files*
-//! rather than as pixels at runtime — the `.ico` compiled into the Windows executable and the
-//! `.icns` inside a macOS bundle. Both are written from [`rgba`] rather than committed, by
-//! [`png`] and [`ico`] below, so there is one mark and nothing to keep in step with it. That is
-//! the whole reason there is a PNG encoder in a simulator: not to be one, but so that no part of
-//! the build has a picture of the icon that could disagree with this file.
+// The window icon, drawn rather than decoded.
+//
+// **Not a `//!` comment in this file, and that is load-bearing.** `build.rs` pulls this module in
+// with `include!` to generate the Windows `.ico`, because a build script cannot depend on the
+// crate it is building. An inner doc comment is illegal in a macro expansion — E0753 — so the
+// module's documentation lives on `pub mod icon;` in `lib.rs` and the reasoning lives here as
+// ordinary comments. Put a `//!` back and only the Windows build breaks, eight minutes into a
+// release.
+//
+// The same mark the website uses: a membrane, the bright arc across it, a nucleus and three
+// organelles. `icon.svg` in the site repository is the original, and the numbers below are its
+// numbers — a 32-unit square, so a coordinate here can be read straight off that file.
+//
+// Arithmetic rather than a PNG, because there is no decoder here to decode one. `mm-app` takes
+// Bevy with `default-features = false` and does not enable `png`, so the dependency graph contains
+// no image codec at all; pulling one in to unpack six circles would cost more than drawing them.
+// It also means the icon renders at whatever size the platform asks for instead of at whatever
+// size somebody exported, and it cannot go missing — the same reason `cell.wgsl` is embedded
+// rather than loaded from an `assets/` directory.
+//
+// The same argument runs the other way for the two icons the operating system wants as *files*
+// rather than as pixels at runtime — the `.ico` compiled into the Windows executable and the
+// `.icns` inside a macOS bundle. Both are written from `rgba` rather than committed, by `png` and
+// `ico` below, so there is one mark and nothing to keep in step with it. That is the whole reason
+// there is a PNG encoder in a simulator: not to be one, but so that no part of the build has a
+// picture of the icon that could disagree with this file.
 
 /// `#5fd39b`. The producer green, and the one the site draws the mark in.
 const MARK: [f32; 3] = [95.0 / 255.0, 211.0 / 255.0, 155.0 / 255.0];

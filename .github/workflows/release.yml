@@ -55,6 +55,12 @@ jobs:
       - name: cargo fast
         run: cargo fast --locked
 
+      # Separate because `fast` is mm-core and mm-asm. This one proves the build script can still
+      # include the icon module, which is otherwise only discoverable on the Windows runner, two
+      # jobs and eight minutes later.
+      - name: The build script can still include the icon
+        run: cargo build-include --locked
+
   # ---------------------------------------------------------------------------
   # One archive per platform. Each carries both binaries, the scenarios and the
   # genomes they need, and both licences.

@@ -37,6 +37,11 @@ fast = [
     "--test", "m10_pathways",
 ]
 
+# `cargo fast` is `-p mm-core -p mm-asm`, and this one lives in mm-app: the guard that the build
+# script can still include the icon module. Cheap, and the failure it catches is otherwise only
+# visible on a Windows runner.
+build-include = ["test", "--release", "-p", "mm-app", "--test", "build_include"]
+
 slow = [
     "test", "--release", "-p", "mm-core",
     "--test", "m2_life",
