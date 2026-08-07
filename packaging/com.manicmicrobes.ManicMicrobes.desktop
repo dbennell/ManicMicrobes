@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Name=Manic Microbes
+GenericName=Artificial Life Simulator
+Comment=A closed jar with one tap on it: light in, heat out, matter conserved
+Exec=mm-app
+Icon=com.manicmicrobes.ManicMicrobes
+# One main category, or the entry can appear twice in the menu — Science is the main one and
+# Biology is a subcategory of it. The AppStream file lists Education as well, which is a
+# different job: that decides which shelf a software centre puts it on, not the menu.
+Categories=Science;Biology;
+Keywords=artificial life;alife;evolution;simulation;emergence;genome;
+Terminal=false
+# StartupWMClass ties a running window back to this entry so the taskbar shows this icon rather
+# than a generic one. It has to equal what the window reports as its WM_CLASS, and a wrong value
+# matches nothing — which is worse than leaving it out, because without it the desktop falls back
+# to its own heuristics. Left out until it has been read off a running window with `xprop`.

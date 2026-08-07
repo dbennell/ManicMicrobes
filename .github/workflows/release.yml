@@ -231,7 +231,8 @@ jobs:
         run: |
           version="${{ steps.version.outputs.version }}"
           appdir="$RUNNER_TEMP/AppDir"
-          mkdir -p "$appdir/usr/bin" "$appdir/usr/share/icons/hicolor/256x256/apps"
+          id=com.manicmicrobes.ManicMicrobes
+          mkdir -p "$appdir/usr/bin" "$appdir/usr/share/metainfo"
 
           cp target/release/mm-app "$appdir/usr/bin/"
 
@@ -241,23 +242,24 @@ jobs:
           # ancestor is unreachable.
           cp -R genomes scenarios "$appdir/usr/bin/"
 
-          # From the binary that was just built, so the menu icon, the window icon and the .ico
-          # are three renderings of one drawing.
-          ./target/release/mm-app --emit-iconset "$RUNNER_TEMP/mm.iconset"
-          cp "$RUNNER_TEMP/mm.iconset/icon_256x256.png" "$appdir/manicmicrobes.png"
-          cp "$RUNNER_TEMP/mm.iconset/icon_256x256.png" \
-            "$appdir/usr/share/icons/hicolor/256x256/apps/manicmicrobes.png"
+          # Drawn at each size by the binary that was just built, so the menu icon, the window
+          # icon and the .ico are renderings of one drawing rather than copies of each other.
+          for size in 64 128 256 512; do
+            ./target/release/mm-app --emit-icon "$size" \
+              "$appdir/usr/share/icons/hicolor/${size}x${size}/apps/$id.png"
+          done
+          # appimagetool wants the icon named for the desktop entry at the AppDir root too.
+          cp "$appdir/usr/share/icons/hicolor/256x256/apps/$id.png" "$appdir/$id.png"
 
-          cat > "$appdir/manicmicrobes.desktop" <<DESKTOP
-          [Desktop Entry]
-          Type=Application
-          Name=Manic Microbes
-          Comment=An open-ended artificial life simulator
-          Exec=mm-app
-          Icon=manicmicrobes
-          Categories=Science;Education;
-          Terminal=false
-          DESKTOP
+          # The packaging files rather than a copy written inline here: the desktop entry and the
+          # AppStream metadata are the same ones a Flatpak or a .deb will install, they are
+          # validated in the repository, and a second copy in this file is a second thing to keep
+          # in step. Installed under the application id, which is what every software centre
+          # matches on.
+          cp packaging/$id.desktop "$appdir/$id.desktop"
+          mkdir -p "$appdir/usr/share/applications"
+          cp packaging/$id.desktop "$appdir/usr/share/applications/"
+          cp packaging/$id.metainfo.xml "$appdir/usr/share/metainfo/"
 
           printf '#!/bin/sh\nexec "$(dirname "$(readlink -f "$0")")/usr/bin/mm-app" "$@"\n' \
             > "$appdir/AppRun"

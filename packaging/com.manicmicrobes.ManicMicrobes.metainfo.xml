@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AppStream metadata: what a software centre reads to describe this.
+
+  Shared groundwork rather than a submission. Flathub, the Snap Store and a .deb with a proper
+  repository all want the same four things — an application id, a desktop entry, icons at several
+  sizes, and this file — so it is written once here and the AppImage already installs it.
+
+  The id is reverse-DNS from a domain that is actually ours, which Flathub requires and checks.
+
+  Not submitted anywhere yet, deliberately: the README says pre-release with no stable file
+  formats, and a store listing invites people who will judge it as a finished product. After
+  v0.1.0 has met some machines that did not build it.
+-->
+<component type="desktop-application">
+  <id>com.manicmicrobes.ManicMicrobes</id>
+
+  <!-- The metadata is CC0 so a distributor can reuse it; the software is the dual licence. -->
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+
+  <name>Manic Microbes</name>
+  <summary>Watch evolution happen in a closed jar</summary>
+
+  <description>
+    <p>
+      An artificial life simulator in the lineage of Tierra, Avida and DarwinBots, and a piece of
+      consumer software about looking at one. Cells carry a genome of byte-encoded instructions
+      and execute it in a virtual machine of their own. The genome builds and controls physical
+      machinery — organelles — rather than expressing behaviour directly.
+    </p>
+    <p>
+      They live on a substrate carrying a fluid with sixteen diffusing chemicals and an incident
+      light field. Matter is exactly conserved. Energy arrives as light and leaves as heat. Cells
+      eat, move, sense, attack, join, differentiate and divide.
+    </p>
+    <p>
+      There is no fitness function anywhere in it and there never will be. Nothing is scored.
+      Selection is a consequence of the physics, and that constraint is enforced by tests rather
+      than by good intentions.
+    </p>
+    <p>Two ways to use it, sharing one engine:</p>
+    <ul>
+      <li>Set up a world, walk away, and read the wiki it writes about its own species</li>
+      <li>Write cells by hand in an assembly language, and watch whose code survives</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">com.manicmicrobes.ManicMicrobes.desktop</launchable>
+
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/dbennell/ManicMicrobes/main/packaging/screenshots/microscope.png</image>
+      <caption>Four hundred cells and sixty distinct genomes, a thousand ticks after one ancestor</caption>
+    </screenshot>
+  </screenshots>
+
+  <url type="homepage">https://manicmicrobes.com</url>
+  <url type="bugtracker">https://github.com/dbennell/ManicMicrobes/issues</url>
+  <url type="vcs-browser">https://github.com/dbennell/ManicMicrobes</url>
+
+  <developer id="com.manicmicrobes">
+    <name>David Bennell</name>
+  </developer>
+
+  <!-- Empty is the assertion: nothing here needs an age rating. -->
+  <content_rating type="oars-1.1" />
+
+  <categories>
+    <category>Education</category>
+    <category>Science</category>
+  </categories>
+
+  <keywords>
+    <keyword>artificial life</keyword>
+    <keyword>evolution</keyword>
+    <keyword>simulation</keyword>
+    <keyword>emergence</keyword>
+  </keywords>
+
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+
+  <!--
+    One entry per tag. The release workflow should prepend to this when it cuts a version, and
+    until it does the date below is the date this file was written rather than a ship date.
+  -->
+  <releases>
+    <release version="0.0.1" date="2026-08-07" type="development">
+      <description>
+        <p>Pre-release. No stable save format yet: a slide written by one version may not open in
+        the next.</p>
+      </description>
+    </release>
+  </releases>
+</component>

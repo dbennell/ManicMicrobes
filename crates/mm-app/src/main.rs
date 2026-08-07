@@ -602,6 +602,21 @@ fn main() {
         emit_iconset(std::path::Path::new(&args[2]));
         return;
     }
+    // One PNG at one size, for a Linux icon theme — hicolor wants a file per size, and a
+    // packager should not have to extract one out of a macOS iconset to get it.
+    if args.len() == 4 && args[1] == "--emit-icon" {
+        let Ok(size) = args[2].parse::<u32>() else {
+            eprintln!("--emit-icon <size> <file>: {} is not a size", args[2]);
+            std::process::exit(2);
+        };
+        let path = std::path::Path::new(&args[3]);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create the icon directory");
+        }
+        std::fs::write(path, icon::png(size)).expect("write the icon");
+        println!("wrote {size}×{size} to {}", path.display());
+        return;
+    }
 
     // Before anything touches rayon, because a global pool can only be built once. Worth about
     // a tenth of a tick at fifty thousand cells on a processor with more than one kind of core,
