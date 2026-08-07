@@ -93,6 +93,36 @@ jobs:
           rustup default stable
           rustc --version
 
+      # Defender scans every object file rustc writes, and this graph is around 670 crates: the
+      # first Windows build that got all the way through took eighty minutes against a few for
+      # Linux. Excluding the workspace and the two cargo directories is the standard fix and
+      # changes nothing about what comes out — only what reads each file on the way past.
+      #
+      # Never fatal, and never `set -e`. If a future image has Defender under policy and refuses,
+      # the build should be slow rather than broken, so each exclusion is attempted on its own and
+      # a refusal is printed rather than raised.
+      - name: Let rustc write files without them being scanned
+        if: runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          foreach ($path in @($env:GITHUB_WORKSPACE, "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup")) {
+            try {
+              Add-MpPreference -ExclusionPath $path -ErrorAction Stop
+              Write-Host "excluded path $path"
+            } catch {
+              Write-Host "could not exclude $path : $($_.Exception.Message)"
+            }
+          }
+          foreach ($process in @('rustc.exe', 'cargo.exe', 'link.exe')) {
+            try {
+              Add-MpPreference -ExclusionProcess $process -ErrorAction Stop
+              Write-Host "excluded process $process"
+            } catch {
+              Write-Host "could not exclude $process : $($_.Exception.Message)"
+            }
+          }
+
       - name: Work out the version
         id: version
         run: |
