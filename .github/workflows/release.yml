@@ -1,0 +1,246 @@
+name: Release
+
+# Three native builds and a release, because cross-compiling a macOS universal
+# binary from a Linux desktop is the part that hurts and a runner per platform
+# makes it three ordinary `cargo build`s.
+#
+#   push a v* tag        build, test, and publish a release
+#   run it by hand       build and test only, artefacts attached to the run
+#
+# The version comes from the tag, so what the release is called is decided when
+# it is cut rather than here. A tag with a hyphen in it — v0.1.0-rc.1 — is
+# published as a prerelease.
+#
+# The binaries are unsigned, deliberately: signing them costs an Apple developer
+# account and a Windows certificate every year, which is not what this project
+# is for. The cost is a Gatekeeper prompt and a SmartScreen warning, and the way
+# round each is in the release notes rather than left as a surprise.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    # Windows runners default to PowerShell. One shell everywhere means one
+    # packaging script rather than three.
+    shell: bash
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # The gate. Not the full suite — that is four evolutionary acceptance runs and
+  # the better part of an hour. `cargo fast` is every unit test, the totality
+  # fuzz, the hard-rule guards and the determinism suite.
+  # ---------------------------------------------------------------------------
+  check:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustc --version
+
+      - name: cargo fast
+        run: cargo fast --locked
+
+  # ---------------------------------------------------------------------------
+  # One archive per platform. Each carries both binaries, the scenarios and the
+  # genomes they need, and both licences.
+  # ---------------------------------------------------------------------------
+  build:
+    name: ${{ matrix.name }}
+    needs: check
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # A macOS failure should not hide whether Windows built.
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux-x86_64
+            archive: tar.gz
+          - os: macos-latest
+            name: macos-universal
+            archive: zip
+          - os: windows-latest
+            name: windows-x86_64
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustc --version
+
+      - name: Work out the version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            # A hand-run build is not a release and must not look like one.
+            version="0.0.0-dev-$(git rev-parse --short HEAD)"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Building $version"
+
+      # `--locked` on every build: Cargo.lock is committed, and a release that
+      # silently resolved a different dependency graph is not the thing that was
+      # tested two jobs ago.
+      - name: Build
+        if: matrix.name != 'macos-universal'
+        run: |
+          cargo build --release --locked -p mm-cli
+          cargo build --release --locked -p mm-app --features render
+
+      # macos-latest is Apple silicon, so x86_64 is the one that needs adding.
+      # Two builds and a lipo is the whole of "universal".
+      - name: Build both architectures and fuse them
+        if: matrix.name == 'macos-universal'
+        run: |
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release --locked --target "$target" -p mm-cli
+            cargo build --release --locked --target "$target" -p mm-app --features render
+          done
+          mkdir -p target/release
+          for binary in mm-cli mm-app; do
+            lipo -create -output "target/release/$binary" \
+              "target/aarch64-apple-darwin/release/$binary" \
+              "target/x86_64-apple-darwin/release/$binary"
+            lipo -info "target/release/$binary"
+          done
+
+      - name: Stage the archive
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          dir="manic-microbes-${version}-${{ matrix.name }}"
+          exe=""
+          [[ "$RUNNER_OS" == "Windows" ]] && exe=".exe"
+
+          mkdir -p "dist/$dir"
+          cp "target/release/mm-app$exe" "dist/$dir/"
+          cp "target/release/mm-cli$exe" "dist/$dir/"
+
+          # A scenario is a recipe and a genome is a seed: without both, `run`
+          # has nothing to put on the slide.
+          cp -R scenarios genomes "dist/$dir/"
+          cp README.md LICENSE-MIT LICENSE-APACHE "dist/$dir/"
+
+          echo "STAGE_DIR=$dir" >> "$GITHUB_ENV"
+
+      - name: Archive
+        run: |
+          cd dist
+          if [[ "${{ matrix.archive }}" == "zip" ]]; then
+            # Git Bash on the Windows runner has no `zip`; it does have 7z.
+            if command -v zip >/dev/null 2>&1; then
+              zip -qr "$STAGE_DIR.zip" "$STAGE_DIR"
+            else
+              7z a -bso0 "$STAGE_DIR.zip" "$STAGE_DIR"
+            fi
+          else
+            tar czf "$STAGE_DIR.tar.gz" "$STAGE_DIR"
+          fi
+          ls -lh "$STAGE_DIR".*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/*.${{ matrix.archive }}
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Only on a tag. A hand-run build stops at the job above with its archives
+  # attached to the run, which is what makes this workflow safe to try out.
+  # ---------------------------------------------------------------------------
+  release:
+    name: Publish
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum ./*.zip ./*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Release notes
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          cat > notes.md <<NOTES
+          Pre-release. There is no stable save format yet, and a slide written by
+          one version may not open in the next.
+
+          Each archive holds both binaries — \`mm-app\`, the microscope, and
+          \`mm-cli\`, the headless runner — along with the scenarios, the genomes
+          and both licences. Nothing to install: unpack it and run it.
+
+          \`\`\`
+          ./mm-app
+          ./mm-cli run scenarios/soup.ron --genome genomes/ancestor.mm --ticks 50000
+          \`\`\`
+
+          ### The binaries are not signed
+
+          Signing costs a yearly Apple developer account and a Windows
+          certificate, and this is free software written for the interest of it.
+          So each platform will ask once:
+
+          - **macOS** — "cannot be opened because the developer cannot be
+            verified". Either right-click the binary and choose Open, or strip
+            the download flag: \`xattr -dr com.apple.quarantine
+            manic-microbes-${version}-macos-universal\`
+          - **Windows** — SmartScreen shows a blue warning. More info → Run
+            anyway.
+          - **Linux** — \`chmod +x mm-app mm-cli\` if the archive did not keep it.
+
+          Verify what you downloaded against \`SHA256SUMS\` if you would rather
+          not take that on trust.
+
+          ### Requirements
+
+          A GPU with Vulkan, Metal or DX12 for the microscope; \`mm-cli\` needs
+          none. 4 GB of RAM for a small slide. On Linux, XWayland if you are on
+          Wayland.
+          NOTES
+          cat notes.md
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=""
+          # v0.1.0-rc.1 is a prerelease; v0.1.0 is not.
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            prerelease="--prerelease"
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file notes.md \
+            $prerelease \
+            dist/*.zip dist/*.tar.gz dist/SHA256SUMS
