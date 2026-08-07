@@ -109,7 +109,11 @@ fn dress(style: &mut egui::Style) {
     s.item_spacing = egui::vec2(6.0, 3.0);
     s.button_padding = egui::vec2(7.0, 2.0);
     s.interact_size.y = 18.0;
-    s.menu_margin = egui::Margin::symmetric(0, 4);
+    // Four points either side, not zero. A menu item is a full-width button and puts its
+    // shortcut hard against its own right edge, so with no margin the keys were painted on the
+    // popup's border. `menu_caption` and `menu_rule` then indent by `button_padding.x` on top of
+    // this, so a caption, a label and a rule all begin at the same x.
+    s.menu_margin = egui::Margin::symmetric(4, 4);
     s.slider_width = 130.0;
     s.slider_rail_height = theme::row::BAR;
     s.icon_width = 11.0;
@@ -453,31 +457,81 @@ pub fn segmented<T: Copy + PartialEq>(
 /// bindings are discovered, and a binding that is not written next to the thing it does is a
 /// binding nobody has.
 pub fn menu_item(ui: &mut egui::Ui, label: &str, key: &str) -> egui::Response {
-    let mut button = egui::Button::new(text(Role::Body, label));
-    if !key.is_empty() {
-        button = button.shortcut_text(text(Role::Label, key).color(col(theme::DIM)));
+    ui.add(menu_button(label, key, false))
+}
+
+/// A menu item that is also a switch: the same row, plus whether the thing is on.
+///
+/// The `on` state is what makes the shortcut colour a decision rather than a default. `DIM` is
+/// chosen to sit back from a near-black menu, and on the raised fill of a selected row it
+/// disappears entirely — so every item that was *switched on* was the one whose key you could
+/// not read, which is precisely backwards. Selected rows get the label's own ink.
+pub fn menu_toggle(ui: &mut egui::Ui, label: &str, key: &str, on: bool) -> egui::Response {
+    ui.add(menu_button(label, key, on).selected(on))
+}
+
+fn menu_button<'a>(label: &'a str, key: &'a str, on: bool) -> egui::Button<'a> {
+    let button = egui::Button::new(text(Role::Body, label));
+    if key.is_empty() {
+        return button;
     }
-    ui.add(button)
+    let ink = if on {
+        Role::Label.ink().unwrap_or(theme::DIM)
+    } else {
+        theme::DIM
+    };
+    button.shortcut_text(text(Role::Label, key).color(col(ink)))
 }
 
 /// The name of a group of menu items, above them.
+///
+/// Indented to `button_padding.x`, because that is where the items below it start: a caption
+/// flush against the popup's edge and a label seven points in read as two columns, and a menu
+/// has one.
 pub fn menu_caption(ui: &mut egui::Ui, caption: &str) {
+    let pad = ui.spacing().button_padding.x as i8;
     ui.add_space(2.0);
-    ui.label(text(Role::Section, caption));
+    egui::Frame::new()
+        .inner_margin(egui::Margin {
+            left: pad,
+            right: pad,
+            ..egui::Margin::ZERO
+        })
+        .show(ui, |ui| ui.label(text(Role::Section, caption)));
+}
+
+/// Pin a menu to [`theme::MENU_WIDTH`]. First thing in every menu's closure.
+///
+/// A menu is a popup and a popup is as wide as its content, which for a menu is the wrong rule
+/// twice over: a rule fills whatever it is offered and dragged `View` out to six hundred
+/// points, and a menu with no rule in it shrank to its longest word and jammed `Tools`' shortcut
+/// column against the labels. Neither width was chosen; both were a side effect of what happened
+/// to be in the menu. Setting both bounds means the menu is the width it is meant to be
+/// regardless of what is in it, and [`menu_rule`] can go on filling the width it is given
+/// because the width it is given is now a decision.
+pub fn menu(ui: &mut egui::Ui) {
+    ui.set_min_width(theme::MENU_WIDTH);
+    ui.set_max_width(theme::MENU_WIDTH);
 }
 
 /// A rule between two groups of menu items.
 ///
 /// A hairline inset from both edges rather than egui's full-width separator, which at a
 /// twenty-three pixel row height cuts a menu into slices instead of grouping it.
+///
+/// Fills the width it is given, so it must be given one — see [`menu`].
 pub fn menu_rule(ui: &mut egui::Ui) {
+    // Inset to where the labels start and where the shortcuts end, so the rule spans the column
+    // rather than the popup. Taken from `button_padding` rather than written as a number,
+    // because a menu item is a button and this is the same edge.
+    let pad = ui.spacing().button_padding.x;
     ui.add_space(3.0);
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 1.0), egui::Sense::hover());
     ui.painter().rect_filled(
         egui::Rect::from_min_size(
-            egui::pos2(rect.left() + 8.0, rect.top()),
-            egui::vec2((width - 16.0).max(0.0), 1.0),
+            egui::pos2(rect.left() + pad, rect.top()),
+            egui::vec2((width - pad * 2.0).max(0.0), 1.0),
         ),
         0.0,
         col(theme::RULE),
@@ -533,21 +587,36 @@ pub fn drawer_split(
 
     let height = ui.available_height();
     let total = ui.available_width();
-    let column = if total >= MIN_WORK + theme::CONTEXT_COLUMN {
+    // The gap `horizontal_top` puts *between* the two columns, which is part of the width and
+    // was being spent twice: the two children were given `total` between them and then laid out
+    // with a gap, so the content came out one `item_spacing` wider than the space it was handed.
+    //
+    // In the drawer that was invisible — a panel's width is the window's and it simply clipped.
+    // In a window (M10.10) a window is as wide as its content, so the overflow made it wider,
+    // which made `total` bigger, which made the overflow again: the build window crept about six
+    // points wider every frame until it ran off the screen. The same shape of runaway as the
+    // scenario tab's height, in the other axis, and the reason both are worth a note.
+    let gap = ui.spacing().item_spacing.x;
+    let column = if total >= MIN_WORK + theme::CONTEXT_COLUMN + gap {
         theme::CONTEXT_COLUMN
     } else {
         0.0
     };
+    let work_width = if column > 0.0 {
+        total - column - gap
+    } else {
+        total
+    };
     ui.horizontal_top(|ui| {
         ui.allocate_ui_with_layout(
-            egui::vec2(total - column, height),
+            egui::vec2(work_width, height),
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
                 // Both dimensions, not just the height. `allocate_ui_with_layout` reports the
                 // rect its content *used*, so a work area whose content is one short label —
                 // the debugger before a sandbox is taken — shrank to the width of that label
                 // and handed the rest of the drawer to the context column.
-                ui.set_min_size(egui::vec2(total - column, height));
+                ui.set_min_size(egui::vec2(work_width, height));
                 work(ui);
             },
         );

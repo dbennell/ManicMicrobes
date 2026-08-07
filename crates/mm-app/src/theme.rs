@@ -304,6 +304,20 @@ pub const CONTEXT_COLUMN: f32 = 300.0;
 /// The parameter editor's group rail, on the left, which is narrower because it holds one word.
 pub const GROUP_COLUMN: f32 = 150.0;
 
+/// How wide a menu is. Every menu, and the same one.
+///
+/// A menu in egui is a popup that sizes to its content, and the two things a menu contains
+/// pull that width in opposite directions. A rule fills the width it is given, and the width a
+/// popup gives is whatever is left of the screen — so `View`, which has rules in it, came out
+/// six hundred points wide, a third of the window, for items thirty points long. `Tools`, which
+/// had none, sized to its longest word and came out at sixty-eight, with the shortcut column
+/// jammed against the label.
+///
+/// So it is stated rather than derived: wide enough for the longest item and its shortcut
+/// (`slides — the world as it stands`, and `Reset camera · Home`), and the same for all four so
+/// that the menu bar does not change shape as you move along it.
+pub const MENU_WIDTH: f32 = 264.0;
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -417,31 +417,23 @@ pub enum Panel {
     Metrics,
     Legend,
     Genome,
-    /// Every cost, rate and mutation the world runs on (M10.2).
-    Parameters,
     /// The tree of life, the food web and the timeline, sharing one selection (M10.4).
     ///
     /// Was two panels, `Wiki` and `FoodWeb`, which put the tree and the web on opposite sides
     /// of the screen when the question they answer — who is eating whom, and where did they
     /// come from — is one question.
     Ecology,
+    /// The tools, and the scenario they are writing (M10.10).
+    ///
+    /// Was two drawer tabs, `Toolbox` and `Scenario`, and they were always one job: the toolbox
+    /// is what you draw with and the scenario is what the drawing came out as. Keeping them
+    /// apart meant the pane that says *whether the wall reached the recipe* was the one you had
+    /// to close the wall tool to read.
+    Build,
+    /// Every cost, rate and mutation the world runs on (M10.2).
+    Parameters,
     Editor,
     Debugger,
-    /// The scenario the slide would be saved as: its outline, and the RON that Save would
-    /// write (M10.7).
-    ///
-    /// A tab rather than a takeover of the two rails, which is where the design puts it. §2
-    /// spent a milestone deciding that the left rail is *what is selected* and the right is
-    /// *what the world is doing*; a second layout that means something else while a mode is on
-    /// is how both end up half-learned.
-    Scenario,
-    /// The tools and their settings, for building a slide rather than watching one.
-    ///
-    /// A panel and not a menu, and that is the whole reason it exists. The settings began in the
-    /// Tools menu, which closes the moment you click the slide — so adjusting a dose meant open,
-    /// change, close, paint, and open again for the next stroke. A thing you adjust *while*
-    /// working has to stay on screen while you work.
-    Toolbox,
 }
 
 /// Which view the ecology pane is showing.
@@ -487,7 +479,32 @@ impl Ecology {
     }
 }
 
-/// Where a panel sits when it is docked.
+/// Which view the build window is showing.
+///
+/// One window with two views rather than two windows, for the reason [`Panel::Build`] gives:
+/// the tools and the recipe they are writing are two halves of one job, and the second half is
+/// how you check the first one worked.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Build {
+    /// The tools, the brush, the loaded chemical, and what is on the slide.
+    Tools,
+    /// The scenario the slide would be saved as, and the RON that Save would write.
+    Scenario,
+}
+
+impl Build {
+    pub const ALL: [Build; 2] = [Build::Tools, Build::Scenario];
+
+    #[must_use]
+    pub fn title(self) -> &'static str {
+        match self {
+            Build::Tools => "tools",
+            Build::Scenario => "scenario",
+        }
+    }
+}
+
+/// Where a panel sits when it is open.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Dock {
     /// The left rail: what is selected.
@@ -496,17 +513,33 @@ pub enum Dock {
     Right,
     /// The bottom drawer, one tab at a time. Everything that wants width rather than height.
     Drawer,
+    /// A window over the slide, as many at once as you open (M10.10).
+    ///
+    /// # Why these four are not tabs
+    ///
+    /// The drawer had seven tabs doing three unrelated jobs, and a row of seven equal chips
+    /// says they are seven of one thing. `genome` and `ecology` describe *what is on the
+    /// slide*: they follow the selection, they are read while the world runs, and they are the
+    /// two that belong to the microscope. The other five were an authoring surface, a settings
+    /// form, a text editor and a step debugger — none of which reads the selection, and all of
+    /// which are opened to *do* something and closed again.
+    ///
+    /// The cost is that a window covers the slide, which is the objection UI.md §4 raised
+    /// against exactly this and which has not gone away — so they are movable, they are not
+    /// modal, and any number can be open at once. What the drawer could never do is hold two of
+    /// them: `edit, run, look, edit` cannot survive the editor closing the debugger, and §10.2
+    /// had to redesign a pane around that. As windows the problem does not arise.
+    Window,
 }
 
 impl Panel {
-    pub const ALL: [Panel; 10] = [
+    pub const ALL: [Panel; 9] = [
         Panel::Cell,
         Panel::Metrics,
         Panel::Legend,
         Panel::Genome,
         Panel::Ecology,
-        Panel::Toolbox,
-        Panel::Scenario,
+        Panel::Build,
         Panel::Parameters,
         Panel::Editor,
         Panel::Debugger,
@@ -520,8 +553,7 @@ impl Panel {
             Panel::Legend => "legend",
             Panel::Genome => "genome",
             Panel::Ecology => "ecology",
-            Panel::Toolbox => "toolbox",
-            Panel::Scenario => "scenario",
+            Panel::Build => "build",
             Panel::Parameters => "parameters",
             Panel::Editor => "editor",
             Panel::Debugger => "debugger",
@@ -537,11 +569,15 @@ impl Panel {
             Panel::Legend => "L",
             Panel::Genome => "G",
             Panel::Ecology => "W",
+            // `T` until M10.10, and it was never only the toolbox's: `T` is `Follow selection`
+            // in UI.md §2 and in `handle_input`, so the one keystroke opened a panel *and*
+            // started the camera chasing a cell. Two bindings on one key is not a shortcut
+            // table, and the uniqueness test below could not see it because `follow` is not a
+            // panel. `B` was free.
+            Panel::Build => "B",
             Panel::Parameters => ",",
             Panel::Editor => "E",
             Panel::Debugger => "D",
-            Panel::Toolbox => "T",
-            Panel::Scenario => "S",
         }
     }
 
@@ -550,29 +586,34 @@ impl Panel {
         match self {
             Panel::Cell => Dock::Left,
             Panel::Metrics | Panel::Legend => Dock::Right,
-            Panel::Genome
-            | Panel::Ecology
-            | Panel::Parameters
-            | Panel::Editor
-            | Panel::Debugger
-            | Panel::Scenario
-            | Panel::Toolbox => Dock::Drawer,
+            Panel::Genome | Panel::Ecology => Dock::Drawer,
+            Panel::Build | Panel::Parameters | Panel::Editor | Panel::Debugger => Dock::Window,
         }
     }
 }
 
 /// Which panels are showing.
 ///
-/// The rails are independent switches. The drawer holds one tab at a time, so its state is
-/// *which* tab rather than a switch each — pressing `g` shows the genome, pressing it again
-/// puts the drawer away, and pressing `e` swaps to the editor without a second keystroke to
-/// close the first.
+/// Three kinds of state, because there are three kinds of home. The rails are independent
+/// switches. The drawer holds one tab at a time, so its state is *which* tab rather than a
+/// switch each — pressing `g` shows the genome, pressing it again puts the drawer away, and
+/// pressing `w` swaps to the ecology pane without a second keystroke to close the first. The
+/// windows are independent switches again, and deliberately: see [`Dock::Window`].
+///
+/// A switch each rather than a set, matching `cell`/`metrics`/`legend`, so that
+/// [`Panels::is_open`] stays a `match` the compiler checks. Every arm below is spelled out for
+/// the same reason — a tenth panel must not quietly land in the drawer because a catch-all put
+/// it there.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Panels {
     pub cell: bool,
     pub metrics: bool,
     pub legend: bool,
     pub drawer: Option<Panel>,
+    pub build: bool,
+    pub parameters: bool,
+    pub editor: bool,
+    pub debugger: bool,
 }
 
 impl Default for Panels {
@@ -582,6 +623,10 @@ impl Default for Panels {
             metrics: true,
             legend: true,
             drawer: None,
+            build: false,
+            parameters: false,
+            editor: false,
+            debugger: false,
         }
     }
 }
@@ -593,7 +638,11 @@ impl Panels {
             Panel::Cell => self.cell,
             Panel::Metrics => self.metrics,
             Panel::Legend => self.legend,
-            _ => self.drawer == Some(panel),
+            Panel::Build => self.build,
+            Panel::Parameters => self.parameters,
+            Panel::Editor => self.editor,
+            Panel::Debugger => self.debugger,
+            Panel::Genome | Panel::Ecology => self.drawer == Some(panel),
         }
     }
 
@@ -602,11 +651,16 @@ impl Panels {
             Panel::Cell => self.cell = open,
             Panel::Metrics => self.metrics = open,
             Panel::Legend => self.legend = open,
-            _ if open => self.drawer = Some(panel),
-            // Closing a drawer tab only puts the drawer away if it is the tab on show.
-            // Otherwise it is a request to close something that is already closed.
-            _ => {
-                if self.drawer == Some(panel) {
+            Panel::Build => self.build = open,
+            Panel::Parameters => self.parameters = open,
+            Panel::Editor => self.editor = open,
+            Panel::Debugger => self.debugger = open,
+            Panel::Genome | Panel::Ecology => {
+                if open {
+                    self.drawer = Some(panel);
+                } else if self.drawer == Some(panel) {
+                    // Closing a drawer tab only puts the drawer away if it is the tab on show.
+                    // Otherwise it is a request to close something that is already closed.
                     self.drawer = None;
                 }
             }
@@ -760,12 +814,12 @@ mod tests {
         assert!(panels.is_open(Panel::Genome));
 
         // Opening another tab swaps, rather than needing the first to be closed by hand.
-        panels.toggle(Panel::Editor);
-        assert!(panels.is_open(Panel::Editor));
+        panels.toggle(Panel::Ecology);
+        assert!(panels.is_open(Panel::Ecology));
         assert!(!panels.is_open(Panel::Genome));
 
         // And toggling the tab on show puts the drawer away.
-        panels.toggle(Panel::Editor);
+        panels.toggle(Panel::Ecology);
         assert!(!panels.drawer_open());
     }
 
@@ -773,8 +827,41 @@ mod tests {
     fn closing_a_tab_that_is_not_showing_does_not_shut_the_drawer() {
         let mut panels = Panels::default();
         panels.set(Panel::Genome, true);
-        panels.set(Panel::Editor, false);
+        panels.set(Panel::Ecology, false);
         assert!(panels.is_open(Panel::Genome), "the drawer closed itself");
+    }
+
+    #[test]
+    fn the_windows_are_independent_of_each_other() {
+        // The whole reason they are windows. `edit, run, look, edit` needs the editor and the
+        // debugger open together, and as drawer tabs they were exclusive — UI.md §10.2 had to
+        // move the scratch cell into the editor's own rail to work around it.
+        let mut panels = Panels::default();
+        for panel in Panel::ALL.into_iter().filter(|p| p.dock() == Dock::Window) {
+            panels.set(panel, true);
+        }
+        for panel in Panel::ALL.into_iter().filter(|p| p.dock() == Dock::Window) {
+            assert!(panels.is_open(panel), "{} closed another", panel.title());
+        }
+
+        panels.toggle(Panel::Editor);
+        assert!(!panels.is_open(Panel::Editor));
+        assert!(panels.is_open(Panel::Debugger), "the debugger went with it");
+    }
+
+    #[test]
+    fn a_window_never_touches_the_drawer() {
+        // The failure this guards: `set` used to route everything that was not a rail into the
+        // drawer through a catch-all, so opening the parameter form would have thrown away
+        // whatever the drawer was showing.
+        let mut panels = Panels::default();
+        panels.set(Panel::Genome, true);
+        for panel in Panel::ALL.into_iter().filter(|p| p.dock() == Dock::Window) {
+            panels.set(panel, true);
+            assert_eq!(panels.drawer, Some(Panel::Genome), "{}", panel.title());
+            panels.set(panel, false);
+            assert_eq!(panels.drawer, Some(Panel::Genome), "{}", panel.title());
+        }
     }
 
     #[test]
@@ -789,17 +876,35 @@ mod tests {
 
     #[test]
     fn every_panel_docks_somewhere_it_fits() {
-        // The drawer is for anything that wants width — a listing, a tree, a source buffer.
-        // The rails are for anything that wants height. Getting this backwards is how a
-        // genome listing ends up forty characters wide in a side panel.
+        // The drawer is for anything that wants width *and reads the slide* — a listing, a
+        // tree. The rails are for anything that wants height. A window is for the things you
+        // open to do a job and close again, which is the M10.10 split. Getting the first one
+        // backwards is how a genome listing ends up forty characters wide in a side panel.
         for panel in Panel::ALL {
             let dock = panel.dock();
             match panel {
                 Panel::Cell => assert_eq!(dock, Dock::Left),
                 Panel::Metrics | Panel::Legend => assert_eq!(dock, Dock::Right),
-                _ => assert_eq!(dock, Dock::Drawer, "{} is not in the drawer", panel.title()),
+                Panel::Genome | Panel::Ecology => {
+                    assert_eq!(dock, Dock::Drawer, "{} is not in the drawer", panel.title());
+                }
+                Panel::Build | Panel::Parameters | Panel::Editor | Panel::Debugger => {
+                    assert_eq!(dock, Dock::Window, "{} is not a window", panel.title());
+                }
             }
         }
+    }
+
+    #[test]
+    fn the_drawer_is_what_reads_the_slide_and_nothing_else() {
+        // Stated as a count so that adding a tab to the drawer is a deliberate act with a test
+        // to change, rather than the path of least resistance it was for five milestones.
+        let tabs: Vec<&str> = Panel::ALL
+            .into_iter()
+            .filter(|p| p.dock() == Dock::Drawer)
+            .map(Panel::title)
+            .collect();
+        assert_eq!(tabs, ["genome", "ecology"]);
     }
 }
 

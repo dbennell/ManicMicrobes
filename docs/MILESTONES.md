@@ -431,6 +431,27 @@ is done by watching, which is what this milestone is for.
   see `docs/OVERLAPS.md` for what some of it cost — and UI.md §8.1 makes the boundary explicit.
   A chrome change that appears to need one of those files is a chrome change that is wrong.
 
+- **M10.10 — where a panel lives.** The drawer had grown to seven tabs doing three unrelated
+  jobs, and a row of seven equal chips claims they are seven of one thing. It comes down to the
+  two that read the slide — genome and ecology — and the other five become movable, non-modal
+  windows: `build` (the toolbox and the scenario pane, merged, because checking the second is
+  how you find out the first one worked), `parameters`, `editor`, `debugger`. Designed in
+  `docs/UI.md` §12.
+
+  **It reverses two earlier decisions and says so in place.** §4 chose a drawer tab for the
+  parameter editor partly because egui's window frame drew no fill; `skin::sheet_frame` has
+  existed since M10.7 and that reason expired. §10.2 designed around the editor and debugger
+  being exclusive tabs; as windows they are not, and the workaround it built — the scratch cell
+  in the editor's own rail — is kept because it was the better property anyway.
+
+  It also fixes two layout runaways of the same shape, one of which was live: a container that
+  sizes to its content, holding a body that fills its container, has no fixed point. The
+  scenario tab grew the drawer by its own footer every frame until it had eaten the slide, and
+  `skin::drawer_split` spent one `item_spacing` twice, which a panel clipped and a window
+  cannot. UI.md §12.4.
+
+  **This deliverable does not open the renderer either**, on the same terms as M10.7 above.
+
 **Acceptance tests**
 1. **Input goes where it is pointed.** `ui::route` is a pure function of pointer position and
    layout; a pointer inside any panel rect never returns the slide. Tested without a graphics
@@ -454,7 +475,14 @@ is done by watching, which is what this milestone is for.
    `overlap_detector`, `swell_probe`, `gradient_probe` and `frame_cost` pass unmodified, and
    the M10.6 diff contains none of the files UI.md §8.1 lists. The picture is finished; this
    milestone is the window around it.
-8. **No regression.** Every acceptance test from M0–M8 still passes.
+8. **A panel's home is stated once and asserted.** `ui::Panel::dock` is the single answer to
+   where a panel goes, and `ui.rs` tests it without a graphics stack: the drawer's tab list is
+   exactly `[genome, ecology]`; every window panel is independently openable and closing one
+   leaves the others up; opening or closing a window never touches which tab the drawer is on;
+   and no two panels share a key or a title. The last of those had been passing while `T` was
+   bound to both the toolbox and `Follow selection`, because `follow` is not a panel — which is
+   the limit of what a uniqueness test over one list can see, and worth knowing.
+9. **No regression.** Every acceptance test from M0–M8 still passes.
 
 ---
 

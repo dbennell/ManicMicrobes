@@ -50,7 +50,7 @@ Three consequences that decide arguments later:
 │   machine   ▸  │                                       │   tick   1 204 887  │
 │                │                                       │   cells  48 213     │
 ├────────────────┴───────────────────────────────────────┴─────────────────────┤
-│  GENOME │ ECOLOGY │ EDITOR │ DEBUGGER                              ▲ collapse │
+│  GENOME │ ECOLOGY                                                  ▲ collapse │
 │  ┌────────────────────────────────────────────────────────────────────────┐  │
 │  │  87  GENE     %00110000        gene b                                  │  │
 │  │  96  IMM      %000101          = 40                                    │  │
@@ -69,7 +69,8 @@ Regions, and the egui construct each one is:
 | transport | same bar, right-aligned | pause/run/speed/step, mirrors the keys |
 | left rail | `SidePanel::left`, resizable, collapsible | cell inspector; empty state when nothing is selected |
 | right rail | `SidePanel::right` | metrics, legend, world readout |
-| bottom drawer | `TopBottomPanel::bottom`, tabbed, collapsible | genome, ecology, editor, debugger — the four things that want width |
+| bottom drawer | `TopBottomPanel::bottom`, tabbed, collapsible | genome and ecology — what reads the slide (§12.1; the editor and debugger are windows) |
+| windows | `egui::Window`, movable, non-modal | build, parameters, editor, debugger — what you open to do a job (§12.2) |
 | status bar | `TopBottomPanel::bottom`, below the drawer | selection, counts, magnification, scale bar |
 | **the slide** | `CentralPanel` | whatever is left |
 
@@ -106,9 +107,12 @@ File      MAKE
           ──
           Quit                    Ctrl+Q
 
-View      Panels                  ▸           cell · metrics · legend · genome · ecology ·
-                                              parameters · editor · debugger
-                                                                       (each a checkbox)
+View      ON THE SLIDE                        cell I · metrics P · legend L ·
+                                              genome G · ecology W    (each a checkbox)
+          ──
+          WINDOWS                             build B · parameters , ·
+                                              editor E · debugger D   (each a checkbox)
+          ──
           Interventions…                      what has been changed mid-run, and when
                                               (opens the ecology pane on that view)
           Overlays                ▸           one per chemical, 1–9
@@ -125,7 +129,9 @@ Tools     Select                  F1
           Draw barrier            F4
           Erase barrier           F5
           ──
-          Thickness  ──○────      1–10, default 3   how wide a wall stroke is
+          Build…                  B           the tools' settings, what is on the slide, and
+                                              the scenario they are writing (§12.3). Not a
+                                              submenu: §4.3
 
 Help      Keys
           ISA reference
@@ -426,6 +432,12 @@ the drawer is where everything wide already lives. The practical push was that e
 frame draws no fill in this build, so over a lit slide the editor came out as ghost text with
 cells swimming through it; a docked panel paints its own background. `,` toggles it, in the
 same unmodified-key scheme as the other panels rather than the `Ctrl+,` above.
+
+> **Superseded by §12.2 (M10.10): it is a window after all.** The second reason above expired —
+> `skin::sheet_frame` was written for M10.7's sheets and a window paints its own background now.
+> The first reason did not, and is the acknowledged cost of §12. What outweighed it is that this
+> form is not about the selection and does not belong in the strip that describes it. The key is
+> unchanged.
 
 ---
 
@@ -1086,7 +1098,7 @@ the panels read as a notebook rather than a settings dialogue.
 Every drawer tab is **a wide work area plus a fixed 300px context column on the right**, and
 the context column holds whatever the work area cannot say about itself:
 
-| tab | work area | context column |
+| pane | work area | context column |
 | --- | --- | --- |
 | genome | the listing | genes, and the diagnostics |
 | ecology | the tree, web, timeline or budget | the selected species |
@@ -1094,6 +1106,12 @@ the context column holds whatever the work area cannot say about itself:
 | parameters | the field table | *(the group list, on the left instead)* |
 | editor | the buffer | diagnostics, live |
 | debugger | the trace | breakpoints, and the step controls |
+
+Five of those six left the drawer at M10.10 (§12) and **all six kept the shape**, which is the
+argument for having had one: `skin::drawer_split` did not care that its `Ui` stopped being a
+panel, and the width rule that drops the context column below `380 + CONTEXT_COLUMN` is the same
+rule that makes a window useful at the size you dragged it to. The one thing that had to change
+was a gap it was spending twice — see §12.4.
 
 The toolbox is the one that needs it most and has it least. It is a vertical stack of a
 `Slider`, a `ComboBox`, a `DragValue` and a `TextEdit` with four paragraphs of prose
@@ -1207,6 +1225,11 @@ the information; taking the button away is a different and wronger claim.
 A drawer tab, `scenario` (`S`), on the drawer shape of §8.6: the outline in the work area, and
 **what Save will write** in the context column, as the actual RON, live.
 
+> **§12.3 (M10.10) made it the second view of the build window**, on the same shape and with the
+> same content. It was always the half of the toolbox that tells you whether the toolbox worked,
+> and having to close the brush to read it was the whole argument for merging them. `S` still
+> reaches it; it now opens the build window on that view rather than a tab of its own.
+
 The design puts these in the two rails instead, replacing the cell inspector and the metrics
 while authoring. That is a second layout, and §2 has already spent a milestone establishing that
 the rails are *what is selected* and *what the world is doing*. A tab costs nothing, reuses
@@ -1263,6 +1286,11 @@ the same one `skin::drawer_split` already applies to the context column: the edi
 left rail when there is room for it and drops it when there is not. One tab that is useful at
 three hundred points and at eight hundred.
 
+> **Still true as a window (§12.2).** The width rule is what made moving it cheap: a window
+> whose layout already survives being narrowed is a window that survives being dragged. Its
+> default size is set wide enough to clear the rule's threshold, because a pane that opens in
+> its own degraded form reads as broken rather than as compact.
+
 ### 10.2 The scratch cell is in the editor's left rail
 
 The editor and the debugger are drawer tabs and therefore exclusive — opening one closes the
@@ -1272,6 +1300,12 @@ promoting the editor to the window and demoting the debugger to a drawer.
 Instead: **the scratch cell lives in the editor's left rail.** The editor becomes
 self-sufficient, the debugger tab stays exactly what it is — breakpoints over the *live world*,
 which is a different job — and no tab has to close for another to be useful.
+
+> **M10.10 removed the exclusivity this was working around, and the rail stays anyway (§12.2).**
+> Both are windows now and either can be open beside the other, so the constraint is gone; but
+> the editor being able to run what you are writing without reaching for a second pane was
+> always the better property, and it is the one this section actually argued for. What has
+> changed is that the genome pane's `edit` chip no longer costs you the listing it opened from.
 
 ### 10.3 Source is edited; reading is rendered
 
@@ -1393,9 +1427,154 @@ egui ships Hack and Ubuntu-Light and no more. `✕` (U+2715) is in neither and r
 box in the close button — which a screenshot showed and nothing else would have. The buttons use
 `—`, `☐` and `×`, and anything outside Latin-1 needs a photograph before it is believed.
 
+**And a second one was sitting in `Help ▸ Keys` the whole time**: `⌫` (U+232B), for the
+backspace that sets the speed to `max`. It survived this rule being written because a menu was
+the one surface a photograph could not reach — `MM_SHOT_VIEW=menu:help` fixed that (§12.6) and
+the tofu box was in the first picture it took. It now reads `bksp`. The rule was right; it had
+a blind spot, and the blind spot was the shape of the tooling.
+
 ---
 
-## 12. Order of work
+## 12. Where a panel lives (M10.10)
+
+The drawer had accumulated seven tabs and they were doing three unrelated jobs. A row of seven
+equal chips is a claim that they are seven of one thing, and reading it as one — *these are the
+things the drawer shows* — is how you end up looking for the parameter editor next to the tree
+of life.
+
+### 12.1 The drawer is what reads the slide
+
+Two tabs, and the rule that admits them is not "wide" — it is **follows the selection, and is
+read while the world runs.**
+
+| tab | what it answers |
+| --- | --- |
+| genome | what is this cell running |
+| ecology | where did it come from, what does it eat, what has happened |
+
+Both are about *the thing you clicked*. Neither has a button that changes the world. That is
+why they can live in a strip along the bottom with the slide above them: the slide is the
+subject and the drawer is the caption.
+
+The other five were an authoring surface, a settings form, a text editor and a step debugger.
+None of them reads the selection. All of them are opened to *do* something and closed again,
+and while one was open the slide was two hundred points shorter for no reason connected to what
+was on it. `ui::Panel::dock` now returns `Dock::Window` for those, and `ui`'s test asserts the
+drawer's tab list is exactly `[genome, ecology]` — so adding a ninth panel to the drawer is a
+deliberate act with a test to change, which for five milestones it was not.
+
+### 12.2 The windows, and what this overturns
+
+**This reverses §4's decision and §10.2's workaround, and both were right when they were
+made.** §4 chose a drawer tab for the parameter editor on two grounds. The first — *a window
+over the slide has to be dragged aside to see what your change did* — is still true, and is the
+price of this section; it is paid down by the windows being movable and never modal, not by
+pretending it is not a cost. The second — *egui's window frame draws no fill in this build, so
+the editor came out as ghost text with cells swimming through it* — is simply no longer true:
+`skin::sheet_frame` exists, M10.7's sheets use it, and the photographs show a solid panel.
+
+| window | key | what it is |
+| --- | --- | --- |
+| build | `B` | the tools, and the scenario they are writing |
+| parameters | `,` | every cost, rate and mutation the world runs on |
+| editor | `E` | the buffer, its scratch cell, and what the caret is on |
+| debugger | `D` | breakpoints over the live world |
+
+**Any number open at once, and that is the point.** §10.2 spent a design on the fact that the
+editor and the debugger were exclusive tabs — `edit, run, look, edit` cannot survive one half
+closing the other — and solved it by moving the scratch cell into the editor's own left rail.
+That was the right fix for a drawer and it stays, because the editor being self-sufficient is
+worth having; but as windows the problem it was solving does not arise, and the genome pane's
+`edit` chip no longer throws away the listing you were reading in order to show you the buffer.
+
+**`B`, not `T`.** The toolbox's key was `T`, and `T` is also `Follow selection` in §2 and in
+`handle_input` — so the one keystroke opened a panel *and* set the camera chasing a cell. The
+uniqueness test in `ui.rs` could not see it, because `follow` is not a panel. `B` was free.
+
+### 12.3 The toolbox and the scenario pane are one window
+
+`toolbox` and `scenario` were two tabs and the split was never on a seam. The toolbox is what
+you draw with; the scenario pane is what the drawing came out as, and checking the second is how
+you find out the first one worked — §9.2 says so in as many words, and §4 lists three edits that
+reached the slide and not the recipe. Reading the RON meant closing the brush.
+
+One window, two views behind one header, exactly as the ecology pane holds four. `ui::Build` is
+the enum, `Build::Tools` and `Build::Scenario` the views. **The toolbox does not become a
+menu**: §4.3's argument is untouched and is the reason this window is not modal either. A thing
+you adjust between two strokes has to stay on screen while you stroke.
+
+### 12.4 A window is as big as it is told to be
+
+Every one of these bodies fills its height — `skin::drawer_split` under a header, with the
+scroll areas at `auto_shrink([false, false])`. That is the drawer shape doing exactly what it is
+for, and in a container that sizes itself to its content it is a runaway: the body asks for all
+of it, the container offers however much was asked for, and there is no fixed point. Two of
+these were live in the build before the windows existed:
+
+- **The scenario tab, vertically.** Its save row was laid out *after* the outline's scroll area,
+  so the content came out one footer taller than the drawer, every frame, against a drawer that
+  had just grown by a footer. About thirty points a frame until it hit the `760` of
+  `size_range` and had eaten the slide. The save row was never on screen — it was always the
+  part hanging off the bottom, which is why the symptom read as "the pane grows" rather than
+  "the pane overflows". Fixed by laying the footer out bottom-up first.
+- **`drawer_split`, horizontally.** It handed its two columns `total` between them and then laid
+  them out with an `item_spacing` gap, so the content was one gap wider than the space. A panel
+  is as wide as the window and simply clipped it; a window is as wide as its content, so the
+  build window crept six points wider every frame.
+
+So: `default_size` for where a window starts, `set_min_size(available)` inside so the body's
+`available_height` is the window's rather than infinity, and `resizable` then means what it
+says. The defaults are also wide enough to clear each body's *own* width rule — the editor's
+left rail drops below `EDITOR_RAIL + 420`, and a default that trips its own rule is a window
+that looks broken the first time it opens.
+
+### 12.5 A menu is as wide as it is told to be, too
+
+The same failure as §12.4, in the surface next door, and in both directions at once:
+
+- **`View` came out six hundred points wide**, a third of the window, for items thirty points
+  long. `menu_rule` fills the width it is given, a popup gives whatever is left of the screen,
+  and a menu sizes to its content — so one rule dragged the whole menu to the screen edge.
+- **`Tools` came out sixty-eight**, because it had no rule in it and sized to its longest word,
+  with the shortcut column jammed against the labels.
+
+Neither width was chosen. `theme::MENU_WIDTH` is, and `skin::menu` pins every menu to it: wide
+enough for the longest item and its shortcut, and the same for all four so the bar does not
+change shape as you move along it. `menu_margin` gains four points either side — a menu item is
+a full-width button and puts its shortcut against its own right edge, so at zero the keys were
+painted on the popup's border — and `menu_caption` and `menu_rule` indent by `button_padding.x`,
+so a caption, a label and a rule all begin at the same x.
+
+**The shortcut on a switched-on item was the one you could not read.** `DIM` is chosen to sit
+back from a near-black menu and vanishes on the raised fill of a selected row, which made every
+item that was *on* the one whose key was invisible. `skin::menu_toggle` is the row that knows it
+is a switch, and gives a selected row the label's own ink.
+
+### 12.6 A menu can be photographed
+
+None of the above was found by reading the code, and none of it could have been: `MM_SHOT_VIEW`
+could arrange every panel, pane, window and sheet in this interface and not one menu, because a
+menu is a popup that opens on a click. So two menu widths were wrong for a milestone, and §11.4's
+tofu box had a sibling in `Help ▸ Keys` that outlived the rule written to catch it.
+
+`MM_SHOT_VIEW=menu:view` holds one open. egui keeps a popup's open state in memory under an id
+derived from its button's response, so the harness asks for exactly what a click would have
+done — no second code path, and nothing that behaves differently when the variable is unset.
+The repo's method is that a claim about the picture is settled by a photograph; a surface that
+cannot be photographed is a surface where that method silently does not apply.
+
+### 12.7 The menu says which is which
+
+`View` is in two groups under captions: **on the slide** (the rails and the drawer's tabs) and
+**windows**. Both are generated from `Panel::ALL` filtered on `dock()`, which is the whole
+reason that list exists — the menu and the keyboard cannot drift apart if neither is written
+out by hand. `Tools ▸ Build…` opens the build window on its tools view, and `File ▸ Save
+scenario… S` opens it on the scenario view, which is what that item has always meant: *show me
+the pane that holds the path field*, not *write the file*.
+
+---
+
+## 13. Order of work
 
 | step | what | why it is here |
 | --- | --- | --- |
@@ -1408,6 +1587,7 @@ box in the close button — which a screenshot showed and nothing else would hav
 | **M10.9** | the window itself: borderless, with the menu bar as its title bar | §11. Independent of everything else and the smallest of the four, but last, because it is the only one whose failure mode is a window you cannot move. |
 | **M10.8** | the cell editor: its rails, the caret's reading, the ISA reference, the scratch cell | §10. Last because it is the one that needs `mm-core` to say anything new, and the only new thing it needs is documentation. |
 | **M10.7** | building a scenario: the authoring caption, the scenario pane and its RON preview, what is on the slide, sheets and the library | §9. Almost no new mechanism — §4 built it all and the interface never said so. Last because it is the smallest, and because it is the one whose absence is only ever confusing rather than wrong. |
+| **M10.10** | where a panel lives: the drawer down to what reads the slide, the other five as windows, the toolbox and the scenario pane merged | §12. After all of them, because it is the step that could only be taken once there were seven tabs to look at: the shape of the mistake is not visible while you are making it one milestone at a time. |
 
 10.1 first because it is the smallest thing that makes the application usable day to day.
 10.5 before 10.6 because it is the one that can go wrong, and it should go wrong against a UI
@@ -1417,7 +1597,7 @@ costs nothing to revert.
 
 ---
 
-## 13. What could go wrong
+## 14. What could go wrong
 
 - **The instanced pipeline is the risky part.** Bevy's mid-level render API is the part that
   moves most between releases and has the least documentation. Mitigation: follow the upstream

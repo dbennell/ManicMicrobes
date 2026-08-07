@@ -16,13 +16,18 @@
 //! slide in whatever is left. Every shortcut below also appears against its menu item; there
 //! is deliberately no binding that cannot be discovered from the menus.
 //!
+//! The drawer holds what *reads* the slide and nothing else (M10.10, `docs/UI.md` §12). The
+//! build window, the parameter form, the editor and the debugger are windows over it: they do
+//! not follow the selection, they are opened to do a job, and any number can be open at once.
+//!
 //! ```text
-//!   File  Slide  Simulation  View  Tools  Help     ⏸ ▶ ½× 1× 8× max ⏭
+//!   File  View  Tools  Help                        ⏸ ▶ ½× 1× 8× max ⏭
 //!  ┌────────────┬────────────────────────────┬──────────────────────┐
 //!  │  cell      │        THE SLIDE           │  metrics             │
-//!  │            │                            │  legend              │
-//!  ├────────────┴────────────────────────────┴──────────────────────┤
-//!  │  genome │ ecology │ editor │ debugger                            │
+//!  │            │   ┌──────────────────┐     │  legend              │
+//!  │            │   │ editor · window  │     │                      │
+//!  ├────────────┴───┴──────────────────┴─────┴──────────────────────┤
+//!  │  genome │ ecology                                              │
 //!  ├─────────────────────────────────────────────────────────────────┤
 //!  │  Cryptous mixtus · tick 1 204 887 · 48 213 cells       102×     │
 //!  └─────────────────────────────────────────────────────────────────┘
@@ -39,8 +44,10 @@
 //! | `0` `` ` `` `-` `=` `backspace` | speed: paused, ½×, 1×, 8×, as fast as it will go |
 //! | `1`–`9` | toggle that chemical's overlay |
 //! | `i` `p` `l` | cell, metrics, legend |
-//! | `g` `w` `e` `d` | drawer: genome, ecology, editor, debugger |
+//! | `g` `w` | drawer: genome, ecology |
+//! | `b` `,` `e` `d` | windows: build, parameters, editor, debugger |
 //! | `f` | the ecology pane, on the food web |
+//! | `s` | the build window, on the scenario it would save |
 //! | `c` | rounded cells |
 //! | `t` | track the selected cell |
 //! | `home` | reset the camera |
@@ -104,7 +111,10 @@ use mm_app::skin;
 use mm_app::slide::{self, Frame, Lod, Slide};
 use mm_app::theme::{self, Mood, Role};
 use mm_app::tools::{self, ToolEvent};
-use mm_app::ui::{self, Dock, Ecology, Focus, Panel, Panels, Rect, Target};
+// `Build` here is `ui::Build`, which half of the build window is showing. `editor::Build` — an
+// assembly that either produced bytes or produced errors — is spelled out in full at its three
+// uses, and they are the only two types in this file that share a name.
+use mm_app::ui::{self, Build, Dock, Ecology, Focus, Panel, Panels, Rect, Target};
 use mm_app::wiki;
 use mm_core::biology::BiologyConfig;
 use mm_core::cell::CellSeed;
@@ -369,8 +379,24 @@ fn arrange(spec: &str, sim: &mut SlideRes, view: &mut View) {
                 sim.select(first);
                 view.panels.set(Panel::Genome, true);
             }
-            "toolbox" => view.panels.set(Panel::Toolbox, true),
-            "scenario" => view.panels.set(Panel::Scenario, true),
+            // Two spellings kept from before M10.10 merged them into one window, because they
+            // name the two views and every script and doc that photographs one says which.
+            "toolbox" => {
+                view.panels.set(Panel::Build, true);
+                view.build = Build::Tools;
+            }
+            "scenario" => {
+                view.panels.set(Panel::Build, true);
+                view.build = Build::Scenario;
+            }
+            // `menu:view` holds a menu open, so a menu can be photographed at all. The name is
+            // the one the menu bar prints, lowercased.
+            "menu" => match sub {
+                "file" | "view" | "tools" | "help" => view.menu_open = Some(sub.to_string()),
+                // Said out loud, because the failure is otherwise a photograph of a menu bar
+                // with nothing open — which is what a menu that failed to draw looks like.
+                other => eprintln!("MM_SHOT_VIEW: no such menu `{other}`"),
+            },
             // The sheets, so each can be photographed.
             "newslide" => view.sheet = Some(Sheet::NewSlide),
             "newscen" => view.sheet = Some(Sheet::NewScenario),
@@ -396,7 +422,8 @@ fn arrange(spec: &str, sim: &mut SlideRes, view: &mut View) {
                 view.centre = Vec2::splat(48.0);
                 view.zoom = (BASE_SCALE * 6.0 / 96.0).clamp(0.05, 40.0);
                 view.tool = Tool::Paint;
-                view.panels.set(Panel::Scenario, true);
+                view.panels.set(Panel::Build, true);
+                view.build = Build::Scenario;
             }
             "ecology" => {
                 view.panels.set(Panel::Ecology, true);
@@ -1318,6 +1345,14 @@ struct View {
     species: Option<mm_core::phylogeny::SpeciesId>,
     /// Which of the ecology pane's three views is showing (M10.4).
     ecology: Ecology,
+    /// Which half of the build window is showing: the tools, or the recipe they wrote (M10.10).
+    build: Build,
+    /// A menu held open for the screenshot harness, by the name the menu bar gives it.
+    ///
+    /// `None` in every ordinary run, and nothing sets it but `arrange`. It exists because a
+    /// menu is the one part of this interface a photograph could not reach, and both of the
+    /// menu widths that turned out to be wrong were wrong for a milestone.
+    menu_open: Option<String>,
     /// The strip of the menu bar that is draggable as a title bar (M10.9).
     ///
     /// Recorded by `panels` and read by `window_chrome`, which is the same one-frame-stale
@@ -1457,6 +1492,8 @@ impl Default for View {
             place_count: 1,
             species: None,
             ecology: Ecology::Tree,
+            build: Build::Tools,
+            menu_open: None,
             title_bar: Rect::default(),
             on_edge: false,
             want_minimise: false,
@@ -1909,6 +1946,13 @@ fn keyboard(keys: &ButtonInput<KeyCode>, view: &mut View, sim: &mut SlideRes) {
         view.panels.set(Panel::Ecology, true);
         view.ecology = Ecology::Web;
     }
+    // `s` was the scenario pane's own tab before M10.10 merged it into the build window, and it
+    // is the key UI.md §2 gives `Save scenario…` — which has always meant "show me the pane that
+    // holds the path field", not "write the file". Same treatment as `f` above.
+    if keys.just_pressed(KeyCode::KeyS) {
+        view.panels.set(Panel::Build, true);
+        view.build = Build::Scenario;
+    }
     if keys.just_pressed(KeyCode::KeyT) {
         view.follow = !view.follow;
     }
@@ -1954,11 +1998,10 @@ fn panel_key(panel: Panel) -> KeyCode {
         Panel::Legend => KeyCode::KeyL,
         Panel::Genome => KeyCode::KeyG,
         Panel::Ecology => KeyCode::KeyW,
+        Panel::Build => KeyCode::KeyB,
         Panel::Parameters => KeyCode::Comma,
         Panel::Editor => KeyCode::KeyE,
         Panel::Debugger => KeyCode::KeyD,
-        Panel::Toolbox => KeyCode::KeyT,
-        Panel::Scenario => KeyCode::KeyS,
     }
 }
 
@@ -3318,11 +3361,16 @@ fn panels(
     let mut quit = false;
     menu_bar(&mut root, &mut sim, &mut view, &mut quit);
     sheets(&mut root, &mut sim, &mut view);
+    // Floating, so they take no space from the layout below and the viewport rectangle recorded
+    // at the end of this function is the same with them open as without. `ui::route` is what
+    // keeps a click inside one from reaching the slide underneath, and it already did: the
+    // `egui_wants_pointer` half of the rule was written for the sheets and covers these too.
+    windows(&mut root, &mut sim, &mut view);
     status_bar(&mut root, &sim, &view, &frame, &diagnostics);
-    // The parameter draft belongs to the panel that edits it: when that tab is not the one on
-    // show, the draft goes with it, so reopening reads the world afresh rather than presenting
-    // edits from ten minutes ago as though they were still pending.
-    if view.panels.drawer != Some(Panel::Parameters) {
+    // The parameter draft belongs to the panel that edits it: when that window is shut, the
+    // draft goes with it, so reopening reads the world afresh rather than presenting edits from
+    // ten minutes ago as though they were still pending.
+    if !view.panels.is_open(Panel::Parameters) {
         sim.draft = None;
     }
     drawer(&mut root, &mut sim, &mut view);
@@ -3372,6 +3420,18 @@ fn panels(
 
     if quit {
         exit.write(AppExit::Success);
+    }
+}
+
+/// One checkbox in the View menu, for one panel.
+///
+/// Off the `Panel::ALL` list rather than written out, which is the whole reason that list
+/// exists: the menu and the keyboard are generated from it, so a panel cannot be reachable by
+/// one and not the other.
+fn panel_item(ui: &mut egui::Ui, view: &mut View, panel: Panel) {
+    let open = view.panels.is_open(panel);
+    if skin::menu_toggle(ui, panel.title(), panel.key(), open).clicked() {
+        view.panels.set(panel, !open);
     }
 }
 
@@ -3492,7 +3552,8 @@ fn new_scenario_sheet(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
                 // Straight into the tool you need first: a blank slide is a slide with nothing
                 // to select.
                 view.tool = Tool::Paint;
-                view.panels.set(Panel::Scenario, true);
+                view.panels.set(Panel::Build, true);
+                view.build = Build::Tools;
                 view.sheet = None;
             }
             if skin::chip(ui, "Cancel", None, false).clicked() {
@@ -3783,7 +3844,20 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
         let bar = ui.max_rect();
         view.title_bar = Rect::new(bar.min.x, bar.min.y, bar.max.x, bar.max.y);
         egui::MenuBar::new().ui(ui, |ui| {
-            ui.menu_button("File", |ui| {
+            // A menu that cannot be photographed is a menu whose width is a guess, and two of
+            // them were wrong for a milestone before anybody opened one. `MM_SHOT_VIEW=menu:view`
+            // holds one open so the screenshot harness can take its picture; egui keeps a
+            // popup's open state in memory under an id derived from its button's response, so
+            // this asks for exactly what a click would have done.
+            let hold = view.menu_open.clone();
+            let hold_open = |resp: &egui::Response, name: &str| {
+                if hold.as_deref() == Some(name) {
+                    egui::Popup::open_id(&resp.ctx, egui::Popup::default_response_id(resp));
+                }
+            };
+
+            let file = ui.menu_button("File", |ui| {
+                skin::menu(ui);
                 // One menu for documents, both kinds of them (M10.9). This was two — a File
                 // menu whose every item was disabled, and a Slide menu that did the work — and
                 // between them they had `New slide… Ctrl+N` *twice*, once live and once dead,
@@ -3818,12 +3892,13 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                         ui.close();
                     }
                 });
-                if skin::menu_item(ui, "Save scenario…", Panel::Scenario.key()).clicked() {
-                    // The scenario pane, not a dialogue: it holds the path field *and* the RON
+                if skin::menu_item(ui, "Save scenario…", "S").clicked() {
+                    // The scenario view, not a dialogue: it holds the path field *and* the RON
                     // that saving will write. This used to be `Save parameters as…`, a nested
                     // menu that wrote the whole scenario under the name of one part of it and
                     // showed you none of what it was about to do.
-                    view.panels.set(Panel::Scenario, true);
+                    view.panels.set(Panel::Build, true);
+                    view.build = Build::Scenario;
                     ui.close();
                 }
 
@@ -3841,33 +3916,36 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                 }
             });
 
-            ui.menu_button("View", |ui| {
-                for panel in Panel::ALL {
-                    let mut open = view.panels.is_open(panel);
-                    if ui
-                        .add(
-                            egui::Button::new(panel.title())
-                                .shortcut_text(panel.key())
-                                .selected(open),
-                        )
-                        .clicked()
-                    {
-                        open = !open;
-                        view.panels.set(panel, open);
-                    }
+            let view_menu = ui.menu_button("View", |ui| {
+                skin::menu(ui);
+                // Grouped by where the thing lands, because that is the M10.10 split and the
+                // menu is where it has to be legible: the rails and the drawer describe the
+                // slide and are read while it runs; the windows are opened to do a job.
+                skin::menu_caption(ui, "on the slide");
+                for panel in Panel::ALL
+                    .into_iter()
+                    .filter(|p| p.dock() != Dock::Window)
+                {
+                    panel_item(ui, view, panel);
                 }
+                skin::menu_rule(ui);
+                skin::menu_caption(ui, "windows");
+                for panel in Panel::ALL
+                    .into_iter()
+                    .filter(|p| p.dock() == Dock::Window)
+                {
+                    panel_item(ui, view, panel);
+                }
+                skin::menu_rule(ui);
                 let count = sim.latest.interventions.len();
                 let showing =
                     view.panels.is_open(Panel::Ecology) && view.ecology == Ecology::Interventions;
-                if ui
-                    .add(
-                        egui::Button::new(if count == 0 {
-                            "Interventions…".to_string()
-                        } else {
-                            format!("Interventions… ({count})")
-                        })
-                        .selected(showing),
-                    )
+                let label = if count == 0 {
+                    "Interventions…".to_string()
+                } else {
+                    format!("Interventions… ({count})")
+                };
+                if skin::menu_toggle(ui, &label, "", showing)
                     .on_hover_text("what has been changed in this world, and when")
                     .clicked()
                 {
@@ -3886,20 +3964,12 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                         } else {
                             String::new()
                         };
-                        if ui
-                            .add(egui::Button::new(name).shortcut_text(key).selected(on))
-                            .clicked()
-                        {
+                        if skin::menu_toggle(ui, &name, &key, on).clicked() {
                             sim.engine.toggle_overlay(i);
                         }
                     }
                 });
-                if ui
-                    .add(
-                        egui::Button::new("Rounded cells")
-                            .shortcut_text("C")
-                            .selected(view.rounded),
-                    )
+                if skin::menu_toggle(ui, "Rounded cells", "C", view.rounded)
                     .on_hover_text(
                         "shaded, irregular cells rather than flat squares. Presentation only \
                          — it changes which tile of a baked atlas each sprite samples",
@@ -3908,12 +3978,7 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                 {
                     view.rounded = !view.rounded;
                 }
-                if ui
-                    .add(
-                        egui::Button::new("Organelles")
-                            .shortcut_text("N")
-                            .selected(view.organelles),
-                    )
+                if skin::menu_toggle(ui, "Organelles", "N", view.organelles)
                     .on_hover_text(
                         "the blobs inside each cell. Off is how you look at the cells \
                          themselves — a crowd of them is mostly organelles by area, and the \
@@ -3923,23 +3988,13 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                 {
                     view.organelles = !view.organelles;
                 }
-                if ui
-                    .add(
-                        egui::Button::new("Optics")
-                            .shortcut_text("O")
-                            .selected(sim.engine.optics_enabled()),
-                    )
+                if skin::menu_toggle(ui, "Optics", "O", sim.engine.optics_enabled())
                     .on_hover_text("vignette, defocus and dust on the objective")
                     .clicked()
                 {
                     sim.engine.set_optics(!sim.engine.optics_enabled());
                 }
-                if ui
-                    .add(
-                        egui::Button::new("Flow")
-                            .shortcut_text("V")
-                            .selected(sim.engine.flow_enabled()),
-                    )
+                if skin::menu_toggle(ui, "Flow", "V", sim.engine.flow_enabled())
                     .on_hover_text(
                         "which way the water is going, and how fast. Arrows point \
                          downstream and are drawn only where the water is actually moving, \
@@ -3949,21 +4004,11 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                 {
                     sim.engine.set_flow(!sim.engine.flow_enabled());
                 }
-                ui.separator();
-                if ui
-                    .add(
-                        egui::Button::new("Follow selection")
-                            .shortcut_text("T")
-                            .selected(view.follow),
-                    )
-                    .clicked()
-                {
+                skin::menu_rule(ui);
+                if skin::menu_toggle(ui, "Follow selection", "T", view.follow).clicked() {
                     view.follow = !view.follow;
                 }
-                if ui
-                    .add(egui::Button::new("Reset camera").shortcut_text("Home"))
-                    .clicked()
-                {
+                if skin::menu_item(ui, "Reset camera", "Home").clicked() {
                     view.centre = Vec2::new(
                         sim.latest.frame.width as f32 / 2.0,
                         sim.latest.frame.height as f32 / 2.0,
@@ -3973,41 +4018,47 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                 }
             });
 
-            ui.menu_button("Tools", |ui| {
+            let tools = ui.menu_button("Tools", |ui| {
+                skin::menu(ui);
                 for (tool, key) in TOOLS {
-                    if ui
-                        .add(
-                            egui::Button::new(tool.name())
-                                .shortcut_text(key)
-                                .selected(view.tool == tool),
-                        )
-                        .clicked()
-                    {
+                    if skin::menu_toggle(ui, tool.name(), key, view.tool == tool).clicked() {
                         view.tool = tool;
                         ui.close();
                     }
                 }
-                ui.separator();
-                // The settings live in the toolbox panel, not here. A menu closes the moment
-                // you click the slide, so a dose adjusted from a menu costs open-change-close
-                // for every stroke — see `Panel::Toolbox`.
-                if ui
-                    .add(egui::Button::new("Toolbox…").shortcut_text("T"))
-                    .on_hover_text("what the tools are loaded with, and the sources on the slide")
+                skin::menu_rule(ui);
+                // The settings live in the build window, not here. A menu closes the moment you
+                // click the slide, so a dose adjusted from a menu costs open-change-close for
+                // every stroke — see `Dock::Window`, which is why that window is not modal
+                // either.
+                if skin::menu_item(ui, "Build…", Panel::Build.key())
+                    .on_hover_text(
+                        "what the tools are loaded with, the sources on the slide, and the \
+                         scenario they are writing",
+                    )
                     .clicked()
                 {
-                    view.panels.set(Panel::Toolbox, true);
+                    view.panels.set(Panel::Build, true);
+                    view.build = Build::Tools;
                     ui.close();
                 }
             });
 
-            ui.menu_button("Help", |ui| {
-                ui.label("keys");
-                ui.separator();
+            let help = ui.menu_button("Help", |ui| {
+                skin::menu(ui);
+                skin::menu_caption(ui, "keys");
+                // On the row grammar (§8.4) rather than one padded string: `{key:<10}` is column
+                // alignment done with spaces, which holds only while the font is monospace and
+                // the labels are ASCII.
+                //
+                // `bksp` rather than `⌫` (U+232B), which is not in Hack and came out as a tofu
+                // box — the same gamble UI.md §11.4 lost on `✕`, in the one part of the interface
+                // that could not be photographed until now. It has been in this list since the
+                // list existed.
                 for (key, what) in [
                     ("space", "run / pause"),
                     (".", "step one tick"),
-                    ("0 ` - = ⌫", "speed"),
+                    ("0 ` - = bksp", "speed"),
                     ("1–9", "chemical overlays"),
                     ("[ ]", "step one overlay at a time"),
                     ("v", "flow field"),
@@ -4016,9 +4067,14 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                     ("wheel", "zoom about the pointer"),
                     ("click", "select a cell"),
                 ] {
-                    ui.small(format!("{key:<10} {what}"));
+                    skin::stat(ui, what, key);
                 }
             });
+
+            hold_open(&file.response, "file");
+            hold_open(&view_menu.response, "view");
+            hold_open(&tools.response, "tools");
+            hold_open(&help.response, "help");
 
             // The transport, at the right-hand end, mirroring the keys rather than replacing
             // them. `right_to_left` so it stays pinned to the edge as the window resizes.
@@ -4373,16 +4429,92 @@ fn drawer(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
             match showing {
                 Panel::Genome => genome_body(ui, sim, view),
                 Panel::Ecology => ecology_body(ui, sim, view),
-                Panel::Toolbox => toolbox_body(ui, sim, view),
-                Panel::Scenario => scenario_body(ui, sim, view),
-                Panel::Parameters => parameters_body(ui, sim, view),
-                Panel::Editor => editor_body(ui, sim, view),
-                Panel::Debugger => debugger_body(ui, sim),
-                // The rails' panels are never the drawer's tab; `Panels::set` will not put
-                // one there.
-                Panel::Cell | Panel::Metrics | Panel::Legend => {}
+                // Nothing else can be the drawer's tab: `Panels::set` routes by `Panel::dock`
+                // and only these two are `Dock::Drawer`, which `ui`'s own test asserts.
+                Panel::Cell
+                | Panel::Metrics
+                | Panel::Legend
+                | Panel::Build
+                | Panel::Parameters
+                | Panel::Editor
+                | Panel::Debugger => {}
             }
         });
+}
+
+/// The windows: as many as are open, over the slide (M10.10, `docs/UI.md` §12).
+///
+/// # Why a window has to be told how big it is
+///
+/// Every one of these bodies fills its height — a scroll area with `auto_shrink([false, false])`
+/// under a header, which is the drawer shape doing what it is for. An `egui::Window` sizes
+/// itself to its content, so a body that asks for "all of it" and a container that offers
+/// "however much you asked for" have no fixed point between them and the window grows without
+/// bound. That is the same runaway the scenario tab had in the drawer, one container out.
+///
+/// So each window is given an explicit rectangle: `default_size` for where it starts, and a
+/// `set_min_size` inside so the body's `available_height` is the window's, not infinity.
+/// `resizable` then means what it says — the size is the one you dragged it to, and the content
+/// scrolls inside it.
+fn windows(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
+    let screen = root.ctx().viewport_rect();
+    for panel in Panel::ALL.into_iter().filter(|p| p.dock() == Dock::Window) {
+        if !view.panels.is_open(panel) {
+            continue;
+        }
+        // Where each one starts, and how big. Wide enough that each opens showing the thing it
+        // was built to show rather than the degraded form of it — every one of these bodies has
+        // a width rule that drops a column when there is no room, and a default that trips its
+        // own width rule is a window that looks broken on first open. The editor's is the
+        // dearest: its left rail holds the scratch cell, which is the whole of §10.2.
+        //
+        // Offset per window so that opening two does not stack them exactly, and towards a
+        // corner rather than the middle, because the middle is the slide and the slide is what
+        // the window is about.
+        let (want, step) = match panel {
+            Panel::Build => (egui::vec2(820.0, 460.0), 0.0),
+            Panel::Parameters => (egui::vec2(980.0, 560.0), 1.0),
+            Panel::Editor => (egui::vec2(1040.0, 620.0), 2.0),
+            _ => (egui::vec2(900.0, 520.0), 3.0),
+        };
+        let at = screen.min + egui::vec2(40.0 + step * 26.0, 48.0 + step * 26.0);
+        // Clamped against where it starts, not against the screen: the offsets above push each
+        // window down and right, so a size that fits the screen from the origin still hangs off
+        // the bottom by the offset. The editor at 620 opened 20 points under the status bar.
+        let size = egui::vec2(
+            want.x.min(screen.max.x - at.x - 20.0).max(320.0),
+            want.y.min(screen.max.y - at.y - 40.0).max(200.0),
+        );
+        let mut open = true;
+        egui::Window::new(skin::text(Role::Body, panel.title()))
+            .id(egui::Id::new(("window", panel.title())))
+            .open(&mut open)
+            .collapsible(true)
+            .resizable(true)
+            .frame(skin::sheet_frame())
+            .default_size(size)
+            .default_pos(at)
+            .show(root.ctx(), |ui| {
+                // Claim the rectangle the window was given, so the body's `available_height` is
+                // that and not "as much as you like". See the docstring: without it a body that
+                // fills its height and a container that fits its content have no fixed point.
+                ui.set_min_size(ui.available_size());
+                match panel {
+                    Panel::Build => build_body(ui, sim, view),
+                    Panel::Parameters => parameters_body(ui, sim, view),
+                    Panel::Editor => editor_body(ui, sim, view),
+                    Panel::Debugger => debugger_body(ui, sim),
+                    Panel::Cell
+                    | Panel::Metrics
+                    | Panel::Legend
+                    | Panel::Genome
+                    | Panel::Ecology => {}
+                }
+            });
+        if !open {
+            view.panels.set(panel, false);
+        }
+    }
 }
 
 /// A cell's flattened sides, as the mesh wants them.
@@ -4497,6 +4629,31 @@ fn token_colour(kind: mm_asm::highlight::TokenKind) -> egui::Color32 {
         T::Unknown => ink_colour(Ink::Miss, false),
         T::Comment => egui::Color32::from_gray(105),
         T::Space => ink_colour(Ink::Note, false),
+    }
+}
+
+/// The build window: the tools, and the recipe they are writing (M10.10, `docs/UI.md` §12).
+///
+/// Two views behind one header, the way the ecology pane holds four. They were two drawer tabs
+/// and the split was never on a seam: the toolbox is what you draw with, the scenario is what
+/// the drawing came out as, and checking the second is how you find out the first one worked.
+/// Reading the RON meant closing the brush.
+fn build_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        for which in Build::ALL {
+            if skin::chip(ui, which.title(), None, view.build == which).clicked() {
+                view.build = which;
+            }
+        }
+        // No authoring caption here. The menu bar already carries it (§9.1) and the scenario
+        // view's footnote spells out what it means; a third copy in the header between them
+        // would be one more place to keep in step and nothing learned.
+    });
+    ui.separator();
+    match view.build {
+        Build::Tools => toolbox_body(ui, sim, view),
+        Build::Scenario => scenario_body(ui, sim, view),
     }
 }
 
