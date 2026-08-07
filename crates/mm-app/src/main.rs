@@ -4541,51 +4541,69 @@ fn scenario_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
                 ),
             ));
 
-            egui::ScrollArea::vertical()
-                .id_salt("scenario_outline")
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    for (title, count, rows) in outline_of(&scenario) {
-                        ui.horizontal(|ui| {
-                            ui.label(skin::text(Role::Section, &title));
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| ui.label(skin::text(Role::Label, count)),
-                            );
-                        });
-                        for (label, value) in rows {
-                            skin::stat(ui, &label, &value);
-                        }
-                        ui.add_space(4.0);
+            // Bottom-up, so the save row is placed *before* the outline that fills what is left.
+            //
+            // Nothing may follow a scroll area that claims the height. The drawer is a resizable
+            // panel and egui grows one to fit its content, so a footer laid out after a
+            // `auto_shrink([false, false])` scroll area makes the content exactly one footer
+            // taller than the drawer — every frame, against a drawer that just grew by a footer.
+            // It climbed at some thirty pixels a frame until it hit the 760 of `size_range` and
+            // had eaten the slide, and the save row itself was never on screen: it was always
+            // the part hanging off the bottom.
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(skin::text(Role::Label, "save to"));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut view.file_path)
+                            .desired_width(220.0)
+                            .font(skin::font(Role::Value))
+                            .hint_text("scenarios/the_drift.ron"),
+                    );
+                    if ui
+                        .add_enabled(
+                            !view.file_path.trim().is_empty(),
+                            egui::Button::new(skin::text(Role::Label, "Save scenario")),
+                        )
+                        .on_hover_text("writes exactly the RON in the column beside this")
+                        .clicked()
+                    {
+                        save = true;
+                    }
+                    if let Some(note) = &view.file_note {
+                        match note {
+                            Ok(m) => ui.label(skin::moody(Role::Label, Mood::Good, m.clone())),
+                            Err(m) => ui.label(skin::moody(Role::Label, Mood::Bad, m.clone())),
+                        };
                     }
                 });
+                ui.add_space(3.0);
+                skin::hairline(ui);
 
-            skin::hairline(ui);
-            ui.add_space(3.0);
-            ui.horizontal(|ui| {
-                ui.label(skin::text(Role::Label, "save to"));
-                ui.add(
-                    egui::TextEdit::singleline(&mut view.file_path)
-                        .desired_width(220.0)
-                        .font(skin::font(Role::Value))
-                        .hint_text("scenarios/the_drift.ron"),
+                // What is left, read in the usual direction.
+                ui.allocate_ui_with_layout(
+                    ui.available_size(),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt("scenario_outline")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                for (title, count, rows) in outline_of(&scenario) {
+                                    ui.horizontal(|ui| {
+                                        ui.label(skin::text(Role::Section, &title));
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| ui.label(skin::text(Role::Label, count)),
+                                        );
+                                    });
+                                    for (label, value) in rows {
+                                        skin::stat(ui, &label, &value);
+                                    }
+                                    ui.add_space(4.0);
+                                }
+                            });
+                    },
                 );
-                if ui
-                    .add_enabled(
-                        !view.file_path.trim().is_empty(),
-                        egui::Button::new(skin::text(Role::Label, "Save scenario")),
-                    )
-                    .on_hover_text("writes exactly the RON in the column beside this")
-                    .clicked()
-                {
-                    save = true;
-                }
-                if let Some(note) = &view.file_note {
-                    match note {
-                        Ok(m) => ui.label(skin::moody(Role::Label, Mood::Good, m.clone())),
-                        Err(m) => ui.label(skin::moody(Role::Label, Mood::Bad, m.clone())),
-                    };
-                }
             });
         },
         |ui| {
