@@ -10,6 +10,13 @@
 //! drawing them. It also means the icon renders at whatever size the platform asks for instead of
 //! at whatever size somebody exported, and it cannot go missing — the same reason `cell.wgsl` is
 //! embedded rather than loaded from an `assets/` directory.
+//!
+//! The same argument runs the other way for the two icons the operating system wants as *files*
+//! rather than as pixels at runtime — the `.ico` compiled into the Windows executable and the
+//! `.icns` inside a macOS bundle. Both are written from [`rgba`] rather than committed, by
+//! [`png`] and [`ico`] below, so there is one mark and nothing to keep in step with it. That is
+//! the whole reason there is a PNG encoder in a simulator: not to be one, but so that no part of
+//! the build has a picture of the icon that could disagree with this file.
 
 /// `#5fd39b`. The producer green, and the one the site draws the mark in.
 const MARK: [f32; 3] = [95.0 / 255.0, 211.0 / 255.0, 155.0 / 255.0];
@@ -158,6 +165,149 @@ fn over(dst: &mut [f32; 3], dst_a: &mut f32, src: [f32; 3], src_a: f32) {
 
 fn to_byte(v: f32) -> u8 {
     (v.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+/* -------------------------------------------------------------------------------------------- */
+/* Container formats                                                                              */
+/* -------------------------------------------------------------------------------------------- */
+
+/// The mark as a PNG.
+///
+/// Deflate's *stored* mode — every block copied verbatim, no compression at all. A real encoder
+/// would be a dependency and several hundred lines to save a few tens of kilobytes on a file that
+/// is already a rounding error beside an 80 MB binary. The output is a valid PNG either way,
+/// because "stored" is a legal deflate block and every decoder handles it.
+pub fn png(size: u32) -> Vec<u8> {
+    let pixels = rgba(size);
+
+    // The filter byte in front of each row. Zero — "no filter" — because filtering exists to make
+    // the compression that is not happening here work better.
+    let mut raw = Vec::with_capacity((size * (size * 4 + 1)) as usize);
+    for y in 0..size {
+        raw.push(0);
+        let row = (y * size * 4) as usize;
+        raw.extend_from_slice(&pixels[row..row + (size * 4) as usize]);
+    }
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]);
+
+    let mut ihdr = Vec::with_capacity(13);
+    ihdr.extend_from_slice(&size.to_be_bytes());
+    ihdr.extend_from_slice(&size.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 6, 0, 0, 0]); // 8 bits a channel, RGBA, no interlace.
+    chunk(&mut out, b"IHDR", &ihdr);
+
+    chunk(&mut out, b"IDAT", &zlib_stored(&raw));
+    chunk(&mut out, b"IEND", &[]);
+    out
+}
+
+/// The mark as a Windows `.ico`, holding one PNG per size.
+///
+/// PNG-compressed entries rather than the older bitmap-and-mask ones: supported since Vista, and
+/// the microscope wants a GPU from the last decade, so nothing that can run this cannot read it.
+pub fn ico(sizes: &[u32]) -> Vec<u8> {
+    let images: Vec<Vec<u8>> = sizes.iter().map(|&s| png(s)).collect();
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&0u16.to_le_bytes()); // reserved
+    out.extend_from_slice(&1u16.to_le_bytes()); // 1 = icon, 2 = cursor
+    out.extend_from_slice(&(images.len() as u16).to_le_bytes());
+
+    // Directory first, so the offsets have to be worked out before any image is written.
+    let mut offset = 6 + 16 * images.len() as u32;
+    for (&size, image) in sizes.iter().zip(&images) {
+        // 256 is written as 0. The field is one byte, and 256 does not fit in one byte.
+        let dimension = if size >= 256 { 0u8 } else { size as u8 };
+        out.push(dimension);
+        out.push(dimension);
+        out.push(0); // palette size; 0 for truecolour
+        out.push(0); // reserved
+        out.extend_from_slice(&1u16.to_le_bytes()); // colour planes
+        out.extend_from_slice(&32u16.to_le_bytes()); // bits a pixel
+        out.extend_from_slice(&(image.len() as u32).to_le_bytes());
+        out.extend_from_slice(&offset.to_le_bytes());
+        offset += image.len() as u32;
+    }
+
+    for image in images {
+        out.extend_from_slice(&image);
+    }
+    out
+}
+
+/// A PNG chunk: length, type, payload, and a CRC over the type and payload.
+fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    out.extend_from_slice(kind);
+    out.extend_from_slice(data);
+
+    let mut crc = Crc::new();
+    crc.eat(kind);
+    crc.eat(data);
+    out.extend_from_slice(&crc.finish().to_be_bytes());
+}
+
+/// A zlib stream of stored deflate blocks.
+fn zlib_stored(data: &[u8]) -> Vec<u8> {
+    let mut out = vec![0x78, 0x01]; // deflate, 32K window, no preset dictionary
+
+    // A stored block's length is a u16, so anything longer is several blocks.
+    const MAX: usize = 65535;
+    let mut rest = data;
+    loop {
+        let take = rest.len().min(MAX);
+        let (block, remainder) = rest.split_at(take);
+        let last = remainder.is_empty();
+
+        out.push(if last { 1 } else { 0 }); // BFINAL, and BTYPE 00 for stored
+        out.extend_from_slice(&(take as u16).to_le_bytes());
+        out.extend_from_slice(&(!(take as u16)).to_le_bytes()); // the ones' complement, as spec'd
+        out.extend_from_slice(block);
+
+        if last {
+            break;
+        }
+        rest = remainder;
+    }
+
+    out.extend_from_slice(&adler32(data).to_be_bytes());
+    out
+}
+
+/// Adler-32, which is the checksum zlib ends a stream with.
+fn adler32(data: &[u8]) -> u32 {
+    let (mut a, mut b) = (1u32, 0u32);
+    for &byte in data {
+        a = (a + byte as u32) % 65521;
+        b = (b + a) % 65521;
+    }
+    (b << 16) | a
+}
+
+/// CRC-32, which is what a PNG chunk ends with. The table is built on first use rather than
+/// written out, because a 256-entry constant is harder to check than the loop that makes it.
+struct Crc(u32);
+
+impl Crc {
+    fn new() -> Self {
+        Crc(0xffff_ffff)
+    }
+
+    fn eat(&mut self, data: &[u8]) {
+        for &byte in data {
+            let mut c = (self.0 ^ byte as u32) & 0xff;
+            for _ in 0..8 {
+                c = if c & 1 != 0 { 0xedb8_8320 ^ (c >> 1) } else { c >> 1 };
+            }
+            self.0 = c ^ (self.0 >> 8);
+        }
+    }
+
+    fn finish(self) -> u32 {
+        self.0 ^ 0xffff_ffff
+    }
 }
 
 #[cfg(test)]

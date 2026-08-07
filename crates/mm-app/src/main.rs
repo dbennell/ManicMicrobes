@@ -594,6 +594,15 @@ const SPECK_RGB: [f32; 3] = [0.745, 0.667, 0.510];
 const SPECK_MAX_SIDE: u64 = 8;
 
 fn main() {
+    // Before Bevy, because this one does not want a window — it writes files and stops. The
+    // release workflow calls it on the macOS runner to build the `.icns` that goes in the bundle,
+    // so the dock icon comes from `icon.rs` like every other copy of the mark.
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() == 3 && args[1] == "--emit-iconset" {
+        emit_iconset(std::path::Path::new(&args[2]));
+        return;
+    }
+
     // Before anything touches rayon, because a global pool can only be built once. Worth about
     // a tenth of a tick at fifty thousand cells on a processor with more than one kind of core,
     // and nothing at all on one without — see `mm_app::threads`.
@@ -3341,6 +3350,41 @@ fn with_window(entity: Entity, f: impl FnOnce(&winit::window::Window)) {
             f(window);
         }
     });
+}
+
+/// Write an `.iconset` directory for `iconutil`, which is how a macOS bundle gets its icon.
+///
+/// The names are `iconutil`'s and not negotiable: `icon_<n>x<n>.png` and `icon_<n>x<n>@2x.png`,
+/// where the `@2x` of a size is drawn at twice it. Nothing here is a scaled copy — every one is
+/// drawn at its own size by [`icon::rgba`], which is the advantage of a mark that is arithmetic.
+///
+/// Panics rather than returns: this runs in a release build on a runner, and an icon that half
+/// wrote itself should stop the release rather than ship.
+fn emit_iconset(dir: &std::path::Path) {
+    // (nominal size, pixels). `iconutil` wants both members of each pair to exist.
+    const FACES: &[(u32, u32)] = &[
+        (16, 16),
+        (16, 32),
+        (32, 32),
+        (32, 64),
+        (128, 128),
+        (128, 256),
+        (256, 256),
+        (256, 512),
+        (512, 512),
+        (512, 1024),
+    ];
+
+    std::fs::create_dir_all(dir).expect("create the iconset directory");
+    for &(nominal, pixels) in FACES {
+        let name = if pixels == nominal {
+            format!("icon_{nominal}x{nominal}.png")
+        } else {
+            format!("icon_{nominal}x{nominal}@2x.png")
+        };
+        std::fs::write(dir.join(name), icon::png(pixels)).expect("write an iconset face");
+    }
+    println!("wrote {} faces to {}", FACES.len(), dir.display());
 }
 
 /// Put the mark on the window, once there is a real window to put it on.

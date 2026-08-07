@@ -144,6 +144,45 @@ jobs:
 
           echo "STAGE_DIR=$dir" >> "$GITHUB_ENV"
 
+      # macOS shows the dock icon of a *bundle*, never of a bare executable, and Finder will not
+      # launch a bare one by double-click either. So the microscope ships as `Manic Microbes.app`
+      # and mm-cli stays beside it as the plain binary it wants to be.
+      #
+      # The iconset is emitted by the binary that was just built, so the dock icon and the window
+      # icon are the same drawing and cannot drift apart. `iconutil` is preinstalled.
+      - name: Wrap the microscope in an app bundle
+        if: matrix.name == 'macos-universal'
+        run: |
+          app="dist/$STAGE_DIR/Manic Microbes.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+
+          ./target/release/mm-app --emit-iconset "$RUNNER_TEMP/mm.iconset"
+          iconutil -c icns "$RUNNER_TEMP/mm.iconset" -o "$app/Contents/Resources/icon.icns"
+
+          mv "dist/$STAGE_DIR/mm-app" "$app/Contents/MacOS/mm-app"
+
+          cat > "$app/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>Manic Microbes</string>
+            <key>CFBundleDisplayName</key><string>Manic Microbes</string>
+            <key>CFBundleIdentifier</key><string>com.manicmicrobes.app</string>
+            <key>CFBundleVersion</key><string>${{ steps.version.outputs.version }}</string>
+            <key>CFBundleShortVersionString</key><string>${{ steps.version.outputs.version }}</string>
+            <key>CFBundleExecutable</key><string>mm-app</string>
+            <key>CFBundleIconFile</key><string>icon</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>LSMinimumSystemVersion</key><string>12.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          PLIST
+
+          echo "bundle contents:"
+          find "$app" -type f | sed 's|^|  |'
+
       - name: Archive
         run: |
           cd dist
@@ -200,14 +239,20 @@ jobs:
           Pre-release. There is no stable save format yet, and a slide written by
           one version may not open in the next.
 
-          Each archive holds both binaries — \`mm-app\`, the microscope, and
-          \`mm-cli\`, the headless runner — along with the scenarios, the genomes
-          and both licences. Nothing to install: unpack it and run it.
+          Each archive holds the microscope and \`mm-cli\`, the headless runner,
+          along with the scenarios, the genomes and both licences. Nothing to
+          install: unpack it and run it.
+
+          On macOS the microscope is \`Manic Microbes.app\` — double-click it.
+          Elsewhere it is \`mm-app\` beside \`mm-cli\`. The headless runner is the
+          same everywhere:
 
           \`\`\`
-          ./mm-app
           ./mm-cli run scenarios/soup.ron --genome genomes/ancestor.mm --ticks 50000
           \`\`\`
+
+          A scenario seeds the water and the light but puts no cells on the
+          slide, so \`--genome\` is what makes it a world rather than an empty jar.
 
           ### The binaries are not signed
 
@@ -216,8 +261,9 @@ jobs:
           So each platform will ask once:
 
           - **macOS** — "cannot be opened because the developer cannot be
-            verified". Either right-click the binary and choose Open, or strip
-            the download flag: \`xattr -dr com.apple.quarantine
+            verified". Either right-click the app and choose Open, which offers
+            the button a double-click does not, or strip the download flag from
+            the whole folder: \`xattr -dr com.apple.quarantine
             manic-microbes-${version}-macos-universal\`
           - **Windows** — SmartScreen shows a blue warning. More info → Run
             anyway.

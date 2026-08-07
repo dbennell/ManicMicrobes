@@ -76,3 +76,10 @@ required-features = ["render"]
 # which is `#![forbid(unsafe_code)]`.
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
+
+# Puts the mark inside the .exe, which is the only way Explorer will show one for it. Gated on the
+# host rather than the target because a build script is compiled for the host; every build that
+# matters is native. `build.rs` generates the .ico from `src/icon.rs`, so nothing in the tree is a
+# second copy of the mark that could stop matching the first.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
