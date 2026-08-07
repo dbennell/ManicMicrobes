@@ -44,7 +44,7 @@ jobs:
     name: Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Toolchain
         run: |
@@ -79,7 +79,7 @@ jobs:
             archive: zip
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Toolchain
         run: |
@@ -159,9 +159,13 @@ jobs:
           fi
           ls -lh "$STAGE_DIR".*
 
-      - uses: actions/upload-artifact@v4
+      # Named for the thing rather than the platform. The archive inside has
+      # always carried the full name, but GitHub wraps an artefact in a zip
+      # called whatever this is — so a hand-run build handed you a file called
+      # `linux-x86_64.zip` and no clue what was in it.
+      - uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.name }}
+          name: manic-microbes-${{ matrix.name }}
           path: dist/*.${{ matrix.archive }}
           if-no-files-found: error
           retention-days: 7
@@ -176,9 +180,9 @@ jobs:
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
