@@ -3170,9 +3170,29 @@ fn redraw(
 /// It runs after [`panels`] because it must not steal a press egui wanted. The edge band is six
 /// points wide and the rails go right up to it, so the order is the difference between grabbing
 /// the window and clicking the first overlay in the legend.
+///
+/// # The press that never came back up
+///
+/// Handing a drag to the compositor means handing it *the pointer grab*, and the release that
+/// ends it is delivered to the window manager rather than to us. So the button this application
+/// saw go down is never seen coming up, and both halves of the input system are left believing
+/// it is still held:
+///
+/// - `ButtonInput<MouseButton>` keeps `Left` in its pressed set, so the *next* real press fires
+///   no `just_pressed` at all — no pan starts, and no second window drag starts either.
+/// - [`ui::Focus`] keeps its latch on whoever owned the press, so even once the button state
+///   recovers, `resolve` hands the frame to the title bar while the pointer is over the slide.
+///
+/// Between them that is one whole press-and-release spent resynchronising after every window
+/// move or resize, in whichever direction you went next — click the slide once before it will
+/// pan, click the bar once before it will drag. It reads as focus, and it is bookkeeping.
+///
+/// [`abandon_press`] is the fix, and the rule it encodes is: **a gesture the compositor has
+/// taken over is a gesture this application no longer owns.** Say so at the moment of handing
+/// it over, rather than waiting for an event that is not coming.
 fn window_chrome(
     mut view: ResMut<View>,
-    buttons: Res<ButtonInput<MouseButton>>,
+    mut buttons: ResMut<ButtonInput<MouseButton>>,
     mut window: Query<(Entity, &mut Window), With<PrimaryWindow>>,
     mut contexts: EguiContexts,
     mut commands: Commands,
@@ -3262,6 +3282,7 @@ fn window_chrome(
             with_window(entity, |w| {
                 let _ = w.drag_resize_window(direction);
             });
+            abandon_press(&mut buttons, &mut view);
             return;
         }
         // The menu bar's empty half is the title bar. `wants_pointer_input` is false there —
@@ -3271,6 +3292,7 @@ fn window_chrome(
             with_window(entity, |w| {
                 let _ = w.drag_window();
             });
+            abandon_press(&mut buttons, &mut view);
         }
     }
 
@@ -3282,6 +3304,26 @@ fn window_chrome(
         let now = maximised(entity);
         win.set_maximized(!now);
     }
+}
+
+/// Forget the press that the compositor has just taken over. See [`window_chrome`].
+///
+/// `reset` and not `release`: `release` would post a `just_released`, and the frame that reads
+/// it is the one that decides a short left-click on the slide selects a cell. A window drag that
+/// happened to finish over the plate would pick whatever was under the pointer, which is a
+/// stranger bug than the one being fixed. `reset` says the press never happened, which is the
+/// truth this application is entitled to — it is not the one holding the button any more.
+///
+/// It also means the real release, if a platform does deliver one, is a no-op: Bevy only posts
+/// `just_released` for a button it had in its pressed set.
+fn abandon_press(buttons: &mut ButtonInput<MouseButton>, view: &mut View) {
+    buttons.reset(MouseButton::Left);
+    // The latch belongs to the gesture, and the gesture is gone. Both of them: the right button
+    // cannot be mid-stroke here — the compositor only takes the left — but a latch left set by
+    // any means is a latch that misroutes the next drag, and clearing it costs nothing.
+    view.focus.release();
+    view.tool_focus.release();
+    view.paint_from = None;
 }
 
 /// Do something to the real window behind a Bevy window entity.

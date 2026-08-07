@@ -1394,6 +1394,31 @@ egui wanted — the rails go right to the edge, and six points is the difference
 the window and clicking the first overlay in the legend. And a pointer in the band is routed to
 `Target::Panel`, so a drag that starts on the frame does not also pan the slide behind it.
 
+**Handing over the gesture hands over the pointer grab, and with it the release.** The button
+this application saw go down is never seen coming up: the window manager gets that event, not
+us. Nothing said so, and two pieces of bookkeeping were left believing the button was still
+held — `ButtonInput<MouseButton>` kept `Left` in its pressed set, so the *next* real press fired
+no `just_pressed` at all, and `ui::Focus` kept its latch on whoever owned the press, so a frame
+whose pointer was over the slide was still being handed to the title bar.
+
+Between them that cost one whole press-and-release resynchronising after every window move or
+resize, in whichever direction you went next: click the slide once before it would pan, click
+the bar once before it would drag. **It reads as focus and it is arithmetic** — there is no
+focus model in this interface, and the fix was not to add one.
+
+`abandon_press` says it at the moment of handing over: *a gesture the compositor has taken over
+is a gesture this application no longer owns.* It `reset`s the button rather than `release`ing
+it, because a release posts a `just_released`, and the frame that reads one is the frame that
+decides a short left-click on the slide selects a cell — so a window drag that happened to
+finish over the plate would have picked whatever was under the pointer. `reset` says the press
+never happened, which is the truth we are entitled to, and it makes the real release a no-op on
+any platform that does deliver one.
+
+It repairs a second, narrower race for free: `view.on_edge` is a frame stale, so a press that
+lands in the resize band on the same frame the pointer arrives there latches the slide before
+`window_chrome` gets to decide. The latch is now cleared by the same call that starts the
+resize.
+
 ### 11.2 What this costs, and the way out
 
 A borderless window is one where the usual escape hatches are the only escape hatches. On GNOME,
