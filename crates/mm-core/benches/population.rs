@@ -1047,6 +1047,19 @@ fn phase_bench(c: &mut Criterion) {
         b.iter(|| index.rebuild(pristine.cells(), w, h))
     });
 
+    // The same rebuild on an empty slide of the same size, which splits its cost in two.
+    //
+    // The counting sort is O(cells) in its two walks of the population and O(grid) in
+    // everything else: a `width * height` zeroing of `starts`, a prefix sum over the same, and a
+    // clone of it for the write cursor. At 512 squares that is about three megabytes of
+    // streaming that happens whether there are fifty thousand cells on the slide or none, and
+    // this benchmark is the none.
+    let empty = World::new(slide(1)).expect("world");
+    let mut empty_index = NeighbourIndex::default();
+    group.bench_function("neighbour_rebuild_empty", |b| {
+        b.iter(|| empty_index.rebuild(empty.cells(), w, h))
+    });
+
     group.finish();
 }
 
