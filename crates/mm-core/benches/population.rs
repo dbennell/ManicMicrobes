@@ -955,6 +955,48 @@ fn phase_bench(c: &mut Criterion) {
         })
     });
 
+    // Intent resolution, fed a real tick's worth of intents rather than an empty buffer.
+    let vm = world.scenario().vm;
+    let spike_damage = world.biology().ecology.spike_damage;
+    let em_range = world.biology().ecology.em_range;
+    let mut intents = mm_core::intent::IntentBuffer::new();
+    intents.begin_tick(capacity);
+    mm_core::biology::execute(
+        world.cells_mut(),
+        &substrate,
+        &index,
+        &mut intents,
+        &vm,
+        0,
+        1,
+        spike_damage,
+        em_range,
+        chemistry,
+    );
+    let pool = world.genomes().clone();
+    let config = world.biology().clone();
+    let mut pending = mm_core::intent::Pending::default();
+    let mut resolve_substrate = substrate.clone();
+    group.bench_function("resolve", |b| {
+        b.iter(|| {
+            pending.births.clear();
+            pending.deaths.clear();
+            std::hint::black_box(mm_core::biology::resolve(
+                world.cells_mut(),
+                &mut resolve_substrate,
+                &pool,
+                &intents,
+                &config,
+                &chem,
+                &mut ledger,
+                &mut pending,
+                &pressure,
+                0,
+                1,
+            ))
+        })
+    });
+
     group.bench_function("gather_touch", |b| {
         b.iter(|| index.gather_touch(world.cells()))
     });
