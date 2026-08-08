@@ -1353,6 +1353,87 @@ impl World {
         moved
     }
 
+    /// Wash the whole slide to one level of one chemical, and say so in the recipe.
+    ///
+    /// Not the paint tool run over every square. [`Self::inject`] records a [`Seeding::Spike`]
+    /// per square, so a 270-square slide washed in carbon would write 72,900 entries into a file
+    /// whose entire job is to be read by a person. [`Seeding::Uniform`] is one line and has been
+    /// in the format since M1; there was no way to reach it without a text editor, which is why
+    /// "start this world short of carbon" — the first thing anybody wants from a scenario — was
+    /// the one thing the editor could not express.
+    ///
+    /// A **level and not a dose**: each square is set to `per_square` rather than having it
+    /// added, so dragging the number down takes matter off the slide as readily as raising it
+    /// puts matter on. Everything else the recipe said about this chemical goes with it — spikes
+    /// painted by hand, a gradient, a patch — because a wash with those still listed underneath
+    /// is a file that reopens as a different slide than the one you were looking at when you
+    /// saved it.
+    ///
+    /// Both directions go through the ledger, in both currencies (I4, I5), for the same reason
+    /// `inject` cannot be `substrate_mut().set_chem` at the call site.
+    ///
+    /// Barrier squares are left alone, which is what makes this agree with reloading the file:
+    /// `World::new` raises barriers before it seeds, so `add_chem` skips them there exactly as
+    /// `set_chem` skips them here.
+    ///
+    /// Returns the net matter moved — positive onto the slide, negative off it.
+    pub fn set_uniform_seeding(&mut self, chemical: usize, per_square: i32) -> i64 {
+        let c = chemical % CHEM_COUNT;
+        let level = per_square.max(0);
+        let (w, h) = (self.substrate.width(), self.substrate.height());
+        let mut net: i64 = 0;
+        for y in 0..h as i32 {
+            for x in 0..w as i32 {
+                net += i64::from(self.substrate.set_chem(c, x, y, level));
+            }
+        }
+
+        let moved = net.unsigned_abs() as i64;
+        let latent = self
+            .biology
+            .metabolism
+            .latent_in(&self.scenario.chemicals, c, moved);
+        if net > 0 {
+            self.ledger.record_injected(c, moved);
+            self.ledger.import(latent);
+        } else if net < 0 {
+            self.ledger.record_drained(c, moved);
+            self.ledger.export(latent);
+        }
+
+        self.scenario.seeding.retain(|s| {
+            !matches!(s,
+                Seeding::Uniform { chemical, .. }
+                | Seeding::Gradient { chemical, .. }
+                | Seeding::Spike { chemical, .. }
+                | Seeding::Patch { chemical, .. } if *chemical == c)
+        });
+        if level > 0 {
+            self.scenario.seeding.push(Seeding::Uniform {
+                chemical: c,
+                per_square: level,
+            });
+        }
+        net
+    }
+
+    /// What one square of `chemical` is seeded with, if the recipe says so uniformly.
+    ///
+    /// The read half of [`Self::set_uniform_seeding`], so an editor can show what is set rather
+    /// than sampling a square and hoping it is representative — a square under a barrier, or one
+    /// a cell has just eaten out of, is not.
+    #[must_use]
+    pub fn uniform_seeding(&self, chemical: usize) -> Option<i32> {
+        let c = chemical % CHEM_COUNT;
+        self.scenario.seeding.iter().find_map(|s| match s {
+            Seeding::Uniform {
+                chemical,
+                per_square,
+            } if *chemical == c => Some(*per_square),
+            _ => None,
+        })
+    }
+
     /// Write a hand-placed founder into the scenario's inhabitant list.
     ///
     /// Placing a cell puts it on the slide; this is what makes the slide able to *say* so, and
@@ -1711,6 +1792,112 @@ mod tests {
         assert_eq!(w.ledger().evicted()[0], 0, "nothing had to be destroyed");
         // 63 open squares, not 64
         assert_eq!(w.ledger().chem_totals()[0], 63 * q10(100) as i64);
+        w.check_invariants().unwrap();
+    }
+
+    /// The reason the call exists: the recipe stays readable.
+    #[test]
+    fn a_uniform_wash_is_one_line_in_the_recipe_and_not_four_thousand() {
+        let mut w = World::new(Scenario {
+            width: 64,
+            height: 64,
+            ..Scenario::default()
+        })
+        .unwrap();
+        // Painted by hand first, so the wash has spikes to clear as well as a level to set.
+        for x in 0..10 {
+            w.inject(4, x, 0, q10(500));
+        }
+        assert_eq!(w.scenario().seeding.len(), 10, "ten spikes, one per square");
+
+        w.set_uniform_seeding(4, q10(40));
+        let of_carbon: Vec<_> = w
+            .scenario()
+            .seeding
+            .iter()
+            .filter(|s| matches!(s, Seeding::Uniform { chemical: 4, .. }
+                | Seeding::Gradient { chemical: 4, .. }
+                | Seeding::Spike { chemical: 4, .. }
+                | Seeding::Patch { chemical: 4, .. }))
+            .collect();
+        assert_eq!(
+            of_carbon.len(),
+            1,
+            "4096 squares should be one entry, and the hand-painted spikes should be gone"
+        );
+        assert_eq!(
+            of_carbon[0],
+            &Seeding::Uniform {
+                chemical: 4,
+                per_square: q10(40)
+            }
+        );
+        w.check_invariants().unwrap();
+    }
+
+    /// The claim the whole thing rests on: what you washed is what the file gives back.
+    #[test]
+    fn a_washed_slide_is_what_reopening_its_scenario_gives() {
+        // With a barrier on it, because that is where the two paths could disagree: `World::new`
+        // raises barriers before it seeds, and the wash has to skip the same squares.
+        let mut w = World::new(Scenario {
+            width: 16,
+            height: 16,
+            barriers: vec![Barrier::Rect {
+                x: 3,
+                y: 3,
+                width: 4,
+                height: 2,
+            }],
+            ..Scenario::default()
+        })
+        .unwrap();
+        w.set_uniform_seeding(4, q10(40));
+        w.set_uniform_seeding(11, q10(400));
+        w.check_invariants().unwrap();
+
+        let reopened = World::new(w.scenario().clone()).unwrap();
+        for c in [4, 11] {
+            assert_eq!(
+                reopened.substrate().chem_plane(c),
+                w.substrate().chem_plane(c),
+                "chemical {c} came back different from what was saved"
+            );
+        }
+        assert_eq!(reopened.substrate().chem_at(4, 4, 3), 0, "under the wall");
+    }
+
+    /// A level, not a dose. Setting it lower has to take matter *off* the slide, through the
+    /// books, or the drag that lowers it is a leak.
+    #[test]
+    fn washing_down_takes_matter_off_the_slide_and_the_books_agree() {
+        let mut w = World::new(Scenario {
+            width: 16,
+            height: 16,
+            seeding: vec![Seeding::Uniform {
+                chemical: 4,
+                per_square: q10(400),
+            }],
+            ..Scenario::default()
+        })
+        .unwrap();
+        let before: i64 = w.total_matter()[4];
+
+        let net = w.set_uniform_seeding(4, q10(40));
+        assert!(net < 0, "lowering the level should have removed matter");
+        assert_eq!(w.total_matter()[4], before + net);
+        assert_eq!(w.substrate().chem_at(4, 7, 7), q10(40));
+        w.check_invariants().unwrap();
+
+        // And to nothing at all, which drops the entry rather than writing `per_square: 0`.
+        w.set_uniform_seeding(4, 0);
+        assert_eq!(w.total_matter()[4], 0);
+        assert!(w.uniform_seeding(4).is_none());
+        assert!(w
+            .scenario()
+            .seeding
+            .iter()
+            .all(|s| !matches!(s, Seeding::Uniform { chemical: 4, .. })));
         w.check_invariants().unwrap();
     }
 
