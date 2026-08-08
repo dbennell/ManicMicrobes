@@ -6,7 +6,18 @@
 //! finding rather than a bug to tune away, so this exists to say *which* number is starving it
 //! rather than to make the test pass.
 //!
-//! Run with `cargo test -p mm-core --test predator_probe -- --nocapture --test-threads=1`.
+//! Run with
+//! `cargo test -p mm-core --test predator_probe -- --ignored --nocapture --test-threads=1`.
+//!
+//! **`#[ignore]`, like every other probe in the tree** — `gradient_probe`, `packing_probe`,
+//! `shader_probe`, `frame_cost` and `tick_cost` all gate themselves the same way. This one did
+//! not, and it was 73.6 seconds of a 203-second workspace run: 36% of the cost of testing every
+//! change, paid to re-derive a finding that is already written down twenty lines above. A probe
+//! answers a question once; an acceptance test guards an answer forever. Only the second kind
+//! belongs in the default run.
+//!
+//! What guards this finding is `m8_ecology::the_shipped_organisms_reproduce`, which is where the
+//! failure shows up and which still runs every time.
 //!
 //! # What it found
 //!
@@ -162,6 +173,7 @@ fn loadout(world: &World, i: usize) -> String {
 
 /// Follow one founder and report what it is doing, for each genome in turn.
 #[test]
+#[ignore = "probe; run with --test predator_probe -- --ignored --nocapture --test-threads=1"]
 fn what_the_shipped_genomes_do_from_one_founder() {
     for name in ["ancestor.mm", "scavenger.mm", "predator.mm", "hunter.mm"] {
         let bytes = assemble(name);
@@ -202,6 +214,7 @@ fn what_the_shipped_genomes_do_from_one_founder() {
 
 /// Where each organelle's upkeep goes, for the loadouts above.
 #[test]
+#[ignore = "probe; run with --test predator_probe -- --ignored --nocapture --test-threads=1"]
 fn what_each_loadout_costs_to_carry() {
     let catalogue = mm_core::organelle::OrganelleCatalogue::balanced();
     // The organelles each genome's `#build` actually asks for, at the params it asks for.
@@ -270,6 +283,7 @@ fn what_each_loadout_costs_to_carry() {
 /// whether the *extension* upkeep — charged per tick per unit of spike, on top of the
 /// organelle upkeep that `what_each_loadout_costs_to_carry` reports — is what it cannot afford.
 #[test]
+#[ignore = "probe; run with --test predator_probe -- --ignored --nocapture --test-threads=1"]
 fn what_the_predator_earns_and_what_it_pays() {
     let predator = assemble("predator.mm");
     let prey = assemble("ancestor.mm");
@@ -373,6 +387,7 @@ fn what_the_predator_earns_and_what_it_pays() {
 /// This holds a corpse's worth of carrion under the predator's own feet and asks whether that
 /// is the whole difference.
 #[test]
+#[ignore = "probe; run with --test predator_probe -- --ignored --nocapture --test-threads=1"]
 fn a_predator_standing_on_its_food() {
     let predator = assemble("predator.mm");
     for (label, feed) in [("carrion elsewhere", false), ("carrion underfoot", true)] {
@@ -471,6 +486,7 @@ fn a_predator_standing_on_its_food() {
 /// Everything above narrows it to "abundant food, no more energy". This is the ledger entry
 /// that says where the energy is going instead of guessing from levels.
 #[test]
+#[ignore = "probe; run with --test predator_probe -- --ignored --nocapture --test-threads=1"]
 fn where_the_energy_goes_tick_by_tick() {
     for name in ["ancestor.mm", "predator.mm"] {
         let bytes = assemble(name);
@@ -540,6 +556,7 @@ fn where_the_energy_goes_tick_by_tick() {
 /// `HALT` ends the tick with the instruction pointer already past it — with a forward `JMPZ` over
 /// the whole divide block, which does.
 #[test]
+#[ignore = "probe; run with --test predator_probe -- --ignored --nocapture --test-threads=1"]
 fn what_the_predator_is_actually_short_of() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../genomes/predator.mm");
     let source = std::fs::read_to_string(&path).expect("genome source");
@@ -606,6 +623,7 @@ fn what_the_predator_is_actually_short_of() {
 /// hunt. This is the same variants with something to eat, which is the condition the shipped
 /// acceptance test never puts a predator in.
 #[test]
+#[ignore = "probe; run with --test predator_probe -- --ignored --nocapture --test-threads=1"]
 fn the_fixed_predator_among_prey() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../genomes/predator.mm");
     let source = std::fs::read_to_string(&path).expect("genome source");
@@ -700,6 +718,7 @@ fn the_fixed_predator_among_prey() {
 /// itself. This asks where the bar has to be for the economy to clear it, which is the shape of
 /// the question rather than a number to tune until a test passes.
 #[test]
+#[ignore = "probe; run with --test predator_probe -- --ignored --nocapture --test-threads=1"]
 fn where_the_bar_has_to_be_for_a_predator_to_clear_it() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../genomes/predator.mm");
     let source = std::fs::read_to_string(&path).expect("genome source");
@@ -794,6 +813,7 @@ fn where_the_bar_has_to_be_for_a_predator_to_clear_it() {
 /// chloroplast's build cost and its upkeep, and it is the discontinuity a food web needs — you
 /// are in one gear or the other, and the middle is where this genome has been stuck.
 #[test]
+#[ignore = "probe; run with --test predator_probe -- --ignored --nocapture --test-threads=1"]
 fn a_predator_that_gives_up_the_sun() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../genomes/predator.mm");
     let source = std::fs::read_to_string(&path).expect("genome source");
@@ -901,6 +921,7 @@ fn a_predator_that_gives_up_the_sun() {
 /// branch it gated was dead — a cell divided on its instruction cycle whatever it held. With a
 /// guard that guards, 200 is a real bar and the ancestor cannot clear it often enough to grow.
 #[test]
+#[ignore = "probe; run with --test predator_probe -- --ignored --nocapture --test-threads=1"]
 fn what_bar_the_ancestor_can_clear() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../genomes/ancestor.mm");
     let source = std::fs::read_to_string(&path).expect("genome source");
@@ -937,6 +958,7 @@ fn what_bar_the_ancestor_can_clear() {
 /// prey does not change it either. So the guard is passing and something after it is refusing.
 /// This watches the daughter buffer, which is the one thing between `BUD` and `SPLIT`.
 #[test]
+#[ignore = "probe; run with --test predator_probe -- --ignored --nocapture --test-threads=1"]
 fn what_happens_between_bud_and_split() {
     for name in ["ancestor.mm", "predator.mm"] {
         let bytes = assemble(name);
@@ -988,6 +1010,7 @@ fn what_happens_between_bud_and_split() {
 /// does to hold a longer genome before it gets there. So the levers worth trying are the three
 /// that change what it must build and what it earns when it has.
 #[test]
+#[ignore = "probe; run with --test predator_probe -- --ignored --nocapture --test-threads=1"]
 fn which_cost_kills_the_daughters() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../genomes/predator.mm");
     let source = std::fs::read_to_string(&path).expect("genome source");
@@ -1086,6 +1109,7 @@ fn which_cost_kills_the_daughters() {
 /// spike that cannot raise a daughter and a spike that cannot kill anything are equally useless,
 /// so the question is whether those are the same setting.
 #[test]
+#[ignore = "probe; run with --test predator_probe -- --ignored --nocapture --test-threads=1"]
 fn is_a_spike_that_can_raise_daughters_still_a_spike() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../genomes/predator.mm");
     let source = std::fs::read_to_string(&path).expect("genome source");
@@ -1166,6 +1190,7 @@ fn is_a_spike_that_can_raise_daughters_still_a_spike() {
 ///
 /// So: does the discrimination pay for the organelle it takes?
 #[test]
+#[ignore = "probe; run with --test predator_probe -- --ignored --nocapture --test-threads=1"]
 fn does_telling_kin_from_prey_pay_for_the_eye_that_does_it() {
     let prey = assemble("ancestor.mm");
     eprintln!("\nalone in soup.ron from one founder, 2400 ticks:");
@@ -1247,6 +1272,7 @@ fn does_telling_kin_from_prey_pay_for_the_eye_that_does_it() {
 
 /// Does the friend-or-foe decision actually fire? Measured on the spike, not on the outcome.
 #[test]
+#[ignore = "probe; run with --test predator_probe -- --ignored --nocapture --test-threads=1"]
 fn a_sentinel_puts_its_spike_away_for_its_own_kind() {
     let sentinel = assemble("sentinel.mm");
     let prey = assemble("ancestor.mm");
@@ -1311,6 +1337,7 @@ fn a_sentinel_puts_its_spike_away_for_its_own_kind() {
 
 /// What the two halves of the friend-or-foe comparison actually read.
 #[test]
+#[ignore = "probe; run with --test predator_probe -- --ignored --nocapture --test-threads=1"]
 fn what_the_sentinel_sees() {
     let watcher_src = "
         EXPRESS #build
@@ -1402,6 +1429,7 @@ fn what_the_sentinel_sees() {
 /// what this cell is wearing, and change nothing else. If the badge does what it was built for,
 /// the same weapon at the same extension stops being a sterility switch.
 #[test]
+#[ignore = "probe; run with --test predator_probe -- --ignored --nocapture --test-threads=1"]
 fn does_a_badge_buy_back_the_weapon() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../genomes/predator.mm");
     let source = std::fs::read_to_string(&path).expect("genome source");
