@@ -61,6 +61,32 @@ use crate::sensing::TouchReading;
 /// still apart, so respecting the core here does not stop the renderer cutting a small cell away.
 pub const CORE_PERMILLE: i32 = 950;
 
+/// The stiffest a cell can be, in the same permille. A cell here is very nearly incompressible.
+///
+/// Not 1000: two cells that cannot overlap at all share no wall, and SPEC §6.4 is explicit that
+/// the resting overlap *is* the tissue and that circles which do not overlap cannot tile a plane.
+/// So even a fully turgid cell yields a little.
+pub const CORE_PERMILLE_RIGID: i32 = 995;
+
+/// Where one cell stops compressing, in permille of its own radius.
+///
+/// [`CORE_PERMILLE`] when `rigidity_gain` is zero, which is every world written before it, and
+/// scaled towards [`CORE_PERMILLE_RIGID`] by the cell's wall and its turgor otherwise. See
+/// `MetabolicRates::rigidity_gain` for what it is for and `docs/STIFFNESS.md` §4 for the design.
+#[must_use]
+pub fn core_permille(cells: &CellArena, i: usize, rates: &crate::metabolism::MetabolicRates) -> i32 {
+    if rates.rigidity_gain <= 0 {
+        return CORE_PERMILLE;
+    }
+    // Wall times turgor, and then the scenario's gain on top. See `biology::rigidity` for why
+    // the renderer reads the same quantity *without* the gain.
+    let rigidity =
+        crate::fixed::q10_scale(crate::biology::rigidity(cells, i, rates), rates.rigidity_gain)
+            .clamp(0, crate::fixed::Q10_ONE);
+    let span = (CORE_PERMILLE_RIGID - CORE_PERMILLE) as i64;
+    CORE_PERMILLE + ((span * rigidity as i64) / crate::fixed::Q10_ONE as i64) as i32
+}
+
 /// How much of a contact's compression one relaxation pass takes out, in sixteenths.
 ///
 /// Soft on purpose, and much softer than the value this replaced. Contact used to be a hard
@@ -987,6 +1013,7 @@ fn correction_for(
     cells: &CellArena,
     index: &NeighbourIndex,
     radii: &[i32],
+    permille: &[i32],
     blocked: &[bool],
     i: usize,
     first_pass: bool,
@@ -1019,7 +1046,12 @@ fn correction_for(
         let d = d_sq.isqrt().min(i32::MAX as i64) as i32;
         // How far the pair is compressed, and how much of that is past the core.
         let squeeze = want - d;
-        let core = ((want as i64 * CORE_PERMILLE as i64) / 1000) as i32;
+        // Each cell contributes its own incompressible core, so a rigid cell pressed against a
+        // limp one is the limp one that gives. Symmetric — both sides of the pair compute the
+        // same number from the same two cells, which Jacobi separation requires — and exactly
+        // equal to the expression it replaces when every cell is at `CORE_PERMILLE`.
+        let core = ((ri as i64 * permille[i] as i64 + radii[j] as i64 * permille[j] as i64) / 1000)
+            as i32;
         let crushed = (core - d).max(0);
 
         // Being crushed, charged to this cell — except by whatever it is joined to. An organism
@@ -1168,13 +1200,16 @@ impl SeparationScratch {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn resolve_collisions(
     cells: &mut CellArena,
     index: &NeighbourIndex,
     radii: &mut Vec<i32>,
+    permille: &mut Vec<i32>,
     crowding: &mut Vec<i32>,
     pressure: &mut Vec<i32>,
     blocked: &[bool],
+    rates: &crate::metabolism::MetabolicRates,
     scratch: &mut SeparationScratch,
 ) -> u32 {
     let mut separated = 0u32;
@@ -1195,9 +1230,19 @@ pub fn resolve_collisions(
     crowding.resize(cells.capacity(), 0);
     pressure.clear();
     pressure.resize(cells.capacity(), 0);
+    // Where each cell stops compressing, hoisted for the same reason the radii are: it reads the
+    // whole interior to work out the turgor, and the inner loop would otherwise redo that once
+    // per pair. Exactly `CORE_PERMILLE` for every cell when `rigidity_gain` is zero.
+    permille.clear();
+    permille.reserve(cells.capacity());
     radii.clear();
     radii.reserve(cells.capacity());
     for i in 0..cells.capacity() {
+        permille.push(if cells.occupied(i) {
+            core_permille(cells, i, rates)
+        } else {
+            CORE_PERMILLE
+        });
         radii.push(if cells.occupied(i) {
             crate::fixed::q10_to_pos(crate::biology::radius(cells, i))
         } else {
@@ -1255,6 +1300,7 @@ pub fn resolve_collisions(
         let first = pass == 0;
         let arena: &CellArena = cells;
         let radii_ref: &[i32] = radii;
+        let perm_ref: &[i32] = permille;
         // Into the buffer rather than into a fresh `Vec`: `collect_into_vec` keeps the
         // allocation and writes in the same order `collect` would, so the arithmetic and its
         // sequence are untouched.
@@ -1264,7 +1310,7 @@ pub fn resolve_collisions(
             .map(|&i| {
                 (
                     i,
-                    correction_for(arena, index, radii_ref, blocked, i as usize, first),
+                    correction_for(arena, index, radii_ref, perm_ref, blocked, i as usize, first),
                 )
             })
             .collect_into_vec(deltas);
@@ -1374,6 +1420,93 @@ pub fn resolve_collisions(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn rigidity_is_off_by_default_and_never_softens_a_cell() {
+        // The property that lets this ship with every earlier measurement intact: at the default
+        // rate `core_permille` is the constant those measurements were taken against, to the
+        // digit, for every cell whatever it is carrying.
+        use crate::cell::{CellId, CellSeed};
+        use crate::fixed::{pos, q10};
+        use crate::genome::GenomePool;
+
+        let pool = GenomePool::new();
+        let mut cells = CellArena::new();
+        let genome = pool.intern(vec![0x2E; 4]).expect("genome");
+        let id = cells.spawn(CellSeed {
+            x: pos(4),
+            y: pos(4),
+            mass: q10(30),
+            energy: q10(1_000),
+            membrane: 24,
+            key: 11,
+            badge: 0,
+            species: 0,
+            parent: CellId::NONE,
+            birth_tick: 0,
+            genome,
+        });
+        let i = cells.index(id).expect("alive");
+
+        let off = crate::metabolism::MetabolicRates::default();
+        assert_eq!(off.rigidity_gain, 0, "rigidity is not off by default");
+        for load in [0, 1, 64] {
+            for c in 0..crate::chem::CHEM_COUNT {
+                cells.interior_mut(i)[c] = q10(load);
+            }
+            assert_eq!(core_permille(&cells, i, &off), CORE_PERMILLE);
+        }
+
+        // Switched on, a cell is stiffer than the default and never softer, at any load and any
+        // membrane, and it never passes the rigid ceiling.
+        let on = crate::metabolism::MetabolicRates {
+            rigidity_gain: crate::fixed::Q10_ONE * 16,
+            ..crate::metabolism::MetabolicRates::default()
+        };
+        for load in [0, 1, 4, 16, 64, 4096] {
+            for c in 0..crate::chem::CHEM_COUNT {
+                cells.interior_mut(i)[c] = q10(load);
+            }
+            for membrane in [0u8, 24, 255] {
+                cells.slots_mut(i)[crate::organelle::MEMBRANE_SLOT].param = membrane;
+                let p = core_permille(&cells, i, &on);
+                assert!(
+                    (CORE_PERMILLE..=CORE_PERMILLE_RIGID).contains(&p),
+                    "core {p} out of range at load {load}, membrane {membrane}"
+                );
+            }
+        }
+    }
+
+    /// `resolve_collisions` with the two arguments every test here leaves at their defaults.
+    ///
+    /// Added when separation grew a per-cell core: the tests are about geometry, not about
+    /// turgor, and `MetabolicRates::default` has `rigidity_gain` at zero, which makes
+    /// `core_permille` exactly `CORE_PERMILLE` for every cell — the constant these tests were
+    /// written against.
+    #[allow(clippy::too_many_arguments)]
+    fn separate(
+        cells: &mut CellArena,
+        index: &NeighbourIndex,
+        radii: &mut Vec<i32>,
+        crowding: &mut Vec<i32>,
+        pressure: &mut Vec<i32>,
+        blocked: &[bool],
+        scratch: &mut SeparationScratch,
+    ) -> u32 {
+        resolve_collisions(
+            cells,
+            index,
+            radii,
+            &mut Vec::new(),
+            crowding,
+            pressure,
+            blocked,
+            &crate::metabolism::MetabolicRates::default(),
+            scratch,
+        )
+    }
+
     use super::*;
     use crate::cell::{CellId, CellSeed};
     use crate::fixed::{pos, q10};
@@ -1623,7 +1756,7 @@ mod tests {
         let mut index = NeighbourIndex::default();
         index.rebuild(&cells, 16, 16);
         let before = separation(&cells, 0, 1);
-        let n = resolve_collisions(
+        let n = separate(
             &mut cells,
             &mut index,
             &mut Vec::new(),
@@ -1643,7 +1776,7 @@ mod tests {
         index2.rebuild(&far, 16, 16);
         let positions: Vec<(i32, i32)> = far.iter().map(|i| (far.x[i], far.y[i])).collect();
         assert_eq!(
-            resolve_collisions(
+            separate(
                 &mut far,
                 &mut index2,
                 &mut Vec::new(),
@@ -1668,7 +1801,7 @@ mod tests {
             cells.x[0] = cells.x[0].saturating_add(load);
             cells.x[1] = cells.x[1].saturating_sub(load);
             index.rebuild(&cells, 16, 16);
-            resolve_collisions(
+            separate(
                 &mut cells,
                 &mut index,
                 &mut Vec::new(),
@@ -1784,7 +1917,7 @@ mod tests {
         let mut index = NeighbourIndex::default();
         for _ in 0..400 {
             index.rebuild(&cells, 16, 16);
-            resolve_collisions(
+            separate(
                 &mut cells,
                 &mut index,
                 &mut Vec::new(),
@@ -1818,7 +1951,7 @@ mod tests {
         let (mut apart, _p) = arena(&[(pos(6), pos(6)), (pos(6) + 3 * r, pos(6))]);
         let mut index = NeighbourIndex::default();
         index.rebuild(&apart, 16, 16);
-        resolve_collisions(
+        separate(
             &mut apart,
             &mut index,
             &mut Vec::new(),
@@ -1837,7 +1970,7 @@ mod tests {
         let (mut crushed, _p2) = arena(&[(pos(6), pos(6)), (pos(6) + r / 4, pos(6))]);
         let mut index2 = NeighbourIndex::default();
         index2.rebuild(&crushed, 16, 16);
-        resolve_collisions(
+        separate(
             &mut crushed,
             &mut index2,
             &mut Vec::new(),
@@ -1865,7 +1998,7 @@ mod tests {
         let mut index = NeighbourIndex::default();
         index.rebuild(&resting, 16, 16);
         let mut light = Vec::new();
-        resolve_collisions(
+        separate(
             &mut resting,
             &mut index,
             &mut Vec::new(),
@@ -1880,7 +2013,7 @@ mod tests {
         let mut index2 = NeighbourIndex::default();
         index2.rebuild(&wedged, 16, 16);
         let mut heavy = Vec::new();
-        resolve_collisions(
+        separate(
             &mut wedged,
             &mut index2,
             &mut Vec::new(),
@@ -1910,7 +2043,7 @@ mod tests {
         let mut index = NeighbourIndex::default();
         index.rebuild(&cells, 16, 16);
         for _ in 0..20 {
-            resolve_collisions(
+            separate(
                 &mut cells,
                 &mut index,
                 &mut Vec::new(),
@@ -1933,7 +2066,7 @@ mod tests {
         let mut index = NeighbourIndex::default();
         index.rebuild(&cells, 16, 16);
         for _ in 0..50 {
-            resolve_collisions(
+            separate(
                 &mut cells,
                 &mut index,
                 &mut Vec::new(),
@@ -1962,7 +2095,7 @@ mod tests {
             let mut index = NeighbourIndex::default();
             for _ in 0..10 {
                 index.rebuild(&cells, 16, 16);
-                resolve_collisions(
+                separate(
                     &mut cells,
                     &mut index,
                     &mut Vec::new(),
@@ -2016,7 +2149,7 @@ mod tests {
         let mut index = NeighbourIndex::default();
         index.rebuild(&cells, 16, 16);
         let before = cells.x[0];
-        resolve_collisions(
+        separate(
             &mut cells,
             &mut index,
             &mut Vec::new(),
@@ -2041,7 +2174,7 @@ mod tests {
         let (mut cells, _p) = arena(&[(pos(6) + POS_ONE / 2, pos(5) + POS_ONE / 8)]);
         let mut index = NeighbourIndex::default();
         index.rebuild(&cells, 16, 16);
-        resolve_collisions(
+        separate(
             &mut cells,
             &mut index,
             &mut Vec::new(),
@@ -2069,7 +2202,7 @@ mod tests {
         let mut i2 = NeighbourIndex::default();
         i1.rebuild(&empty, 16, 16);
         i2.rebuild(&clear, 16, 16);
-        let a = resolve_collisions(
+        let a = separate(
             &mut empty,
             &mut i1,
             &mut Vec::new(),
@@ -2078,7 +2211,7 @@ mod tests {
             &[],
             &mut SeparationScratch::default(),
         );
-        let b = resolve_collisions(
+        let b = separate(
             &mut clear,
             &mut i2,
             &mut Vec::new(),
@@ -2104,7 +2237,7 @@ mod tests {
         let mut index = NeighbourIndex::default();
         index.rebuild(&cells, 16, 16);
         let (mut crowding, mut pressure) = (Vec::new(), Vec::new());
-        resolve_collisions(
+        separate(
             &mut cells,
             &mut index,
             &mut Vec::new(),

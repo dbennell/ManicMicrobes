@@ -98,6 +98,10 @@ pub struct World {
     /// Every cell's photosynthetic and respiratory capacity, worked out in parallel before the
     /// metabolic loop reads them. Scratch on the same terms as the two above.
     capacities: Vec<crate::metabolism::Capacities>,
+    /// Where each cell stops compressing, permille of its own radius, from its wall and its
+    /// turgor. Scratch on the same terms as `radii`: derived fresh every tick from state that is
+    /// itself saved, so it is excluded from equality, hashing and snapshots.
+    core_permille: Vec<i32>,
     /// How hard each cell is being pressed by cells it is not joined to, `POS`, as of this
     /// tick's separation pass. Scratch in the same sense: recomputed from positions every
     /// tick, so it is excluded from equality and from the hash.
@@ -315,6 +319,7 @@ impl World {
             radii: Vec::new(),
             separation: crate::neighbours::SeparationScratch::default(),
             capacities: Vec::new(),
+            core_permille: Vec::new(),
             crowding: Vec::new(),
             pressure: Vec::new(),
             slip: Vec::new(),
@@ -692,9 +697,11 @@ impl World {
                 &mut self.cells,
                 &mut self.neighbours,
                 &mut self.radii,
+                &mut self.core_permille,
                 &mut self.crowding,
                 &mut self.pressure,
                 blocked,
+                &self.biology.metabolism.rates,
                 &mut self.separation,
             );
         }
