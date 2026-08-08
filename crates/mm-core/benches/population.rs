@@ -848,26 +848,62 @@ fn phase_bench(c: &mut Criterion) {
     if cfg!(debug_assertions) {
         return;
     }
-    let Some(mut world) = grown("ancestor.mm", 1) else {
+    let Some(pristine) = grown("ancestor.mm", 1) else {
         return;
     };
-    let (w, h) = (world.substrate().width(), world.substrate().height());
+    let (w, h) = (pristine.substrate().width(), pristine.substrate().height());
     let mut index = NeighbourIndex::default();
-    index.rebuild(world.cells(), w, h);
+    index.rebuild(pristine.cells(), w, h);
 
-    let substrate = world.substrate().clone();
-    let chem = world.scenario().chemicals.clone();
-    let metabolism = world.biology().metabolism.clone();
-    let ecology_cfg = world.biology().ecology;
-    let chemistry = world.biology().metabolism.catalogue.metabolism;
-    let capacity = world.cells().capacity();
+    let substrate = pristine.substrate().clone();
+    let chem = pristine.scenario().chemicals.clone();
+    let metabolism = pristine.biology().metabolism.clone();
+    let ecology_cfg = pristine.biology().ecology;
+    let chemistry = pristine.biology().metabolism.catalogue.metabolism;
+    let capacity = pristine.cells().capacity();
 
+    // A fresh clone per benchmark, and it is not a tidiness measure.
+    //
+    // These all ran against one shared world, and `b.iter` calls a phase thousands of times, each
+    // call mutating it. So every benchmark started from whatever the previous ones left behind,
+    // and its number depended on the order they were declared in — which meant a change to one
+    // phase silently re-baselined the others. Caught in the act: after a change that touched only
+    // `neighbours.rs`, `phase/metabolism` reported -25.6% and `phase/resolve` -35.2%, both at
+    // p = 0.00, and neither file had been modified since its baseline.
+    //
+    // Within one benchmark the state still drifts — running a phase repeatedly advances it
+    // without advancing the rest, which is the same liberty `breakdown_of` takes and is fair for
+    // pricing work per call. What this fixes is that the drift no longer leaks between them.
+    //
+    // # What it still cannot resolve
+    //
+    // Two consecutive runs of this group with no code change between them, after the fix:
+    //
+    // ```text
+    //   metabolism         p = 0.35   no change
+    //   physics            p = 0.16   no change
+    //   collisions         p = 0.33   no change
+    //   gather_touch       p = 0.09   no change
+    //   resolve            +1.3%      p = 0.00
+    //   neighbour_rebuild  +1.3%      p = 0.00
+    //   ecology            +9.3%      p = 0.02   "regressed"
+    // ```
+    //
+    // So the order-dependence is gone and ordinary run-to-run drift is not. `ecology` is the
+    // smallest phase here at some 450us and the least able to resolve anything; `resolve` and
+    // `neighbour_rebuild` have intervals tight enough that criterion correctly reports a real
+    // 1.3% of thermal drift as significant, which is not the same as it being interesting.
+    //
+    // Read it as: a change over about 10% is believable on any of these on the first run, and
+    // anything smaller needs repeating — on `ecology`, twice. A single `p < 0.05` is necessary
+    // and not sufficient.
     let mut group = c.benchmark_group("phase");
 
     let mut ledger = mm_core::ledger::Ledger::new();
     let mut starving = Vec::new();
     let mut capacities = Vec::new();
     let pressure = vec![0i32; capacity];
+    let mut world = pristine.clone();
     group.bench_function("metabolism", |b| {
         b.iter(|| {
             starving.clear();
@@ -887,6 +923,7 @@ fn phase_bench(c: &mut Criterion) {
     let slip = vec![0i32; capacity];
     let mut eco_substrate = substrate.clone();
     let mut eco_scan = Vec::new();
+    let mut world = pristine.clone();
     group.bench_function("ecology", |b| {
         b.iter(|| {
             mm_core::ecology::scan_into(world.cells(), &mut eco_scan);
@@ -914,6 +951,7 @@ fn phase_bench(c: &mut Criterion) {
     // The scan is inside the iteration, because `World::step` pays for it every tick. Hoisting
     // it out would measure half the phase and report an improvement that nobody gets.
     let mut body_scan = Vec::new();
+    let mut world = pristine.clone();
     group.bench_function("physics", |b| {
         b.iter(|| {
             mm_core::sensing::scan_bodies_into(world.cells(), &mut body_scan);
@@ -938,6 +976,7 @@ fn phase_bench(c: &mut Criterion) {
     let mut separation = neighbours::SeparationScratch::default();
     let rates = world.biology().metabolism.rates;
     let relax = world.biology().separation_relax;
+    let mut world = pristine.clone();
     group.bench_function("collisions", |b| {
         b.iter(|| {
             std::hint::black_box(neighbours::resolve_collisions(
@@ -977,6 +1016,7 @@ fn phase_bench(c: &mut Criterion) {
     let config = world.biology().clone();
     let mut pending = mm_core::intent::Pending::default();
     let mut resolve_substrate = substrate.clone();
+    let mut world = pristine.clone();
     group.bench_function("resolve", |b| {
         b.iter(|| {
             pending.births.clear();
@@ -997,12 +1037,14 @@ fn phase_bench(c: &mut Criterion) {
         })
     });
 
+    // These two read the population and never write it, so they need no clone of their own and
+    // cannot contaminate anything.
     group.bench_function("gather_touch", |b| {
-        b.iter(|| index.gather_touch(world.cells()))
+        b.iter(|| index.gather_touch(pristine.cells()))
     });
 
     group.bench_function("neighbour_rebuild", |b| {
-        b.iter(|| index.rebuild(world.cells(), w, h))
+        b.iter(|| index.rebuild(pristine.cells(), w, h))
     });
 
     group.finish();
