@@ -194,7 +194,7 @@ impl State {
             dither: num("MM_BENCH_DITHER", 0.1),
             amplitude: num("MM_BENCH_AMPLITUDE", 0.05),
             speed: num("MM_BENCH_SPEED", 0.02),
-            swell: num("MM_BENCH_SWELL", 1.0) > 0.5,
+            firmness: num("MM_BENCH_FIRMNESS", 0.0).clamp(0.0, 1.0),
             cap: num("MM_BENCH_CAP", SQUASH_PER_CELL as f32) as usize,
             reach: num("MM_BENCH_REACH", 1.52),
             churn: num("MM_BENCH_CHURN", 0.0),
@@ -708,9 +708,30 @@ fn panel(mut contexts: EguiContexts, mut state: ResMut<State>) {
             ui.add(egui::Slider::new(&mut s.bench.speed, 0.0..=0.3).text("speed"));
 
             ui.separator();
+            // Above the faults, and separated from them, because it is not one. Everything below
+            // this asks "what if the data were wrong"; this asks "what should the picture be".
+            ui.label(egui::RichText::new("what a cell is made of").strong());
+            ui.label("0 is a bag of fluid that tiles into polygons — 1 is a walled body that stays round");
+            ui.add(
+                egui::Slider::new(&mut s.bench.firmness, 0.0..=1.0)
+                    .text("firmness")
+                    .custom_formatter(|v, _| {
+                        format!(
+                            "{v:.2}  {}",
+                            match v {
+                                x if x < 0.05 => "foam",
+                                x if x < 0.35 => "soft",
+                                x if x < 0.65 => "half",
+                                x if x < 0.95 => "firm",
+                                _ => "marbles",
+                            }
+                        )
+                    }),
+            );
+
+            ui.separator();
             ui.label(egui::RichText::new("faults to inject").strong());
             ui.label("all off is data correct by construction — all-pairs, uncapped, in reach");
-            ui.checkbox(&mut s.bench.swell, "area-preserving swell");
             ui.checkbox(&mut s.bench.staircase, "mm-core's radius staircase");
             ui.add(
                 egui::Slider::new(&mut s.bench.cap, 0..=SQUASH_PER_CELL)

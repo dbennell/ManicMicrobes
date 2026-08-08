@@ -193,7 +193,13 @@ fn what_each_injected_fault_does() {
     );
     row(
         "no area swell",
-        &run(&Bench { swell: false, ..base }, 600),
+        &run(
+            &Bench {
+                firmness: 1.0,
+                ..base
+            },
+            600,
+        ),
     );
 
     header("and on a raft of 37, where a cell has more neighbours than slots");

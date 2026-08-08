@@ -199,9 +199,28 @@ pub struct Bench {
     pub amplitude: f32,
     /// How fast, in radians per frame.
     pub speed: f32,
-    /// Whether the area-preserving swell is applied. Off draws every cell at `PACKING` times its
-    /// radius, cut by the seams and no more — which leaves the gaps the swell exists to close.
-    pub swell: bool,
+    /// How firmly a cell holds its own shape, `0..=1`. **The foam-to-marbles slider.**
+    ///
+    /// This is the one knob here that is not a fault to inject. Everything else in this struct
+    /// exists to reproduce something going wrong; this one asks what the picture *should* be.
+    ///
+    /// Zero is a bag of fluid: the area-preserving swell is applied in full, so a cell squeezed
+    /// on one side bulges on the other until what survives its neighbours' seams encloses the
+    /// area it has. A crowd of them tiles into polygons with no gaps — a moss leaf.
+    ///
+    /// One is a walled body: no swell at all, so a cell is drawn at `PACKING` times its radius,
+    /// cut by its seams and no more. A crowd of them stays round with gaps between — a smear of
+    /// yeast. This was `swell: bool` and its two states are this knob's two ends.
+    ///
+    /// In between is in between, and the point of it being continuous is that nobody has yet
+    /// established which end the interesting pictures are near, or whether the middle is a
+    /// picture at all rather than a smear of the two.
+    ///
+    /// **What sets it on a real slide is deliberately not decided here.** `slide::squash_of`
+    /// currently derives it from junctions and `biology::rigidity`, which is one answer; this
+    /// bench exists so the *look* can be settled before the mechanism is argued about, the same
+    /// way the rest of the module separates the shader from the simulation.
+    pub firmness: f32,
     /// How many seams reach the shader, deepest first. Twelve is `cellmesh::SQUASH_PER_CELL`;
     /// anything less is the truncation that was found dropping neighbours in bucket order.
     pub cap: usize,
@@ -234,7 +253,7 @@ impl Default for Bench {
             motion: Motion::Drift,
             amplitude: 0.05,
             speed: 0.02,
-            swell: true,
+            firmness: 0.0,
             cap: crate::cellmesh::SQUASH_PER_CELL,
             reach: 1.52,
             churn: 0.0,
@@ -443,11 +462,10 @@ impl Bench {
             }
             // Then the swell, from the *whole* seam list — which is what `squash_of` does, before
             // anything truncates it.
-            let swell = if self.swell {
-                slide::area_swell(bare, bare, &seams)
-            } else {
-                1.0
-            };
+            // The same expression `slide::squash_of` applies, so the bench and the slide cannot
+            // drift: full swell at firmness zero, none at one, linear between.
+            let swell = 1.0
+                + (1.0 - self.firmness.clamp(0.0, 1.0)) * (slide::area_swell(bare, bare, &seams) - 1.0);
             for s in seams.iter_mut() {
                 s.face /= swell;
             }
