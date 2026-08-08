@@ -74,13 +74,21 @@
     // a tick. An eighth takes that to **7**, and leaves the pack better separated as well: 14% of
     // near pairs overlapping against 19%.
     //
+    // `rigidity_gain` is **one**, not sixteen, and the difference matters more than it looks. The
+    // gain multiplies wall times turgor and then clamps at one, so at sixteen anything above a
+    // sixteenth saturates — and a membrane of 24 out of 255 is already 0.094. Every cell on the
+    // slide would read fully firm and the dial would discriminate nothing, which is exactly what
+    // happened the first time `can_a_marble_swim_through_a_crowd_a_blob_cannot` was run: four
+    // swimmers, four different bodies, one identical distance. At one, `marble.mm` reads 1.00 and
+    // an ancestor reads 0.09, which is the spread the whole mechanism is about.
+    //
     // Both are zero in `BiologyConfig::default`, for the reason `light_occlusion` is: they change
     // what a slide holds, and every acceptance result in the tree was taken without them.
     biology: (
         separation_relax: 128,
         metabolism: (
             rates: (
-                rigidity_gain: 16384,
+                rigidity_gain: 1024,
             ),
         ),
     ),

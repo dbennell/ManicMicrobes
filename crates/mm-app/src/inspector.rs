@@ -48,6 +48,22 @@ pub struct Inspection {
     pub damage: i32,
     pub key: u8,
 
+    /// How firmly this cell holds its own shape, `Q10`. Wall times turgor — see
+    /// [`mm_core::biology::rigidity`].
+    ///
+    /// Here because it is the one reading that explains what a cell *looks like* and cannot be
+    /// worked out from anything else on this panel. A slide of round separate cells and a slide of
+    /// polygons differ in this number and in nothing visible beside it; the membrane parameter is
+    /// half of it and the interior chemistry is the other half, and multiplying two readings in
+    /// your head to find out why the picture is what it is is not an instrument.
+    ///
+    /// It was added the first time somebody looked at a slide that should have been marbles, saw
+    /// polygons, and reasonably concluded that something softer had overtaken the lineage. Nothing
+    /// had — every cell had the wall its genome asked for, and the wall was 200 of a possible 255,
+    /// which is 0.78 firm and still visibly angular. That is a five-second answer with this on the
+    /// panel and a probe run without it.
+    pub rigidity: i32,
+
     pub genome_len: usize,
     pub genome_hash: u64,
     /// The genome itself, so the panel can disassemble it and show the cell reading its own
@@ -133,6 +149,11 @@ impl Inspection {
             energy: cells.energy[i],
             damage: cells.damage[i],
             key: cells.key[i],
+            rigidity: mm_core::biology::rigidity(
+                cells,
+                i,
+                &world.biology().metabolism.rates,
+            ),
             genome_len: cells.genome[i].len(),
             genome_hash: cells.genome[i].hash(),
             genome: std::sync::Arc::clone(&cells.genome[i]),

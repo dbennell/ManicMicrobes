@@ -100,21 +100,30 @@ pub const CORE_PERMILLE: i32 = 950;
 /// default, so a tissue still tessellates and still shares its walls.
 pub const CORE_PERMILLE_RIGID: i32 = 1000;
 
+/// How firm a cell is *as the simulation sees it*, `Q10`: wall times turgor times the
+/// scenario's `rigidity_gain`. Zero when the gain is, which is every world written before it.
+#[must_use]
+pub fn firmness(cells: &CellArena, i: usize, rates: &crate::metabolism::MetabolicRates) -> i32 {
+    if rates.rigidity_gain <= 0 {
+        return 0;
+    }
+    // Wall times turgor, and then the scenario's gain on top. See `biology::rigidity` for why the
+    // renderer reads the same quantity *without* the gain: swell has no counterpart in the
+    // simulation, and everything in this module does.
+    crate::fixed::q10_scale(crate::biology::rigidity(cells, i, rates), rates.rigidity_gain)
+        .clamp(0, crate::fixed::Q10_ONE)
+}
+
 /// Where one cell stops compressing, in permille of its own radius.
 ///
 /// [`CORE_PERMILLE`] when `rigidity_gain` is zero, which is every world written before it, and
-/// scaled towards [`CORE_PERMILLE_RIGID`] by the cell's wall and its turgor otherwise. See
-/// `MetabolicRates::rigidity_gain` for what it is for and `docs/STIFFNESS.md` §4 for the design.
+/// scaled towards [`CORE_PERMILLE_RIGID`] by [`firmness`] otherwise.
 #[must_use]
 pub fn core_permille(cells: &CellArena, i: usize, rates: &crate::metabolism::MetabolicRates) -> i32 {
-    if rates.rigidity_gain <= 0 {
+    let rigidity = firmness(cells, i, rates);
+    if rigidity <= 0 {
         return CORE_PERMILLE;
     }
-    // Wall times turgor, and then the scenario's gain on top. See `biology::rigidity` for why
-    // the renderer reads the same quantity *without* the gain.
-    let rigidity =
-        crate::fixed::q10_scale(crate::biology::rigidity(cells, i, rates), rates.rigidity_gain)
-            .clamp(0, crate::fixed::Q10_ONE);
     let span = (CORE_PERMILLE_RIGID - CORE_PERMILLE) as i64;
     CORE_PERMILLE + ((span * rigidity as i64) / crate::fixed::Q10_ONE as i64) as i32
 }
@@ -1548,14 +1557,40 @@ pub fn resolve_collisions(
                 cells.vy[i] = cells.vy[i].saturating_sub((dot * cy / mag_sq) as i32);
             }
         }
-        // What is left is the cell sliding along its neighbours, which membranes resist.
-        cells.vx[i] = crate::fixed::q10_scale(cells.vx[i], CONTACT_FRICTION);
-        cells.vy[i] = crate::fixed::q10_scale(cells.vy[i], CONTACT_FRICTION);
-        // And below a threshold it is simply held: see `REST_SPEED`.
+        // What is left is the cell sliding along its neighbours, which membranes resist — and how
+        // *much* they resist is the thing firmness buys.
+        //
+        // A bag of fluid pressed into another bag of fluid has a wide, flattened, sticky contact
+        // and drags badly; a hard round body touching another has very little contact and slips
+        // past. So a limp cell keeps a quarter of its sliding speed, as everything did before
+        // this, and a marble keeps almost all of it.
+        //
+        // This is what makes firmness a *choice* rather than a look. Being soft costs nothing and
+        // is fine if you are an autotroph — sitting in a mat of your own kind in the light is the
+        // whole plan. It is ruinous if you are trying to hunt, because the thing you are hunting
+        // is inside a crowd and getting into a crowd, through it and out again is exactly the
+        // manoeuvre a soft cell cannot do. The wall and the turgor are paid for in matter and
+        // upkeep; what they buy is being able to move where everything else is stuck.
+        //
+        // Scaled by the cell's own firmness and not the pair's: a marble slides past a blob just
+        // as well as past another marble, because the thing that drags is its own deformable
+        // surface. Two blobs stick to each other twice as much as one blob and a marble do, which
+        // falls out of both of them being scaled.
+        let firm = firmness(cells, i, rates);
+        let slip = CONTACT_FRICTION
+            + (((Q10_ONE - CONTACT_FRICTION) as i64 * firm.clamp(0, Q10_ONE) as i64)
+                / Q10_ONE as i64) as i32;
+        cells.vx[i] = crate::fixed::q10_scale(cells.vx[i], slip);
+        cells.vy[i] = crate::fixed::q10_scale(cells.vy[i], slip);
+        // And below a threshold it is simply held: see `REST_SPEED`. A firm cell is harder to pin
+        // this way too — static friction is the same contact area doing the same job — so the
+        // threshold falls with the same factor, and a marble in a crowd is never quite held still.
+        let pin = (REST_SPEED as i64 * (Q10_ONE - firm.clamp(0, Q10_ONE)) as i64
+            / Q10_ONE as i64) as i32;
         if cells.vx[i]
             .saturating_abs()
             .saturating_add(cells.vy[i].saturating_abs())
-            < REST_SPEED
+            < pin
         {
             cells.vx[i] = 0;
             cells.vy[i] = 0;

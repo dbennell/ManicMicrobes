@@ -7582,6 +7582,29 @@ fn cell_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
         hurt,
     );
 
+
+    // What it looks like, and why. A firm cell is drawn near its true radius and stays round; a
+    // limp one is drawn fat, crosses its neighbours deeply and tiles into a polygon. Wall times
+    // turgor, both of which the genome pays for — so this is the reading that connects the
+    // picture to the loadout below and the chemistry beneath that.
+    let firm = c.rigidity as f32 / mm_core::Q10_ONE as f32;
+    skin::row(
+        ui,
+        "firmness",
+        Some((firm, ink)),
+        &format!(
+            "{firm:.2} {}",
+            match firm {
+                x if x < 0.15 => "limp",
+                x if x < 0.4 => "soft",
+                x if x < 0.7 => "half",
+                x if x < 0.9 => "firm",
+                _ => "marble",
+            }
+        ),
+        ink,
+    );
+
     ui.add_space(theme::SECTION_GAP);
     skin::hairline(ui);
 

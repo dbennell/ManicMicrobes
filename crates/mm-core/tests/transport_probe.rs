@@ -797,3 +797,156 @@ fn what_relaxation_costs_and_buys() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// What firmness is *for*.
+
+#[test]
+#[ignore = "probe; --release --ignored --nocapture"]
+fn can_a_marble_swim_through_a_crowd_a_blob_cannot() {
+    // Firmness costs matter and upkeep and until now bought only a picture. This is the claim it
+    // has to earn its keep on: a bag of fluid pressed into other bags has a wide, flattened,
+    // sticky contact and drags; a hard round body has very little contact and slips past. So a
+    // soft cell is fine in a mat of its own kind — which is the whole plan if you photosynthesise
+    // — and cannot hunt, because getting into a crowd, through it and out again is exactly the
+    // manoeuvre it cannot make.
+    //
+    // One swimmer at a time, through the same fixed lattice of inert cells, with the same cilium
+    // at the same power. The only thing that differs is what the swimmer is made of.
+    //
+    // Found: monotone in firmness, and worth about a tenth. Sampled while the swimmer is still
+    // inside the crowd, a marble is 11% further along than a limp cell of the same mass driven by
+    // the same cilium. That is not a large number for one crossing and it is the right shape for
+    // one: it compounds over a hunt, it is free to a cell that is soft and staying put, and it is
+    // paid for in wall and turgor by one that is not.
+    let inert_pack = |world: &mut World, genome: &std::sync::Arc<mm_core::Genome>| {
+        let across = 9i32;
+        for k in 0..(across * across) {
+            let (gx, gy) = (k % across, k / across);
+            // Tight enough to be an obstacle. At a pitch of two the swimmer crossed the whole
+            // slide whatever it was made of, because a lattice with that much daylight in it is
+            // not a crowd.
+            world.spawn_cell(CellSeed {
+                x: pos(9) + gx * mm_core::fixed::POS_ONE * 3 / 2,
+                y: pos(9) + gy * mm_core::fixed::POS_ONE * 3 / 2,
+                mass: q10(30),
+                energy: q10(1_000_000),
+                membrane: 24,
+                key: 11,
+                badge: 0,
+                species: 0,
+                parent: CellId::NONE,
+                birth_tick: 0,
+                genome: std::sync::Arc::clone(genome),
+            });
+        }
+    };
+
+    println!("\nSWIM  one cilium at full power, through a fixed 9x9 lattice of limp cells.");
+    println!("  swimmer      membrane   solute   firmness   squares travelled by tick 7/14/21/28");
+    for (label, membrane, solute) in [
+        ("limp", 24u8, 0i32),
+        ("soft", 24, 4),
+        ("firm", 200, 4),
+        ("marble", 255, 4),
+    ] {
+        let mut world = World::new(Scenario {
+            name: "swim".into(),
+            seed: 1,
+            width: 32,
+            height: 32,
+            light: LightRegime::Uniform { intensity: Q10_ONE },
+            current: mm_core::light::CurrentField::Still,
+            jitter: 0,
+            seeding: vec![],
+            ..Scenario::default()
+        })
+        .expect("world");
+        let mut biology = BiologyConfig {
+            mutation: MutationRates::none(),
+            ..BiologyConfig::default()
+        };
+        // The crowd must not change while the swimmer crosses it.
+        biology.metabolism.rates.background_damage = 0;
+        biology.metabolism.rates.metabolic_floor = 0;
+        biology.metabolism.rates.growth_rate = 0;
+        biology.metabolism.rates.osmotic_upkeep = 0;
+        // **One, not sixteen.** At a gain of sixteen anything with wall times turgor above a
+        // sixteenth saturates, and a membrane of 24 out of 255 is already 0.094 — so every cell
+        // on the slide reads fully firm and the dial discriminates nothing. That was the first
+        // run of this probe: four swimmers, four different bodies, one identical distance.
+        biology.metabolism.rates.rigidity_gain = Q10_ONE;
+        biology.separation_relax = Q10_ONE / 8;
+        world.set_biology(biology);
+
+        let inert = world
+            .genomes()
+            .intern(vec![mm_core::Op::Halt.canonical_byte()])
+            .expect("genome");
+        inert_pack(&mut world, &inert);
+
+        // The swimmer, entering from the left edge at the lattice's mid-height.
+        let start = (2i32, 16i32);
+        let id = world.spawn_cell(CellSeed {
+            x: pos(start.0),
+            y: pos(start.1),
+            mass: q10(30),
+            energy: q10(1_000_000),
+            membrane,
+            key: 11,
+            badge: 0,
+            species: 0,
+            parent: CellId::NONE,
+            birth_tick: 0,
+            genome: std::sync::Arc::clone(&inert),
+        });
+        let threshold = world.biology().metabolism.rates.osmotic_threshold;
+        if let Some(i) = world.cells_mut().index(id) {
+            let cells = world.cells_mut();
+            cells.slots_mut(i)[0] = Organelle::finished(OrganelleType::Membrane, membrane);
+            let mut cilium = Organelle::finished(OrganelleType::Cilium, 200);
+            cilium.control[0] = Q10_ONE as i16; // full ahead
+            cilium.control[1] = 0; // due +x, into the crowd
+            cells.slots_mut(i)[4] = cilium;
+            // Solute, skipping peroxide, which is toxic.
+            let usable: Vec<usize> = (0..mm_core::chem::CHEM_COUNT).filter(|c| *c != 13).collect();
+            let each = (threshold as i64 * solute as i64 / usable.len() as i64) as i32;
+            for c in usable {
+                cells.interior_mut(i)[c] = each.max(0);
+            }
+        }
+        world.adopt_current_contents_as_baseline();
+
+        let rates = world.biology().metabolism.rates;
+        let firm = world
+            .cells()
+            .index(id)
+            .map(|i| mm_core::neighbours::firmness(world.cells(), i, &rates))
+            .unwrap_or(0) as f32
+            / Q10_ONE as f32;
+
+        // Sampled while it is still in the crowd. Six hundred ticks was the first version and
+        // every swimmer read 30.00 squares — the width of the slide, because a cilium at full
+        // power crosses it long before then and then sits against the far wall. A measurement
+        // that saturates is a measurement of the boundary.
+        let travelled = |w: &World| -> f64 {
+            w.cells()
+                .index(id)
+                .map(|i| {
+                    let dx = (w.cells().x[i] - pos(start.0)) as f64;
+                    let dy = (w.cells().y[i] - pos(start.1)) as f64;
+                    (dx * dx + dy * dy).sqrt() / POS_ONE as f64
+                })
+                .unwrap_or(0.0)
+        };
+        let mut at = Vec::new();
+        for _ in 0..4 {
+            world.run(7);
+            at.push(travelled(&world));
+        }
+        println!(
+            "  {label:<12} {membrane:>8}   {solute:>6}   {firm:>8.2}   {:>6.2} {:>6.2} {:>6.2} {:>6.2}",
+            at[0], at[1], at[2], at[3]
+        );
+    }
+}

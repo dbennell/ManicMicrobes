@@ -384,3 +384,90 @@ fn what_makes_a_mat_of_marbles_rather_than_a_scatter() {
         println!("  {intensity:>5}  {pop:>4}   {cover:>7.0}%   {mean:>10.3}");
     }
 }
+
+#[test]
+#[ignore = "probe; --release --ignored --nocapture"]
+fn who_is_actually_on_the_marbles_slide() {
+    // Reported from the microscope: the marbles scenario looks squashed. The suspicion is that
+    // something softer overtook `marble.mm`, and the point of this is that the suspicion is
+    // checkable — a cell's firmness is wall times turgor, and both are readable off the arena.
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../genomes/marble.mm");
+    let bytes = mm_asm::assemble(&std::fs::read_to_string(src).expect("genome"))
+        .expect("assembles")
+        .bytes;
+    let scenario = Scenario {
+        name: "the marbles".into(),
+        seed: 20250728,
+        width: 64,
+        height: 64,
+        light: LightRegime::Uniform { intensity: Q10_ONE },
+        current: mm_core::light::CurrentField::Still,
+        fluid_interval: 1,
+        seeding: vec![
+            mm_core::Seeding::Uniform { chemical: 11, per_square: q10(400) },
+            mm_core::Seeding::Uniform { chemical: 14, per_square: q10(400) },
+            mm_core::Seeding::Uniform { chemical: 4, per_square: q10(400) },
+        ],
+        ..Scenario::default()
+    };
+    let mut world = World::new(scenario).expect("world");
+    let mut biology = BiologyConfig::default();
+    biology.separation_relax = Q10_ONE / 8;
+    biology.metabolism.rates.rigidity_gain = Q10_ONE * 16;
+    world.set_biology(biology);
+    world.place_founders(&bytes, 16);
+
+    println!("\nWHO  the marbles, 16 founders of marble.mm, mutation on");
+    println!("  tick    pop   membrane p10/p50/p90   rigidity p10/p50/p90   mean swell");
+    for step in 0..=6 {
+        if step > 0 {
+            world.run(2_000);
+        }
+        let rates = world.biology().metabolism.rates;
+        let mut mem: Vec<i32> = Vec::new();
+        let mut rig: Vec<f32> = Vec::new();
+        for i in world.cells().iter() {
+            mem.push(world.cells().slots(i)[0].param as i32);
+            rig.push(
+                mm_core::biology::rigidity(world.cells(), i, &rates) as f32 / Q10_ONE as f32,
+            );
+        }
+        mem.sort_unstable();
+        rig.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+        let n = mem.len();
+        if n == 0 {
+            println!("  {:>5}   extinct", step * 2_000);
+            break;
+        }
+        let pick = |v: &[f32], q: usize| v[(v.len() - 1) * q / 100];
+        let pickm = |v: &[i32], q: usize| v[(v.len() - 1) * q / 100];
+        // Draw it, on a copy, so the frame is the one the microscope would build.
+        let mut slide = Slide::new(Scenario::stress(8, 8)).expect("slide");
+        slide.set_world(world.clone());
+        slide.set_camera(32.0, 32.0, 40.0, 40.0);
+        slide.set_zoom(64.0);
+        let frame = slide.frame();
+        let swells: Vec<f32> = frame
+            .cells
+            .iter()
+            .filter(|d| !d.squash.is_empty())
+            .map(|d| d.area_swell)
+            .collect();
+        let swell = if swells.is_empty() {
+            0.0
+        } else {
+            swells.iter().sum::<f32>() / swells.len() as f32
+        };
+        println!(
+            "  {:>5}   {n:>4}   {:>3}/{:>3}/{:>3}              {:.2}/{:.2}/{:.2}           {swell:.3}",
+            step * 2_000,
+            pickm(&mem, 10),
+            pickm(&mem, 50),
+            pickm(&mem, 90),
+            pick(&rig, 10),
+            pick(&rig, 50),
+            pick(&rig, 90),
+        );
+        world.run(0);
+    }
+}

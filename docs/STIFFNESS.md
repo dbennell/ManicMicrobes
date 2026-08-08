@@ -342,7 +342,51 @@ half.
 
 ---
 
-## 8. The recommendation
+## 8. What firmness is for
+
+§7 gave the mechanism a use it was not designed for and this is the one it was: firmness costs
+matter and upkeep, and until it bought something a genome could *want*, it was a rendering
+preference with a bill attached.
+
+**It is drag.** A bag of fluid pressed into other bags of fluid has a wide, flattened, sticky
+contact and drags badly; a hard round body has very little contact and slips past. So
+`neighbours::CONTACT_FRICTION` — the fraction of a sliding cell's speed that survives a tick,
+which was one number for every cell — scales with firmness. A limp cell keeps a quarter of it, as
+everything did before; a marble keeps almost all.
+
+Measured, one cilium at full power driving one swimmer into a fixed lattice of limp cells,
+sampled while it is still inside the crowd:
+
+| swimmer | membrane | firmness | squares by tick 7 / 14 / 21 / 28 |
+| --- | ---: | ---: | --- |
+| limp | 24 | 0.00 | 5.73 · 9.72 · 13.61 · 17.31 |
+| soft | 24 | 0.09 | 5.73 · 9.94 · 13.89 · 17.90 |
+| firm | 200 | 0.78 | 5.71 · 10.25 · 14.27 · 19.43 |
+| marble | 255 | 1.00 | 5.70 · 10.63 · 15.40 · 19.24 |
+
+Monotone, and worth about a tenth over one crossing. That is the right size for it: it compounds
+over a hunt, it is free to a cell that is soft and staying where it is, and it is paid for in wall
+and turgor by one that is not.
+
+> **Which makes firmness a strategy rather than a look.** Being soft is fine if you photosynthesise
+> — sitting in a mat of your own kind in the light is the whole plan, and a tessellating mat is
+> what that looks like. It is ruinous if you hunt, because the thing you are hunting is inside a
+> crowd, and getting in, through and out again is exactly the manoeuvre a soft cell cannot make.
+
+Two things found by measuring it rather than assuming it, both recorded in place:
+
+- **The gain saturates.** `rigidity_gain` multiplies wall times turgor and clamps at one, so at a
+  gain of sixteen anything above a sixteenth is fully firm — and a membrane of 24 out of 255 is
+  already 0.094. Every cell on the slide read 1.00 and the first run of the swim probe produced
+  four different bodies and one identical distance. `the_marbles.ron` uses a gain of **one**, where
+  `marble.mm` reads 1.00 and an ancestor reads 0.09.
+- **A cilium at full power crosses a 32-square slide in well under a hundred ticks**, so the first
+  version of the probe measured every swimmer against the far wall. A measurement that saturates
+  is a measurement of the boundary.
+
+---
+
+## 9. The recommendation
 
 1. **Correct SPEC §6.4** points 2 and 3, and drop the stale sentence from `CORE_PERMILLE`'s doc
    comment. Documentation only, no behaviour, and it is a prerequisite for anyone reasoning about

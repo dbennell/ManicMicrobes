@@ -107,7 +107,11 @@
         IMM     2               ; mitochondrion
         IMM     2
         BUILD
-        IMM     200             ; the wall. 58 units of carbon, once, and 0.42 a tick to carry
+        IMM     12              ; a vacuole, and the smallest one that does the job. See below.
+        IMM     4
+        IMM     4
+        BUILD
+        IMM     255             ; the wall, at the catalogue's maximum
         ZERO                    ; type ignored on slot 0
         ZERO                    ; slot 0 — the membrane
         BUILD
@@ -124,7 +128,7 @@
         IMM     14              ; oxygen
         EAT
         DROP
-        IMM     64
+        IMM     76
         IMM     4               ; carbon, and more of it: there is a wall to pay for
         EAT
         DROP
