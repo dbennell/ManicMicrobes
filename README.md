@@ -132,6 +132,9 @@ however correct it is.
 | [`docs/MILESTONES.md`](docs/MILESTONES.md) | the delivery plan and, more usefully, the acceptance test for each milestone. Definition of done. |
 | [`docs/UI.md`](docs/UI.md) | normative for the front-end the way SPEC.md is for the core: the layout, the palette and type scale, and a running record of which interface decisions were later reversed and why. |
 | [`docs/CHEMISTRY.md`](docs/CHEMISTRY.md) | the metabolic pathways, and the investigation that produced them. |
+| [`docs/FEEDING.md`](docs/FEEDING.md) | the ways of making a living the engine has and the ones it does not, the control-word ledger, and whether sixteen organelle types is enough. |
+| [`docs/NEURONS.md`](docs/NEURONS.md) | the guide to building a nervous system out of junctions: what already works, the one reading that blocks it, and the order to do it in. |
+| [`docs/STIFFNESS.md`](docs/STIFFNESS.md) | why every cell is exactly as stiff as every other, what turgor is currently charged for, and where the squish is actually drawn. |
 | [`docs/OVERLAPS.md`](docs/OVERLAPS.md) | **read before chasing anything wrong with the picture.** Cells drawn over one another was hunted through the physics for days and was twice in the shader's wiring. |
 
 The prose in this repository is load-bearing. Most non-obvious decisions carry the reasoning and
