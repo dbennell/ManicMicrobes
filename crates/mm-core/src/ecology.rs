@@ -26,6 +26,8 @@
 //! are all the same three mechanisms in different proportions, which is why the analysis layer
 //! infers trophic level rather than reading it off a field.
 
+use rayon::prelude::*;
+
 use crate::cell::CellArena;
 use crate::chem::CHEM_COUNT;
 use crate::fixed::{q10_scale, Q10_ONE};
@@ -215,6 +217,39 @@ pub fn digestive_capacity(cells: &CellArena, i: usize) -> i32 {
     digestive_capacity_by_pathway(cells, i).iter().sum()
 }
 
+/// What one cell's organelles are doing to its neighbours, worked out before the sequential
+/// loop.
+///
+/// The third of these hoists, after `metabolism::Capacities` and `sensing::BodyScan`, and exact
+/// for the same reason: every field is a function of the organelle slots alone and
+/// [`step`] never builds, tears down or retypes one. Three separate walks of all sixteen slots
+/// per cell per tick became one, and that one runs on every core.
+///
+/// Scratch: derived fresh each tick, so excluded from equality, hashing and snapshots.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EcologyScan {
+    /// How far the spikes are out, scaled by their size.
+    pub extension: i32,
+    /// Holdfast surface presented to the current.
+    pub filter: i32,
+    /// Lysosome capacity, split by the substrate each turns carrion into.
+    pub digestion: [i32; crate::organelle::PATHWAY_COUNT],
+}
+
+/// Fill `into` with one [`EcologyScan`] per arena slot.
+pub fn scan_into(cells: &CellArena, into: &mut Vec<EcologyScan>) {
+    into.clear();
+    into.resize(cells.capacity(), EcologyScan::default());
+    into.par_iter_mut().enumerate().for_each(|(i, scan)| {
+        if !cells.occupied(i) {
+            return;
+        }
+        scan.extension = spike_extension(cells, i);
+        scan.filter = filter_strength(cells, i);
+        scan.digestion = digestive_capacity_by_pathway(cells, i);
+    });
+}
+
 /// Digestive capacity, split by which substrate each lysosome turns carrion into.
 ///
 /// A lysosome's `control[1]` chooses its pathway, the same word a mitochondrion and a
@@ -338,6 +373,8 @@ pub fn step(
     config: &EcologyConfig,
     chemistry: &crate::organelle::MetabolicChemistry,
     ledger: &mut Ledger,
+    // What each cell's spikes, holdfasts and lysosomes add up to, from `scan_into`.
+    scan: &[EcologyScan],
 ) -> EcologyReport {
     let mut report = EcologyReport::default();
 
@@ -384,7 +421,7 @@ pub fn step(
         }
 
         // --- spikes ---
-        let extension = spike_extension(cells, i);
+        let extension = scan.get(i).map(|s| s.extension).unwrap_or(0);
         if extension > 0 {
             let cost = q10_scale(config.spike_upkeep, extension);
             let paid = cells.energy[i].min(cost);
@@ -424,7 +461,7 @@ pub fn step(
         //
         // What goes past, not what is here. See [`captured`] for why that is the whole design
         // and not a detail of it.
-        let filter = filter_strength(cells, i);
+        let filter = scan.get(i).map(|s| s.filter).unwrap_or(0);
         if filter > 0 {
             let (sx, sy) = (
                 crate::fixed::pos_to_square(cells.x[i]),
@@ -487,7 +524,7 @@ pub fn step(
         //
         // One pass per pathway a lysosome is set to. Almost every cell has all its lysosomes on
         // one, so this is one iteration doing work and three skipping immediately.
-        let by_pathway = digestive_capacity_by_pathway(cells, i);
+        let by_pathway = scan.get(i).map(|s| s.digestion).unwrap_or_default();
         for (n, &capacity) in by_pathway.iter().enumerate() {
             if capacity <= 0 {
                 continue;
@@ -628,6 +665,29 @@ mod tests {
     use crate::genome::GenomePool;
     use crate::organelle::Organelle;
     use crate::scenario::Scenario;
+
+    /// The ecology phase as `World::step` runs it: organelle scan first, then the loop.
+    ///
+    /// Shadows [`super::step`] deliberately, for the reason `sensing`'s shim does — gathering the
+    /// scan is not optional for a caller, and a test that skipped it would be exercising a slide
+    /// where no spike is out, no holdfast filters and no lysosome digests.
+    #[allow(clippy::too_many_arguments)]
+    fn step(
+        cells: &mut CellArena,
+        substrate: &mut Substrate,
+        neighbours: &crate::neighbours::NeighbourIndex,
+        crowding: &[i32],
+        slip: &[i32],
+        config: &EcologyConfig,
+        chemistry: &crate::organelle::MetabolicChemistry,
+        ledger: &mut Ledger,
+    ) -> EcologyReport {
+        let mut scan = Vec::new();
+        super::scan_into(cells, &mut scan);
+        super::step(
+            cells, substrate, neighbours, crowding, slip, config, chemistry, ledger, &scan,
+        )
+    }
 
     fn arena() -> (CellArena, GenomePool, Substrate, Ledger) {
         let scenario = Scenario::stress(16, 16);

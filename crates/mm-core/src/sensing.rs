@@ -26,6 +26,8 @@
 //! rowing against nothing. The impulse decays, so momentum is not conserved and is not
 //! claimed to be; what is bounded is how much a cilium can inject per tick.
 
+use rayon::prelude::*;
+
 use crate::cell::CellArena;
 use crate::chem::{chem_index, CHEM_COUNT};
 use crate::fixed::{pos_to_square, q10_scale, sat_i16, POS_ONE, Q10_ONE};
@@ -388,6 +390,60 @@ pub fn holdfast_grip(cells: &CellArena, i: usize) -> i32 {
     grip
 }
 
+/// What one cell's organelles are doing to move it, worked out before the sequential loop.
+///
+/// The same hoist `metabolism::Capacities` is, for the same reason and with the same argument
+/// for why it is exact: every field here is a function of the cell's organelle slots alone, and
+/// [`step_physics`] never builds, tears down or retypes an organelle. So computing them a pass
+/// earlier cannot change what they are, and the pass that computes them runs on every core while
+/// the loop that consumes them runs on one.
+///
+/// It was two full walks of all sixteen slots per cell per tick — one summing cilium thrust, one
+/// summing holdfast grip — for organelles most cells never grow. On the mixed benchmark slide
+/// 3.8% of cells carry a cilium and 7.7% a holdfast; on the autotroph slide, none do, and the
+/// loop walked every slot of every cell to discover that.
+///
+/// Scratch, in the sense `World::slip` and `World::crowding` are: derived fresh every tick from
+/// the loadout, so it is excluded from equality, hashing and snapshots.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BodyScan {
+    /// Summed cilium thrust, `Q10` of a square per tick, before any energy shortfall is applied.
+    pub thrust_x: i32,
+    pub thrust_y: i32,
+    /// What beating that hard costs, whether or not the cell can afford it.
+    pub spent: i32,
+    /// Summed holdfast grip.
+    pub grip: i32,
+}
+
+/// Fill `into` with one [`BodyScan`] per arena slot.
+pub fn scan_bodies_into(cells: &CellArena, into: &mut Vec<BodyScan>) {
+    into.clear();
+    into.resize(cells.capacity(), BodyScan::default());
+    into.par_iter_mut().enumerate().for_each(|(i, scan)| {
+        if !cells.occupied(i) {
+            return;
+        }
+        // Slots in order, and accumulated with the same saturating adds the loop used, because
+        // both are order-sensitive in general and the point of this is that nothing changes.
+        let (mut fx, mut fy, mut spent) = (0i32, 0i32, 0i32);
+        for o in cells.slots(i) {
+            let thrust = cilium_thrust(o);
+            if thrust == 0 {
+                continue;
+            }
+            let (dx, dy) = cilium_direction(o);
+            fx = fx.saturating_add(q10_scale(thrust, dx));
+            fy = fy.saturating_add(q10_scale(thrust, dy));
+            spent = spent.saturating_add(q10_scale(thrust.abs(), THRUST_ENERGY));
+        }
+        scan.thrust_x = fx;
+        scan.thrust_y = fy;
+        scan.spent = spent;
+        scan.grip = holdfast_grip(cells, i);
+    });
+}
+
 /// The direction a cilium is mounted, as a unit-ish vector in `Q10`.
 ///
 /// Sixteen mount angles, from the second control input. Sixteen rather than a continuum
@@ -440,6 +496,8 @@ pub fn step_physics(
     // Scratch in the same sense as `crowding` and `pressure`: derived fresh every tick from
     // positions and organelles, so it is excluded from equality, hashing and snapshots.
     slip: &mut Vec<i32>,
+    // What each cell's cilia and holdfasts add up to, from `scan_bodies_into`.
+    scan: &[BodyScan],
     tick: u64,
     seed: u64,
 ) -> PhysicsReport {
@@ -465,18 +523,11 @@ pub fn step_physics(
         let ctx = RandCtx::new(seed, tick, id.ordering_key());
 
         // --- thrust from every cilium, and the reaction into the water ---
-        let (mut fx, mut fy) = (0i32, 0i32);
-        let mut spent = 0i32;
-        for o in cells.slots(i) {
-            let thrust = cilium_thrust(o);
-            if thrust == 0 {
-                continue;
-            }
-            let (dx, dy) = cilium_direction(o);
-            fx = fx.saturating_add(q10_scale(thrust, dx));
-            fy = fy.saturating_add(q10_scale(thrust, dy));
-            spent = spent.saturating_add(q10_scale(thrust.abs(), THRUST_ENERGY));
-        }
+        //
+        // Summed in `scan_bodies_into`, which is a parallel pass. See `BodyScan`.
+        let body = scan.get(i).copied().unwrap_or_default();
+        let (mut fx, mut fy) = (body.thrust_x, body.thrust_y);
+        let spent = body.spent;
         if spent > 0 {
             // Beating costs energy whether or not it achieves anything, which is what makes
             // swimming a trade rather than a free action.
@@ -544,7 +595,7 @@ pub fn step_physics(
         // be exactly the discontinuity SPEC §3 works to keep out of the landscape: one point of
         // `param` would flip a cell from anchored to adrift, and evolution cannot climb that.
         // Under-gripping instead means being carried more slowly, which is a gradient.
-        let grip = holdfast_grip(cells, i);
+        let grip = body.grip;
         if grip > 0 && (drift_x != 0 || drift_y != 0) {
             // Only now is the barrier scan worth doing. A cell with no holdfast, or one in
             // still water, never pays for it — which matters because this runs over the whole
@@ -670,6 +721,29 @@ mod tests {
     use crate::cell::{CellId, CellSeed};
     use crate::fixed::{pos, q10};
     use crate::genome::GenomePool;
+
+    /// The physics phase as `World::step` runs it: body scan first, then the loop.
+    ///
+    /// Shadows [`super::step_physics`] deliberately, so that every test below exercises the pair
+    /// together. Gathering the scan is not optional for a caller — a stale or absent one is a
+    /// slide where no cilium pushes and no holdfast holds — and a test that skipped it would be
+    /// testing a phase nothing runs.
+    fn step_physics(
+        cells: &mut CellArena,
+        substrate: &Substrate,
+        impulse_x: &mut [i32],
+        impulse_y: &mut [i32],
+        forces: BodyForces,
+        slip: &mut Vec<i32>,
+        tick: u64,
+        seed: u64,
+    ) -> PhysicsReport {
+        let mut scan = Vec::new();
+        super::scan_bodies_into(cells, &mut scan);
+        super::step_physics(
+            cells, substrate, impulse_x, impulse_y, forces, slip, &scan, tick, seed,
+        )
+    }
 
     fn substrate_with_gradient() -> Substrate {
         let mut s = Substrate::new(16, 16).unwrap();

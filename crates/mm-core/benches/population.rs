@@ -588,8 +588,11 @@ fn breakdown_of(label: &str, mut world: World) {
     let metabolic = t.elapsed() / n;
 
     let mut eco_substrate = substrate.clone();
+    // Inside the timed loop, because `World::step` pays for it every tick.
+    let mut eco_scan = Vec::new();
     let t = Instant::now();
     for _ in 0..n {
+        mm_core::ecology::scan_into(world.cells(), &mut eco_scan);
         std::hint::black_box(mm_core::ecology::step(
             world.cells_mut(),
             &mut eco_substrate,
@@ -599,6 +602,7 @@ fn breakdown_of(label: &str, mut world: World) {
             &ecology_cfg,
             &chemistry,
             &mut ledger,
+            &eco_scan,
         ));
     }
     let ecology = t.elapsed() / n;
@@ -609,8 +613,12 @@ fn breakdown_of(label: &str, mut world: World) {
         jitter: 0,
         gravity: 0,
     };
+    // The scan is inside the timed loop, because `World::step` pays for it every tick and a
+    // measurement that hoisted it out would be pricing half a phase.
+    let mut body_scan = Vec::new();
     let t = Instant::now();
     for _ in 0..n {
+        mm_core::sensing::scan_bodies_into(world.cells(), &mut body_scan);
         std::hint::black_box(mm_core::sensing::step_physics(
             world.cells_mut(),
             &substrate,
@@ -618,6 +626,7 @@ fn breakdown_of(label: &str, mut world: World) {
             &mut impulse_y,
             forces,
             &mut slip_scratch,
+            &body_scan,
             0,
             1,
         ));
@@ -877,8 +886,10 @@ fn phase_bench(c: &mut Criterion) {
     let crowding = vec![0i32; capacity];
     let slip = vec![0i32; capacity];
     let mut eco_substrate = substrate.clone();
+    let mut eco_scan = Vec::new();
     group.bench_function("ecology", |b| {
         b.iter(|| {
+            mm_core::ecology::scan_into(world.cells(), &mut eco_scan);
             std::hint::black_box(mm_core::ecology::step(
                 world.cells_mut(),
                 &mut eco_substrate,
@@ -888,6 +899,7 @@ fn phase_bench(c: &mut Criterion) {
                 &ecology_cfg,
                 &chemistry,
                 &mut ledger,
+                &eco_scan,
             ))
         })
     });
@@ -899,8 +911,12 @@ fn phase_bench(c: &mut Criterion) {
         jitter: 0,
         gravity: 0,
     };
+    // The scan is inside the iteration, because `World::step` pays for it every tick. Hoisting
+    // it out would measure half the phase and report an improvement that nobody gets.
+    let mut body_scan = Vec::new();
     group.bench_function("physics", |b| {
         b.iter(|| {
+            mm_core::sensing::scan_bodies_into(world.cells(), &mut body_scan);
             std::hint::black_box(mm_core::sensing::step_physics(
                 world.cells_mut(),
                 &substrate,
@@ -908,6 +924,7 @@ fn phase_bench(c: &mut Criterion) {
                 &mut impulse_y,
                 forces,
                 &mut slip_scratch,
+                &body_scan,
                 0,
                 1,
             ))

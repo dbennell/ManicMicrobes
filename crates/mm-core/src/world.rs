@@ -114,6 +114,13 @@ pub struct World {
     /// by filtering a phase later. Scratch like `crowding` and `pressure`: derived every tick,
     /// so excluded from equality, hashing and snapshots.
     slip: Vec<i32>,
+    /// What each cell's cilia and holdfasts add up to, gathered in parallel just before the
+    /// physics phase reads it. Scratch on the same terms as `slip`: derived every tick from the
+    /// organelle loadout, so excluded from equality, hashing and snapshots.
+    body_scan: Vec<crate::sensing::BodyScan>,
+    /// What each cell's spikes, holdfasts and lysosomes add up to, gathered in parallel just
+    /// before the ecology phase reads it. Scratch, on the same terms as `body_scan`.
+    ecology_scan: Vec<crate::ecology::EcologyScan>,
 
     /// The population.
     cells: CellArena,
@@ -323,6 +330,8 @@ impl World {
             crowding: Vec::new(),
             pressure: Vec::new(),
             slip: Vec::new(),
+            body_scan: Vec::new(),
+            ecology_scan: Vec::new(),
             cells: CellArena::new(),
             genomes: GenomePool::new(),
             biology,
@@ -632,6 +641,9 @@ impl World {
 
             // 4. Physics: thrust, Brownian jitter, drag and integration. Cells push on the
             //    water here, so it is sequential and in slot order like resolve.
+            // The organelle sums the physics phase needs, on every core, before the phase that
+            // needs them runs on one. See `sensing::BodyScan`.
+            crate::sensing::scan_bodies_into(&self.cells, &mut self.body_scan);
             report.physics = crate::sensing::step_physics(
                 &mut self.cells,
                 &self.substrate,
@@ -642,6 +654,7 @@ impl World {
                     gravity: self.scenario.gravity,
                 },
                 &mut self.slip,
+                &self.body_scan,
                 tick,
                 seed,
             );
@@ -751,6 +764,8 @@ impl World {
             //     wounded past its limit dies this tick rather than next — and after the
             //     neighbour index was rebuilt by the physics phase, so "touching" means where
             //     things are now.
+            // As the physics phase does: the organelle sums first, on every core.
+            crate::ecology::scan_into(&self.cells, &mut self.ecology_scan);
             report.ecology = crate::ecology::step(
                 &mut self.cells,
                 &mut self.substrate,
@@ -760,6 +775,7 @@ impl World {
                 &self.biology.ecology,
                 &self.biology.metabolism.catalogue.metabolism,
                 &mut self.ledger,
+                &self.ecology_scan,
             );
 
             let dead = biology::apply_deaths(
