@@ -79,6 +79,42 @@ pub struct Capacities {
 }
 
 use crate::organelle::{MetabolicChemistry, OrganelleCatalogue, OrganelleType, PATHWAY_COUNT};
+
+/// Cells per parallel task in [`MetabolismConfig::step`].
+///
+/// Large enough that a worker amortises its ledger, its report and its starving list over a run
+/// of cells rather than paying for them per cell, and small enough that fifty thousand cells is
+/// still a few hundred tasks and rayon can balance them.
+const CELLS_PER_TASK: usize = 1024;
+
+/// What one worker accumulated over its chunk of the arena.
+#[derive(Default)]
+struct Part {
+    /// Converts and absorptions, as a delta from `Ledger::default()`.
+    ledger: Ledger,
+    /// What this chunk's cells asked to dissipate. Settled globally; see `step`.
+    dissipate: i64,
+    /// Cells that could not pay, in slot order within the chunk.
+    starving: Vec<crate::cell::CellId>,
+    report: MetabolicReport,
+}
+
+/// The parts of a cell's metabolism that its own worker cannot finish.
+#[derive(Clone, Copy, Default)]
+struct CellFate {
+    dissipate: i64,
+    poisoned: bool,
+    starved: bool,
+}
+
+/// Add to one band of a cell's emission signature. `CellArena::emit_energy`, from the slice.
+fn emit_into(emission: &mut [i32; OrganelleType::EM_BANDS], band: usize, amount: i32) {
+    if amount <= 0 {
+        return;
+    }
+    let b = band % OrganelleType::EM_BANDS;
+    emission[b] = emission[b].saturating_add(amount);
+}
 use crate::substrate::Substrate;
 
 /// How much of what it catches each conversion keeps, `Q10`.
@@ -470,6 +506,25 @@ pub struct MetabolicReport {
     pub damage: i64,
 }
 
+impl MetabolicReport {
+    /// Add another report's counters into this one.
+    ///
+    /// Every field is a running total, so the merge order cannot be observed — which is what
+    /// lets `step` accumulate one of these per worker.
+    fn merge(&mut self, other: &MetabolicReport) {
+        self.absorbed = self.absorbed.saturating_add(other.absorbed);
+        self.dissipated = self.dissipated.saturating_add(other.dissipated);
+        self.fixed = self.fixed.saturating_add(other.fixed);
+        self.burned = self.burned.saturating_add(other.burned);
+        self.reactive = self.reactive.saturating_add(other.reactive);
+        self.decayed = self.decayed.saturating_add(other.decayed);
+        self.grown = self.grown.saturating_add(other.grown);
+        self.starved = self.starved.saturating_add(other.starved);
+        self.poisoned = self.poisoned.saturating_add(other.poisoned);
+        self.damage = self.damage.saturating_add(other.damage);
+    }
+}
+
 impl Metabolism {
     /// The latent energy of a quantity of one chemical.
     #[inline]
@@ -614,75 +669,178 @@ impl Metabolism {
         // Indexed rather than iterated, and `capacities` is indexed alongside: the loop walks
         // arena *slots*, most of which are occupied and some of which are holes, and every array
         // it touches is keyed by that slot number.
-        #[allow(clippy::needless_range_loop)]
-        for i in 0..cells.capacity() {
-            if !cells.occupied(i) {
-                continue;
-            }
+        // --- the cells, in parallel ---
+        //
+        // Every cell's metabolism reads the substrate and its own state and writes only its own
+        // state, so the loop was sequential for one reason: the ledger. See `settle` below.
+        //
+        // The arena is split by taking the six field vectors this phase writes out of it, which
+        // leaves the rest borrowable as `&CellArena` for the things it only reads — occupancy,
+        // ids, slots and positions. The same move `biology::execute` makes, and the only one
+        // available: `mm-core` forbids unsafe, so disjoint mutable access to arena fields has to
+        // come from the type system rather than from pointer arithmetic.
+        let mut cyto = std::mem::take(&mut cells.interior);
+        let mut mass = std::mem::take(&mut cells.mass);
+        let mut energy = std::mem::take(&mut cells.energy);
+        let mut damage = std::mem::take(&mut cells.damage);
+        let mut age = std::mem::take(&mut cells.age);
+        let mut emission = std::mem::take(&mut cells.emission);
+        let arena: &CellArena = cells;
 
-            // --- photosynthesis: 2 waste + light -> substrate + oxidant ---
-            //
-            // Once per pathway that this cell has a chloroplast on. A cell with two
-            // chloroplasts set to different reactions runs both, which is what makes a
-            // generalist possible and expensive at the same time.
-            let light = {
-                let sq = substrate.index(
-                    cells.x[i] >> crate::fixed::POS_BITS,
-                    cells.y[i] >> crate::fixed::POS_BITS,
-                );
-                let incident = substrate.light().get(sq).copied().unwrap_or(0);
-                // Shaded by whatever is lying on top of this cell. See
-                // `MetabolicRates::light_occlusion` for why this is the only form light rivalry
-                // can take on a slide lit from outside the plane, and why the measure is
-                // `pressure` rather than a count of neighbours.
-                shaded(incident, pressure.get(i).copied().unwrap_or(0), &self.rates)
-            };
-            if light > 0 {
-                let by_pathway = capacities[i].photosynthesis;
-                for (n, &capacity) in by_pathway.iter().enumerate() {
-                    if capacity <= 0 {
-                        continue;
+        // Chunked rather than per-cell so that each worker amortises its ledger and its report
+        // over a run of cells, and so that `starving` comes back in slot order by construction:
+        // chunks are contiguous ascending ranges, so concatenating them in chunk order is slot
+        // order, which is what rule 6 asks of a list that feeds `apply_deaths`.
+        let chunk = CELLS_PER_TASK;
+        let mut parts: Vec<Part> = cyto
+            .par_chunks_mut(chunk * CHEM_COUNT)
+            .zip(mass.par_chunks_mut(chunk))
+            .zip(energy.par_chunks_mut(chunk))
+            .zip(damage.par_chunks_mut(chunk))
+            .zip(age.par_chunks_mut(chunk))
+            .zip(emission.par_chunks_mut(chunk))
+            .enumerate()
+            .map(
+                |(c, (((((cyto, mass), energy), damage), age), emission))| {
+                    let base = c * chunk;
+                    let mut part = Part::default();
+                    for j in 0..mass.len() {
+                        let i = base + j;
+                        if !arena.occupied(i) {
+                            continue;
+                        }
+                        let light = {
+                            let sq = substrate.index(
+                                arena.x[i] >> crate::fixed::POS_BITS,
+                                arena.y[i] >> crate::fixed::POS_BITS,
+                            );
+                            let incident = substrate.light().get(sq).copied().unwrap_or(0);
+                            // Shaded by whatever is lying on top of this cell. See
+                            // `MetabolicRates::light_occlusion` for why this is the only form
+                            // light rivalry can take on a slide lit from outside the plane, and
+                            // why the measure is `pressure` rather than a count of neighbours.
+                            shaded(incident, pressure.get(i).copied().unwrap_or(0), &self.rates)
+                        };
+                        let Some(caps) = capacities.get(i) else {
+                            continue;
+                        };
+                        let from = j * CHEM_COUNT;
+                        let Some(cell_cyto) = cyto.get_mut(from..from + CHEM_COUNT) else {
+                            continue;
+                        };
+                        let fate = self.cell_step(
+                            m,
+                            chem,
+                            toxic,
+                            caps,
+                            arena.slots(i),
+                            light,
+                            pressure.get(i).copied().unwrap_or(0),
+                            cell_cyto,
+                            &mut mass[j],
+                            &mut energy[j],
+                            &mut damage[j],
+                            &mut age[j],
+                            &mut emission[j],
+                            &mut part.ledger,
+                            &mut part.report,
+                        );
+                        part.dissipate = part.dissipate.saturating_add(fate.dissipate);
+                        if fate.poisoned || fate.starved {
+                            part.starving.push(arena.id_at(i));
+                        }
                     }
-                    let Some(p) = m.pathways.get(n) else {
-                        continue;
-                    };
-                    let latent_per_unit = self.latent_of(chem, p.substrate);
-                    // Bounded by machinery, by the waste on hand, and by the light falling on
-                    // it. Two units of waste make one of substrate and one of oxidant.
-                    let waste_available = cells.interior(i)[p.waste];
-                    let by_light = q10_scale(capacity, light);
-                    let pairs = by_light.min(waste_available / 2).max(0);
-                    if pairs <= 0 {
-                        continue;
-                    }
-                    let gained_latent = (pairs as i64 * latent_per_unit as i64) / Q10_ONE as i64;
-                    // The light it took to bank that much, plus what was lost as heat.
-                    let absorbed = if self.rates.photosynthesis_efficiency > 0 {
-                        (gained_latent * Q10_ONE as i64)
-                            / self.rates.photosynthesis_efficiency as i64
-                    } else {
-                        gained_latent
-                    };
-                    let interior = cells.interior_mut(i);
-                    interior[p.waste] = interior[p.waste].saturating_sub(pairs * 2);
-                    interior[p.substrate] = interior[p.substrate].saturating_add(pairs);
-                    interior[p.oxidant] = interior[p.oxidant].saturating_add(pairs);
-                    // Two units of waste became one of substrate and one of oxidant. Reported
-                    // rather than done silently: an unaccounted transmutation is
-                    // indistinguishable from a conservation bug (I4).
-                    ledger.convert(p.waste, p.substrate, pairs as i64);
-                    ledger.convert(p.waste, p.oxidant, pairs as i64);
+                    part
+                },
+            )
+            .collect();
 
-                    ledger.absorb(absorbed);
-                    let waste_heat = absorbed.saturating_sub(gained_latent);
-                    report.dissipated += ledger.dissipate(waste_heat);
-                    report.absorbed += absorbed;
-                    report.fixed += pairs as i64;
-                }
-            }
+        cells.interior = cyto;
+        cells.mass = mass;
+        cells.energy = energy;
+        cells.damage = damage;
+        cells.age = age;
+        cells.emission = emission;
 
-            // --- respiration: substrate + oxidant -> waste + energy ---
-            let by_pathway = capacities[i].respiration;
+        // --- settle, in slot order ---
+        //
+        // Everything above accumulated into a ledger of its own starting from `default()`, so
+        // what each worker holds is a delta and `Ledger::merge` adds them back. Integer addition
+        // is associative, so the merge order cannot be observed.
+        //
+        // Dissipation is the exception and the reason this phase was sequential.
+        // `Ledger::dissipate` clamps against the live `energy_stored`, so its result depends on
+        // how much has already been spent this tick — a per-worker ledger starting at zero would
+        // dissipate nothing, and one seeded with the world total would let every worker spend the
+        // whole world's energy. So the workers record what they *asked* to dissipate and it is
+        // settled once, here.
+        //
+        // That is exact whenever the tick's total request does not exceed the energy stored
+        // before it: no clamp can bind at any point in the sequence, because at every prefix the
+        // stored energy is at least the sum of what remains to be asked for, and absorption only
+        // adds. Below that line the split between `energy_out` and `energy_stored` can differ
+        // from what the sequential order would have produced — but only in a world whose entire
+        // standing energy is less than one tick of its own upkeep, which is a world in the act of
+        // dying, and I5 still holds exactly either way because `take_energy` moves what it
+        // reports whatever it clamps to.
+        let mut requested = 0i64;
+        for part in &parts {
+            ledger.merge(&part.ledger);
+            requested = requested.saturating_add(part.dissipate);
+            report.merge(&part.report);
+        }
+        debug_assert!(
+            requested <= ledger.energy_stored().saturating_add(requested),
+            "dissipation accounting went backwards"
+        );
+        report.dissipated = report
+            .dissipated
+            .saturating_add(ledger.dissipate(requested));
+        for part in &mut parts {
+            starving.append(&mut part.starving);
+        }
+
+        report
+    }
+
+    /// One cell's metabolism, reading the world and writing only itself.
+    ///
+    /// Split out of [`MetabolismConfig::step`] so that the loop over cells can run on every
+    /// core. Everything it touches is either shared and read-only — the chemical table, the
+    /// pathway set, this cell's organelle slots — or exclusively this cell's, which is what
+    /// makes the split legal at all.
+    ///
+    /// The two things it cannot do for itself come back in [`CellFate`]: it records what it
+    /// asked to dissipate rather than dissipating it, because that clamps against a global
+    /// total, and it flags starvation rather than pushing an id, because the list has to end up
+    /// in slot order.
+    #[allow(clippy::too_many_arguments)]
+    fn cell_step(
+        &self,
+        m: MetabolicChemistry,
+        chem: &ChemTable,
+        toxic: &[(usize, i32)],
+        caps: &Capacities,
+        slots: &[crate::organelle::Organelle],
+        light: i32,
+        pressure: i32,
+        cyto: &mut [i32],
+        mass: &mut i32,
+        energy: &mut i32,
+        damage: &mut i32,
+        age: &mut u32,
+        emission: &mut [i32; crate::organelle::OrganelleType::EM_BANDS],
+        ledger: &mut Ledger,
+        report: &mut MetabolicReport,
+    ) -> CellFate {
+        let mut fate = CellFate::default();
+        // --- photosynthesis: 2 waste + light -> substrate + oxidant ---
+        //
+        // Once per pathway that this cell has a chloroplast on. A cell with two
+        // chloroplasts set to different reactions runs both, which is what makes a
+        // generalist possible and expensive at the same time.
+        if light > 0 {
+            let by_pathway = (*caps).photosynthesis;
             for (n, &capacity) in by_pathway.iter().enumerate() {
                 if capacity <= 0 {
                     continue;
@@ -691,205 +849,247 @@ impl Metabolism {
                     continue;
                 };
                 let latent_per_unit = self.latent_of(chem, p.substrate);
-                let (sub, ox) = {
-                    let interior = cells.interior(i);
-                    (interior[p.substrate], interior[p.oxidant])
-                };
-                let burn = capacity.min(sub).min(ox).max(0);
-                if burn <= 0 {
+                // Bounded by machinery, by the waste on hand, and by the light falling on
+                // it. Two units of waste make one of substrate and one of oxidant.
+                let waste_available = (&*cyto)[p.waste];
+                let by_light = q10_scale(capacity, light);
+                let pairs = by_light.min(waste_available / 2).max(0);
+                if pairs <= 0 {
                     continue;
                 }
-                let released = (burn as i64 * latent_per_unit as i64) / Q10_ONE as i64;
-                let recovered =
-                    (released * self.rates.respiration_efficiency as i64) / Q10_ONE as i64;
-                // Two units come out for the two that went in, but not all of it is inert: a
-                // share is reactive, and that share is what ages the cell.
-                let exhaust = burn.saturating_mul(2);
-                let reactive = q10_scale(exhaust, self.rates.reactive_fraction).min(exhaust);
-                let inert = exhaust.saturating_sub(reactive);
-
-                let interior = cells.interior_mut(i);
-                interior[p.substrate] = interior[p.substrate].saturating_sub(burn);
-                interior[p.oxidant] = interior[p.oxidant].saturating_sub(burn);
-                interior[p.waste] = interior[p.waste].saturating_add(inert);
-                interior[p.reactive] = interior[p.reactive].saturating_add(reactive);
-
-                // Reported as two balanced reactions, so the per-species claim stays exact and
-                // an unaccounted transmutation still shows up as drift.
-                let from_substrate = burn.min(inert);
-                ledger.convert(p.substrate, p.waste, from_substrate as i64);
-                ledger.convert(
-                    p.substrate,
-                    p.reactive,
-                    burn.saturating_sub(from_substrate) as i64,
-                );
-                let oxidant_inert = inert.saturating_sub(from_substrate);
-                ledger.convert(p.oxidant, p.waste, oxidant_inert as i64);
-                ledger.convert(
-                    p.oxidant,
-                    p.reactive,
-                    burn.saturating_sub(oxidant_inert) as i64,
-                );
-                report.reactive += reactive as i64;
-
-                cells.energy[i] = cells.energy[i].saturating_add(crate::fixed::sat_i32(recovered));
-                // The latent energy left the substrate; part became cell energy and the rest
-                // became heat. Stored is unchanged by the first and reduced by the second,
-                // which is exactly what dissipating the difference says.
-                report.dissipated += ledger.dissipate(released - recovered);
-                report.burned += burn as i64;
-            }
-
-            // --- growth: cytoplasm becoming body ---
-            //
-            // A cell puts structural matter into itself up to what its membrane can hold, and
-            // its membrane's size is what says how big it means to be. This is the other half
-            // of division: a daughter is born at half its parent's mass and has to earn the
-            // rest back before it can divide in turn, which is what makes structural matter
-            // the thing a population is ultimately limited by.
-            //
-            // Not a species change — the same chemical, moved from the cytoplasm to the body —
-            // so it needs no ledger entry, only for both compartments to be counted.
-            {
-                let membrane = cells.slots(i)[0];
-                let target =
-                    q10(membrane.param as i32).saturating_add((membrane.control[1] as i32).max(0));
-                let room = target.saturating_sub(cells.mass[i]);
-                // And somewhere to put it. A cell wedged among neighbours cannot get bigger
-                // any more than it can bud, and for the same reason.
-                //
-                // Growth was gated on nothing at all, which is how a slide with a bounded
-                // *population* still ended up with 125% of its area covered in cells: division
-                // stopped, and then every cell went on enlarging towards a target set by its
-                // membrane parameter whether or not there was room. Overlap at that density is
-                // not something a solver can fix — no arrangement of those cells has them clear
-                // of each other, so the core floor cannot be honoured at any price.
-                //
-                // The matter simply stays in the cytoplasm, which is where it came from. That is
-                // conserving, and it is not free storage either: the interior has a capacity
-                // (see `biology::interior_capacity`), so a cell that cannot spend what it has
-                // stops being able to take any more in.
-                let wedged = self.rates.growth_pressure > 0
-                    && pressure.get(i).copied().unwrap_or(0) > self.rates.growth_pressure;
-                if room > 0 && !wedged {
-                    let sc = m.structural % CHEM_COUNT;
-                    let available = cells.interior(i)[sc];
-                    let grown = self.rates.growth_rate.min(room).min(available);
-                    if grown > 0 {
-                        cells.interior_mut(i)[sc] = cells.interior(i)[sc].saturating_sub(grown);
-                        cells.mass[i] = cells.mass[i].saturating_add(grown);
-                        report.grown += grown as i64;
-                    }
-                }
-            }
-
-            // Note what does *not* happen here: a cell does not decompose its own peroxide.
-            //
-            // It decomposes in the water, and only there. Real hydrogen peroxide needs
-            // catalase to break down at any speed, and catalase is a lysosome — an M8
-            // organelle this cell does not have. So the only way out of a cytoplasm is to
-            // excrete it, and a cell that will not is stuck with it.
-            //
-            // This was the other way round to begin with, and the consequence was worth
-            // recording: with interior decay, retaining peroxide was an *advantage*, because
-            // it decayed into carbon dioxide right where photosynthesis needed it. The strain
-            // that dutifully excreted its waste lost, every time, for having given away its
-            // own food supply. A believable mechanism, an emergent result, and the exact
-            // opposite of the physics it was meant to model.
-
-            // --- toxicity: membrane damage from what the cell is carrying (SPEC §7.1) ---
-            //
-            // A toxin does harm only above a threshold, so carrying a little is survivable
-            // and carrying a lot is not. That is what makes excreting it a strategy rather
-            // than a formality, and what gives a `PUMP` something to be for.
-            {
-                let mut inflicted = 0i32;
-                let interior = cells.interior(i);
-                for &(c, toxicity) in toxic {
-                    let held: i32 = interior.get(c).copied().unwrap_or(0);
-                    let excess = held.saturating_sub(self.rates.toxicity_threshold);
-                    if excess > 0 {
-                        inflicted = inflicted.saturating_add(q10_scale(excess, toxicity));
-                    }
-                }
-                // Wear, on top of whatever the cell is poisoning itself with. Everything ages
-                // now, including the cells that never respire.
-                inflicted = inflicted.saturating_add(self.rates.background_damage.max(0));
-
-                // Repair, as far as the cell can pay for it. Bounded by three things: the
-                // damage there is to mend, the rate it can mend at, and what it can afford.
-                let want = self.rates.repair_per_tick.min(cells.damage[i]).max(0);
-                let repaired = if self.rates.repair_energy_per_unit > 0 && want > 0 {
-                    let affordable = ((cells.energy[i] as i64 * Q10_ONE as i64)
-                        / self.rates.repair_energy_per_unit as i64)
-                        .min(want as i64) as i32;
-                    let spent = q10_scale(affordable, self.rates.repair_energy_per_unit);
-                    cells.energy[i] = cells.energy[i].saturating_sub(spent);
-                    report.dissipated += ledger.dissipate(spent as i64);
-                    affordable
+                let gained_latent = (pairs as i64 * latent_per_unit as i64) / Q10_ONE as i64;
+                // The light it took to bank that much, plus what was lost as heat.
+                let absorbed = if self.rates.photosynthesis_efficiency > 0 {
+                    (gained_latent * Q10_ONE as i64)
+                        / self.rates.photosynthesis_efficiency as i64
                 } else {
-                    want
+                    gained_latent
                 };
-                cells.damage[i] = cells.damage[i]
-                    .saturating_sub(repaired)
-                    .saturating_add(inflicted)
-                    .max(0);
-                report.damage += inflicted as i64;
+                let interior = &mut *cyto;
+                interior[p.waste] = interior[p.waste].saturating_sub(pairs * 2);
+                interior[p.substrate] = interior[p.substrate].saturating_add(pairs);
+                interior[p.oxidant] = interior[p.oxidant].saturating_add(pairs);
+                // Two units of waste became one of substrate and one of oxidant. Reported
+                // rather than done silently: an unaccounted transmutation is
+                // indistinguishable from a conservation bug (I4).
+                ledger.convert(p.waste, p.substrate, pairs as i64);
+                ledger.convert(p.waste, p.oxidant, pairs as i64);
 
-                // A membrane fails when the damage exceeds what was invested in it. That is
-                // why membrane investment is a real trade-off and not just a number: it is
-                // the cell's tolerance for its own chemistry.
-                let tolerance = q10(cells.slots(i)[0].param as i32).max(q10(1));
-                if cells.damage[i] > tolerance {
-                    starving.push(cells.id_at(i));
-                    report.poisoned = report.poisoned.saturating_add(1);
-                }
+                ledger.absorb(absorbed);
+                let waste_heat = absorbed.saturating_sub(gained_latent);
+                fate.dissipate = fate.dissipate.saturating_add((waste_heat).max(0));
+                report.absorbed += absorbed;
+                report.fixed += pairs as i64;
             }
-
-            // --- upkeep: the cost of being alive ---
-            //
-            // The floor first, then what the body costs, then what the cytoplasm costs. A cell
-            // that has shed everything still pays to be a cell.
-            //
-            // Turgor goes in here rather than beside it deliberately: a cell that cannot meet
-            // its bill is dying, and there is no reason a bill it ran up by hoarding should be
-            // the one bill that cannot kill. It does not kill *suddenly*, which is the property
-            // that matters — the charge rises smoothly with the load, so a lineage that is
-            // over the line burns down a buffer measured in thousands of ticks and has all of
-            // that time to excrete, build a vacuole, or divide the load in half. What it cannot
-            // do is hold the matter and pay nothing.
-            let upkeep = self
-                .rates
-                .metabolic_floor
-                .max(0)
-                .saturating_add(capacities[i].upkeep)
-                .saturating_add(turgor_cost(
-                    &self.rates,
-                    crate::biology::osmotic_load_against(
-                        cells.interior(i),
-                        capacities[i].sequestered,
-                    ),
-                ))
-                .saturating_add(leak_cost(&self.rates, cells.energy[i]));
-            if upkeep > 0 {
-                let paid = cells.energy[i].min(upkeep);
-                cells.energy[i] = cells.energy[i].saturating_sub(paid);
-                report.dissipated += ledger.dissipate(paid as i64);
-                // What it actually paid, not what it owed — so a cell that cannot meet its
-                // upkeep dims, which is what starving looks like from the outside.
-                cells.emit_energy(i, crate::organelle::OrganelleType::EM_METABOLIC, paid);
-                if paid < upkeep {
-                    // It could not pay. A cell that cannot meet its own upkeep is dying, and
-                    // the bookkeeping phase is where that is acted on.
-                    starving.push(cells.id_at(i));
-                    report.starved = report.starved.saturating_add(1);
-                }
-            }
-
-            cells.age[i] = cells.age[i].saturating_add(1);
         }
 
-        report
+        // --- respiration: substrate + oxidant -> waste + energy ---
+        let by_pathway = (*caps).respiration;
+        for (n, &capacity) in by_pathway.iter().enumerate() {
+            if capacity <= 0 {
+                continue;
+            }
+            let Some(p) = m.pathways.get(n) else {
+                continue;
+            };
+            let latent_per_unit = self.latent_of(chem, p.substrate);
+            let (sub, ox) = {
+                let interior = &*cyto;
+                (interior[p.substrate], interior[p.oxidant])
+            };
+            let burn = capacity.min(sub).min(ox).max(0);
+            if burn <= 0 {
+                continue;
+            }
+            let released = (burn as i64 * latent_per_unit as i64) / Q10_ONE as i64;
+            let recovered =
+                (released * self.rates.respiration_efficiency as i64) / Q10_ONE as i64;
+            // Two units come out for the two that went in, but not all of it is inert: a
+            // share is reactive, and that share is what ages the cell.
+            let exhaust = burn.saturating_mul(2);
+            let reactive = q10_scale(exhaust, self.rates.reactive_fraction).min(exhaust);
+            let inert = exhaust.saturating_sub(reactive);
+
+            let interior = &mut *cyto;
+            interior[p.substrate] = interior[p.substrate].saturating_sub(burn);
+            interior[p.oxidant] = interior[p.oxidant].saturating_sub(burn);
+            interior[p.waste] = interior[p.waste].saturating_add(inert);
+            interior[p.reactive] = interior[p.reactive].saturating_add(reactive);
+
+            // Reported as two balanced reactions, so the per-species claim stays exact and
+            // an unaccounted transmutation still shows up as drift.
+            let from_substrate = burn.min(inert);
+            ledger.convert(p.substrate, p.waste, from_substrate as i64);
+            ledger.convert(
+                p.substrate,
+                p.reactive,
+                burn.saturating_sub(from_substrate) as i64,
+            );
+            let oxidant_inert = inert.saturating_sub(from_substrate);
+            ledger.convert(p.oxidant, p.waste, oxidant_inert as i64);
+            ledger.convert(
+                p.oxidant,
+                p.reactive,
+                burn.saturating_sub(oxidant_inert) as i64,
+            );
+            report.reactive += reactive as i64;
+
+            (*energy) = (*energy).saturating_add(crate::fixed::sat_i32(recovered));
+            // The latent energy left the substrate; part became cell energy and the rest
+            // became heat. Stored is unchanged by the first and reduced by the second,
+            // which is exactly what dissipating the difference says.
+            fate.dissipate = fate.dissipate.saturating_add((released - recovered).max(0));
+            report.burned += burn as i64;
+        }
+
+        // --- growth: cytoplasm becoming body ---
+        //
+        // A cell puts structural matter into itself up to what its membrane can hold, and
+        // its membrane's size is what says how big it means to be. This is the other half
+        // of division: a daughter is born at half its parent's mass and has to earn the
+        // rest back before it can divide in turn, which is what makes structural matter
+        // the thing a population is ultimately limited by.
+        //
+        // Not a species change — the same chemical, moved from the cytoplasm to the body —
+        // so it needs no ledger entry, only for both compartments to be counted.
+        {
+            let membrane = slots[0];
+            let target =
+                q10(membrane.param as i32).saturating_add((membrane.control[1] as i32).max(0));
+            let room = target.saturating_sub(*mass);
+            // And somewhere to put it. A cell wedged among neighbours cannot get bigger
+            // any more than it can bud, and for the same reason.
+            //
+            // Growth was gated on nothing at all, which is how a slide with a bounded
+            // *population* still ended up with 125% of its area covered in cells: division
+            // stopped, and then every cell went on enlarging towards a target set by its
+            // membrane parameter whether or not there was room. Overlap at that density is
+            // not something a solver can fix — no arrangement of those cells has them clear
+            // of each other, so the core floor cannot be honoured at any price.
+            //
+            // The matter simply stays in the cytoplasm, which is where it came from. That is
+            // conserving, and it is not free storage either: the interior has a capacity
+            // (see `biology::interior_capacity`), so a cell that cannot spend what it has
+            // stops being able to take any more in.
+            let wedged = self.rates.growth_pressure > 0
+                && pressure > self.rates.growth_pressure;
+            if room > 0 && !wedged {
+                let sc = m.structural % CHEM_COUNT;
+                let available = (&*cyto)[sc];
+                let grown = self.rates.growth_rate.min(room).min(available);
+                if grown > 0 {
+                    (&mut *cyto)[sc] = (&*cyto)[sc].saturating_sub(grown);
+                    (*mass) = (*mass).saturating_add(grown);
+                    report.grown += grown as i64;
+                }
+            }
+        }
+
+        // Note what does *not* happen here: a cell does not decompose its own peroxide.
+        //
+        // It decomposes in the water, and only there. Real hydrogen peroxide needs
+        // catalase to break down at any speed, and catalase is a lysosome — an M8
+        // organelle this cell does not have. So the only way out of a cytoplasm is to
+        // excrete it, and a cell that will not is stuck with it.
+        //
+        // This was the other way round to begin with, and the consequence was worth
+        // recording: with interior decay, retaining peroxide was an *advantage*, because
+        // it decayed into carbon dioxide right where photosynthesis needed it. The strain
+        // that dutifully excreted its waste lost, every time, for having given away its
+        // own food supply. A believable mechanism, an emergent result, and the exact
+        // opposite of the physics it was meant to model.
+
+        // --- toxicity: membrane damage from what the cell is carrying (SPEC §7.1) ---
+        //
+        // A toxin does harm only above a threshold, so carrying a little is survivable
+        // and carrying a lot is not. That is what makes excreting it a strategy rather
+        // than a formality, and what gives a `PUMP` something to be for.
+        {
+            let mut inflicted = 0i32;
+            let interior = &*cyto;
+            for &(c, toxicity) in toxic {
+                let held: i32 = interior.get(c).copied().unwrap_or(0);
+                let excess = held.saturating_sub(self.rates.toxicity_threshold);
+                if excess > 0 {
+                    inflicted = inflicted.saturating_add(q10_scale(excess, toxicity));
+                }
+            }
+            // Wear, on top of whatever the cell is poisoning itself with. Everything ages
+            // now, including the cells that never respire.
+            inflicted = inflicted.saturating_add(self.rates.background_damage.max(0));
+
+            // Repair, as far as the cell can pay for it. Bounded by three things: the
+            // damage there is to mend, the rate it can mend at, and what it can afford.
+            let want = self.rates.repair_per_tick.min(*damage).max(0);
+            let repaired = if self.rates.repair_energy_per_unit > 0 && want > 0 {
+                let affordable = (((*energy) as i64 * Q10_ONE as i64)
+                    / self.rates.repair_energy_per_unit as i64)
+                    .min(want as i64) as i32;
+                let spent = q10_scale(affordable, self.rates.repair_energy_per_unit);
+                (*energy) = (*energy).saturating_sub(spent);
+                fate.dissipate = fate.dissipate.saturating_add((spent as i64).max(0));
+                affordable
+            } else {
+                want
+            };
+            (*damage) = (*damage)
+                .saturating_sub(repaired)
+                .saturating_add(inflicted)
+                .max(0);
+            report.damage += inflicted as i64;
+
+            // A membrane fails when the damage exceeds what was invested in it. That is
+            // why membrane investment is a real trade-off and not just a number: it is
+            // the cell's tolerance for its own chemistry.
+            let tolerance = q10(slots[0].param as i32).max(q10(1));
+            if (*damage) > tolerance {
+                fate.poisoned = true;
+                report.poisoned = report.poisoned.saturating_add(1);
+            }
+        }
+
+        // --- upkeep: the cost of being alive ---
+        //
+        // The floor first, then what the body costs, then what the cytoplasm costs. A cell
+        // that has shed everything still pays to be a cell.
+        //
+        // Turgor goes in here rather than beside it deliberately: a cell that cannot meet
+        // its bill is dying, and there is no reason a bill it ran up by hoarding should be
+        // the one bill that cannot kill. It does not kill *suddenly*, which is the property
+        // that matters — the charge rises smoothly with the load, so a lineage that is
+        // over the line burns down a buffer measured in thousands of ticks and has all of
+        // that time to excrete, build a vacuole, or divide the load in half. What it cannot
+        // do is hold the matter and pay nothing.
+        let upkeep = self
+            .rates
+            .metabolic_floor
+            .max(0)
+            .saturating_add((*caps).upkeep)
+            .saturating_add(turgor_cost(
+                &self.rates,
+                crate::biology::osmotic_load_against(
+                    &*cyto,
+                    (*caps).sequestered,
+                ),
+            ))
+            .saturating_add(leak_cost(&self.rates, *energy));
+        if upkeep > 0 {
+            let paid = (*energy).min(upkeep);
+            (*energy) = (*energy).saturating_sub(paid);
+            fate.dissipate = fate.dissipate.saturating_add((paid as i64).max(0));
+            // What it actually paid, not what it owed — so a cell that cannot meet its
+            // upkeep dims, which is what starving looks like from the outside.
+            emit_into(emission, crate::organelle::OrganelleType::EM_METABOLIC, paid);
+            if paid < upkeep {
+                // It could not pay. A cell that cannot meet its own upkeep is dying, and
+                // the bookkeeping phase is where that is acted on.
+                fate.starved = true;
+                report.starved = report.starved.saturating_add(1);
+            }
+        }
+
+        (*age) = (*age).saturating_add(1);
+        fate
     }
 
     /// How much matter one cell's organelles of a given type can convert this tick.
