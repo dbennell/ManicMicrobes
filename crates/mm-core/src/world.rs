@@ -702,6 +702,7 @@ impl World {
                 &mut self.pressure,
                 blocked,
                 &self.biology.metabolism.rates,
+                self.biology.separation_relax,
                 &mut self.separation,
             );
         }

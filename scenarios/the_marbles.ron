@@ -52,4 +52,36 @@
     inhabitants: [
         (genome: "marble.mm", count: 16),
     ],
+
+    // The other half of being a marble, and it only works as a pair with the genome.
+    //
+    // A firm cell is drawn at its true radius rather than 15% over it, so it crosses its
+    // neighbours barely and the plane through the crossings barely cuts it. That takes a packed
+    // sheet from 0.387 out of round — more angular than a square — to 0.167, between a hexagon and
+    // a circle. **The rest of the distance is the cells not being pressed into one another**, and
+    // that is not something a renderer can give: at a spacing where nothing physically touches the
+    // same firmness reaches 0.088, rounder than a hexagon.
+    //
+    // `rigidity_gain` is what buys it. Wall times turgor scales `neighbours::core_permille`
+    // towards `CORE_PERMILLE_RIGID`, which is a thousand — exactly tangency — so any overlap at
+    // all is past the core and takes the stiff response. A firm cell cannot be that close to
+    // another without pushing it away, which is what "marble" means mechanically.
+    //
+    // `separation_relax` is what makes that survivable. With the core at tangency every contact
+    // takes the stiff branch, where it had been the rare deep-penetration case, and the
+    // corrections are summed across a cell's neighbours — so a crowded cell is shoved several
+    // times as far as any one contact asked for and the pack buzzes at 662 thousandths of a square
+    // a tick. An eighth takes that to **7**, and leaves the pack better separated as well: 14% of
+    // near pairs overlapping against 19%.
+    //
+    // Both are zero in `BiologyConfig::default`, for the reason `light_occlusion` is: they change
+    // what a slide holds, and every acceptance result in the tree was taken without them.
+    biology: (
+        separation_relax: 128,
+        metabolism: (
+            rates: (
+                rigidity_gain: 16384,
+            ),
+        ),
+    ),
 )

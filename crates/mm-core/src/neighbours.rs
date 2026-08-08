@@ -39,7 +39,7 @@
 use rayon::prelude::*;
 
 use crate::cell::CellArena;
-use crate::fixed::{pos_to_square, POS_ONE};
+use crate::fixed::{pos_to_square, Q10_ONE, POS_ONE};
 use crate::sensing::TouchReading;
 
 /// The closest two cells may be pressed together, as a fraction of the distance at which their
@@ -61,7 +61,7 @@ use crate::sensing::TouchReading;
 /// still apart, so respecting the core here does not stop the renderer cutting a small cell away.
 pub const CORE_PERMILLE: i32 = 950;
 
-/// The stiffest a cell can be, in the same permille. Just short of a thousand, on measurement.
+/// The stiffest a cell can be, in the same permille. **A thousand: it does not overlap at all.**
 ///
 /// This was 995, on the reasoning that two cells which cannot overlap share no wall, and SPEC §6.4
 /// is explicit that the resting overlap *is* the tissue and that circles which do not overlap
@@ -82,24 +82,23 @@ pub const CORE_PERMILLE: i32 = 950;
 /// a firm cell cannot be that close to another without pushing it away, which is the whole of
 /// what "marble" means mechanically.
 ///
-/// **A thousand was tried and put back, and the two reasons are the finding.** At exactly tangency
-/// `want == core`, so the band `pressure` is normalised against collapses to nothing; the guard
-/// skips it, pressure is never accumulated, and `split_pressure` and `growth_pressure` both stop
-/// working — a settled pack went from 266 cells to 394 and tripled its jitter. That half is fixed,
-/// by normalising pressure against a fixed reference band instead of the pair's own.
+/// **A thousand was tried, put back, and then reached properly, and the route is the finding.**
 ///
-/// The other half is not. With the core at tangency every contact takes the stiff branch, where
-/// it used to be the rare deep-penetration case, and the corrections are *summed* across a cell's
-/// neighbours — so a crowded cell is shoved several times as far as any one contact asked for and
-/// the pack buzzes at 662 thousandths of a square a tick against a soft one's 63. Averaging the
-/// shoves fixes it completely and costs 69% of the carrying capacity, which is a separate piece of
-/// work; see the note at the end of `correction_for`.
+/// The first attempt broke two things at once. `pressure` was normalised against the pair's own
+/// band, `want - core`, which at tangency is zero — the guard skipped it, pressure was never
+/// accumulated, and `split_pressure` and `growth_pressure` both silently stopped working. That is
+/// fixed by normalising against a fixed reference band, which is also the right meaning: pressure
+/// is how hard a cell is being squeezed, not how far through its own range it is.
 ///
-/// So 995: stiff enough that a firm pair rests essentially tangent, short enough that the band
-/// survives and the stiff branch stays the exception. A soft cell is unaffected either way —
-/// [`CORE_PERMILLE`] is still 950 and `rigidity_gain` is still zero by default, so a tissue still
-/// tessellates and still shares its walls.
-pub const CORE_PERMILLE_RIGID: i32 = 995;
+/// The second was that with the core at tangency every contact takes the stiff branch, where it
+/// had been the rare deep-penetration case, and the corrections were *summed* across a cell's
+/// neighbours. A rigid pack buzzed at 110 thousandths of a square a tick against a soft one's 18.
+/// `BiologyConfig::separation_relax` is the dial that fixes it, and an eighth is enough: 110 falls
+/// to 9, which is quieter than the soft pack was before any of this.
+///
+/// A soft cell is unaffected: [`CORE_PERMILLE`] is still 950 and `rigidity_gain` is still zero by
+/// default, so a tissue still tessellates and still shares its walls.
+pub const CORE_PERMILLE_RIGID: i32 = 1000;
 
 /// Where one cell stops compressing, in permille of its own radius.
 ///
@@ -902,6 +901,13 @@ struct Correction {
     touching: bool,
     /// Contacts seen, for the population-wide count.
     contacts: u32,
+    /// The part of the correction that came from the *core* branch, kept apart so it can be
+    /// under-relaxed on its own. See the note at the end of [`correction_for`].
+    sdx: i32,
+    sdy: i32,
+    /// How many contacts contributed to it. Not the same as `contacts`: a pair resting in the
+    /// soft band asks for nothing from the core.
+    stiff_contacts: u32,
 }
 
 /// Push one cell out of any blocked square its body overlaps.
@@ -1071,6 +1077,7 @@ pub fn touches_barrier(
 /// Every quantity that used to be credited to both cells of a pair is now computed by each of
 /// them about itself, which gives the same numbers — the geometry is symmetric — and removes the
 /// only reason the pass had to be sequential.
+#[allow(clippy::too_many_arguments)]
 fn correction_for(
     cells: &CellArena,
     index: &NeighbourIndex,
@@ -1079,6 +1086,7 @@ fn correction_for(
     blocked: &[bool],
     i: usize,
     first_pass: bool,
+    relax: i32,
 ) -> Correction {
     let mut out = Correction::default();
     if !cells.occupied(i) {
@@ -1192,9 +1200,9 @@ fn correction_for(
         //
         // Halved once for the sixteenths and once more because both cells move, so the pair
         // closes by the full fraction while each travels half of it.
-        let push = squeeze
-            .saturating_mul(CONTACT_STRENGTH)
-            .saturating_add(crushed.saturating_mul(CORE_STRENGTH));
+        let soft_push = squeeze.saturating_mul(CONTACT_STRENGTH);
+        let stiff_push = crushed.saturating_mul(CORE_STRENGTH);
+        let push = soft_push.saturating_add(stiff_push);
         let shove = push / 16 / 2;
         // Clamped per contact, not drawn from a per-tick pool. See [`MAX_SHOVE`]: the pool
         // starved the inside of a crowd, which is the one place that has to work.
@@ -1205,32 +1213,75 @@ fn correction_for(
         }
         out.touching = true;
         out.contacts = out.contacts.saturating_add(1);
-        out.dx = out
-            .dx
-            .saturating_add((ux as i64 * allowed as i64 / POS_ONE as i64) as i32);
-        out.dy = out
-            .dy
-            .saturating_add((uy as i64 * allowed as i64 / POS_ONE as i64) as i32);
+        // Split by which branch asked for it, so the relaxation below can be aimed at the one that
+        // needs it — but **only when there is a relaxation to aim**, because splitting one rounded
+        // multiply into two is not a no-op. Two roundings instead of one is a few `POS` units per
+        // contact, and in a system where a pack's arrangement is chaotic that is enough to
+        // reshuffle every seeded acceptance result. At `relax == 0` this is the arithmetic that
+        // shipped, digit for digit.
+        if relax > 0 {
+            let stiff = if push > 0 {
+                ((allowed as i64 * stiff_push as i64) / push as i64) as i32
+            } else {
+                0
+            };
+            let soft = allowed - stiff;
+            out.dx = out
+                .dx
+                .saturating_add((ux as i64 * soft as i64 / POS_ONE as i64) as i32);
+            out.dy = out
+                .dy
+                .saturating_add((uy as i64 * soft as i64 / POS_ONE as i64) as i32);
+            out.sdx = out
+                .sdx
+                .saturating_add((ux as i64 * stiff as i64 / POS_ONE as i64) as i32);
+            out.sdy = out
+                .sdy
+                .saturating_add((uy as i64 * stiff as i64 / POS_ONE as i64) as i32);
+            if stiff > 0 {
+                out.stiff_contacts = out.stiff_contacts.saturating_add(1);
+            }
+        } else {
+            out.dx = out
+                .dx
+                .saturating_add((ux as i64 * allowed as i64 / POS_ONE as i64) as i32);
+            out.dy = out
+                .dy
+                .saturating_add((uy as i64 * allowed as i64 / POS_ONE as i64) as i32);
+        }
     }
 
-    // **Not** under-relaxed, and there is a measurement behind that which is worth keeping.
+    // The stiff corrections, shared out among the contacts that asked for them.
     //
-    // Each contact asks for the correction that would fix that pair on its own, and these are
-    // *summed*, so a cell with six neighbours can be moved up to six times as far as any one of
-    // them wanted. That is a textbook over-relaxation and averaging them is the textbook fix. It
-    // works, on the thing it is aimed at: a settled pack's residual jitter falls from 59
-    // thousandths of a square a tick to 11, and a *rigid* pack — see `CORE_PERMILLE_RIGID` — from
-    // 662 to the same 11, which is the difference between a crowd that buzzes and one that sits
-    // still.
+    // Each contact computes what would fix that pair on its own, and summing six of them moves a
+    // cell six times as far as any one wanted. That is a textbook over-relaxation, and the
+    // textbook fix is to divide by the number of constraints: the divisor is
+    // `1 + (n - 1) * relax`, so zero is exactly the sum and `Q10_ONE` is exactly the average.
     //
-    // It also takes the settled population of a 64-square slide from 244 cells to **75**. Gentler
-    // separation leaves pairs resting where the sum would have driven them apart, and everything
-    // downstream of that — `split_pressure`, `growth_pressure`, the carrying capacity — moves with
-    // it. A 69% change in what a slide holds is not a rendering detail smuggled in behind a
-    // stiffness knob; it is its own piece of work, with its own before-and-after across the
-    // acceptance runs.
+    // **Only the stiff branch, and that is the whole of why this is safe.** The soft response is a
+    // thirty-second of the overlap and six of them do not overshoot anything; it is the core's
+    // sixteen-sixteenths that does, and for a cell of default stiffness that branch is the rare
+    // deep-penetration case rather than every contact. So a soft population is left almost exactly
+    // as it was — which matters, because relaxing *everything* was tried and it moved things that
+    // have nothing to do with jitter: `sponge`'s filter feeder stopped out-gathering a cell with
+    // no holdfast, and the settled population of a stress slide fell a fifth. A rigid population,
+    // where the stiff branch fires on every contact, is where the correction belongs and is the
+    // only place it lands.
     //
-    // Left summed until then. The jitter is real, the fix is known, and the price is written down.
+    // **The barrier's shove is held out of it entirely.** A wall is immovable and its correction is
+    // one-sided — there is no pair to share it with — so dividing it by however many cells happen
+    // to be touching lets a crowded cell sink into it. That broke the filter feeder outright the
+    // first time this was written, for a different reason than the one above and with the same
+    // symptom.
+    let (mut sdx, mut sdy) = (out.sdx, out.sdy);
+    if out.stiff_contacts > 1 && relax > 0 {
+        let n = (out.stiff_contacts - 1) as i64;
+        let divisor = (Q10_ONE as i64).saturating_add(n.saturating_mul(relax as i64)).max(1);
+        sdx = ((sdx as i64 * Q10_ONE as i64) / divisor) as i32;
+        sdy = ((sdy as i64 * Q10_ONE as i64) / divisor) as i32;
+    }
+    out.dx = out.dx.saturating_add(sdx);
+    out.dy = out.dy.saturating_add(sdy);
     out
 }
 
@@ -1303,6 +1354,7 @@ pub fn resolve_collisions(
     pressure: &mut Vec<i32>,
     blocked: &[bool],
     rates: &crate::metabolism::MetabolicRates,
+    relax: i32,
     scratch: &mut SeparationScratch,
 ) -> u32 {
     let mut separated = 0u32;
@@ -1403,7 +1455,9 @@ pub fn resolve_collisions(
             .map(|&i| {
                 (
                     i,
-                    correction_for(arena, index, radii_ref, perm_ref, blocked, i as usize, first),
+                    correction_for(
+                        arena, index, radii_ref, perm_ref, blocked, i as usize, first, relax,
+                    ),
                 )
             })
             .collect_into_vec(deltas);
@@ -1596,6 +1650,7 @@ mod tests {
             pressure,
             blocked,
             &crate::metabolism::MetabolicRates::default(),
+            crate::biology::BiologyConfig::default().separation_relax,
             scratch,
         )
     }

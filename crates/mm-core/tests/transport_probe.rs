@@ -110,6 +110,8 @@ thread_local! {
     /// Set by the rigidity sweep, so the world builders above do not all grow a parameter that
     /// only one test varies.
     static RIGIDITY: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+    /// The same, for the separation solver's under-relaxation.
+    static RELAX: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
 }
 
 /// Carbon, carbon dioxide, oxygen, peroxide. The four the default loop actually moves.
@@ -184,6 +186,7 @@ fn growth_world_shaded(
     };
     biology.metabolism.rates.light_occlusion = occlusion;
     biology.metabolism.rates.rigidity_gain = RIGIDITY.with(|r| r.get());
+    biology.separation_relax = RELAX.with(|r| r.get());
     world.set_biology(biology);
     let genome = world.genomes().intern(ancestor()).expect("intern");
     let id = world.spawn_cell(CellSeed {
@@ -588,8 +591,13 @@ fn does_a_settled_pack_hold_still() {
     // argued.
     let size = 32u32;
     let settle = 4_000u64;
-    for (label, gain) in [("rigidity off", 0i32), ("rigidity 16x", Q10_ONE * 16)] {
+    for (label, gain, relax) in [
+        ("soft, as shipped", 0i32, 0i32),
+        ("rigid, relax off", Q10_ONE * 16, 0),
+        ("rigid, relax 1/8", Q10_ONE * 16, Q10_ONE / 8),
+    ] {
         RIGIDITY.with(|r| r.set(gain));
+        RELAX.with(|r| r.set(relax));
         let mut world = growth_world_shaded(size, 8, 40, 400, 400, 1, Q10_ONE / 8);
         world.run(settle);
 
@@ -684,7 +692,7 @@ fn does_a_settled_pack_hold_still() {
             prev = now;
         }
         println!(
-            "  {label:<14} pop {:>4}   move/tick {:>4} thousandths   core {}..{}   \
+            "  {label:<18} pop {:>4}   move/tick {:>4} thousandths   core {}..{}   \
              {:>4.0}% of near pairs overlap, p05 depth {:>5.1}% of touching",
             world.cells().len(),
             moved / n.max(1),
@@ -696,4 +704,96 @@ fn does_a_settled_pack_hold_still() {
         let _ = core_swing;
     }
     RIGIDITY.with(|r| r.set(0));
+    RELAX.with(|r| r.set(0));
+}
+
+// ---------------------------------------------------------------------------------------------
+// The last link: a solver that can hold a rigid pack apart without buzzing or starving it.
+
+#[test]
+#[ignore = "probe; --release --ignored --nocapture"]
+fn what_relaxation_costs_and_buys() {
+    // Summing every contact's correction over-relaxes a crowded cell and the pack buzzes;
+    // averaging them is dead still. `BiologyConfig::separation_relax` is the dial between, and
+    // this is where its value comes from.
+    //
+    // **Five seeds, and the first version of this used one.** Single readings gave 247, 284, 139
+    // and 195 cells at four consecutive settings, and jitter of 76, 187, 6 and 7 — both columns
+    // non-monotone, which is `CHEMISTRY.md` §6's warning arriving on schedule: a population on
+    // these slides overshoots, starves back and settles, so one reading at one tick is a phase
+    // sample and two of them can rank either way by luck.
+    //
+    // The recipe is `seam_slots`' — `Scenario::stress` with sixteen founders — because that is the
+    // acceptance test this has to not break, and measuring something adjacent to it would be
+    // measuring the wrong slide.
+    let size = 64u32;
+    let ticks = 4_000u64;
+    let seeds = [1u64, 2, 3, 4, 5];
+    let bytes = ancestor();
+    println!(
+        "\nRELAX  {size}² slide, {ticks} ticks, 16 founders, {} seeds, Scenario::stress.\n\
+         0 sums the contacts (what shipped), 1024 averages them. Jitter in thousandths of a\n\
+         square a tick, over twenty ticks, keyed by cell so births and deaths do not count.",
+        seeds.len()
+    );
+    println!("  relax   rigidity          population            jitter");
+    for relax in [0i32, 64, 128, 256, 1024] {
+        for (label, gain) in [("off", 0i32), ("16x", Q10_ONE * 16)] {
+            let (mut pops, mut jit) = (Vec::new(), Vec::new());
+            for seed in seeds {
+                let mut world = World::new(Scenario {
+                    seed,
+                    width: size,
+                    height: size,
+                    ..Scenario::stress(size, size)
+                })
+                .expect("world");
+                let mut biology = BiologyConfig::default();
+                biology.separation_relax = relax;
+                biology.metabolism.rates.rigidity_gain = gain;
+                world.set_biology(biology);
+                world.place_founders(&bytes, 16);
+                world.run(ticks);
+                pops.push(world.cells().len() as f64);
+
+                type Seen = std::collections::BTreeMap<u64, (i64, i64)>;
+                let pos_of = |w: &World| -> Seen {
+                    w.cells()
+                        .iter()
+                        .map(|i| {
+                            (
+                                w.cells().id_at(i).ordering_key(),
+                                (w.cells().x[i] as i64, w.cells().y[i] as i64),
+                            )
+                        })
+                        .collect()
+                };
+                let mut prev = pos_of(&world);
+                let (mut moved, mut n) = (0i64, 0i64);
+                for _ in 0..20 {
+                    world.run(1);
+                    let now = pos_of(&world);
+                    for (key, b) in &now {
+                        let Some(a) = prev.get(key) else { continue };
+                        let d = (((a.0 - b.0).pow(2) + (a.1 - b.1).pow(2)) as f64).sqrt();
+                        moved += (d * 1000.0 / POS_ONE as f64) as i64;
+                        n += 1;
+                    }
+                    prev = now;
+                }
+                jit.push((moved / n.max(1)) as f64);
+            }
+            let stat = |v: &[f64]| -> String {
+                let mean = v.iter().sum::<f64>() / v.len().max(1) as f64;
+                let lo = v.iter().cloned().fold(f64::INFINITY, f64::min);
+                let hi = v.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                format!("{mean:>5.0} [{lo:>4.0}-{hi:>4.0}]")
+            };
+            println!(
+                "  {relax:>5}   {label:>8}   {}   {}",
+                stat(&pops),
+                stat(&jit)
+            );
+        }
+    }
 }

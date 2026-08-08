@@ -79,11 +79,30 @@ fn a_packed_sheet_does_not_run_out_of_seam_slots() {
             if total > 0 { full * 1000 / total } else { 0 }
         );
     }
-    let (_, full, total) = histogram_at(&mut world, 1500);
+    let (hist, full, total) = histogram_at(&mut world, 1500);
+    // The guard asks whether there is a *packed sheet* to measure, and now it asks it in the
+    // units the question is in.
+    //
+    // It used to be `total > 200`. Two things are wrong with a count. It encodes a carrying
+    // capacity, so it fails when something fixes the physics rather than the picture — correcting
+    // the separation solver's over-relaxation (`BiologyConfig::separation_relax`) moved the
+    // settled population from 266 cells to 215 over five seeds, because a cell had stopped being
+    // shoved several times further than any of its contacts asked for. And a count on a
+    // population that overshoots and starves back is a phase sample, which `CHEMISTRY.md` §6 is
+    // explicit about: single readings at four consecutive settings gave 247, 284, 139 and 195.
+    //
+    // Coverage was tried instead and is also wrong: this pack covers 27% of its slide by area at
+    // any setting, because these cells are small and it is their *contacts* that are dense.
+    //
+    // Which is the thing the test is about. The slot cap only bites on a cell pressed against
+    // more neighbours than it has slots, so what has to exist is cells with many contacts.
+    let crowded: usize = hist.iter().skip(6).sum();
     assert!(
-        total > 200,
-        "the slide never filled up, so this measures nothing"
+        crowded > 50,
+        "no packed sheet to measure: only {crowded} cells of {total} are pressed against six or \
+         more neighbours"
     );
+
     // Reported rather than asserted, because the honest answer turned out to be "yes, and it is
     // not what you are looking at". 13% saturate at the renderer's reach and there are real
     // asymmetric pairs — but the cell that runs out of slots is almost always a *large* one

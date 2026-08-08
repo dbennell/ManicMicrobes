@@ -346,6 +346,16 @@ pub const FIELDS: &[Field] = &[
                middle of a crowd is a bad place to be. Zero switches it off",
     },
     Field {
+        path: "separation_relax",
+        label: "separation relax",
+        group: Group::Metabolism,
+        unit: Unit::Q10,
+        note: "how much of a crowded cell's separation is shared out among the contacts asking \
+               for it. Zero sums them, which converges fast and makes a pack buzz; one averages \
+               them, which is still and converges so slowly a crowd never separates. An eighth \
+               is where the curve turns",
+    },
+    Field {
         path: "metabolism.rates.rigidity_gain",
         label: "rigidity gain",
         group: Group::Metabolism,

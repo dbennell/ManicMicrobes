@@ -676,6 +676,27 @@ pub struct BiologyConfig {
     ///
     /// Zero switches the check off, which is what a scenario studying unbounded growth wants.
     pub split_pressure: i32,
+    /// How much of a crowded cell's separation is shared out among the contacts asking for it,
+    /// `Q10`. Zero sums them, `Q10_ONE` averages them.
+    ///
+    /// Every contact computes the correction that would fix *that pair on its own*, and these are
+    /// added together — so a cell with six neighbours can be moved six times as far as any one of
+    /// them wanted. That is a textbook over-relaxation, and the textbook fix is to divide by the
+    /// number of contacts. Both ends are wrong in a different way and the useful part is what each
+    /// gets wrong:
+    ///
+    /// * **Summed** (zero, and what shipped) converges fast and oscillates. A settled pack buzzes
+    ///   at 59 thousandths of a square a tick — visible between consecutive frames — and a *rigid*
+    ///   one, where every contact takes the stiff branch instead of the rare deep-penetration one,
+    ///   buzzes at 662.
+    /// * **Averaged** (`Q10_ONE`) is dead still, 11 thousandths for both, and converges so slowly
+    ///   that a crowd never separates within its three passes. Measured, a 64-square slide settles
+    ///   at 75 cells where the sum holds 244.
+    ///
+    /// So it is a dial rather than a choice, and the divisor is `1 + (contacts - 1) * relax`,
+    /// which is exactly the sum at zero and exactly the average at one.
+    pub separation_relax: i32,
+
     /// Which chemical structural mass is made of. Must match the metabolism's.
     pub structural_chemical: usize,
     /// Energy per genome byte copied at full fidelity, `Q10`. Accuracy is not free.
@@ -825,6 +846,32 @@ impl Default for BiologyConfig {
             // population against 1.5. It costs about 45% of the cells against 3.0, which is the
             // honest price of them not being inside each other.
             split_pressure: q10(1),
+            // **Off, and the reason is the same one that keeps `light_occlusion` and
+            // `rigidity_gain` off.** It changes what a slide holds, and every acceptance result
+            // in the tree was taken without it. A scenario that wants a rigid population turns it
+            // on beside them; `the_thicket.ron` is where that lives.
+            //
+            // Measured over five seeds on the acceptance recipe by
+            // `transport_probe::what_relaxation_costs_and_buys`. Both columns are monotone and
+            // they pull against each other:
+            //
+            //   relax   population        jitter
+            //       0   266 [227-320]     218
+            //      64   221               163
+            //     128   215               132
+            //     256   210               112
+            //    1024    76                48
+            //
+            // No setting keeps both, and an eighth is where the curve turns: it takes 40% of the
+            // jitter for the last of the population that comes free. Past 256 the returns on
+            // jitter flatten and the cost stops being a correction and becomes a cull — full
+            // averaging holds 76 cells where the sum holds 266, because a crowd then never
+            // separates inside its three passes.
+            //
+            // The population it costs is not damage. A cell shoved six times further than any of
+            // its contacts asked for is being driven apart by a numerical artefact, and the
+            // carrying capacity that artefact supports is not one the biology earned.
+            separation_relax: 0,
             structural_chemical: 4,
             copy_energy_per_byte: Q10_ONE / 64,
             junctions: crate::junction::JunctionConfig::default(),
