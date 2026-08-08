@@ -210,3 +210,47 @@ rather than of the count.
 One thing worth fixing regardless of the number: substrate planes are allocated eagerly,
 `vec![vec![0i32; n]; CHEM_COUNT]`, even though the solver already skips the empty ones. That is
 16.8 MB of guaranteed zeroes at 512², and it would be 33.5 MB at 32.
+
+---
+
+## 6. Where the seeded carbon actually starts to bite
+
+Written when the front end grew a control for it (`docs/UI.md` §9.6). Until then the starting
+chemistry was a number in a `.ron` that nobody could change without a text editor, so nobody had
+swept it, and the obvious story — *carbon is the body, matter is conserved, therefore the carbon
+in the water is the carrying capacity* — had never been checked. It is wrong over the whole range
+anybody would think to try.
+
+64×64, `light: Uniform(819)`, 8 founders of `ancestor.mm`, CO₂ and oxidant held at 400 units a
+square, one seed, population read at tick 20,000:
+
+| carbon, units/square | population at 20k |
+| ---: | ---: |
+| 400 | 985 |
+| 40 | 988 |
+| 10 | 1032 |
+| 4 | 347 |
+| 1 | 65 |
+| 0.25 | 31 |
+
+**Flat across the top forty-fold, then a cliff.** The shipped soup seeds 400 units a square,
+which is two orders of magnitude above the knee at roughly 4–10. Anyone setting out to build a
+scarce world by halving the carbon — or by taking a tenth of it, as
+`photosynthesis_or_die.ron` does — has changed nothing about what limits the population, and
+would reasonably conclude that carbon does not matter. It matters below 10.
+
+What limits it above the knee is not established here and should not be guessed at: the same
+sweep over light intensity returned 1432, 986, 1887, 629 and 0 for 1024, 819, 512, 256 and 128,
+which is not a curve. **A population on these slides oscillates** — it overshoots, starves back
+and settles — so a single reading at a single tick is a phase sample, and two of them can rank
+either way by luck. That is a caveat on this table too: the carbon column is trustworthy because
+the effect below the knee is an order of magnitude and monotonic, not because one seed is enough.
+
+Two things follow, one of which is a job:
+
+1. **The `--sweep` path should report a windowed mean, not a final tick.** `mm-cli sweep` exists
+   and takes `--param`; nothing about it says the number it prints is a phase sample.
+2. **`soup.ron`'s 400 is worth revisiting.** Not lowering it — the soup is the control condition
+   and changing it invalidates every comparison made against it — but knowing that it sits a
+   hundred times above the constraint means the soup has never been a test of matter
+   conservation's ecological consequences, only of its arithmetic.
