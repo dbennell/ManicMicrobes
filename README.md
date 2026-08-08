@@ -110,9 +110,9 @@ cargo bench --workspace                      # criterion gates
 The three aliases are defined in `.cargo/config.toml`, which also says what `fast` leaves out and
 why. `full` is `cargo test --release --workspace`.
 
-`cargo fast` and `cargo build-include` are also what CI runs on every push, and what the
-`pre-push` hook runs before anything leaves the machine. Hooks are not installed by cloning, so
-in a fresh clone:
+`cargo fast` and `cargo build-include` are also what CI runs on `main` and on every pull request,
+and what the `pre-push` hook runs before anything leaves the machine. Hooks are not installed by
+cloning, so in a fresh clone:
 
 ```sh
 git config core.hooksPath .githooks

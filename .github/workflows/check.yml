@@ -14,10 +14,23 @@ name: Check
 # push. See `.cargo/config.toml` for what each alias covers and why they run in release.
 
 on:
+  # `main` only, not every branch. A topic branch of your own is already gated by the pre-push
+  # hook, and a branch with a pull request open would otherwise be tested twice for one commit —
+  # once as a push and once as the PR. A `v*` tag is `release.yml`'s, whose first job is these
+  # same two commands.
   push:
-    # Branches only. A tag push is `release.yml`'s, and its first job is these same two
-    # commands — there is no reason to run them twice against one commit.
-    branches: ["**"]
+    branches: [main]
+
+  # The half that a push cannot cover: a pull request from a fork pushes to the *fork*, so
+  # without this the run lands in a stranger's Actions tab, if it runs at all, and the PR page
+  # here shows no status. This tests the merge commit — what merging would actually produce —
+  # rather than the branch in isolation.
+  #
+  # `pull_request` and never `pull_request_target`. The difference is that this one gives a fork's
+  # code a read-only token and no secrets, and the other hands it write access to this
+  # repository. There is nothing in a build workflow that needs the second.
+  pull_request:
+
   workflow_dispatch:
 
 concurrency:
