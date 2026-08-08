@@ -70,6 +70,35 @@
 //!
 //! The second is the cheaper experiment and does not need the physics to move. It is the one to
 //! try next.
+//!
+//! # Built, and where it has to stop
+//!
+//! Firmness now shrinks the drawn radius from `slide::PACKING` towards one, and the far end
+//! reaches 0.167 out of round where the swell alone stopped at 0.298. The obvious next question
+//! is what happens past one, and the answer is worth having in a table rather than an opinion:
+//!
+//! ```text
+//!   firmness   out of round   drawn apart while physically touching
+//!       0.00          0.387     0%
+//!       1.00          0.167     0%
+//!       1.25          0.134    19%   worst 0.064 squares of daylight
+//!       1.50          0.102    30%   worst 0.132
+//!       2.00          0.043    65%   worst 0.268
+//! ```
+//!
+//! **One is exactly the last honest setting, and that is not a coincidence** — it is where the
+//! drawn radius equals the radius `mm-core` says the cell has. Past it the cells keep getting
+//! rounder, all the way to 0.043 which is a sphere for practical purposes, and they do it by
+//! being drawn smaller than they are: at two, two thirds of the pairs the *physics* has pressed
+//! together are drawn with clear air between them.
+//!
+//! That is the mirror image of the fault `docs/OVERLAPS.md` was written about. Drawing a pair
+//! apart when the simulation has them in contact is exactly as much of a lie as drawing them
+//! through each other, and it is a worse kind of lie for being flattering — the picture looks
+//! *better*, and every crowding, collision and packing result read off it is wrong.
+//!
+//! So `slide::packing_for` clamps at one and `phantom::Bench::packing` does not. The bench is
+//! where a question like this gets answered; the renderer is where the answer gets enforced.
 
 use mm_app::phantom::{Bench, Layout, Motion};
 
@@ -126,6 +155,45 @@ fn bench(firmness: f32, spacing: f32) -> Bench {
     }
 }
 
+/// Of the pairs the *physics* has in contact, how many are drawn with daylight between them.
+///
+/// The bench's own `wall_gap` cannot answer this and is not meant to: it asks whether two cells
+/// whose *drawn* circles overlap meet properly along their shared wall, which is a question about
+/// the seam. This asks whether the drawn circles overlap **at all** for a pair that is physically
+/// touching — which is the fault a shrinking radius introduces, and the mirror image of the
+/// overlapping `docs/OVERLAPS.md` was written about. Drawing a pair apart when the simulation has
+/// them pressed together is exactly as much of a lie as drawing them through each other.
+fn false_gaps(firmness: f32, spacing: f32) -> (f32, f32) {
+    let b = bench(firmness, spacing);
+    let blobs = b.blobs(0);
+    let drawn = b.draw(&blobs, 0);
+    let (mut touching, mut lying, mut worst) = (0u32, 0u32, 0.0f32);
+    for i in 0..drawn.len() {
+        for j in (i + 1)..drawn.len() {
+            let (a, c) = (&drawn[i], &drawn[j]);
+            let d = ((a.blob.x - c.blob.x).powi(2) + (a.blob.y - c.blob.y).powi(2)).sqrt();
+            // Physically in contact: the radii `mm-core` would report, not the drawn ones.
+            if d >= a.blob.r + c.blob.r {
+                continue;
+            }
+            touching += 1;
+            let daylight = d - (a.bare + c.bare);
+            if daylight > 0.0 {
+                lying += 1;
+                worst = worst.max(daylight);
+            }
+        }
+    }
+    (
+        if touching == 0 {
+            0.0
+        } else {
+            lying as f32 * 100.0 / touching as f32
+        },
+        worst,
+    )
+}
+
 /// Mean swell, the fraction of the lattice covered, and how far from round the outlines are.
 fn measure(firmness: f32, spacing: f32) -> (f32, f32, f32) {
     let b = bench(firmness, spacing);
@@ -170,12 +238,15 @@ fn what_firmness_does_to_the_picture() {
                 _ => "(loose: nothing quite touches)",
             }
         );
-        println!("  firmness    swell   area kept   out of round");
+        println!(
+            "  firmness    swell   area kept   out of round   drawn apart while touching"
+        );
         let (_, soft_fill, _) = measure(0.0, spacing);
-        for firmness in [0.0f32, 0.25, 0.5, 0.75, 1.0] {
+        for firmness in [0.0f32, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0] {
             let (swell, fill, round) = measure(firmness, spacing);
+            let (lying, worst) = false_gaps(firmness, spacing);
             println!(
-                "  {firmness:>8.2}   {swell:>6.3}   {:>8.0}%   {round:>12.3}",
+                "  {firmness:>8.2}   {swell:>6.3}   {:>8.0}%   {round:>12.3}   {lying:>10.0}%                  (worst {worst:.3} sq)",
                 fill * 100.0 / soft_fill.max(f32::EPSILON),
             );
         }
@@ -185,4 +256,29 @@ fn what_firmness_does_to_the_picture() {
          cargo run -p mm-app --bin shaderbench --features render --release\n  \
          and drag `firmness` in the panel, or MM_BENCH_FIRMNESS=1 for the far end."
     );
+}
+
+#[test]
+fn the_renderer_never_draws_a_cell_smaller_than_it_is() {
+    // The guard on the finding above. `Bench::packing` is deliberately open past one so that the
+    // question "what would that look like" can be asked; `slide::packing_for` is not, because the
+    // answer is that two thirds of touching pairs get drawn apart and every packing result read
+    // off the picture becomes wrong.
+    for f in [-1.0f32, 0.0, 0.5, 1.0, 1.5, 2.0, 100.0] {
+        let p = mm_app::slide::packing_for(f);
+        assert!(
+            (1.0..=mm_app::slide::PACKING).contains(&p),
+            "packing_for({f}) = {p}, outside 1.0..={}",
+            mm_app::slide::PACKING
+        );
+    }
+    // And the honest end really is honest: at firmness one, nothing physically touching is drawn
+    // apart, at every spacing a pack can settle at.
+    for spacing in [0.9f32, 0.95, 1.0] {
+        let (lying, worst) = false_gaps(1.0, spacing);
+        assert_eq!(
+            lying, 0.0,
+            "at spacing {spacing}, {lying}% of touching pairs drawn apart by up to {worst}"
+        );
+    }
 }

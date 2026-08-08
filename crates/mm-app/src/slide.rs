@@ -456,7 +456,16 @@ pub fn seam_between(
 /// Measured on a raft of phantom cells at the spacing the physics drives a pack to, this takes the
 /// outline from 0.387 out of round — more angular than a square — to 0.167, between a hexagon and
 /// a circle. The rest of the distance is *spacing*, which is the physics' to give.
-fn packing_for(firmness: f32) -> f32 {
+///
+/// **Clamped at one, and `phantom::Bench::packing` is deliberately not.** One is where the drawn
+/// radius equals the radius `mm-core` says the cell has. Past it the cells do keep getting
+/// rounder — measured, all the way to 0.043 out of round, which is a sphere — and they do it by
+/// being drawn smaller than they are: at a firmness of two, **two thirds of the pairs the physics
+/// has pressed together are drawn with clear air between them**. That is the mirror image of the
+/// fault `docs/OVERLAPS.md` is about, and the worse kind for being flattering, because the picture
+/// looks better and every crowding and packing result read off it is wrong.
+/// `firmness_probe::the_renderer_never_draws_a_cell_smaller_than_it_is` holds the line.
+pub fn packing_for(firmness: f32) -> f32 {
     PACKING + (1.0 - PACKING) * firmness.clamp(0.0, 1.0)
 }
 

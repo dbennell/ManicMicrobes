@@ -521,9 +521,20 @@ impl Bench {
     /// about the geometry, so whether cells look separate is decided by whether they *are*
     /// separate — which is `MetabolicRates::rigidity_gain` and `neighbours::core_permille`, and
     /// is why `Bench::spacing` is the knob to sweep beside this one.
+    /// # Past one
+    ///
+    /// The bench does **not** clamp at one, where `slide::packing_for` does, and the asymmetry is
+    /// deliberate. One is the honest end: a cell drawn at exactly the radius `mm-core` says it
+    /// has. Past it the cell is drawn *smaller* than it is, so a pair the physics has in contact
+    /// is drawn with clear air between them — a lie about the geometry, and the same class of lie
+    /// as the overlapping this whole module was built to find, only in the other direction.
+    ///
+    /// It is left open here because the bench exists to answer "what would that look like"
+    /// without anyone having to argue about it, and because the answer turns out to be worth
+    /// knowing: see `firmness_probe`.
     #[must_use]
     pub fn packing(&self) -> f32 {
-        PACKING + (1.0 - PACKING) * self.firmness.clamp(0.0, 1.0)
+        (PACKING + (1.0 - PACKING) * self.firmness.max(0.0)).max(0.05)
     }
 
     /// Everything in one call: place the cells, then draw them.

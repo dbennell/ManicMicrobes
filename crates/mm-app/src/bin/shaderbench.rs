@@ -713,7 +713,7 @@ fn panel(mut contexts: EguiContexts, mut state: ResMut<State>) {
             ui.label(egui::RichText::new("what a cell is made of").strong());
             ui.label("0 is a bag of fluid that tiles into polygons — 1 is a walled body that stays round");
             ui.add(
-                egui::Slider::new(&mut s.bench.firmness, 0.0..=1.0)
+                egui::Slider::new(&mut s.bench.firmness, 0.0..=2.0)
                     .text("firmness")
                     .custom_formatter(|v, _| {
                         format!(
@@ -723,7 +723,8 @@ fn panel(mut contexts: EguiContexts, mut state: ResMut<State>) {
                                 x if x < 0.35 => "soft",
                                 x if x < 0.65 => "half",
                                 x if x < 0.95 => "firm",
-                                _ => "marbles",
+                                x if x < 1.05 => "marbles",
+                                _ => "shrunken — drawn smaller than it is",
                             }
                         )
                     }),
