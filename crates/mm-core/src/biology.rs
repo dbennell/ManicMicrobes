@@ -300,13 +300,39 @@ pub fn rigidity(cells: &CellArena, i: usize, rates: &crate::metabolism::Metaboli
 /// before and what no cell in any run has ever thought worth building.
 #[must_use]
 pub fn osmotic_load(cells: &CellArena, i: usize) -> i64 {
-    let solute: i64 = cells.interior(i).iter().map(|&v| v as i64).sum();
-    let silent: i64 = cells
-        .slots(i)
+    osmotic_load_of(cells.interior(i), cells.slots(i))
+}
+
+/// The same, from the two slices it actually reads.
+///
+/// Exists because `metabolism::step` runs its cells in parallel, which it can only do by taking
+/// the mutated field vectors out of the arena — at which point `cells.interior(i)` is not
+/// available to a helper that takes `&CellArena`. The arena form above is the one every other
+/// caller wants and is kept.
+#[must_use]
+pub fn osmotic_load_of(interior: &[i32], slots: &[Organelle]) -> i64 {
+    osmotic_load_against(interior, sequestered(slots))
+}
+
+/// How much solute a cell's vacuoles hold out of the osmotic reckoning.
+///
+/// Split out because it is the half of [`osmotic_load`] that depends only on the loadout, and
+/// `metabolism::step` therefore computes it in its parallel scan rather than in the sequential
+/// loop. The other half cannot move: it sums the live cytoplasm, which photosynthesis,
+/// respiration and growth all rewrite before the upkeep block reads it.
+#[must_use]
+pub fn sequestered(slots: &[Organelle]) -> i64 {
+    slots
         .iter()
         .filter(|o| o.kind == OrganelleType::Vacuole && o.is_active())
         .map(|o| q10(o.param as i32) as i64)
-        .sum();
+        .sum()
+}
+
+/// The osmotic load given a vacuole capacity already summed.
+#[must_use]
+pub fn osmotic_load_against(interior: &[i32], silent: i64) -> i64 {
+    let solute: i64 = interior.iter().map(|&v| v as i64).sum();
     (solute - silent).max(0)
 }
 

@@ -440,6 +440,36 @@ impl Ledger {
         }
         Ok(())
     }
+
+    /// Add another ledger's movements into this one.
+    ///
+    /// For a phase that runs its cells in parallel: each worker accumulates into a ledger of its
+    /// own starting from [`Default`], so what it holds is a *delta* rather than a total, and the
+    /// deltas are added back here.
+    ///
+    /// Every field is a running sum and integer addition is associative and commutative, so the
+    /// merge order cannot be observed and rule 6 is satisfied by construction rather than by
+    /// sorting. That is only true of the fields — it is **not** true of
+    /// [`Ledger::dissipate`], which clamps against the live `energy_stored` and therefore
+    /// depends on how much has already been spent. A parallel caller must keep its dissipation
+    /// out of the per-worker ledgers and settle it once, against this one, afterwards.
+    pub fn merge(&mut self, other: &Ledger) {
+        for c in 0..CHEM_COUNT {
+            self.chem[c] = self.chem[c].saturating_add(other.chem[c]);
+            self.evicted[c] = self.evicted[c].saturating_add(other.evicted[c]);
+            self.injected[c] = self.injected[c].saturating_add(other.injected[c]);
+            self.drained[c] = self.drained[c].saturating_add(other.drained[c]);
+        }
+        self.energy_in = self.energy_in.saturating_add(other.energy_in);
+        self.energy_out = self.energy_out.saturating_add(other.energy_out);
+        self.energy_stored = self.energy_stored.saturating_add(other.energy_stored);
+        self.converted = self.converted.saturating_add(other.converted);
+        self.energy_imported = self.energy_imported.saturating_add(other.energy_imported);
+        self.energy_exported = self.energy_exported.saturating_add(other.energy_exported);
+        for s in 0..TrophicSource::COUNT {
+            self.income[s] = self.income[s].saturating_add(other.income[s]);
+        }
+    }
 }
 
 impl StateHash for Ledger {

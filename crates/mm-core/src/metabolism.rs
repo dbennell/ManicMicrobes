@@ -69,6 +69,13 @@ pub struct Capacities {
     /// upkeep block asks for it, so hoisting it would price a cell's turgor on chemistry it no
     /// longer holds.
     pub upkeep: i32,
+    /// How much solute this cell's vacuoles hold out of the osmotic reckoning.
+    ///
+    /// The loadout-dependent half of `biology::osmotic_load`, and the last instance of the same
+    /// hoist: it was a walk of all sixteen slots per cell per tick looking for vacuoles, which
+    /// two of the twenty shipped genomes build. The other half of that function sums the live
+    /// cytoplasm and stays in the sequential loop, because the loop rewrites it.
+    pub sequestered: i64,
 }
 
 use crate::organelle::{MetabolicChemistry, OrganelleCatalogue, OrganelleType, PATHWAY_COUNT};
@@ -532,6 +539,7 @@ impl Metabolism {
             slot.photosynthesis = self.capacity_by_pathway(cells, i, OrganelleType::Chloroplast);
             slot.respiration = self.capacity_by_pathway(cells, i, OrganelleType::Mitochondrion);
             slot.upkeep = self.catalogue.upkeep(cells.slots(i));
+            slot.sequestered = crate::biology::sequestered(cells.slots(i));
         });
     }
 
@@ -857,7 +865,10 @@ impl Metabolism {
                 .saturating_add(capacities[i].upkeep)
                 .saturating_add(turgor_cost(
                     &self.rates,
-                    crate::biology::osmotic_load(cells, i),
+                    crate::biology::osmotic_load_against(
+                        cells.interior(i),
+                        capacities[i].sequestered,
+                    ),
                 ))
                 .saturating_add(leak_cost(&self.rates, cells.energy[i]));
             if upkeep > 0 {
