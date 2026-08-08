@@ -289,7 +289,9 @@ fn a_marble_on_a_real_slide() {
     // lattice above proves the picture responds to what a cell is made of; this proves a lineage
     // can get there and stay there while feeding itself.
     println!("\nLIVE  soup.ron, 16 founders, 20 000 ticks");
-    println!("  genome        pop   membrane p50   rigidity p50   mean swell   mean radius");
+    println!(
+        "  genome        pop   membrane p50   rigidity p50   mean swell   mean radius   coverage"
+    );
     for genome in ["ancestor.mm", "marble.mm"] {
         let world = live(genome, 20_000);
         let rates = world.biology().metabolism.rates;
@@ -312,16 +314,73 @@ fn a_marble_on_a_real_slide() {
             println!("  {genome:<12}  extinct");
             continue;
         }
+        // How much of the slide the cells actually cover, which is the difference between a
+        // packed sheet and a scatter — and the thing a median radius cannot tell you.
+        let area: f32 = radii.iter().map(|r| std::f32::consts::PI * r * r).sum();
+        let slide = (world.substrate().width() * world.substrate().height()) as f32;
         let (mean, _max, _n) = drawn(world);
         println!(
-            "  {genome:<12} {pop:>4}   {:>12}   {:>12.2}   {mean:>10.3}   {:>11.2}",
+            "  {genome:<12} {pop:>4}   {:>12}   {:>12.2}   {mean:>10.3}   {:>11.2}   {:>8.0}%",
             membranes[pop / 2],
             rigidities[pop / 2],
             radii[pop / 2],
+            area * 100.0 / slide,
         );
     }
     println!(
         "\n  1.000 is a marble — the true circle, cut by its seams, gaps left.\n  \
          Above 1 is foam: inflated until the clipped outline keeps the cell's area."
     );
+}
+
+#[test]
+#[ignore = "probe; --release --ignored --nocapture"]
+fn what_makes_a_mat_of_marbles_rather_than_a_scatter() {
+    // `marble.mm` is round but sparse: 55% coverage against the ancestor's 105%, because it pays
+    // seven times the membrane upkeep and its equilibrium population is lower for it. A picture
+    // of separate round cells with acres between them is not the picture — a smear of yeast is
+    // wall to wall *and* round.
+    //
+    // Coverage cannot be fixed by shrinking the slide: light arrives per square, so carrying
+    // capacity scales with area and the fraction is unchanged. What raises it is income.
+    println!("\nMAT  marble.mm on soup.ron, 16 founders, 20 000 ticks, light varied");
+    println!("  light   pop   coverage   mean swell");
+    for intensity in [1024i32, 2048, 4096, 8192] {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../genomes/marble.mm");
+        let bytes = mm_asm::assemble(&std::fs::read_to_string(src).expect("genome"))
+            .expect("assembles")
+            .bytes;
+        let scenario = Scenario {
+            name: "mat".into(),
+            seed: 20250728,
+            width: 64,
+            height: 64,
+            light: LightRegime::Uniform { intensity },
+            current: mm_core::light::CurrentField::Still,
+            fluid_interval: 1,
+            seeding: vec![
+                mm_core::Seeding::Uniform { chemical: 11, per_square: q10(400) },
+                mm_core::Seeding::Uniform { chemical: 14, per_square: q10(400) },
+                mm_core::Seeding::Uniform { chemical: 4, per_square: q10(400) },
+            ],
+            ..Scenario::default()
+        };
+        let mut world = World::new(scenario).expect("world");
+        world.place_founders(&bytes, 16);
+        world.run(20_000);
+        let pop = world.cells().len();
+        let area: f32 = world
+            .cells()
+            .iter()
+            .map(|i| {
+                let r = mm_core::biology::radius(world.cells(), i) as f32 / Q10_ONE as f32;
+                std::f32::consts::PI * r * r
+            })
+            .sum();
+        let slide = (world.substrate().width() * world.substrate().height()) as f32;
+        let cover = area * 100.0 / slide;
+        let (mean, _, _) = drawn(world);
+        println!("  {intensity:>5}  {pop:>4}   {cover:>7.0}%   {mean:>10.3}");
+    }
 }

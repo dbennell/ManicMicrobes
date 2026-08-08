@@ -14,13 +14,19 @@
 //
 // Measured, on this slide against the same slide seeded with `ancestor.mm`:
 //
-//   genome         population   membrane   rigidity   swell   radius
-//   ancestor.mm         1 113         24       0.09    1.229     1.12
-//   marble.mm             436        255       1.00    1.015     1.00
+//   genome         population   rigidity   swell   coverage   radius
+//   ancestor.mm         1 113       0.09    1.229       105%     1.12
+//   marble.mm             666       0.68    1.095       105%     1.38
 //
 // where 1.000 is a perfect sphere cut by its seams and 1.237 is a cell inflated until its
-// clipped outline keeps the area it has. **Under half the carrying capacity** is what the
-// picture costs, and it is charged every tick forever rather than once.
+// clipped outline keeps the area it has. **Four cells in ten** is what the picture costs, and it
+// is charged every tick forever rather than once.
+//
+// Coverage is the number that decides whether this looks like anything. A rounder strain is
+// available — a vacuole and a wall at the catalogue's maximum reaches a swell of 1.015 — and it
+// settles at 436 cells covering barely half the slide, which is a scatter of very round cells
+// rather than a smear of yeast. `marble.mm`'s own header has that measurement. Being nearly as
+// round and twice as dense is the better picture, and it is why the wall stops at 200.
 //
 // Note that `soup.ron` names no inhabitants at all, which is why it falls back to the ancestor —
 // see `seed_into` in `mm-app`. Naming them here is also how a saved slide remembers who was on

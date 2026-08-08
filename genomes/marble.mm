@@ -4,7 +4,7 @@
 ; no gaps. That is `slide::area_swell` and it is right for a moss leaf. A smear of yeast pressed
 ; just as hard stays obstinately round, and this is the genome that produces the second picture.
 ;
-; It is `ancestor.mm` with eight extra instructions. Nothing else changes, which is the point —
+; It is `ancestor.mm` with four extra instructions. Nothing else changes, which is the point —
 ; being a marble is not a different way of living, it is the same way of living with a different
 ; investment.
 ;
@@ -24,49 +24,57 @@
 ; became something `BUILD` could reach, none of them could have had one, because a daughter is
 ; born with her mother's membrane parameter and nothing anywhere could change that number.
 ;
-; ---------------------------------------------------------------- why it needs a vacuole
+; ---------------------------------------------------------------- why 200, and not 255
 ;
-; A membrane costs `8 + param/4` units of structural matter, so the catalogue's maximum of 255
-; costs 71.75 — and `BASE_INTERIOR_CAPACITY` is 64. **A cell cannot hold enough carbon at once to
-; build its own maximum wall.** Without help the ceiling is a param of about 224.
+; Because a marble you cannot fill a slide with is not the picture.
 ;
-; The way past it is a vacuole, which raises interior capacity by its own `param`. This is the
-; first thing in the engine that has ever *needed* one: `gradient_probe` reports zero vacuoles in
-; every population it has ever measured, because until now a vacuole's only effect was to reduce
-; a bill.
+; The obvious version of this genome takes the wall to the catalogue's maximum. It cannot: a
+; membrane costs `8 + param/4` units of structural matter, so 255 costs 71.75, and
+; `BASE_INTERIOR_CAPACITY` is 64. **A cell cannot hold enough carbon at once to build its own
+; maximum wall.** The way past that is a vacuole, which raises interior capacity by its own
+; `param` — and would be the first thing in this engine ever to need one, since `gradient_probe`
+; reports zero vacuoles in every population it has ever measured.
 ;
-; It cuts both ways and the arithmetic is close. A vacuole also takes its own `param` back out of
-; `osmotic_load`, so it lowers the turgor at the same time as it raises the ceiling — and turgor
-; is the other half of rigidity. At 40 the trade comes out ahead because the extra capacity lets
-; the cell hold more solute overall than the vacuole hides.
+; It works, and it is the wrong trade. Measured on `soup.ron` from sixteen founders at twenty
+; thousand ticks:
 ;
-; Measured, that is the difference between most of the way and all of it:
+;   genome                     pop   rigidity   swell   coverage
+;   ancestor.mm              1 113       0.09   1.229       105%
+;   this, wall 200             666       0.68   1.095       105%
+;   wall 255 + a vacuole       436       1.00   1.015        55%
 ;
-;   variant                       membrane   rigidity   swell
-;   no vacuole, wall at 200          200       0.68     1.095
-;   vacuole at 40, wall at 255       255       1.00     1.015
+; where 1.000 is a perfect sphere and 1.237 is a cell inflated until its clipped outline keeps
+; the area it has. The third row is **rounder and half as dense**: the extra wall costs enough
+; upkeep that the population settles at 436, which covers barely half the slide, and a scatter of
+; very round cells is not what a smear of yeast looks like. The second row is wall to wall *and*
+; visibly separate, which is.
 ;
-; against `ancestor.mm`'s 1.229 and a perfect sphere's 1.000. The second is the picture.
+; So the wall stops at 200, a little under the ceiling `BASE_INTERIOR_CAPACITY` sets, and there is
+; no vacuole. The rounder strain is worth knowing about and is four instructions away — add a
+; vacuole at 40 in slot 4 and take the wall to 255 — but it is a different picture and a worse one.
 ;
 ; ---------------------------------------------------------------- what it costs
 ;
-; On `soup.ron` from sixteen founders, at twenty thousand ticks:
+; **Four cells in ten**, against the ancestor, and paid every tick forever:
 ;
-;   genome         population   membrane   rigidity   swell   radius
-;   ancestor.mm         1 113         24       0.09    1.229     1.12
-;   marble.mm             436        255       1.00    1.015     1.00
+;   structural matter in the wall   14 units -> 58, a little over four times
+;   membrane upkeep                 0.078 -> 0.42 energy a tick, five and a half times
+;   total loadout upkeep            ~0.41 -> ~0.75 energy a tick
 ;
-; **Under half the carrying capacity**, which is the price of the picture and is paid every tick
-; forever: 71.75 units of structural matter in the wall against the ancestor's 14, 0.53 energy a
-; tick to carry it against 0.078, and a vacuole on top of that.
+; The slide still fills — coverage is the ancestor's 105% — because the cells are *larger*, at a
+; median radius of 1.38 against 1.12. `membrane.param` is also the growth target, so a thicker
+; wall is also a bigger cell, and here that happens to compensate for there being fewer of them.
 ;
-; One thing that did *not* happen, and it was the thing to watch for. `membrane.param` is also
-; the growth target — a cell grows towards `q10(param)` — so the obvious worry was that a marble
-; would be a giant, which is backwards from life, where yeast are small and round and moss cells
-; are large and tessellated. Measured, the median radius is **1.00 against the ancestor's 1.12**:
-; the marbles are *smaller*, because they divide long before they reach a target of 255 and are
-; matter-limited well below it. The conflation is real and is still worth separating one day, but
-; it does not bite here.
+; That conflation is worth knowing rather than relying on. Real yeast are small and round and
+; moss cells are large and tessellated, which is the other way round; separating wall thickness
+; from target size would need a second membrane control, and `control[1]` is already the growth
+; target. See the growth block in `metabolism.rs`.
+;
+; One thing this genome is *not* robust to: brighter light. At `Uniform(intensity: 2048)` and
+; above it goes extinct, where the ancestor does not. Unexplained, and left as a finding rather
+; than tuned away — the likeliest suspect is that faster photosynthesis fills the cytoplasm with
+; substrate it cannot burn or excrete fast enough, and the quadratic turgor charge does the rest.
+; `#grow` returns eight units of sugar a cycle, which was calibrated for the ancestor's income.
 ;
 ; Chemical indices and organelle slots are `ancestor.mm`'s, unchanged.
 
@@ -99,11 +107,7 @@
         IMM     2               ; mitochondrion
         IMM     2
         BUILD
-        IMM     40
-        IMM     4               ; a vacuole, and the first thing in this engine that ever needed one
-        IMM     4
-        BUILD
-        IMM     255             ; the wall, at the catalogue's maximum
+        IMM     200             ; the wall. 58 units of carbon, once, and 0.42 a tick to carry
         ZERO                    ; type ignored on slot 0
         ZERO                    ; slot 0 — the membrane
         BUILD
@@ -120,7 +124,7 @@
         IMM     14              ; oxygen
         EAT
         DROP
-        IMM     100
+        IMM     64
         IMM     4               ; carbon, and more of it: there is a wall to pay for
         EAT
         DROP
