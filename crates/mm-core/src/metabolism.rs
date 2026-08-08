@@ -166,6 +166,74 @@ pub struct MetabolicRates {
     /// guessing at.
     pub metabolic_floor: i32,
 
+    /// How much light a cell loses to the neighbours pressing on it, `Q10`.
+    ///
+    /// # Why light has to be rival, and why this is the only shape it can take
+    ///
+    /// SPEC §17.8 measured that a dense pack has no interior, and named light as one of the
+    /// reasons: the plane is prescribed from a closed form every fluid step, a chloroplast reads
+    /// the value at its centre square and does not decrement it, so nothing shades anything but a
+    /// barrier and absorption is not competed for. Energy input therefore scales with
+    /// *population* rather than with area, and a slide has no energy ceiling at all.
+    ///
+    /// `transport_probe` then ruled out the two obvious fixes. Slowing the fluid produces a real
+    /// carbon gradient and does not make the middle of a pack a worse place to be; starving the
+    /// waste makes it a *better* one, because respiration exhales what photosynthesis eats and a
+    /// crowd is its own atmosphere. The core can only be hostile if something the cells cannot
+    /// manufacture runs out there, and light is the only such thing in this world.
+    ///
+    /// **Per-square rivalry would not do it either.** Cell centres are roughly uniformly dense
+    /// inside a pack — hard-sphere packing sees to that — so capping the flux per square bounds
+    /// the population without distinguishing core from rind. What separates them is *occlusion*,
+    /// and in a slide lit from outside the plane the only thing that can occlude a cell is
+    /// another cell lying over it.
+    ///
+    /// So the measure is `pressure`, which the separation solver already computes and the
+    /// snapshot already carries: zero where two cells merely touch, `Q10_ONE` where they are
+    /// bottomed out on their cores, summed over contacts. That is an overlap-area proxy, not a
+    /// crowding tax — a neighbour resting against you covers none of you and one pressed halfway
+    /// through you covers a lot.
+    ///
+    /// ```text
+    ///     effective light = light / (1 + occlusion * pressure)
+    /// ```
+    ///
+    /// Hyperbolic rather than exponential so it is one integer divide, monotone, and asymptotic
+    /// rather than reaching zero — a buried cell is dim, never perfectly dark.
+    ///
+    /// Zero switches it off, which is how every test written before it runs.
+    pub light_occlusion: i32,
+
+    /// How much stiffer a fully turgid, thick-walled cell is than a limp one, `Q10`.
+    ///
+    /// Turgor is currently a bill that buys nothing: `osmotic_upkeep` charges quadratically for
+    /// held solute and no mechanism anywhere gives the cell anything back. In a real cell turgor
+    /// is *exactly* what makes a walled body rigid — a plant runs five to ten atmospheres of it —
+    /// and `docs/STIFFNESS.md` §4 is the design this implements.
+    ///
+    /// Rigidity is `wall x turgor`, a product rather than a sum: a thick wall with no turgor is
+    /// plasmolysed and floppy, and pressure with no wall has nothing to push against. It scales
+    /// `neighbours::CORE_PERMILLE` towards 1000 — a rigid cell keeps a larger incompressible core
+    /// and is squashed less — and **never below it**, so this can only ever make a cell stiffer
+    /// than it is today.
+    ///
+    /// # What it is being tested for
+    ///
+    /// `transport_probe::how_dark_does_the_core_have_to_be` found that light occlusion removes the
+    /// burial advantage and then stops: pushing it harder does not push further, because a shaded
+    /// cell grows less, shrinks, overlaps less and is therefore shaded less. The escape route is
+    /// *size*.
+    ///
+    /// Stiffness closes it, and the reason is worth stating precisely. `pressure` is normalised
+    /// against the band between touching and the core, so a rigid cell — whose band is narrow —
+    /// reads near-maximum pressure as soon as it is touching at all. **Stiffness turns `pressure`
+    /// from a measure of depth into a measure of count**, and a count of neighbours does not fall
+    /// when a cell shrinks. Turgor also does not fall when a cell shrinks: `osmotic_load` is the
+    /// solute a cell holds and interior capacity does not scale with mass.
+    ///
+    /// Zero switches it off exactly, which is how every test written before it runs.
+    pub rigidity_gain: i32,
+
     /// Free solute a cell carries for nothing, `Q10`. See [`crate::biology::osmotic_load`].
     ///
     /// Solute in solution pulls water in, the cell swells, and something has to hold it
@@ -273,6 +341,9 @@ impl Default for MetabolicRates {
             // About the same again as a bare membrane's own upkeep, so merely existing costs
             // roughly twice what it did and a working cell barely feels it.
             metabolic_floor: Q10_ONE / 32,
+            // Set from `transport_probe::how_dark_does_the_core_have_to_be`. See the field.
+            light_occlusion: 0,
+            rigidity_gain: 0,
             // Measured: see the field docs. Four capacities is above everything the founding
             // race carries and below where a converged pack sits.
             osmotic_threshold: 4 * crate::biology::BASE_INTERIOR_CAPACITY,
@@ -286,6 +357,21 @@ impl Default for MetabolicRates {
             energy_leak: Q10_ONE / 64,
         }
     }
+}
+
+/// The light actually reaching a cell, after the neighbours lying over it.
+///
+/// `light / (1 + occlusion * pressure)`, in integers, saturating. Returns the incident light
+/// unchanged when occlusion is zero or nothing is pressing, so a lone cell on an empty slide is
+/// unaffected by construction rather than by calibration.
+#[must_use]
+pub fn shaded(incident: i32, pressure: i32, rates: &MetabolicRates) -> i32 {
+    if rates.light_occlusion <= 0 || pressure <= 0 || incident <= 0 {
+        return incident;
+    }
+    let shade = (rates.light_occlusion as i64 * pressure as i64) / Q10_ONE as i64;
+    let denom = (Q10_ONE as i64).saturating_add(shade).max(1);
+    ((incident as i64 * Q10_ONE as i64) / denom).clamp(0, incident as i64) as i32
 }
 
 /// Energy a cell loses this tick for banking more than it is allowed to, `Q10`.
@@ -499,7 +585,12 @@ impl Metabolism {
                     cells.x[i] >> crate::fixed::POS_BITS,
                     cells.y[i] >> crate::fixed::POS_BITS,
                 );
-                substrate.light().get(sq).copied().unwrap_or(0)
+                let incident = substrate.light().get(sq).copied().unwrap_or(0);
+                // Shaded by whatever is lying on top of this cell. See
+                // `MetabolicRates::light_occlusion` for why this is the only form light rivalry
+                // can take on a slide lit from outside the plane, and why the measure is
+                // `pressure` rather than a count of neighbours.
+                shaded(incident, pressure.get(i).copied().unwrap_or(0), &self.rates)
             };
             if light > 0 {
                 let by_pathway = capacities[i].photosynthesis;
@@ -1657,5 +1748,40 @@ mod tests {
         }
         assert_eq!(burned[0], 0, "a closed throttle should burn nothing");
         assert!(burned[1] > 0 && burned[1] < burned[2], "{burned:?}");
+    }
+
+    #[test]
+    fn shading_is_off_until_it_is_asked_for_and_never_brightens() {
+        // The property that lets this ship with the mechanism present and every existing
+        // measurement unchanged: at the default rate a cell in a crowd is lit exactly as it was.
+        let off = MetabolicRates::default();
+        assert_eq!(off.light_occlusion, 0, "occlusion is not off by default");
+        for pressure in [0, Q10_ONE, Q10_ONE * 8, i32::MAX] {
+            assert_eq!(shaded(Q10_ONE, pressure, &off), Q10_ONE);
+        }
+
+        let on = MetabolicRates {
+            light_occlusion: Q10_ONE / 8,
+            ..MetabolicRates::default()
+        };
+        // A cell nothing is pressing on is unshaded, by construction rather than by calibration.
+        assert_eq!(shaded(Q10_ONE, 0, &on), Q10_ONE);
+        // And one that is being pressed gets less, monotonically, without ever going dark or
+        // negative — for any input a crowd can produce.
+        let mut last = shaded(Q10_ONE, 0, &on);
+        for k in 1..64 {
+            let now = shaded(Q10_ONE, Q10_ONE * k, &on);
+            assert!(now <= last, "shading brightened at pressure {k}");
+            assert!(now >= 0, "shading went negative at pressure {k}");
+            last = now;
+        }
+        assert!(last > 0, "a buried cell went perfectly dark");
+        // Nothing silly gets past it either.
+        for p in [i32::MIN, -1, i32::MAX] {
+            for l in [i32::MIN, -1, 0, Q10_ONE, i32::MAX] {
+                let v = shaded(l, p, &on);
+                assert!(v <= l.max(0) || l < 0, "shading brightened from ({l}, {p})");
+            }
+        }
     }
 }

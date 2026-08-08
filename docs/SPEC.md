@@ -1646,6 +1646,50 @@ mechanism that wants stratification has to close that gap: make transport slow r
 consumption, and the honest way is to let occupancy impede it, which is the porosity term the
 solver does not have.
 
+**The paragraph above proposed the wrong fix, and `transport_probe` measured why.** Recorded here
+rather than deleted, because the reasoning is right up to its last clause and the correction is
+the useful part.
+
+Transport *rate* was tested first, since it is free: `fluid_interval` is already a scenario field
+and ten of the eleven shipped scenarios set it to 1. Slowing it does exactly what this section
+predicts — at `fluid_interval` 8 with carbon near the knee of `CHEMISTRY.md` §6, the core holds
+half to two-thirds the carbon of the rind, consistently and at no cost in population, where this
+section measured 0.3%. **And a buried cell is still richer than one on the rind**, at 118% of its
+energy, unchanged.
+
+Starving the shared pools does not help and makes it worse. Seeding the oxidant scarce does
+nothing whatever, because photosynthesis *produces* the oxidant. Seeding the waste scarce moves
+the buried cell's advantage from 118% to **169%**:
+
+> A pack is not a consumer of a shared pool. It is a **producer of the thing it consumes** —
+> respiration exhales the waste photosynthesis eats — so the interior of a crowd is a
+> microenvironment the crowd makes for itself. The scarcer the waste in the water, the more
+> valuable it is to be surrounded by cells breathing it out. **The pack is its own atmosphere.**
+
+Which is the argument against the porosity term. Impeding transport where the cells are
+concentrates the pack's own exhaust where the pack is; it would sharpen a *beneficial* core, not
+a hostile one. **Do not build it** without a measurement that says otherwise.
+
+What can work is a resource the cells cannot manufacture, and there is exactly one: energy enters
+as light and nothing else (§7.3), and no cell can make light, store it, or take it from a
+neighbour. Per-square rivalry is not the shape either — hard-sphere packing keeps cell centres
+roughly uniformly dense inside a pack, so capping the flux per square bounds the population
+without distinguishing core from rind. What separates them is **occlusion**, and on a slide lit
+from outside the plane the only thing that can occlude a cell is another cell lying over it.
+
+That is `MetabolicRates::light_occlusion`, measured against `pressure` because the separation
+solver already computes it and it weights each neighbour by how deeply it overlaps — an
+overlap-area proxy rather than a crowding tax. At `Q10/8` it removes the burial advantage
+entirely: mean energy inside the pack falls from 118% of outside to **100%**. Pushing harder does
+not push further, because a shaded cell grows less, presses less hard and therefore shades its
+neighbours less; it is a self-limiting feedback rather than a dial.
+
+**Parity, not inversion.** The middle of a crowd is now unremarkable rather than punishing. The
+growing rind, dormant middle and dead core this section opens with are not yet reached, and the
+remaining distance is an open question rather than a solved one. `scenarios/the_thicket.ron` is
+the slide the three settings live on; `BiologyConfig::default` leaves occlusion at zero, because
+turning it on changes what every existing measurement means and M8 owns balancing.
+
 ### 17.9 What this is all for
 
 Each of these is a carrying-capacity term, and that is deliberate. Area is a limit that selects

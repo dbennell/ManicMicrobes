@@ -336,6 +336,26 @@ pub const FIELDS: &[Field] = &[
                with the square of the excess. Zero switches it off",
     },
     Field {
+        path: "metabolism.rates.light_occlusion",
+        label: "light occlusion",
+        group: Group::Metabolism,
+        unit: Unit::Q10,
+        note: "how much light a cell loses to the neighbours lying over it, per unit of the \
+               pressure they exert. This is the only thing that makes light rival, and light is \
+               the only resource a cell cannot manufacture — so it is what decides whether the \
+               middle of a crowd is a bad place to be. Zero switches it off",
+    },
+    Field {
+        path: "metabolism.rates.rigidity_gain",
+        label: "rigidity gain",
+        group: Group::Metabolism,
+        unit: Unit::Q10,
+        note: "how much stiffer a thick-walled, fully turgid cell is than a limp one. Turgor is \
+               charged for everywhere else and buys nothing; this is what it buys. A rigid cell \
+               keeps a larger incompressible core, so it is squashed less and reads its \
+               neighbours as a count rather than as a depth. Zero switches it off",
+    },
+    Field {
         path: "metabolism.rates.energy_reserve",
         label: "energy reserve",
         group: Group::Metabolism,
