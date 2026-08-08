@@ -247,3 +247,81 @@ fn what_it_costs_to_stay_round() {
         "\n  1.000 is a marble — the true circle, cut by its seams, gaps left.\n           Above 1 is foam: inflated until the clipped outline keeps the cell's area."
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// The same question asked of a live slide rather than a lattice.
+
+fn live(genome: &str, ticks: u64) -> World {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../genomes")
+        .join(genome);
+    let bytes = mm_asm::assemble(&std::fs::read_to_string(src).expect("genome"))
+        .expect("assembles")
+        .bytes;
+    // `soup.ron`'s recipe, written out rather than parsed: `ron` is not a dev-dependency of
+    // this crate and adding one to read a file whose contents are six lines would be the wrong
+    // trade. If the shipped soup changes, `m8_ecology` is where that is noticed.
+    let scenario = Scenario {
+        name: "primordial soup".into(),
+        seed: 20250728,
+        width: 64,
+        height: 64,
+        light: LightRegime::Uniform { intensity: Q10_ONE },
+        current: mm_core::light::CurrentField::Still,
+        fluid_interval: 1,
+        seeding: vec![
+            mm_core::Seeding::Uniform { chemical: 11, per_square: q10(400) },
+            mm_core::Seeding::Uniform { chemical: 14, per_square: q10(400) },
+            mm_core::Seeding::Uniform { chemical: 4, per_square: q10(400) },
+        ],
+        ..Scenario::default()
+    };
+    let mut world = World::new(scenario).expect("world");
+    world.place_founders(&bytes, 16);
+    world.run(ticks);
+    world
+}
+
+#[test]
+#[ignore = "probe; --release --ignored --nocapture"]
+fn a_marble_on_a_real_slide() {
+    // `marble.mm` against `ancestor.mm`, same scenario, same seeding, same everything else. The
+    // lattice above proves the picture responds to what a cell is made of; this proves a lineage
+    // can get there and stay there while feeding itself.
+    println!("\nLIVE  soup.ron, 16 founders, 20 000 ticks");
+    println!("  genome        pop   membrane p50   rigidity p50   mean swell   mean radius");
+    for genome in ["ancestor.mm", "marble.mm"] {
+        let world = live(genome, 20_000);
+        let rates = world.biology().metabolism.rates;
+        let mut membranes: Vec<i32> = Vec::new();
+        let mut rigidities: Vec<f32> = Vec::new();
+        let mut radii: Vec<f32> = Vec::new();
+        for i in world.cells().iter() {
+            membranes.push(world.cells().slots(i)[0].param as i32);
+            rigidities
+                .push(mm_core::biology::rigidity(world.cells(), i, &rates) as f32 / Q10_ONE as f32);
+            radii.push(
+                mm_core::biology::radius(world.cells(), i) as f32 / Q10_ONE as f32,
+            );
+        }
+        membranes.sort_unstable();
+        rigidities.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+        radii.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+        let pop = membranes.len();
+        if pop == 0 {
+            println!("  {genome:<12}  extinct");
+            continue;
+        }
+        let (mean, _max, _n) = drawn(world);
+        println!(
+            "  {genome:<12} {pop:>4}   {:>12}   {:>12.2}   {mean:>10.3}   {:>11.2}",
+            membranes[pop / 2],
+            rigidities[pop / 2],
+            radii[pop / 2],
+        );
+    }
+    println!(
+        "\n  1.000 is a marble — the true circle, cut by its seams, gaps left.\n  \
+         Above 1 is foam: inflated until the clipped outline keeps the cell's area."
+    );
+}
