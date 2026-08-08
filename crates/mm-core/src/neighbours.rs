@@ -61,11 +61,44 @@ use crate::sensing::TouchReading;
 /// still apart, so respecting the core here does not stop the renderer cutting a small cell away.
 pub const CORE_PERMILLE: i32 = 950;
 
-/// The stiffest a cell can be, in the same permille. A cell here is very nearly incompressible.
+/// The stiffest a cell can be, in the same permille. Just short of a thousand, on measurement.
 ///
-/// Not 1000: two cells that cannot overlap at all share no wall, and SPEC §6.4 is explicit that
-/// the resting overlap *is* the tissue and that circles which do not overlap cannot tile a plane.
-/// So even a fully turgid cell yields a little.
+/// This was 995, on the reasoning that two cells which cannot overlap share no wall, and SPEC §6.4
+/// is explicit that the resting overlap *is* the tissue and that circles which do not overlap
+/// cannot tile a plane. That reasoning has expired, and it is worth writing down why rather than
+/// quietly changing the number.
+///
+/// It was true while every cell was drawn at `slide::PACKING` times its radius — 15% larger than
+/// it is — so a pair had to physically overlap before their *drawn* outlines crossed enough to
+/// share a face. A firm cell is now drawn at its true size (`slide::packing_for`), and a pair of
+/// them resting exactly tangent is drawn exactly tangent: two circles, touching, no seam, no gap.
+/// It needs no overlap to be drawn correctly, so there is nothing left to buy with the five
+/// thousandths.
+///
+/// What the five thousandths cost is the thing that matters. Firmness in the *picture* can only
+/// take a cell so far — measured, from 0.387 out of round to 0.167 — and the rest of the distance
+/// is the pair genuinely not being pressed into one another. A core below tangency guarantees
+/// they are. At a thousand, any overlap at all is past the core and takes the stiff response, so
+/// a firm cell cannot be that close to another without pushing it away, which is the whole of
+/// what "marble" means mechanically.
+///
+/// **A thousand was tried and put back, and the two reasons are the finding.** At exactly tangency
+/// `want == core`, so the band `pressure` is normalised against collapses to nothing; the guard
+/// skips it, pressure is never accumulated, and `split_pressure` and `growth_pressure` both stop
+/// working — a settled pack went from 266 cells to 394 and tripled its jitter. That half is fixed,
+/// by normalising pressure against a fixed reference band instead of the pair's own.
+///
+/// The other half is not. With the core at tangency every contact takes the stiff branch, where
+/// it used to be the rare deep-penetration case, and the corrections are *summed* across a cell's
+/// neighbours — so a crowded cell is shoved several times as far as any one contact asked for and
+/// the pack buzzes at 662 thousandths of a square a tick against a soft one's 63. Averaging the
+/// shoves fixes it completely and costs 69% of the carrying capacity, which is a separate piece of
+/// work; see the note at the end of `correction_for`.
+///
+/// So 995: stiff enough that a firm pair rests essentially tangent, short enough that the band
+/// survives and the stiff branch stays the exception. A soft cell is unaffected either way —
+/// [`CORE_PERMILLE`] is still 950 and `rigidity_gain` is still zero by default, so a tissue still
+/// tessellates and still shares its walls.
 pub const CORE_PERMILLE_RIGID: i32 = 995;
 
 /// Where one cell stops compressing, in permille of its own radius.
@@ -1112,7 +1145,19 @@ fn correction_for(
             // Normalised against the band rather than the radius, so it does not change when a
             // population shrinks: being jammed is being jammed at any size, and the size question
             // is [`crate::ecology`]'s to answer.
-            let band = want - core;
+            // Against a **fixed reference band**, not this pair's own. The two are the same
+            // number until a cell can be stiffer than the default, and then they part company
+            // badly: a fully rigid pair has `want == core`, so its own band is zero, and the
+            // guard below then skips it — pressure is never accumulated, nothing is ever
+            // considered crowded, and `split_pressure` and `growth_pressure` both stop working.
+            // Measured, that took a settled pack from 266 cells to 394 and tripled its jitter.
+            //
+            // It is also the right meaning. Pressure is *how hard this cell is being squeezed*,
+            // and normalising it by the cell's own compressibility asks a different question —
+            // how far through its personal range it is — so a stiff cell reads as jammed the
+            // instant it touches anything and a soft one never does. Against a fixed reference,
+            // a firm pair resting tangent is squeezed by nothing and correctly reads zero.
+            let band = ((want as i64 * (1000 - CORE_PERMILLE) as i64) / 1000) as i32;
             if band > 0 {
                 let one = crate::fixed::Q10_ONE as i64;
                 let share = (((squeeze.max(0) as i64) * one) / band as i64).clamp(0, one) as i32;
@@ -1167,6 +1212,25 @@ fn correction_for(
             .dy
             .saturating_add((uy as i64 * allowed as i64 / POS_ONE as i64) as i32);
     }
+
+    // **Not** under-relaxed, and there is a measurement behind that which is worth keeping.
+    //
+    // Each contact asks for the correction that would fix that pair on its own, and these are
+    // *summed*, so a cell with six neighbours can be moved up to six times as far as any one of
+    // them wanted. That is a textbook over-relaxation and averaging them is the textbook fix. It
+    // works, on the thing it is aimed at: a settled pack's residual jitter falls from 59
+    // thousandths of a square a tick to 11, and a *rigid* pack — see `CORE_PERMILLE_RIGID` — from
+    // 662 to the same 11, which is the difference between a crowd that buzzes and one that sits
+    // still.
+    //
+    // It also takes the settled population of a 64-square slide from 244 cells to **75**. Gentler
+    // separation leaves pairs resting where the sum would have driven them apart, and everything
+    // downstream of that — `split_pressure`, `growth_pressure`, the carrying capacity — moves with
+    // it. A 69% change in what a slide holds is not a rendering detail smuggled in behind a
+    // stiffness knob; it is its own piece of work, with its own before-and-after across the
+    // acceptance runs.
+    //
+    // Left summed until then. The jitter is real, the fix is known, and the price is written down.
     out
 }
 

@@ -593,6 +593,62 @@ fn does_a_settled_pack_hold_still() {
         let mut world = growth_world_shaded(size, 8, 40, 400, 400, 1, Q10_ONE / 8);
         world.run(settle);
 
+        // The closest pair on the slide, as a percentage of the distance at which they merely
+        // touch. This is the number the picture needs: a firm cell drawn at its true size is
+        // drawn round only if it is genuinely not pressed into anything, and 100% is that.
+        // Newborns excluded, and the first version of this probe is why: it took the minimum
+        // over every pair, which is always a mother and the daughter she was given half a square
+        // away this tick. That is not a crowd failing to hold itself apart, it is the one place
+        // in the engine where a deep overlap is created on purpose — `ecology::crowding_grace`
+        // exists for exactly the same reason and uses the same number.
+        //
+        // Reported as the fraction of pairs overlapping at all, and the fifth percentile of how
+        // deep those go, which together say whether a settled pack is pressed together or merely
+        // touching.
+        let closeness = |w: &World| -> (f32, f32) {
+            let cells = w.cells();
+            let grace = w.biology().ecology.crowding_grace;
+            let mut deep: Vec<f32> = Vec::new();
+            let mut pairs = 0u32;
+            for i in cells.iter() {
+                if cells.age[i] < grace {
+                    continue;
+                }
+                for j in cells.iter() {
+                    if j <= i || cells.age[j] < grace {
+                        continue;
+                    }
+                    let want = mm_core::fixed::q10_to_pos(
+                        mm_core::biology::radius(cells, i)
+                            .saturating_add(mm_core::biology::radius(cells, j)),
+                    );
+                    if want <= 0 {
+                        continue;
+                    }
+                    let d = mm_core::junction::distance(cells, i, j);
+                    if d < want * 2 {
+                        pairs += 1;
+                        if d < want {
+                            deep.push(d as f32 / want as f32);
+                        }
+                    }
+                }
+            }
+            deep.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+            let p05 = deep
+                .get(deep.len() / 20)
+                .copied()
+                .unwrap_or(1.0);
+            (
+                if pairs == 0 {
+                    0.0
+                } else {
+                    deep.len() as f32 * 100.0 / pairs as f32
+                },
+                p05 * 100.0,
+            )
+        };
+
         // Per cell, over twenty consecutive ticks: how far it moves, and how much its own core
         // moves under it.
         let rates = world.biology().metabolism.rates;
@@ -628,14 +684,16 @@ fn does_a_settled_pack_hold_still() {
             prev = now;
         }
         println!(
-            "  {label:<14} pop {:>4}   mean move/tick {:>5} thousandths of a square   \
-             mean core change/tick {:>4}   core range {}..{}",
+            "  {label:<14} pop {:>4}   move/tick {:>4} thousandths   core {}..{}   \
+             {:>4.0}% of near pairs overlap, p05 depth {:>5.1}% of touching",
             world.cells().len(),
             moved / n.max(1),
-            core_swing / n.max(1),
             core_min,
             core_max,
+            closeness(&world).0,
+            closeness(&world).1,
         );
+        let _ = core_swing;
     }
     RIGIDITY.with(|r| r.set(0));
 }
