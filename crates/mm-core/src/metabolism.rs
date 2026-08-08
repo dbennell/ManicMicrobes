@@ -55,6 +55,20 @@ use rayon::prelude::*;
 pub struct Capacities {
     pub photosynthesis: [i32; crate::organelle::PATHWAY_COUNT],
     pub respiration: [i32; crate::organelle::PATHWAY_COUNT],
+    /// What this cell's organelles cost to maintain, before the floor and the cytoplasm terms.
+    ///
+    /// Here rather than in the sequential loop because it is a third walk of the same sixteen
+    /// slots the two arrays above already walk, and `capacities_into` runs on every core while
+    /// the loop that consumed it runs on one.
+    ///
+    /// Exact, and the reason is worth stating because the neighbouring hoist is *not* legal:
+    /// upkeep depends only on the loadout, and nothing in the sequential loop builds, tears down
+    /// or retypes an organelle — the construction pass that does runs earlier, before
+    /// `capacities_into`. `osmotic_load` cannot move here for exactly the opposite reason: it
+    /// reads the cytoplasm, which photosynthesis, respiration and growth all rewrite before the
+    /// upkeep block asks for it, so hoisting it would price a cell's turgor on chemistry it no
+    /// longer holds.
+    pub upkeep: i32,
 }
 
 use crate::organelle::{MetabolicChemistry, OrganelleCatalogue, OrganelleType, PATHWAY_COUNT};
@@ -517,6 +531,7 @@ impl Metabolism {
             }
             slot.photosynthesis = self.capacity_by_pathway(cells, i, OrganelleType::Chloroplast);
             slot.respiration = self.capacity_by_pathway(cells, i, OrganelleType::Mitochondrion);
+            slot.upkeep = self.catalogue.upkeep(cells.slots(i));
         });
     }
 
@@ -839,7 +854,7 @@ impl Metabolism {
                 .rates
                 .metabolic_floor
                 .max(0)
-                .saturating_add(self.catalogue.upkeep(cells.slots(i)))
+                .saturating_add(capacities[i].upkeep)
                 .saturating_add(turgor_cost(
                     &self.rates,
                     crate::biology::osmotic_load(cells, i),
