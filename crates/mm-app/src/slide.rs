@@ -484,7 +484,31 @@ fn squash_of(world: &World, i: usize, radius: f32) -> (Vec<Squash>, f32) {
 
     // Then grown until what survives the cutting is the area the cell has, and the faces
     // re-expressed against the bigger radius so the planes themselves have not moved.
-    let swell = area_swell(radius, radius, &seams);
+    //
+    // **But only as far as the cell is soft enough to bulge.** A cell is a bag of nearly
+    // incompressible fluid and a bag squeezed on one side swells on the other; a *walled* cell
+    // does not, which is the whole difference between a sheet of tissue and a heap of yeast.
+    // `area_swell` models the bag, so a firm cell is drawn with less of it: at rigidity 1 the
+    // outline is the true circle cut by its seams, gaps and all.
+    //
+    // This is the half of `docs/STIFFNESS.md` §4 that lives here rather than in the physics, and
+    // the reason it is a separate half is written there: swell has no counterpart in the
+    // simulation — nothing anywhere has an opinion about a cell's *shape* — so it is free to vary
+    // per cell in every world, where the stiffness that changes what the simulation does is gated
+    // behind a scenario knob.
+    //
+    // The ancestors build a membrane at 24 of a possible 255, so a default cell is about 9% firm
+    // and is drawn very nearly as it always was. Reaching the marble look means building a wall
+    // several times thicker and holding the solute to pressurise it, which costs structural
+    // matter, upkeep and the quadratic turgor charge. It is bought, not switched on.
+    let firmness = (mm_core::biology::rigidity(
+        world.cells(),
+        i,
+        &world.biology().metabolism.rates,
+    ) as f32
+        / mm_core::Q10_ONE as f32)
+        .clamp(0.0, 1.0);
+    let swell = 1.0 + (1.0 - firmness) * (area_swell(radius, radius, &seams) - 1.0);
     for s in seams.iter_mut() {
         s.face /= swell;
     }

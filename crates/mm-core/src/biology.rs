@@ -250,6 +250,38 @@ pub fn interior_capacity(cells: &CellArena, i: usize) -> i32 {
     capacity
 }
 
+/// How firmly a cell holds its own shape, `Q10`. Zero is a bag; one is a walled sphere.
+///
+/// A **product** of a wall and a pressure, not a sum, because that is what the two are physically:
+/// a thick wall with no turgor is plasmolysed and floppy, and turgor with no wall bursts. Yeast
+/// circle-pack because they have both; animal tissue deforms into a continuous sheet because it
+/// has the second and not the first.
+///
+/// Both terms are things the genome already pays for and already chooses:
+///
+/// * the **wall** is `membrane.param`, set by `BUILD`, and it costs structural matter to raise —
+///   a membrane at 200 costs four times the matter of one at 24, and more upkeep to carry;
+/// * the **turgor** is [`osmotic_load`] against the threshold `osmotic_upkeep` already charges
+///   on, so being firm means holding solute and paying the quadratic bill for it.
+///
+/// So "be a marble rather than a drop of foam" is a real investment in both currencies rather
+/// than a free switch, which is the property that makes it worth having as a choice at all.
+///
+/// Read by two things that are otherwise unrelated, and the split matters. `neighbours::core_permille`
+/// scales it by `MetabolicRates::rigidity_gain` and lets it change *what the simulation does*,
+/// which is why that half is gated behind a scenario knob and off by default. `mm_app::slide`
+/// reads it raw, to decide how much a cell bulges into the space its neighbours leave — which
+/// changes only what is drawn, has no counterpart anywhere in the physics, and is therefore free
+/// to vary per cell in every world.
+#[must_use]
+pub fn rigidity(cells: &CellArena, i: usize, rates: &crate::metabolism::MetabolicRates) -> i32 {
+    let wall = (cells.slots(i)[MEMBRANE_SLOT].param as i32 * Q10_ONE) / 255;
+    let load = osmotic_load(cells, i);
+    let threshold = rates.osmotic_threshold.max(1) as i64;
+    let turgor = ((load * Q10_ONE as i64) / threshold).clamp(0, Q10_ONE as i64) as i32;
+    crate::fixed::q10_scale(wall, turgor).clamp(0, Q10_ONE)
+}
+
 /// Free solute in a cell's cytoplasm, `Q10`: everything it holds, less what is out of solution.
 ///
 /// The quantity turgor is charged on (`MetabolicRates::osmotic_upkeep`), and the reason it is a
@@ -875,12 +907,33 @@ pub fn resolve(
 
                 Intent::Build { slot, kind, param } => {
                     let s = slot as usize % SLOT_COUNT;
-                    if s == MEMBRANE_SLOT {
-                        // Slot 0 is always the membrane and cannot be retyped. A cell without
-                        // a boundary is not a cell.
-                        continue;
-                    }
-                    let kind = OrganelleType::from_operand(kind as i16);
+                    // Slot 0 is always the membrane and cannot be *retyped* — a cell without a
+                    // boundary is not a cell — so the type operand is ignored there and the slot
+                    // stays a membrane whatever a genome asks for.
+                    //
+                    // It used to refuse the whole instruction, and that was over-broad against
+                    // its own rule. Changing a membrane's `param` is neither tearing it down nor
+                    // retyping it, and refusing it had a consequence nobody had noticed: a
+                    // daughter is born with `cells.slots(parent)[0].param` and **nothing anywhere
+                    // could ever change that number**. Mutation does not reach it, because it is
+                    // not a genome byte. So the size of the one organelle every cell has was
+                    // fixed by whatever `CellSeed` founded the lineage and was inherited
+                    // unchanged forever — the single trait in the whole design that evolution
+                    // could not act on, in a project whose premise is that what a cell can do is
+                    // bounded by what it has built and paid for.
+                    //
+                    // Charged exactly like any other `BUILD`: `matter_cost(param)` out of the
+                    // cytoplasm, `build_energy` off the top. The membrane's `build_ticks` is
+                    // zero, which is what makes this safe — a rebuilt membrane is never inert,
+                    // so there is no tick on which the cell is a cell without a boundary.
+                    //
+                    // `TEAR` on slot 0 is still refused, a few arms below. That is the half of
+                    // the rule that was always about the rule.
+                    let kind = if s == MEMBRANE_SLOT {
+                        OrganelleType::Membrane
+                    } else {
+                        OrganelleType::from_operand(kind as i16)
+                    };
                     // Building what is already there is a no-op, not a demolition.
                     //
                     // A genome that re-asserts its body every tick is the obvious way to
