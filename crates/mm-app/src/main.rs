@@ -2116,7 +2116,7 @@ fn handle_mouse(
             continue;
         }
         let before = BASE_SCALE * view.zoom;
-        view.zoom = (view.zoom * (1.0 + ev.y * 0.1)).clamp(0.15, 40.0);
+        view.zoom = (view.zoom * (1.0 + ev.y * 0.1)).clamp(ui::ZOOM_MIN, ui::ZOOM_MAX);
         let after = BASE_SCALE * view.zoom;
         // Zoom about the pointer, not about the middle of the viewport: what is under the
         // cursor stays under the cursor, which is the difference between zooming a microscope

@@ -293,6 +293,22 @@ pub fn brush_squares(centre: (i32, i32), width: u32) -> Vec<(i32, i32)> {
     out
 }
 
+/// How far out the wheel may go, as a multiplier on the renderer's base scale — the status bar's
+/// `×` reading divided by a hundred.
+///
+/// Was `0.15`, which on the larger slides left the plate bigger than the viewport with no way to
+/// see all of it at once: the wheel simply stopped. A tenth is the whole change.
+///
+/// Distinct from the floor `look_at` clamps to, which is lower still, because that one is fitting
+/// a named slide to the window and knows the size it is aiming at. This one is a person turning a
+/// wheel with no target, and a floor that lets the plate shrink to a speck is a floor you fall
+/// off by accident.
+pub const ZOOM_MIN: f32 = 0.10;
+
+/// And how far in. Untouched — one square filling a good part of the window is already past the
+/// point where the cell atlas has more detail to give.
+pub const ZOOM_MAX: f32 = 40.0;
+
 /// Where the camera must move so that the point under the pointer stays under the pointer.
 ///
 /// The difference between zooming a microscope and operating a slider. `offset` is the
@@ -773,6 +789,21 @@ mod tests {
         let mut focus = Focus::default();
         focus.press(Target::Panel);
         assert_eq!(focus.resolve(Target::Slide), Target::Panel);
+    }
+
+    /// The wheel has to reach far enough out to see a whole slide, and the biggest slide the
+    /// `New…` sheets offer is 1024 squares.
+    #[test]
+    fn the_wheel_reaches_far_enough_out_to_see_the_largest_slide() {
+        // `BASE_SCALE` is 8 pixels a square at 1x, so the plate is `8 * zoom * squares` across.
+        const BASE_SCALE: f32 = 8.0;
+        let widest = BASE_SCALE * ZOOM_MIN * 1024.0;
+        assert!(
+            widest <= 1280.0,
+            "a 1024-square slide is {widest} pixels across at full zoom-out, which does not fit \
+             an ordinary window"
+        );
+        assert!(ZOOM_MIN < ZOOM_MAX);
     }
 
     #[test]
