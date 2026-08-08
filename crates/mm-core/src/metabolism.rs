@@ -537,6 +537,28 @@ impl Metabolism {
         let m = self.catalogue.metabolism;
         let mut report = MetabolicReport::default();
 
+        // Which chemicals are poisonous, worked out once for the tick rather than once per cell.
+        //
+        // The toxicity block below used to walk all sixteen interior slots and ask the chemical
+        // table about each. The default table has **one** toxic species —
+        // `chem::tests` asserts exactly that — so fifteen sixteenths of that walk found nothing,
+        // fifty thousand times a tick.
+        //
+        // Bit-exact: built in ascending chemical index, which is the order the enumerate() it
+        // replaces visited them in, and `inflicted` accumulates with `saturating_add`, which is
+        // order-sensitive in general and therefore only safe because the order is preserved.
+        // A fixed array rather than a `Vec`: this runs every tick and there is no reason to
+        // reach the allocator sixty times a second for at most sixteen pairs.
+        let mut toxic_buf = [(0usize, 0i32); CHEM_COUNT];
+        let mut toxic_len = 0usize;
+        for (c, d) in chem.all().iter().enumerate() {
+            if d.toxicity > 0 && toxic_len < CHEM_COUNT {
+                toxic_buf[toxic_len] = (c, d.toxicity);
+                toxic_len = toxic_len.saturating_add(1);
+            }
+        }
+        let toxic = &toxic_buf[..toxic_len];
+
         // --- construction: an organelle takes time before it works ---
         //
         // SPEC §6.2: organelles take time to construct and a partially built one is inert. This
@@ -759,11 +781,9 @@ impl Metabolism {
             // than a formality, and what gives a `PUMP` something to be for.
             {
                 let mut inflicted = 0i32;
-                for (c, held) in cells.interior(i).iter().enumerate() {
-                    let toxicity = chem.get(c).toxicity;
-                    if toxicity <= 0 {
-                        continue;
-                    }
+                let interior = cells.interior(i);
+                for &(c, toxicity) in toxic {
+                    let held: i32 = interior.get(c).copied().unwrap_or(0);
                     let excess = held.saturating_sub(self.rates.toxicity_threshold);
                     if excess > 0 {
                         inflicted = inflicted.saturating_add(q10_scale(excess, toxicity));
@@ -819,7 +839,7 @@ impl Metabolism {
                 .rates
                 .metabolic_floor
                 .max(0)
-                .saturating_add(self.catalogue.upkeep(&cells.loadout(i)))
+                .saturating_add(self.catalogue.upkeep(cells.slots(i)))
                 .saturating_add(turgor_cost(
                     &self.rates,
                     crate::biology::osmotic_load(cells, i),

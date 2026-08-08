@@ -676,7 +676,15 @@ impl OrganelleCatalogue {
     /// Charged whether or not an organelle is finished: a half-built mitochondrion is still
     /// matter the cell is carrying around.
     #[must_use]
-    pub fn upkeep(&self, slots: &[Organelle; SLOT_COUNT]) -> i32 {
+    /// A slice rather than `&[Organelle; SLOT_COUNT]`, so that the caller can pass
+    /// [`crate::cell::CellArena::slots`] straight in.
+    ///
+    /// The array form obliged the one hot caller — `metabolism::step`, once per cell per tick —
+    /// to go through `CellArena::loadout`, which copies all sixteen organelles into a temporary
+    /// so that a reference to a fixed-size array exists to take. That is 128 bytes memcpy'd per
+    /// cell per tick, six megabytes at fifty thousand cells, to read a field from each and throw
+    /// the copy away. A slice needs no copy and the loop below does not care about the length.
+    pub fn upkeep(&self, slots: &[Organelle]) -> i32 {
         let mut total = 0i32;
         for o in slots {
             if o.is_present() {
