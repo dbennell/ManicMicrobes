@@ -68,3 +68,15 @@ jobs:
       # Windows runner, two jobs and eight minutes into a release.
       - name: The build script can still include the icon
         run: cargo build-include --locked
+
+      # The benchmarks are gates (CLAUDE.md), and a gate that does not compile is not a gate.
+      # `benches/population.rs` has now rotted twice — both times because a function it calls
+      # gained a parameter and nothing here ever built it. `cargo fast` does not touch benches
+      # and neither did anything else, so the breakage was invisible until somebody went looking
+      # for a number and found a compiler error instead.
+      #
+      # `--no-run` deliberately: this asks whether the gates still build, which is seconds, not
+      # whether they still pass, which needs a fifty-thousand-cell population and a machine whose
+      # timings mean something. A shared CI runner is not that machine.
+      - name: The gates still compile
+        run: cargo gates --locked

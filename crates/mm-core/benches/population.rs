@@ -271,14 +271,17 @@ fn phase_breakdown(_c: &mut Criterion) {
     if cfg!(debug_assertions) {
         return;
     }
-    let Some(mut world) = grown("ancestor.mm", 1) else {
-        return;
-    };
+    if let Some(world) = grown("ancestor.mm", 1) {
+        breakdown_of("autotroph (ancestor.mm)", world);
+    }
+}
+
+fn breakdown_of(label: &str, mut world: World) {
     let population = world.cells().len();
     let (w, h) = (world.substrate().width(), world.substrate().height());
     let n = 60u32;
 
-    eprintln!("\nPhase breakdown at {population} cells ({w}x{h}):");
+    eprintln!("\nPhase breakdown — {label} — at {population} cells ({w}x{h}):");
 
     // The whole tick first, before anything below has touched the world.
     //
@@ -299,18 +302,26 @@ fn phase_breakdown(_c: &mut Criterion) {
     let rebuild = t.elapsed() / n;
 
     let mut radii = Vec::new();
+    let mut core_permille = Vec::new();
     let mut crowding = Vec::new();
     let mut pressure = Vec::new();
     let mut separation = neighbours::SeparationScratch::default();
+    // Copied out before the loop takes the cells mutably, which is the only reason these are
+    // not read inline from `world`. Both are `Copy`.
+    let rates = world.biology().metabolism.rates;
+    let relax = world.biology().separation_relax;
     let t = Instant::now();
     for _ in 0..n {
         std::hint::black_box(neighbours::resolve_collisions(
             world.cells_mut(),
             &index,
             &mut radii,
+            &mut core_permille,
             &mut crowding,
             &mut pressure,
             &[],
+            &rates,
+            relax,
             &mut separation,
         ));
     }
@@ -460,7 +471,51 @@ fn phase_breakdown(_c: &mut Criterion) {
     }
     let resolve = t.elapsed() / n;
 
+    // --- the junction phase, which the remainder has been carrying ---
+    //
+    // `World::step` solves the distance constraints and then prunes what broke, between physics
+    // and collision separation. Neither has ever appeared in this table, so on a slide with
+    // junctions on it — which the mixed one is, `parasite.mm` joins every tick — both have been
+    // inside "births/deaths etc" the whole time.
+    let junctions = world.biology().junctions;
+    let mut constraints: Vec<(u32, u32, i32)> = Vec::new();
+    let t = Instant::now();
+    for _ in 0..n {
+        std::hint::black_box(mm_core::junction::solve(
+            world.cells_mut(),
+            &junctions,
+            &mut constraints,
+        ));
+    }
+    let jsolve = t.elapsed() / n;
 
+    let t = Instant::now();
+    for _ in 0..n {
+        std::hint::black_box(mm_core::junction::prune(world.cells_mut(), &junctions));
+    }
+    let jprune = t.elapsed() / n;
+
+    // --- the impulse recount ---
+    //
+    // `World::step` recomputes `active_impulses` by scanning both impulse planes end to end,
+    // and does it twice a tick: once after physics whenever anything moved, and again after the
+    // impulses decay. On a 512-square slide that is two full passes over 262,144 pairs of i32,
+    // or about two megabytes of streaming reads, for a number `World::note_impulse` already
+    // maintains incrementally one square at a time.
+    //
+    // Measured here rather than argued about, because "obviously wasteful" and "a measurable
+    // share of the tick" are different claims and only the second one justifies a change.
+    let (ix, iy) = world.impulses();
+    let t = Instant::now();
+    for _ in 0..n {
+        std::hint::black_box(
+            ix.iter()
+                .zip(iy.iter())
+                .filter(|(x, y)| **x != 0 || **y != 0)
+                .count(),
+        );
+    }
+    let recount = (t.elapsed() / n) * 2;
 
     // The fluid on the *populated* world's substrate, not an empty one.
     //
@@ -490,9 +545,18 @@ fn phase_breakdown(_c: &mut Criterion) {
     empty.run(n as u64);
     let empty_tick = t.elapsed() / n;
 
-    let accounted =
-        rebuild * 2 + collisions + fluid + execute + gather + metabolic + ecology + physics
-            + resolve;
+    let accounted = rebuild * 2
+        + collisions
+        + fluid
+        + execute
+        + gather
+        + metabolic
+        + ecology
+        + physics
+        + resolve
+        + jsolve
+        + jprune
+        + recount;
     let rest = whole.saturating_sub(accounted);
     let pct = |d: std::time::Duration| d.as_secs_f64() / whole.as_secs_f64() * 100.0;
     eprintln!("  whole tick            {whole:>10.2?}");
@@ -535,6 +599,13 @@ fn phase_breakdown(_c: &mut Criterion) {
         "  intent resolution     {resolve:>10.2?}  {:5.1}%",
         pct(resolve)
     );
+    eprintln!("  junction solve        {jsolve:>10.2?}  {:5.1}%", pct(jsolve));
+    eprintln!("  junction prune        {jprune:>10.2?}  {:5.1}%", pct(jprune));
+    eprintln!(
+        "  impulse recount x2    {recount:>10.2?}  {:5.1}%   [{} squares, and it is a cached counter]",
+        pct(recount),
+        ix.len()
+    );
     // Births, deaths, junction components, phylogeny and the metrics. Named as what is left.
     eprintln!(
         "  births/deaths etc     {rest:>10.2?}  {:5.1}%  (the remainder)",
@@ -542,9 +613,13 @@ fn phase_breakdown(_c: &mut Criterion) {
     );
 }
 
-/// Per-phase throughput, for finding out *where* a regression went rather than only that one
-/// happened.
-fn phases(c: &mut Criterion) {
+/// Whole-tick throughput per genome, which is the number the gates quote.
+///
+/// Named `population` rather than `phases` because that is what it measures. It was called
+/// `phases` and documented as "per-phase throughput, for finding out *where* a regression went",
+/// and it is nothing of the kind — it is one `world.step()` per *genome*. The phases are
+/// [`phase_bench`] below, which did not exist.
+fn whole_tick(c: &mut Criterion) {
     if cfg!(debug_assertions) {
         return;
     }
@@ -555,6 +630,141 @@ fn phases(c: &mut Criterion) {
             group.bench_function(name, |b| b.iter(|| world.step()));
         }
     }
+    group.finish();
+}
+
+/// One criterion benchmark per phase, so an optimisation is measured against the thing it
+/// changed.
+///
+/// # Why this exists
+///
+/// The whole-tick benchmark cannot see the work. At `sample_size(10)` it reports a confidence
+/// interval of about ±9%, and a phase worth 15% of the tick improving by 20% moves the whole
+/// tick by 3% — comfortably inside the noise. Two real optimisations were measured against it
+/// and came back `p = 0.71`, which is not "no effect", it is "no measurement".
+///
+/// Benching the phase directly turns that 20% back into 20%. The sample size is criterion's
+/// default here rather than ten: a phase call is a few milliseconds, so a hundred samples costs
+/// seconds, and the narrower interval is the entire point.
+///
+/// # What these numbers are and are not
+///
+/// Each phase is called repeatedly on one world, which advances that phase without advancing the
+/// rest — sixty metabolic steps against a fluid nothing is eating from. That is the same liberty
+/// [`breakdown_of`] takes and it is fair for pricing *work per call*, which is what an
+/// optimisation changes. It is not a trajectory and nothing about the simulation should be read
+/// off it.
+fn phase_bench(c: &mut Criterion) {
+    if cfg!(debug_assertions) {
+        return;
+    }
+    let Some(mut world) = grown("ancestor.mm", 1) else {
+        return;
+    };
+    let (w, h) = (world.substrate().width(), world.substrate().height());
+    let mut index = NeighbourIndex::default();
+    index.rebuild(world.cells(), w, h);
+
+    let substrate = world.substrate().clone();
+    let chem = world.scenario().chemicals.clone();
+    let metabolism = world.biology().metabolism.clone();
+    let ecology_cfg = world.biology().ecology;
+    let chemistry = world.biology().metabolism.catalogue.metabolism;
+    let capacity = world.cells().capacity();
+
+    let mut group = c.benchmark_group("phase");
+
+    let mut ledger = mm_core::ledger::Ledger::new();
+    let mut starving = Vec::new();
+    let mut capacities = Vec::new();
+    let pressure = vec![0i32; capacity];
+    group.bench_function("metabolism", |b| {
+        b.iter(|| {
+            starving.clear();
+            std::hint::black_box(metabolism.step(
+                world.cells_mut(),
+                &substrate,
+                &chem,
+                &mut ledger,
+                &mut starving,
+                &pressure,
+                &mut capacities,
+            ))
+        })
+    });
+
+    let crowding = vec![0i32; capacity];
+    let slip = vec![0i32; capacity];
+    let mut eco_substrate = substrate.clone();
+    group.bench_function("ecology", |b| {
+        b.iter(|| {
+            std::hint::black_box(mm_core::ecology::step(
+                world.cells_mut(),
+                &mut eco_substrate,
+                &index,
+                &crowding,
+                &slip,
+                &ecology_cfg,
+                &chemistry,
+                &mut ledger,
+            ))
+        })
+    });
+
+    let mut impulse_x = vec![0i32; substrate.len()];
+    let mut impulse_y = vec![0i32; substrate.len()];
+    let mut slip_scratch: Vec<i32> = Vec::new();
+    let forces = mm_core::sensing::BodyForces {
+        jitter: 0,
+        gravity: 0,
+    };
+    group.bench_function("physics", |b| {
+        b.iter(|| {
+            std::hint::black_box(mm_core::sensing::step_physics(
+                world.cells_mut(),
+                &substrate,
+                &mut impulse_x,
+                &mut impulse_y,
+                forces,
+                &mut slip_scratch,
+                0,
+                1,
+            ))
+        })
+    });
+
+    let mut radii = Vec::new();
+    let mut core_permille = Vec::new();
+    let mut crowd_out = Vec::new();
+    let mut pressure_out = Vec::new();
+    let mut separation = neighbours::SeparationScratch::default();
+    let rates = world.biology().metabolism.rates;
+    let relax = world.biology().separation_relax;
+    group.bench_function("collisions", |b| {
+        b.iter(|| {
+            std::hint::black_box(neighbours::resolve_collisions(
+                world.cells_mut(),
+                &index,
+                &mut radii,
+                &mut core_permille,
+                &mut crowd_out,
+                &mut pressure_out,
+                &[],
+                &rates,
+                relax,
+                &mut separation,
+            ))
+        })
+    });
+
+    group.bench_function("gather_touch", |b| {
+        b.iter(|| index.gather_touch(world.cells()))
+    });
+
+    group.bench_function("neighbour_rebuild", |b| {
+        b.iter(|| index.rebuild(world.cells(), w, h))
+    });
+
     group.finish();
 }
 
@@ -860,6 +1070,7 @@ criterion_group!(
     junction_gate,
     ecology_gate,
     phase_breakdown,
-    phases
+    phase_bench,
+    whole_tick
 );
 criterion_main!(benches);

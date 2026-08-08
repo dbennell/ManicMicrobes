@@ -51,3 +51,11 @@ slow = [
 ]
 
 full = ["test", "--release", "--workspace"]
+
+# The gates build, which is not the same question as the gates pass.
+#
+# `benches/population.rs` has rotted twice, both times by a called function gaining a parameter
+# while nothing in CI ever compiled the caller. Running the gates in CI is the wrong fix — their
+# numbers only mean something on a machine whose timings are stable, and a shared runner is not
+# one — but *building* them is seconds and catches the whole failure mode.
+gates = ["bench", "--workspace", "--no-run"]
