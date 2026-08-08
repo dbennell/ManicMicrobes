@@ -416,6 +416,30 @@ impl NeighbourIndex {
     /// Still `max_radius` and not the neighbour's actual radius, because the whole point of an
     /// index is not to have looked at the neighbour yet. What this removes is the half of the
     /// overestimate that was never about the caller at all.
+    ///
+    /// # A per-row bound was tried, and it does nothing
+    ///
+    /// The remaining overestimate looks recoverable: keep the largest radius in each grid *row*
+    /// and size each row's walk from that instead of from the slide's maximum. It is exact —
+    /// skipping squares that provably hold nothing overlapping leaves the surviving candidates
+    /// in the same order, so a cell still sums its contributions in the sequence Jacobi
+    /// separation needs — and `soup.ron` at 20,000 ticks confirmed it: the state hash was
+    /// unchanged. Measured against a clean baseline it is **+4.4% (p = 0.10), which is nothing**.
+    ///
+    /// The premise is wrong. It assumes large cells are localised, so that most rows get a
+    /// tighter bound. On a grown population they are not: fifty thousand cells over five hundred
+    /// rows is about a hundred per row, the size distribution is broad rather than one outlier,
+    /// and essentially every row therefore contains something near the maximum. The per-row
+    /// bound equals the global one almost everywhere and the narrowing never fires.
+    ///
+    /// Per *square* would fire — at 0.19 cells per square most squares hold one cell, so the
+    /// bound would be that cell's own radius. But it costs a `width * height` array rebuilt
+    /// every tick, which is the memset that already makes `rebuild` grid-bound rather than
+    /// population-bound, and it breaks [`Self::row_run`]: the walk gathers a whole row as one
+    /// contiguous slice, and testing per square means 361 scattered reads into a megabyte where
+    /// there are now 19 contiguous runs. Whether that trades well is unmeasured. A size-tiered
+    /// index — small cells and large cells in separate structures — is the other candidate, and
+    /// it is not exact, because merging two walks changes the order a cell accumulates in.
     pub fn around_radius(&self, sx: i32, sy: i32, radius: i32) -> impl Iterator<Item = usize> + '_ {
         let reach = self.squares_for(radius.saturating_add(self.max_radius));
         self.within(sx, sy, reach.min(self.search))
