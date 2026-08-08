@@ -291,6 +291,21 @@ pub struct NeighbourIndex {
     /// otherwise call it once per neighbour per cell. The same hoist `resolve_collisions`
     /// makes, for the same reason.
     radii: Vec<i32>,
+    /// Write cursor per bucket, for the placement pass of [`Self::rebuild`].
+    ///
+    /// A field rather than a local because the local was `self.starts.clone()` — a fresh
+    /// allocation of one `u32` per substrate square, which on a 512-square slide is a megabyte,
+    /// twice a tick, every tick. The contents are overwritten from `starts` at the start of
+    /// every rebuild, so carrying it between calls holds no state; it holds the allocation.
+    ///
+    /// This does not make the rebuild cheaper by much and it is not meant to. `rebuild` is
+    /// grid-bound rather than population-bound — `neighbour_rebuild_empty` measures 47% of the
+    /// phase on a slide with no cells on it — and the two larger pieces of that, the zeroing of
+    /// `starts` and the prefix sum over it, are structural. `starts` must be a dense running
+    /// total because `row_run` indexes it at arbitrary `x`, so every entry is written whether a
+    /// bucket holds anything or not, and there is nothing a touched-bucket list could
+    /// selectively clear.
+    cursor: Vec<u32>,
 }
 
 impl NeighbourIndex {
@@ -327,14 +342,18 @@ impl NeighbourIndex {
         }
         self.entries.resize(cells.len(), 0);
         // Place, in slot order, so each bucket ends up ascending.
-        let mut cursor = self.starts.clone();
+        self.cursor.clear();
+        self.cursor.extend_from_slice(&self.starts);
         for i in cells.iter() {
             let sq = self.square_of(cells, i);
-            let at = cursor[sq] as usize;
+            let Some(cursor) = self.cursor.get_mut(sq) else {
+                continue;
+            };
+            let at = *cursor as usize;
+            *cursor = cursor.saturating_add(1);
             if let Some(slot) = self.entries.get_mut(at) {
                 *slot = i as u32;
             }
-            cursor[sq] = cursor[sq].saturating_add(1);
         }
     }
 
