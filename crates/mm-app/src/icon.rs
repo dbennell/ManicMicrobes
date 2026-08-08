@@ -58,6 +58,20 @@ const SUPERSAMPLE: u32 = 4;
 
 /// The mark as straight-alpha RGBA rows, top to bottom — what `winit::window::Icon` wants.
 pub fn rgba(size: u32) -> Vec<u8> {
+    render(size, true)
+}
+
+/// The same, without the tile behind it.
+///
+/// For drawing the mark *inside* the application, where it sits on a panel that already has a
+/// ground. The tile is what makes an icon read as an icon on somebody else's taskbar; on our own
+/// menu bar it would be a near-black rounded square sitting on a near-black strip, which is a
+/// block with a cell in it rather than a mark.
+pub fn rgba_untiled(size: u32) -> Vec<u8> {
+    render(size, false)
+}
+
+fn render(size: u32, tile: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity((size * size * 4) as usize);
     let scale = 32.0 / size as f32;
     let step = scale / SUPERSAMPLE as f32;
@@ -73,7 +87,7 @@ pub fn rgba(size: u32) -> Vec<u8> {
                 for sx in 0..SUPERSAMPLE {
                     let x = (px as f32 * SUPERSAMPLE as f32 + sx as f32 + 0.5) * step;
                     let y = (py as f32 * SUPERSAMPLE as f32 + sy as f32 + 0.5) * step;
-                    let (sr, sg, sb, sa) = sample(x, y);
+                    let (sr, sg, sb, sa) = sample(x, y, tile);
                     r += sr * sa;
                     g += sg * sa;
                     b += sb * sa;
@@ -101,11 +115,11 @@ pub fn rgba(size: u32) -> Vec<u8> {
 }
 
 /// One sample of the mark, in the 32-unit space. Returns straight-alpha colour.
-fn sample(x: f32, y: f32) -> (f32, f32, f32, f32) {
+fn sample(x: f32, y: f32, tile: bool) -> (f32, f32, f32, f32) {
     let mut colour = [0.0f32; 3];
     let mut alpha = 0.0f32;
 
-    if in_tile(x, y) {
+    if tile && in_tile(x, y) {
         over(&mut colour, &mut alpha, TILE, 1.0);
     }
 

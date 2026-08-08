@@ -4029,6 +4029,39 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                 }
             };
 
+            // The mark, before the first menu, where an application's own icon goes on a bar
+            // that is also its title bar. Untiled: the tile is what makes it read as an icon on
+            // somebody else's taskbar, and here it would be a near-black square on a near-black
+            // strip.
+            //
+            // Drawn at 40 and shown at 20 so it stays crisp on a display that doubles, and
+            // uploaded once — the handle is kept in egui's temporary store rather than rebuilt
+            // every frame, which at sixty frames a second would be sixty needless texture
+            // uploads a second for a picture that never changes.
+            {
+                const TEXELS: usize = 40;
+                let id = egui::Id::new("mm-mark-texture");
+                let mark: egui::TextureHandle = match ui.ctx().data(|d| d.get_temp(id)) {
+                    Some(handle) => handle,
+                    None => {
+                        let image = egui::ColorImage::from_rgba_unmultiplied(
+                            [TEXELS, TEXELS],
+                            &icon::rgba_untiled(TEXELS as u32),
+                        );
+                        let handle =
+                            ui.ctx()
+                                .load_texture("mm-mark", image, egui::TextureOptions::LINEAR);
+                        ui.ctx().data_mut(|d| d.insert_temp(id, handle.clone()));
+                        handle
+                    }
+                };
+                ui.add(
+                    egui::Image::new(&mark).fit_to_exact_size(egui::vec2(20.0, 20.0)),
+                )
+                .on_hover_text(format!("Manic Microbes {}", env!("CARGO_PKG_VERSION")));
+                ui.add_space(6.0);
+            }
+
             let file = ui.menu_button("File", |ui| {
                 skin::menu(ui);
                 // One menu for documents, both kinds of them (M10.9). This was two — a File
@@ -4260,18 +4293,27 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                 // `×`, U+00D7, and not `✕` U+2715 — which is not in Hack and came out as a
                 // tofu box. egui ships Hack and Ubuntu-Light and no more, so a symbol outside
                 // Latin-1 is a gamble that has to be looked at to settle.
+                // Six points between them. They were touching, which for the three buttons that
+                // close and resize a window is the wrong place to be economical: they are small,
+                // they are in the corner every pointer overshoots into, and the cost of hitting
+                // close when you meant maximise is the whole session. Spaced rather than
+                // enlarged, because the bar's height is set by the menu row beside them.
+                const APART: f32 = 6.0;
+
                 if skin::chip(ui, "×", None, false)
                     .on_hover_text("close")
                     .clicked()
                 {
                     *quit = true;
                 }
+                ui.add_space(APART);
                 if skin::chip(ui, "☐", None, false)
                     .on_hover_text("maximise / restore  (or double-click the bar)")
                     .clicked()
                 {
                     view.want_maximise = true;
                 }
+                ui.add_space(APART);
                 if skin::chip(ui, "—", None, false)
                     .on_hover_text("minimise")
                     .clicked()
