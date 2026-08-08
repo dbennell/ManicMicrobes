@@ -52,7 +52,7 @@ fn histogram_at(world: &mut World, reach: i32) -> (Vec<usize>, usize, usize) {
     let mut hist = vec![0usize; CONTACTS_PER_CELL + 1];
     let mut total = 0usize;
     for i in world.cells().iter() {
-        let n = index.contacts(world.cells(), i, reach).as_slice().len();
+        let n = index.contacts(world.cells(), i, reach, &world.biology().metabolism.rates).as_slice().len();
         hist[n.min(CONTACTS_PER_CELL)] += 1;
         total += 1;
     }
@@ -129,7 +129,7 @@ fn do_any_two_cells_disagree_about_their_shared_wall() {
             (
                 i,
                 index
-                    .contacts(world.cells(), i, 1500)
+                    .contacts(world.cells(), i, 1500, &world.biology().metabolism.rates)
                     .as_slice()
                     .iter()
                     .filter_map(|c| at.get(&(x + c.dx, y + c.dy)).copied())
@@ -220,6 +220,9 @@ fn which_way_does_a_forgotten_neighbour_lie() {
         let (w, h) = (world.substrate().width(), world.substrate().height());
         let mut index = NeighbourIndex::default();
         index.rebuild(world.cells(), w, h);
+        // Contacts now report the neighbour's firmness, which only the renderer reads. These
+        // tests are about which neighbours are found, so the defaults are the right answer.
+        let rates = world.biology().metabolism.rates;
         let cells = world.cells();
         cells
             .iter()
@@ -227,7 +230,7 @@ fn which_way_does_a_forgotten_neighbour_lie() {
                 (
                     cells.id_at(i).ordering_key(),
                     index
-                        .contacts(cells, i, 1500)
+                        .contacts(cells, i, 1500, &rates)
                         .as_slice()
                         .iter()
                         .map(|c| (c.dx, c.dy))
@@ -309,6 +312,7 @@ fn what_the_stale_index_cannot_see() {
     let mut fresh = NeighbourIndex::default();
     fresh.rebuild(world.cells(), w, h);
 
+    let rates = world.biology().metabolism.rates;
     let cells = world.cells();
     let (mut missed, mut phantom, mut total) = (0usize, 0usize, 0usize);
     let mut cells_affected = 0usize;
@@ -316,13 +320,13 @@ fn what_the_stale_index_cannot_see() {
     for i in cells.iter() {
         let stale: Vec<(i32, i32)> = world
             .neighbours()
-            .contacts(cells, i, 1500)
+            .contacts(cells, i, 1500, &rates)
             .as_slice()
             .iter()
             .map(|c| (c.dx, c.dy))
             .collect();
         let now: Vec<(i32, i32)> = fresh
-            .contacts(cells, i, 1500)
+            .contacts(cells, i, 1500, &rates)
             .as_slice()
             .iter()
             .map(|c| (c.dx, c.dy))
@@ -377,6 +381,7 @@ fn both_cells_of_a_pair_agree_where_their_wall_is() {
     let (w, h) = (world.substrate().width(), world.substrate().height());
     let mut index = NeighbourIndex::default();
     index.rebuild(world.cells(), w, h);
+    let rates = world.biology().metabolism.rates;
     let cells = world.cells();
 
     // Both cells' drawn radii, as the front end works them out.
@@ -391,7 +396,7 @@ fn both_cells_of_a_pair_agree_where_their_wall_is() {
     let (mut checked, mut worst) = (0usize, 0.0f64);
     for i in cells.iter() {
         let r = drawn(cells.mass[i]) * PACKING;
-        for c in index.contacts(cells, i, 1500).as_slice() {
+        for c in index.contacts(cells, i, 1500, &rates).as_slice() {
             let Some(&j) = at.get(&(cells.x[i] + c.dx, cells.y[i] + c.dy)) else {
                 continue;
             };

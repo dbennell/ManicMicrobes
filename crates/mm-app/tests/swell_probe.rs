@@ -234,7 +234,7 @@ fn is_it_a_neighbours_radius_that_steps() {
             .map(|i| {
                 let list = world
                     .neighbours()
-                    .contacts(cells, i, 1500)
+                    .contacts(cells, i, 1500, &world.biology().metabolism.rates)
                     .as_slice()
                     .iter()
                     .map(|c| {

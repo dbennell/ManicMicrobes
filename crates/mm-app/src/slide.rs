@@ -444,6 +444,22 @@ pub fn seam_between(
     })
 }
 
+/// How much larger than its physical radius a cell of this firmness is drawn.
+///
+/// [`PACKING`] for a bag of fluid, one for a walled body, linear between. `phantom::Bench::packing`
+/// is the same function and its documentation is the long version; the short one is that "a firm
+/// cell should be cut less deeply" cannot be done by moving the seam, because the seam is the one
+/// plane both cells of a pair arrive at independently and moving it for one of them draws the two
+/// overlapping. What can move is the size each is drawn at: cross two circles barely and the plane
+/// through the crossings barely cuts either.
+///
+/// Measured on a raft of phantom cells at the spacing the physics drives a pack to, this takes the
+/// outline from 0.387 out of round — more angular than a square — to 0.167, between a hexagon and
+/// a circle. The rest of the distance is *spacing*, which is the physics' to give.
+fn packing_for(firmness: f32) -> f32 {
+    PACKING + (1.0 - PACKING) * firmness.clamp(0.0, 1.0)
+}
+
 /// The seams a cell is flattened along, and how much it must swell to keep its area.
 ///
 /// `radius` is the drawn radius, not the physical one — the seams have to be worked out at the
@@ -459,16 +475,45 @@ fn squash_of(world: &World, i: usize, radius: f32) -> (Vec<Squash>, f32) {
         return (Vec::new(), 1.0);
     }
     let scale = 1.0 / POS_ONE as f32;
-    // How firmly this cell holds its own shape. See `Contact::rigidity`.
-    let rigidity = world
+    let rates = &world.biology().metabolism.rates;
+    // How much this cell gives way when another is pressed into it — slot zero's `param`, which
+    // decides which of two cells the shared wall slides towards. Not the same thing as the
+    // firmness below, which decides how *large* either is drawn.
+    let give = world
         .cells()
         .slots(i)
         .first()
         .map_or(0.0, |m| m.param as f32);
-    let mut seams: Vec<Squash> = world
+
+    // The contact set once, not twice. It is walked for the seams and for how much of this cell
+    // is glued, and it is the expensive thing on this path.
+    let set = world
         .neighbours()
-        .contacts(world.cells(), i, PACKING_PERMILLE)
-        .as_slice()
+        .contacts(world.cells(), i, PACKING_PERMILLE, rates);
+    let near = set.as_slice();
+
+    // How firmly this cell holds its own shape: wall times turgor, both of which a genome pays
+    // for. Raw, with no tissue term — see below for why the two firmnesses part company here.
+    let own = mm_core::biology::rigidity(world.cells(), i, rates) as f32
+        / mm_core::Q10_ONE as f32;
+
+    // Size first, because the seams are cut at the size the cell is going to appear.
+    //
+    // A firm cell is drawn nearer its true radius and so crosses its neighbours less deeply, and
+    // the plane through two barely-crossing circles barely cuts either. That is how "cut less
+    // deeply" is done without moving the seam: moving the seam breaks the one property the whole
+    // scheme rests on, since both cells of a pair must arrive at the same plane independently.
+    //
+    // **The tissue term is deliberately absent here and present in the swell.** Each cell has to
+    // know how large its neighbour is drawn, and `Contact::firmness` carries exactly that — but a
+    // neighbour's *glued* fraction would need its whole contact set walked, which is a second
+    // neighbourhood scan per pair. Leaving it out is also the better answer: glue changes whether
+    // a cell bulges into the one beside it, not how big it is.
+    let mine = packing_for(own);
+    let shrink = mine / PACKING;
+    let bare = radius * shrink;
+
+    let mut seams: Vec<Squash> = near
         .iter()
         .filter_map(|c| {
             let (dx, dy) = (c.dx as f32 * scale, c.dy as f32 * scale);
@@ -476,9 +521,10 @@ fn squash_of(world: &World, i: usize, radius: f32) -> (Vec<Squash>, f32) {
             // `drawn_radius`. Reading `c.radius` here instead is what a smoothed radius makes
             // wrong: this cell would use the smooth curve for itself and the staircase for its
             // neighbour, the neighbour would do the reverse, and the pair would compute two
-            // different planes for one wall.
-            let other = drawn_radius(c.mass) * PACKING;
-            seam_between(radius, other, dx, dy, rigidity, c.rigidity as f32)
+            // different planes for one wall. The same now goes for its firmness.
+            let theirs = drawn_radius(c.mass)
+                * packing_for(c.firmness as f32 / mm_core::Q10_ONE as f32);
+            seam_between(bare, theirs, dx, dy, give, c.rigidity as f32)
         })
         .collect();
 
@@ -490,60 +536,41 @@ fn squash_of(world: &World, i: usize, radius: f32) -> (Vec<Squash>, f32) {
     // A packed crowd of cells has two pictures and the engine should be able to draw both. A
     // moss leaf is a tessellation: cells flattened into polygons, sharing walls, no gaps
     // anywhere. A smear of yeast is a heap: pressed together just as hard, still obstinately
-    // round, with gaps between them. `area_swell` models the first — it grows a cell until what
-    // survives its neighbours' seams encloses the area it actually has, which is what separates
-    // a foam from a gravel pile — and until now every cell got it unconditionally.
-    //
-    // Two things decide which a cell is, and they are asked in this order.
+    // round, with gaps between them.
     //
     // **Is it stuck to its neighbours?** A tissue shares its walls because its cells are *glued*,
-    // not because they are soft. That is the true difference between the two pictures, and the
-    // engine has had the mechanism since M7: a junction is a lineage having decided that the
-    // cell on the other end is part of it. So the fraction of a cell's contacts that are joined
-    // is the fraction of it that is tissue, and tissue always tessellates.
+    // not because they are soft, and the engine has had the mechanism since M7. The fraction of a
+    // cell's contacts that are joined is the fraction of it that is tissue, and tissue always
+    // tessellates however rigid its cells are.
     //
     // **If it is free, is it firm?** A bag of fluid squeezed on one side bulges on the other; a
-    // walled, turgid cell does not. `biology::rigidity` is wall times turgor, both of which a
-    // genome pays for — structural matter and upkeep for the membrane, the quadratic turgor
-    // charge for the solute that pressurises it.
+    // walled, turgid cell does not.
     //
-    // The default falls out and is what matters most about this: the shipped ancestors join
-    // nothing and build a membrane of 24 out of a possible 255, so they are ~9% firm, entirely
-    // free, and drawn very nearly exactly as they always were. The tessellated slide is what a
-    // cell looks like unless it has bought its way out.
+    // The default falls out and is what matters most: the shipped ancestors join nothing and
+    // build a membrane of 24 out of a possible 255, so they are about 9% firm, entirely free, and
+    // drawn very nearly exactly as they always were.
     //
-    // # Why the fraction, and not the seam
-    //
-    // The honest version of this is per *seam*: bulge into the neighbours you are joined to and
-    // hold your shape against the strangers. `area_swell` cannot express it — see `SWELL_GAIN`,
-    // which records the same limitation from the other end: the solve has one degree of freedom,
-    // a single scale on the whole circle, for a constraint that is entirely local. A cell half
-    // joined and half free is therefore drawn half way between the two pictures rather than
-    // being tissue on one side and a marble on the other. Giving each free arc its own
-    // correction would fix both this and `SWELL_GAIN`'s complaint at once, and is the change
-    // that section is asking for.
-    let contacts = seams.len().max(1) as f32;
-    let joined = world
-        .neighbours()
-        .contacts(world.cells(), i, PACKING_PERMILLE)
-        .as_slice()
-        .iter()
-        .filter(|c| c.joined)
-        .count() as f32;
+    // The per-*seam* version of this is not expressible — see `SWELL_GAIN`, which records the same
+    // limitation from the other end: the solve has one degree of freedom, a single scale on the
+    // whole circle. A cell half joined and half free is drawn half way between the two pictures
+    // rather than being tissue on one side and a marble on the other.
+    let contacts = near.len().max(1) as f32;
+    let joined = near.iter().filter(|c| c.joined).count() as f32;
     let tissue = (joined / contacts).clamp(0.0, 1.0);
-    let firmness = (mm_core::biology::rigidity(
-        world.cells(),
-        i,
-        &world.biology().metabolism.rates,
-    ) as f32
-        / mm_core::Q10_ONE as f32)
-        .clamp(0.0, 1.0)
-        * (1.0 - tissue);
-    let swell = 1.0 + (1.0 - firmness) * (area_swell(radius, radius, &seams) - 1.0);
+    let bulge = 1.0 - (own * (1.0 - tissue)).clamp(0.0, 1.0);
+    let grown = 1.0 + bulge * (area_swell(bare, bare, &seams) - 1.0);
+
+    // The faces are fractions of the *swollen* radius, so the planes stay where they were. Only
+    // the growth divides out — the shrink is already in `bare`, which the faces were measured
+    // against.
     for s in seams.iter_mut() {
-        s.face /= swell;
+        s.face /= grown;
     }
-    (seams, swell)
+
+    // Both effects reach the shader through the one `swell` attribute it already has: it draws at
+    // `radius * PACKING * swell`, so handing back the growth times the shrink is the same as
+    // handing it a smaller `PACKING`. Nothing in `cellmesh` or `cell.wgsl` moves.
+    (seams, grown * shrink)
 }
 
 /// One organelle, as it is drawn inside its cell.

@@ -476,7 +476,13 @@ impl NeighbourIndex {
     /// Not gathered up front like [`Self::gather_touch`], because only the cells actually on
     /// screen need it and the renderer knows which those are.
     #[must_use]
-    pub fn contacts(&self, cells: &CellArena, i: usize, reach_permille: i32) -> ContactSet {
+    pub fn contacts(
+        &self,
+        cells: &CellArena,
+        i: usize,
+        reach_permille: i32,
+        rates: &crate::metabolism::MetabolicRates,
+    ) -> ContactSet {
         let mut out = ContactSet::default();
         if !cells.occupied(i) {
             return out;
@@ -516,6 +522,7 @@ impl NeighbourIndex {
                 overlap,
                 rigidity: cells.slots(j).first().map_or(0, |m| m.param as i32),
                 joined: crate::junction::existing(cells, i, cells.id_at(j)).is_some(),
+                firmness: crate::biology::rigidity(cells, j, rates),
             });
         }
         out
@@ -566,6 +573,15 @@ pub struct Contact {
     /// How far inside each other's reach the two are, `POS`. Always positive, and measured
     /// against whatever reach the caller asked for rather than against bare radii.
     pub overlap: i32,
+    /// How firmly the neighbour holds its own shape, `Q10`. See [`crate::biology::rigidity`].
+    ///
+    /// The neighbour's, not this cell's, and reported for the same reason `mass` is: a renderer
+    /// that draws a firm cell smaller than a soft one has to work the *pair's* shared wall out
+    /// from both sizes, or the two cells compute two different planes for one wall and are drawn
+    /// overlapping. `rigidity` beside it is the membrane parameter alone, which decides which of
+    /// two cells gives way; this is wall times turgor, which decides how large either is drawn.
+    pub firmness: i32,
+
     /// Whether these two are joined, by a junction of either kind.
     ///
     /// Reported because being *stuck to* a neighbour and merely being pressed against one are
@@ -1586,8 +1602,10 @@ mod tests {
             overlap,
             rigidity: 24,
             // These tests are about which neighbours are found and where their seams fall, which
-            // is a question about geometry. Being joined changes only how a cell is drawn.
+            // is a question about geometry. Being joined changes only how a cell is drawn, and so
+            // does being firm.
             joined: false,
+            firmness: 0,
         }
     }
 

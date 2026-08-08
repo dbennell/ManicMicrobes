@@ -440,14 +440,14 @@ impl Bench {
     pub fn draw(&self, blobs: &[Blob], frame: u64) -> Vec<Drawn> {
         let mut out = Vec::with_capacity(blobs.len());
         for (i, me) in blobs.iter().enumerate() {
-            let bare = me.r * PACKING;
+            let bare = me.r * self.packing();
             let mut seams: Vec<Squash> = Vec::new();
             for (j, other) in blobs.iter().enumerate() {
                 if i == j {
                     continue;
                 }
                 let (dx, dy) = (other.x - me.x, other.y - me.y);
-                let theirs = other.r * PACKING;
+                let theirs = other.r * self.packing();
                 let d = (dx * dx + dy * dy).sqrt();
                 // The reach. A pair further apart than this is never offered as a contact — and
                 // whether the outlines overlap at that distance is exactly the question.
@@ -492,6 +492,38 @@ impl Bench {
             });
         }
         out
+    }
+
+    /// How much larger than its physical radius a cell of this firmness is drawn.
+    ///
+    /// # Why the seam is not simply pushed outwards
+    ///
+    /// "A firm cell should be cut less deeply" is the right description of what has to change and
+    /// the wrong description of how. The seam is the plane through the two points where the
+    /// outlines cross, and it is the *one* choice that both cells arrive at independently — which
+    /// is the property the whole scheme rests on (`slide::seam_between`, SPEC §6.4). Move it
+    /// outward for a firm cell and its neighbour must move the same wall outward too, and then the
+    /// two faces sum to more than the distance between the centres. That is not a rounder cell,
+    /// it is two cells drawn lying over one another, which is the fault `docs/OVERLAPS.md` is
+    /// about.
+    ///
+    /// The seam already does the right thing given the right circles: cross two circles barely and
+    /// the plane through the crossings barely cuts either. So what has to shrink is the **drawn
+    /// radius**, and [`slide::PACKING`] is exactly that number — every cell is drawn 15% larger
+    /// than it physically is, which is why a raft reads as a tessellation even at a spacing where
+    /// nothing physically touches.
+    ///
+    /// Firmness therefore lerps it to one. A soft cell is drawn fat, crosses its neighbours deeply
+    /// and tiles; a firm cell is drawn at its true size, crosses barely and stays round. Both ends
+    /// keep the pair agreeing on one plane, because each still computes it from both radii.
+    ///
+    /// **This is the half that needs the physics.** At `PACKING` of one the picture is honest
+    /// about the geometry, so whether cells look separate is decided by whether they *are*
+    /// separate — which is `MetabolicRates::rigidity_gain` and `neighbours::core_permille`, and
+    /// is why `Bench::spacing` is the knob to sweep beside this one.
+    #[must_use]
+    pub fn packing(&self) -> f32 {
+        PACKING + (1.0 - PACKING) * self.firmness.clamp(0.0, 1.0)
     }
 
     /// Everything in one call: place the cells, then draw them.
