@@ -3835,6 +3835,30 @@ fn new_scenario_sheet(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
 
 
 /// What is in `scenarios/`, and what the one you have picked actually says.
+/// A path field and an Open button, for a `.ron` the library did not list.
+///
+/// Lives here rather than in the File menu because it cannot live in a menu: egui dismisses a
+/// menu on any click inside it, so the field lost its own focus the instant it was clicked.
+/// Returns the path if it was asked to open one.
+fn open_by_path_row(ui: &mut egui::Ui, view: &mut View) -> Option<std::path::PathBuf> {
+    let mut open = None;
+    ui.horizontal(|ui| {
+        ui.label(skin::text(Role::Label, "or a path"));
+        let field = ui.add(
+            egui::TextEdit::singleline(&mut view.file_path)
+                .desired_width(280.0)
+                .font(skin::font(Role::Value))
+                .hint_text("scenarios/the_marbles.ron"),
+        );
+        let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let typed = !view.file_path.trim().is_empty();
+        if (skin::chip(ui, "Open", None, false).clicked() || entered) && typed {
+            open = Some(std::path::PathBuf::from(view.file_path.trim()));
+        }
+    });
+    open
+}
+
 fn library_sheet(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
     let found = library::scenarios();
 
@@ -3863,10 +3887,12 @@ fn library_sheet(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
             ui.label(skin::text(Role::Small, format!("    {}", dir.display())));
         }
         ui.add_space(4.0);
-        ui.label(skin::text(
-            Role::Small,
-            "Open one by path from the Slide menu.",
-        ));
+        if let Some(path) = open_by_path_row(ui, view) {
+            open_scenario(sim, view, &path);
+            if !matches!(view.file_note, Some(Err(_))) {
+                view.sheet = None;
+            }
+        }
         return;
     }
 
@@ -3987,9 +4013,21 @@ fn library_sheet(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
         });
     });
 
+    // Under the list, because it is the same question asked of a file the list does not have.
+    ui.add_space(6.0);
+    if let Some(path) = open_by_path_row(ui, view) {
+        open_now = Some(path);
+    }
+
     if let Some(path) = open_now {
         open_scenario(sim, view, &path);
-        view.sheet = None;
+        // Closed only if it worked. The note goes to the status bar either way — see the comment
+        // there, which is a workaround for the menu that used to trigger this and closed on the
+        // click — but a sheet that vanishes on a typo takes the path you mistyped with it, and
+        // retyping it is the one thing you certainly do not want to do again.
+        if !matches!(view.file_note, Some(Err(_))) {
+            view.sheet = None;
+        }
     }
 }
 
@@ -4200,19 +4238,18 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
 
                 skin::menu_rule(ui);
                 skin::menu_caption(ui, "scenarios — the recipe");
-                if skin::menu_item(ui, "Scenario library…", "").clicked() {
+                // One item, because there was never more than one question being asked.
+                //
+                // This was two: a library sheet listing `scenarios/`, and a submenu holding a
+                // text field for anything not in it. The submenu could not work and was never
+                // going to — **an egui menu closes on any click inside it**, which is what a menu
+                // is for, so clicking into the field to type a path dismissed the field. A text
+                // box does not belong in a menu; it belongs in the sheet, next to the list it is
+                // the alternative to.
+                if skin::menu_item(ui, "Open scenario…", "").clicked() {
                     view.sheet = Some(Sheet::Library);
                     ui.close();
                 }
-                ui.menu_button("Open scenario…", |ui| {
-                    ui.label("a .ron, by path");
-                    ui.text_edit_singleline(&mut view.file_path);
-                    if ui.button("Open").clicked() {
-                        let path = std::path::PathBuf::from(view.file_path.trim());
-                        open_scenario(sim, view, &path);
-                        ui.close();
-                    }
-                });
                 if skin::menu_item(ui, "Save scenario…", "S").clicked() {
                     // The scenario view, not a dialogue: it holds the path field *and* the RON
                     // that saving will write. This used to be `Save parameters as…`, a nested
