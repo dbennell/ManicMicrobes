@@ -7070,12 +7070,15 @@ fn legend_body(ui: &mut egui::Ui, sim: &SlideRes, view: &View, frame: &Frame) {
     // already knows the colours; making its rows the control removes the menu from the loop
     // rather than adding a second way to do the same thing.
     //
-    // The peak is on the rows that are *on*, and it is not decoration: each layer is normalised
-    // against its own maximum, so the colours are legible and meaningless without it.
+    // The scale is on the rows that are *on*, and it is not decoration: each layer is normalised
+    // against a statistic of its own plane, so the colours are legible and meaningless without
+    // it. It is the top of the colour ramp rather than the highest square on the slide — see
+    // `slide::SCALE_QUANTILE` — so a handful of hot squares read as saturated instead of
+    // rescaling everything else.
     let peaks: std::collections::BTreeMap<usize, (i32, i64)> = frame
         .overlays
         .iter()
-        .map(|l| (l.chemical, (l.peak, l.total)))
+        .map(|l| (l.chemical, (l.scale, l.total)))
         .collect();
     for (c, name) in sim.chem_names.iter().enumerate() {
         let on = sim.engine.overlay_enabled(c);

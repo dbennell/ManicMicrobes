@@ -705,8 +705,46 @@ place at the same zoom, and that gesture was three levels deep and twice over.
 The legend is already in the right rail, already open by default, and already knows every
 chemical's colour. **Its rows are the control now**: all sixteen listed, one click each, swatch
 filled when the overlay is on and outlined when it is off so the state reads down the column at
-a glance. The peak stays on the rows that are on, because each layer is normalised against its
-own maximum and the colours are legible and meaningless without it.
+a glance. The scale stays on the rows that are on, because each layer is normalised against a
+statistic of its own plane and the colours are legible and meaningless without it.
+
+#### The ruler was flickering, not the field
+
+The scale used to be the plane's **maximum**, and a maximum is decided by one square out of a
+quarter of a million. Every overlay is normalised against it, so the whole picture's brightness
+is that number's reciprocal: a cell dying and dumping its body into the square it occupied moved
+the maximum, and the entire slide changed shade at once. What that looks like is the field
+flickering. It is the ruler.
+
+Measured rather than guessed, on a settled 128² slide with 3,586 cells, one reading per tick over
+400 ticks (`tests/overlay_scale.rs`, which is kept as the regression test):
+
+| statistic | worst step between ticks | mean step |
+| --- | ---: | ---: |
+| maximum | 43.8% | 5.36% |
+| 99.9th percentile | 3.8% | 0.31% |
+| 99th | 0.2% | 0.03% |
+| 95th | 0.0% | 0.01% |
+| **as shipped** — 99.9th, eased | **0.5%** | **0.06%** |
+
+A 43.8% jump in the divisor is a 17% jump in the brightness of every texel, after the
+square-root curve, once per tick. The numbers say plainly which of the two candidate fixes was
+the real one: the top of the distribution is a thin tail — the maximum sits only 27% above the
+99.9th percentile — so **the statistic was the bug and smoothing alone would only have slowed the
+flash down**. `slide::SCALE_QUANTILE` is the fix and `slide::SCALE_EASE` handles what is left,
+which is the honest movement: a bloom eating its way through the carbon really does change what
+the scale should be, and that should arrive as a fade rather than a step.
+
+Two consequences worth stating. **Squares above the mark saturate** — 262 of 262,144 at 512²,
+which is the price of the other 99.9% holding still. And `Slide::frame` takes `&mut self` now,
+for the carried exposure alone; the world is still only read, which is what M4's guarantee is
+about and what `a_watched_world_matches_a_headless_one` checks.
+
+The quantile is estimated from a 512-bucket histogram rather than a sort. `Slide::frame` runs on
+the simulation thread under the lock a tick takes, so a frame that costs 20 ms is 20 ms the world
+is not being stepped in; sorting a quarter of a million `i32`s per overlay per frame is not
+affordable and neither is the megabyte of scratch. The added pass does not show above run-to-run
+noise on `tests/frame_cost.rs`.
 
 The comparison gesture is `[` and `]`, and it **solos** rather than toggling: whatever was on
 goes off and exactly one thing comes on, so holding a key steps through the chemicals one at a
@@ -723,7 +761,7 @@ bare slide, where there is nothing to be surprised by.
 
 `all` turns out to be a census rather than a picture. Sixteen layers each contribute a
 sixteenth, so the plate is a muddy wash — but the legend beside it lists every chemical with its
-peak, and the ones reading `0.0` are the ones nothing in the world is using. It answers "which
+scale, and the ones reading `0.0` are the ones nothing in the world is using. It answers "which
 of the sixteen does this scenario actually touch" in one click, which is a question `docs/CHEMISTRY.md`
 had to be written to answer.
 
@@ -804,7 +842,7 @@ cells both go straight through the holes. The right button latches its owner lik
 does, so a wall dragged towards the edge of the plate is not abandoned when the pointer touches
 a rail. A megabyte of upload per frame is nothing;
 262,143 entities are not. `Frame` already carries exactly the right data — `field: Vec<f32>`
-normalised, per-layer `rgb` and `peak` — so this is a change of destination, not of content.
+normalised, per-layer `rgb` and `scale` — so this is a change of destination, not of content.
 The `sqrt` presentation curve moves into the shader where it belongs.
 
 **Cells become one draw call.** *Built at M10.5, and not as instancing.* A custom instanced

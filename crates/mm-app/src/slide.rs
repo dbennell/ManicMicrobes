@@ -677,10 +677,18 @@ pub struct OverlayLayer {
     pub chemical: usize,
     pub name: String,
     pub rgb: [f32; 3],
-    /// Per-square concentration normalised against `peak`, `0..=1`.
+    /// Per-square concentration normalised against `scale`, clamped to `0..=1`.
+    ///
+    /// Clamped rather than guaranteed in range: `scale` is a high quantile and not the maximum,
+    /// so the squares above it saturate at the top of the ramp. That is the trade — see
+    /// [`SCALE_QUANTILE`] for what it buys and how many squares it costs.
     pub field: Vec<f32>,
-    /// What `field` was divided by, in `Q10` units. The legend's scale.
-    pub peak: i32,
+    /// What `field` was divided by, in `Q10` units. The top of the colour ramp, and the legend's
+    /// number.
+    ///
+    /// **Not the maximum**, and eased between frames rather than recomputed: see
+    /// [`SCALE_QUANTILE`] and [`SCALE_EASE`].
+    pub scale: i32,
     /// Total of this chemical in the fluid, for the legend's readout.
     pub total: i64,
 }
@@ -717,6 +725,10 @@ pub struct Slide {
     /// Trophic flows over the last complete window, and the one still filling (M8).
     flows: crate::foodweb::Flows,
     flows_filling: crate::foodweb::Flows,
+    /// The top of each overlay's colour ramp, carried between frames so it can be eased into
+    /// rather than recomputed from scratch. `0` means this layer has no exposure yet and the
+    /// next frame should take the reading outright. See [`Slide::overlay_scale`].
+    overlay_scale: [f32; CHEM_COUNT],
 }
 
 /// How many ticks the food web averages over.
@@ -724,6 +736,88 @@ pub struct Slide {
 /// Long enough that a single tick's births and deaths do not make the arrows twitch, short
 /// enough that a shift in the ecosystem shows up while the user is still looking at it.
 const FLOW_WINDOW_TICKS: u64 = 600;
+
+/// Where the top of an overlay's colour ramp sits in its own distribution.
+///
+/// **Not the maximum, and that is the whole point.** An overlay is normalised against a
+/// statistic of its plane, so the entire picture's brightness is that statistic's reciprocal:
+/// when it moves, every square on the slide changes shade at once, and what is seen is the field
+/// flickering when it is actually the ruler. The maximum is the worst possible choice for this,
+/// because it is decided by *one square out of a quarter of a million* — a cell dying and
+/// dumping its body into the square it occupied moves it, and the whole slide flashes.
+///
+/// Measured on a settled 128² slide with 3,586 cells, one reading per tick over 400 ticks
+/// (`tests/overlay_scale.rs`):
+///
+/// | statistic | worst step between ticks | mean step |
+/// | --- | ---: | ---: |
+/// | maximum | 43.8% | 5.36% |
+/// | 99.9th | 3.8% | 0.31% |
+/// | 99th | 0.2% | 0.03% |
+/// | 95th | 0.0% | 0.01% |
+///
+/// A 43.8% jump in the divisor is a 17% jump in the brightness of every texel on the slide,
+/// after the square-root curve — once per tick, at whatever the tick rate happens to be.
+///
+/// 99.9th rather than 99th because the two are not competing on steadiness alone: everything
+/// above the mark saturates, and the 99th clips ten times as many squares. At 512² the 99.9th
+/// flattens 262 squares out of 262,144, and its residual 3.8% is handed to [`SCALE_EASE`].
+const SCALE_QUANTILE: f32 = 0.999;
+
+/// How much of the way the ramp moves towards a new reading each frame.
+///
+/// The second half of the answer, and the half that handles the honest movement rather than the
+/// noise: a bloom eating its way through the carbon really does change what the scale should be,
+/// and it should arrive as a fade rather than as a step.
+///
+/// An eighth, so a reading settles over roughly twenty frames — a third of a second at 60fps.
+/// Per *published* frame rather than per tick, deliberately: this is an exposure control on
+/// something a person is looking at, so its time constant belongs in the units of what they see.
+/// A frame is built only when the renderer has taken the last one ([`crate::engine`]), which
+/// makes one step here exactly one displayed image.
+const SCALE_EASE: f32 = 0.125;
+
+/// How many buckets the quantile is estimated over.
+///
+/// A quantile normally wants a sort, and [`Slide::frame`] runs on the simulation thread under
+/// the same lock a tick takes — a frame that costs 20ms is 20ms the world is not being stepped
+/// in (`tests/frame_cost.rs`). Sorting a quarter of a million `i32`s per overlay per frame is not
+/// affordable and neither is the megabyte of scratch it would want.
+///
+/// A histogram is one extra sequential pass and no allocation, and the error it admits is
+/// bounded by one bucket width — a five-hundredth of the maximum, against a statistic that is
+/// then eased by [`SCALE_EASE`] anyway.
+const SCALE_BUCKETS: usize = 512;
+
+/// The value `share` of the way up a plane, to within a bucket, without sorting it.
+///
+/// Returns `0` for an empty or entirely-zero plane, which the caller reads as "no exposure".
+fn quantile_of(plane: &[i32], share: f32) -> i32 {
+    let max = plane.iter().copied().max().unwrap_or(0);
+    if max <= 0 || plane.is_empty() {
+        return 0;
+    }
+    let last = (SCALE_BUCKETS - 1) as i64;
+    let mut hist = [0u32; SCALE_BUCKETS];
+    for &v in plane {
+        let bucket = (i64::from(v.max(0)) * last / i64::from(max)) as usize;
+        hist[bucket.min(SCALE_BUCKETS - 1)] += 1;
+    }
+    // How many squares must be at or below the mark. `ceil`, so `share` of 1.0 asks for all of
+    // them and lands on the maximum rather than one bucket short of it.
+    let want = (plane.len() as f32 * share).ceil() as u32;
+    let mut seen = 0u32;
+    for (b, count) in hist.iter().enumerate() {
+        seen += count;
+        if seen >= want {
+            // The top of the bucket the mark fell in, so the value returned is one a square
+            // could actually hold rather than the bottom of the band it sits in.
+            let edge = (b as i64 + 1) * i64::from(max) / last;
+            return edge.min(i64::from(max)) as i32;
+        }
+    }
+    max
+}
 
 impl Slide {
     /// # Errors
@@ -745,6 +839,7 @@ impl Slide {
             world: World::new(scenario)?,
             flows: crate::foodweb::Flows::default(),
             flows_filling: crate::foodweb::Flows::default(),
+            overlay_scale: [0.0; CHEM_COUNT],
             overlays,
             show_flow: false,
             lod: Lod::Dots,
@@ -814,18 +909,48 @@ impl Slide {
         crate::foodweb::web(TrophicMix::of(self.world.cells()), flows)
     }
 
+    /// Move one layer's colour ramp towards what this plane wants, and return where it now is.
+    ///
+    /// Snaps rather than eases when there is no exposure yet — a layer being switched on, or a
+    /// world just loaded. A ramp that faded up from nothing over its first twenty frames would
+    /// make every overlay open on a flash of black, which is a worse artefact than the one this
+    /// is here to remove.
+    fn ease_scale(held: &mut f32, plane: &[i32]) -> i32 {
+        let want = quantile_of(plane, SCALE_QUANTILE).max(1) as f32;
+        *held = if *held <= 0.0 {
+            want
+        } else {
+            *held + (want - *held) * SCALE_EASE
+        };
+        // At least one, because it is about to be divided by.
+        (held.round() as i64).clamp(1, i64::from(i32::MAX)) as i32
+    }
+
+    /// Forget every layer's exposure, so the next frame takes its reading outright.
+    ///
+    /// Anything that replaces what is on the slide has to call this. Easing is only meaningful
+    /// between two frames of the *same* world; carried across a load it would fade the new slide
+    /// in from the old one's brightness, which looks like the file taking a moment to settle.
+    fn forget_overlay_scale(&mut self) {
+        self.overlay_scale = [0.0; CHEM_COUNT];
+    }
+
     /// Show this chemical's overlay and no other. The number keys.
     pub fn set_overlay(&mut self, chemical: usize) {
         self.overlays = [false; CHEM_COUNT];
         if let Some(on) = self.overlays.get_mut(chemical % CHEM_COUNT) {
             *on = true;
         }
+        self.forget_overlay_scale();
     }
 
     /// Switch one chemical's overlay on or off without disturbing the others.
     pub fn toggle_overlay(&mut self, chemical: usize) {
         if let Some(on) = self.overlays.get_mut(chemical % CHEM_COUNT) {
             *on = !*on;
+            // This one only. The others are still showing and their exposure is still good;
+            // resetting them would flash every open layer whenever one was toggled.
+            self.overlay_scale[chemical % CHEM_COUNT] = 0.0;
         }
     }
 
@@ -847,7 +972,14 @@ impl Slide {
 
     pub fn set_overlay_mask(&mut self, mask: u32) {
         for (i, on) in self.overlays.iter_mut().enumerate() {
-            *on = mask & (1u32 << i) != 0;
+            let now = mask & (1u32 << i) != 0;
+            // Only what changed, and only on the way *on*. This is called every frame with the
+            // renderer's current choices, so resetting unconditionally would hold every layer at
+            // "no exposure" forever and there would be no easing at all.
+            if now != *on {
+                self.overlay_scale[i] = 0.0;
+            }
+            *on = now;
         }
     }
 
@@ -916,6 +1048,7 @@ impl Slide {
         self.history = MetricHistory::new(self.history.capacity());
         self.flows = crate::foodweb::Flows::default();
         self.flows_filling = crate::foodweb::Flows::default();
+        self.forget_overlay_scale();
     }
 
     /// A reading of one cell, for the inspector panel.
@@ -959,37 +1092,61 @@ impl Slide {
             .unwrap_or_else(|| format!("species {species}"))
     }
 
-    /// Take a frame. Read-only: nothing here can reach the world.
+    /// Take a frame. Read-only *of the world*: nothing here can reach the simulation.
+    ///
+    /// `&mut self` for the overlay exposure alone ([`Slide::overlay_scale`]), which is carried
+    /// between frames so the colour ramp can be eased rather than recomputed from nothing each
+    /// time. It is presentation state, like the camera and the detail tier beside it; the world
+    /// is still only read, which is what M4's guarantee is about and what
+    /// `a_watched_world_matches_a_headless_one` checks.
     #[must_use]
-    pub fn frame(&self) -> Frame {
+    pub fn frame(&mut self) -> Frame {
+        // Destructured so the borrow checker can see that the exposure being written and the
+        // world being read are different fields. The obvious spelling clones the chemical
+        // table to get out of the way, which is sixteen `String` allocations a frame for a
+        // borrow that was always disjoint.
+        //
+        // Scoped, so the split borrow ends here and the rest of the frame can read the world
+        // the ordinary way.
+        let overlays: Vec<OverlayLayer> = {
+            let Slide {
+                world,
+                overlays: shown,
+                overlay_scale,
+                ..
+            } = self;
+            let table = &world.scenario().chemicals;
+            (0..CHEM_COUNT)
+                .filter(|c| shown[*c])
+                .map(|c| {
+                    let plane = world.substrate().chem_plane(c);
+                    // Normalised against a statistic of the frame rather than a fixed scale, so
+                    // a nearly empty slide is still legible. That means the overlay's absolute
+                    // meaning changes between frames, which is why `scale` travels with the
+                    // layer and the legend shows it.
+                    let scale = Self::ease_scale(&mut overlay_scale[c], plane);
+                    let def = table.get(c);
+                    OverlayLayer {
+                        chemical: c,
+                        name: def.name.to_string(),
+                        rgb: [
+                            def.colour[0] as f32 / 255.0,
+                            def.colour[1] as f32 / 255.0,
+                            def.colour[2] as f32 / 255.0,
+                        ],
+                        field: plane
+                            .iter()
+                            .map(|v| (*v as f32 / scale as f32).clamp(0.0, 1.0))
+                            .collect(),
+                        scale,
+                        total: plane.iter().map(|v| i64::from(*v)).sum(),
+                    }
+                })
+                .collect()
+        };
         let substrate = self.world.substrate();
         let cells = self.world.cells();
         let table = &self.world.scenario().chemicals;
-
-        let overlays: Vec<OverlayLayer> = (0..CHEM_COUNT)
-            .filter(|c| self.overlays[*c])
-            .map(|c| {
-                let plane = substrate.chem_plane(c);
-                // Normalised against the frame's own peak rather than a fixed scale, so a
-                // nearly empty slide is still legible. It means the overlay's absolute
-                // meaning changes between frames, which is exactly why `peak` travels with
-                // the layer and the legend shows it.
-                let peak = plane.iter().copied().max().unwrap_or(0).max(1);
-                let def = table.get(c);
-                OverlayLayer {
-                    chemical: c,
-                    name: def.name.to_string(),
-                    rgb: [
-                        def.colour[0] as f32 / 255.0,
-                        def.colour[1] as f32 / 255.0,
-                        def.colour[2] as f32 / 255.0,
-                    ],
-                    field: plane.iter().map(|v| *v as f32 / peak as f32).collect(),
-                    peak,
-                    total: plane.iter().map(|v| i64::from(*v)).sum(),
-                }
-            })
-            .collect();
 
         let light: Vec<f32> = substrate
             .light()
@@ -1740,7 +1897,7 @@ mod tests {
                 !layer.name.is_empty(),
                 "a layer with no name is unlabellable"
             );
-            assert!(layer.peak > 0);
+            assert!(layer.scale > 0);
             assert_eq!(layer.field.len(), 24 * 20);
             assert!(layer.field.iter().all(|v| (0.0..=1.0).contains(v)));
         }

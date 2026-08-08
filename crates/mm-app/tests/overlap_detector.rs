@@ -46,7 +46,7 @@ fn world_with(jitter: i32, ticks: u64) -> Slide {
 }
 
 /// Pairs drawn overlapping with no wall between them, and how deep the overlap goes.
-fn offenders(slide: &Slide) -> (usize, usize, f32) {
+fn offenders(slide: &mut Slide) -> (usize, usize, f32) {
     let frame = slide.frame();
     let cells = &frame.cells;
     let mut pairs = 0usize;
@@ -160,9 +160,9 @@ fn overlapping_pairs_with_no_wall_between_them() {
     );
     let mut counts = Vec::new();
     for jitter in [0, 24, 96] {
-        let slide = world_with(jitter, 4000);
+        let mut slide = world_with(jitter, 4000);
         let n = slide.frame().cells.len();
-        let (bad, touching, worst) = offenders(&slide);
+        let (bad, touching, worst) = offenders(&mut slide);
         eprintln!(
             "{jitter:>10}  {n:>6}  {touching:>9}  {bad:>9}  {:>7.1}%",
             worst * 100.0

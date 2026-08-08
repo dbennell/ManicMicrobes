@@ -36,7 +36,7 @@ fn walled_slide() -> Slide {
 
 #[test]
 fn the_frame_carries_the_barrier_mask() {
-    let slide = walled_slide();
+    let mut slide = walled_slide();
     let frame = slide.frame();
     assert_eq!(
         frame.barriers.len(),
@@ -61,13 +61,13 @@ fn a_slide_with_no_barriers_carries_no_mask() {
         ..Scenario::default()
     };
     scenario.barriers.clear();
-    let slide = Slide::new(scenario).expect("slide");
+    let mut slide = Slide::new(scenario).expect("slide");
     assert!(slide.frame().barriers.is_empty());
 }
 
 #[test]
 fn the_wall_is_painted_and_the_water_beside_it_is_not() {
-    let slide = walled_slide();
+    let mut slide = walled_slide();
     let frame = slide.frame();
     let (w, h) = (frame.width as usize, frame.height as usize);
     let mut pixels = vec![0u8; w * h * 4];
@@ -105,7 +105,7 @@ fn the_wall_layer_is_binary_which_is_what_makes_it_crisp() {
     // Painted through a *vignette* rather than a flat one, because the vignette scales the
     // colour and must not be allowed to leak into the coverage: a wall that faded out towards
     // the edge of the field would be a wall the sampler could smear again.
-    let slide = walled_slide();
+    let mut slide = walled_slide();
     let frame = slide.frame();
     let (w, h) = (frame.width as usize, frame.height as usize);
     let mut pixels = vec![0u8; w * h * 4];
