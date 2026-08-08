@@ -515,6 +515,7 @@ impl NeighbourIndex {
                 mass: cells.mass[j],
                 overlap,
                 rigidity: cells.slots(j).first().map_or(0, |m| m.param as i32),
+                joined: crate::junction::existing(cells, i, cells.id_at(j)).is_some(),
             });
         }
         out
@@ -565,6 +566,18 @@ pub struct Contact {
     /// How far inside each other's reach the two are, `POS`. Always positive, and measured
     /// against whatever reach the caller asked for rather than against bare radii.
     pub overlap: i32,
+    /// Whether these two are joined, by a junction of either kind.
+    ///
+    /// Reported because being *stuck to* a neighbour and merely being pressed against one are
+    /// two different situations and the picture should not be the same. A tissue shares its
+    /// walls; a heap of separate bodies does not, however hard it is packed. See
+    /// `mm_app::slide::squash_of`, which is the only caller and the whole reason this is here.
+    ///
+    /// Either kind, deliberately. A soft junction is a channel and a hard one is a strut, but
+    /// both are a lineage having decided that the cell on the other end is part of it, and that
+    /// is the question being asked.
+    pub joined: bool,
+
     /// What the neighbour has invested in its membrane — slot zero's `param`.
     ///
     /// Reported because it is the nearest thing a cell has to a turgor: a cell that paid for a
@@ -1572,6 +1585,9 @@ mod tests {
             mass: 0,
             overlap,
             rigidity: 24,
+            // These tests are about which neighbours are found and where their seams fall, which
+            // is a question about geometry. Being joined changes only how a cell is drawn.
+            joined: false,
         }
     }
 

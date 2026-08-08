@@ -24,33 +24,42 @@
 //!
 //! # What it found
 //!
-//! A clean, monotone axis from one picture to the other, bought with wall and pressure:
-//!
 //! ```text
-//!   membrane   rigidity   mean swell
-//!       —        0.00       1.237      no turgor at all: today's foam, exactly
-//!       24       0.09       1.215      what the ancestors build — 1.8% off, imperceptible
-//!       64       0.25       1.178
-//!      128       0.50       1.118
-//!      200       0.78       1.051
-//!      255       1.00       1.000      marbles: the true circle, cut by its seams, gaps left
+//!   what                                  membrane  rigidity  joined   mean swell
+//!   lean, free — the shipped ancestors        24      0.09      no        1.215
+//!   lean, free, no turgor at all              24      0.00      no        1.237
+//!   firm, free — a heap of marbles           255      1.00      no        1.000
+//!   firm, JOINED — glued, so tissue anyway   255      1.00     yes        1.082
+//!   lean, joined — tissue, as before          24      0.09     yes        1.232
+//!   half firm, free                          128      0.50      no        1.118
 //! ```
 //!
-//! **The default picture is preserved.** A cell that holds no solute has no turgor and therefore
-//! no rigidity, and is drawn exactly as it always was. The ancestors, at a membrane of 24 out of
-//! a possible 255, come out 1.8% less inflated than before — which is below anything a person can
-//! see and well inside what `swell_probe` already tolerates frame to frame.
+//! **All three pictures are reachable and the default is the one that shipped.** A lean, unjoined
+//! cell — which is every ancestor in the tree — is drawn at 1.215 against the 1.237 it was drawn
+//! at before any of this, a difference of 1.8% and well below what a person can see or what
+//! `swell_probe` already tolerates between frames.
 //!
-//! **And it is bought rather than switched on.** Going from membrane 24 to 255 costs 5.1x the
-//! structural matter to build (14 units against 71.75) and 6.8x the upkeep to carry (0.078
-//! against 0.53 energy a tick), on top of holding enough solute to pressurise the wall, which
-//! `osmotic_upkeep` charges for quadratically. A lineage that wants to be a heap of marbles pays
-//! in both currencies, every tick, forever; one that wants to be a sheet of tissue pays nothing
-//! and is what a cell is by default.
+//! **Glue beats firmness, which is the whole point of doing it this way.** The fourth row is a
+//! maximally rigid cell that would be a marble on its own and is drawn most of the way back to
+//! tissue because it is joined to its neighbours. A lineage that decides to be one body gets one
+//! body's picture whatever its cells are made of, and that is the true reason a moss leaf
+//! tessellates: its cells are stuck together, not soft.
 //!
-//! Turgor saturates at one whole `osmotic_threshold`, which is why the 1x and 4x rows are
-//! identical: past the threshold the wall is as pressurised as it is going to get and the only
-//! remaining term is what it is built of.
+//! **And the marble end is bought.** Membrane 24 to 255 is 5.1x the structural matter to build
+//! and 6.8x the upkeep to carry, on top of holding the solute that pressurises the wall, which
+//! `osmotic_upkeep` charges for quadratically.
+//!
+//! # The junction budget shows up in the picture
+//!
+//! The glued row reads 1.082 rather than the 1.237 of a free lean cell, and the gap is not a
+//! calibration problem. `JUNCTIONS_PER_CELL` is **four**, and a cell packed into a lattice
+//! touches six or more — so a sheet that is glued as thoroughly as the engine allows is still
+//! only about two-thirds joined, and is drawn two-thirds of the way to tissue.
+//!
+//! A fully tessellated body is therefore not currently expressible: not because the picture
+//! cannot draw one, but because a cell cannot be joined to everything it touches. That is the
+//! same four-slot ceiling `docs/NEURONS.md` measured from the other end, where a directed nerve
+//! chain of three cells already spends two slots on its middle cell.
 
 use mm_core::biology::BiologyConfig;
 use mm_core::cell::{CellId, CellSeed};
@@ -65,7 +74,7 @@ use mm_app::slide::Slide;
 /// Inert on purpose: a growing population changes its own radii, spacing and solute from tick to
 /// tick, and none of that is what this measures. The packing probe's bench, with membrane and
 /// solute under control.
-fn bench(membrane: u8, solute_capacities: i32) -> World {
+fn bench(membrane: u8, solute_capacities: i32, joined: bool) -> World {
     let scenario = Scenario {
         name: "marbles".into(),
         seed: 1,
@@ -132,6 +141,50 @@ fn bench(membrane: u8, solute_capacities: i32) -> World {
         }
     }
     world.adopt_current_contents_as_baseline();
+
+    // Glue the lattice into one body, if that is what is being asked. Four junctions a cell, so
+    // each is joined right and down and receives the mirror of that from left and up — which is
+    // the whole budget and exactly what a sheet of tissue needs.
+    if joined {
+        let ids: Vec<CellId> = world.cells().iter().map(|i| world.cells().id_at(i)).collect();
+        let across = 15usize;
+        for (n, a) in ids.iter().enumerate() {
+            for b in [
+                (n % across + 1 < across).then(|| n + 1).filter(|m| *m < ids.len()),
+                Some(n + across).filter(|m| *m < ids.len()),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let (Some(ia), Some(ib)) = (
+                    world.cells().index(*a),
+                    world.cells().index(ids[b]),
+                ) else {
+                    continue;
+                };
+                let rest =
+                    mm_core::junction::distance(world.cells(), ia, ib).max(mm_core::fixed::POS_ONE);
+                let (Some(sa), Some(sb)) = (
+                    mm_core::junction::free_slot(world.cells(), ia),
+                    mm_core::junction::free_slot(world.cells(), ib),
+                ) else {
+                    continue;
+                };
+                let other_b = ids[b];
+                world.cells_mut().junctions_mut(ia)[sa] = mm_core::junction::Junction {
+                    kind: mm_core::junction::JunctionKind::Hard,
+                    other: other_b,
+                    rest,
+                };
+                world.cells_mut().junctions_mut(ib)[sb] = mm_core::junction::Junction {
+                    kind: mm_core::junction::JunctionKind::Hard,
+                    other: *a,
+                    rest,
+                };
+            }
+        }
+    }
+
     // Let the separation solver settle the lattice before anything is drawn.
     world.run(200);
     world
@@ -166,27 +219,31 @@ fn what_it_costs_to_stay_round() {
          `swell` is the factor a cell is drawn larger by so its clipped outline keeps its area.\n\
          1.00 is a marble — the true circle, cut by its seams, gaps left. Above 1 is foam."
     );
-    println!("  membrane  solute (x threshold)  rigidity   mean swell   max swell   cells");
-    for membrane in [24u8, 64, 128, 200, 255] {
-        for capacities in [0i32, 1, 4] {
-            let world = bench(membrane, capacities);
-            let rates = world.biology().metabolism.rates;
-            let rigidity = world
-                .cells()
-                .iter()
-                .next()
-                .map(|i| mm_core::biology::rigidity(world.cells(), i, &rates))
-                .unwrap_or(0) as f32
-                / Q10_ONE as f32;
-            let (mean, max, n) = drawn(world);
-            println!(
-                "  {membrane:>8}  {capacities:>19}   {rigidity:>8.2}   {mean:>10.3}   \
-                 {max:>9.3}   {n:>5.0}"
-            );
-        }
+    println!("  what                                  membrane  rigidity  joined   mean swell");
+    for (label, membrane, solute, joined) in [
+        ("lean, free — the shipped ancestors", 24u8, 1i32, false),
+        ("lean, free, no turgor at all", 24, 0, false),
+        ("firm, free — a heap of marbles", 255, 1, false),
+        ("firm, JOINED — glued, so tissue anyway", 255, 1, true),
+        ("lean, joined — tissue, as before", 24, 1, true),
+        ("half firm, free", 128, 1, false),
+    ] {
+        let world = bench(membrane, solute, joined);
+        let rates = world.biology().metabolism.rates;
+        let rigidity = world
+            .cells()
+            .iter()
+            .next()
+            .map(|i| mm_core::biology::rigidity(world.cells(), i, &rates))
+            .unwrap_or(0) as f32
+            / Q10_ONE as f32;
+        let (mean, _max, _n) = drawn(world);
+        println!(
+            "  {label:<38}{membrane:>6}  {rigidity:>8.2}  {:>6}   {mean:>10.3}",
+            if joined { "yes" } else { "no" }
+        );
     }
     println!(
-        "\n  The ancestors build a membrane of 24, so the top-left corner of that table is the\n  \
-         picture as it has always been, and it is unchanged."
+        "\n  1.000 is a marble — the true circle, cut by its seams, gaps left.\n           Above 1 is foam: inflated until the clipped outline keeps the cell's area."
     );
 }

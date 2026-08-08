@@ -482,32 +482,63 @@ fn squash_of(world: &World, i: usize, radius: f32) -> (Vec<Squash>, f32) {
         })
         .collect();
 
-    // Then grown until what survives the cutting is the area the cell has, and the faces
-    // re-expressed against the bigger radius so the planes themselves have not moved.
+    // Then grown until what survives the cutting is the area the cell has — but only as far as
+    // this cell is the kind of thing that bulges.
     //
-    // **But only as far as the cell is soft enough to bulge.** A cell is a bag of nearly
-    // incompressible fluid and a bag squeezed on one side swells on the other; a *walled* cell
-    // does not, which is the whole difference between a sheet of tissue and a heap of yeast.
-    // `area_swell` models the bag, so a firm cell is drawn with less of it: at rigidity 1 the
-    // outline is the true circle cut by its seams, gaps and all.
+    // # Tissue or marbles
     //
-    // This is the half of `docs/STIFFNESS.md` §4 that lives here rather than in the physics, and
-    // the reason it is a separate half is written there: swell has no counterpart in the
-    // simulation — nothing anywhere has an opinion about a cell's *shape* — so it is free to vary
-    // per cell in every world, where the stiffness that changes what the simulation does is gated
-    // behind a scenario knob.
+    // A packed crowd of cells has two pictures and the engine should be able to draw both. A
+    // moss leaf is a tessellation: cells flattened into polygons, sharing walls, no gaps
+    // anywhere. A smear of yeast is a heap: pressed together just as hard, still obstinately
+    // round, with gaps between them. `area_swell` models the first — it grows a cell until what
+    // survives its neighbours' seams encloses the area it actually has, which is what separates
+    // a foam from a gravel pile — and until now every cell got it unconditionally.
     //
-    // The ancestors build a membrane at 24 of a possible 255, so a default cell is about 9% firm
-    // and is drawn very nearly as it always was. Reaching the marble look means building a wall
-    // several times thicker and holding the solute to pressurise it, which costs structural
-    // matter, upkeep and the quadratic turgor charge. It is bought, not switched on.
+    // Two things decide which a cell is, and they are asked in this order.
+    //
+    // **Is it stuck to its neighbours?** A tissue shares its walls because its cells are *glued*,
+    // not because they are soft. That is the true difference between the two pictures, and the
+    // engine has had the mechanism since M7: a junction is a lineage having decided that the
+    // cell on the other end is part of it. So the fraction of a cell's contacts that are joined
+    // is the fraction of it that is tissue, and tissue always tessellates.
+    //
+    // **If it is free, is it firm?** A bag of fluid squeezed on one side bulges on the other; a
+    // walled, turgid cell does not. `biology::rigidity` is wall times turgor, both of which a
+    // genome pays for — structural matter and upkeep for the membrane, the quadratic turgor
+    // charge for the solute that pressurises it.
+    //
+    // The default falls out and is what matters most about this: the shipped ancestors join
+    // nothing and build a membrane of 24 out of a possible 255, so they are ~9% firm, entirely
+    // free, and drawn very nearly exactly as they always were. The tessellated slide is what a
+    // cell looks like unless it has bought its way out.
+    //
+    // # Why the fraction, and not the seam
+    //
+    // The honest version of this is per *seam*: bulge into the neighbours you are joined to and
+    // hold your shape against the strangers. `area_swell` cannot express it — see `SWELL_GAIN`,
+    // which records the same limitation from the other end: the solve has one degree of freedom,
+    // a single scale on the whole circle, for a constraint that is entirely local. A cell half
+    // joined and half free is therefore drawn half way between the two pictures rather than
+    // being tissue on one side and a marble on the other. Giving each free arc its own
+    // correction would fix both this and `SWELL_GAIN`'s complaint at once, and is the change
+    // that section is asking for.
+    let contacts = seams.len().max(1) as f32;
+    let joined = world
+        .neighbours()
+        .contacts(world.cells(), i, PACKING_PERMILLE)
+        .as_slice()
+        .iter()
+        .filter(|c| c.joined)
+        .count() as f32;
+    let tissue = (joined / contacts).clamp(0.0, 1.0);
     let firmness = (mm_core::biology::rigidity(
         world.cells(),
         i,
         &world.biology().metabolism.rates,
     ) as f32
         / mm_core::Q10_ONE as f32)
-        .clamp(0.0, 1.0);
+        .clamp(0.0, 1.0)
+        * (1.0 - tissue);
     let swell = 1.0 + (1.0 - firmness) * (area_swell(radius, radius, &seams) - 1.0);
     for s in seams.iter_mut() {
         s.face /= swell;
