@@ -230,31 +230,6 @@ const REST_SPEED: i32 = crate::fixed::Q10_ONE / 24;
 /// depth the core already decides, which is a much less interesting job for a constant to have.
 const SEPARATION_PASSES: usize = 3;
 
-/// How many contacts a cell's remembered list holds before it gives up and re-walks.
-///
-/// A cell in a settled monolayer touches about six neighbours; twelve leaves room for the ones
-/// wedged among smaller cells. A cell past it is marked `overflow` and walks its neighbourhood
-/// every pass, exactly as every cell did before, so the cap costs correctness nothing.
-const MAX_REMEMBERED_CONTACTS: usize = 12;
-
-/// The contacts one cell found on the first separation pass.
-#[derive(Clone, Copy, Debug)]
-struct PairList {
-    n: [u32; MAX_REMEMBERED_CONTACTS],
-    len: u8,
-    overflow: bool,
-}
-
-impl Default for PairList {
-    fn default() -> PairList {
-        PairList {
-            n: [0; MAX_REMEMBERED_CONTACTS],
-            len: 0,
-            overflow: false,
-        }
-    }
-}
-
 /// Cells indexed by the substrate square they stand on.
 #[derive(Clone, Debug, Default)]
 pub struct NeighbourIndex {
@@ -1192,8 +1167,6 @@ fn correction_for(
     i: usize,
     first_pass: bool,
     relax: i32,
-    seen: &mut PairList,
-    reuse: bool,
 ) -> Correction {
     let mut out = Correction::default();
     if !cells.occupied(i) {
@@ -1209,199 +1182,154 @@ fn correction_for(
     out.touching = btouch;
     let sx = pos_to_square(cells.x[i]);
     let sy = pos_to_square(cells.y[i]);
-        // The per-pair arithmetic, in a closure so that the two candidate sources below
-        // run identical code rather than a copy of it.
-        let pair = |j: usize, out: &mut Correction| -> bool {
-            if j == i || !cells.occupied(j) {
-                return false;
-            }
-            let want = ri.saturating_add(radii[j]);
-            // Tested on squares, so the pairs that are merely near each other — nearly all of them —
-            // never pay for a square root.
-            let d_sq = separation_sq(cells, i, j);
-            if d_sq >= (want as i64) * (want as i64) {
-                return false;
-            }
-            let d = d_sq.isqrt().min(i32::MAX as i64) as i32;
-            // How far the pair is compressed, and how much of that is past the core.
-            let squeeze = want - d;
-            // Each cell contributes its own incompressible core, so a rigid cell pressed against a
-            // limp one is the limp one that gives. Symmetric — both sides of the pair compute the
-            // same number from the same two cells, which Jacobi separation requires — and exactly
-            // equal to the expression it replaces when every cell is at `CORE_PERMILLE`.
-            let core = ((ri as i64 * permille[i] as i64 + radii[j] as i64 * permille[j] as i64) / 1000)
-                as i32;
-            let crushed = (core - d).max(0);
+    for j in index.around_radius(sx, sy, ri) {
+        if j == i || !cells.occupied(j) {
+            continue;
+        }
+        let want = ri.saturating_add(radii[j]);
+        // Tested on squares, so the pairs that are merely near each other — nearly all of them —
+        // never pay for a square root.
+        let d_sq = separation_sq(cells, i, j);
+        if d_sq >= (want as i64) * (want as i64) {
+            continue;
+        }
+        let d = d_sq.isqrt().min(i32::MAX as i64) as i32;
+        // How far the pair is compressed, and how much of that is past the core.
+        let squeeze = want - d;
+        // Each cell contributes its own incompressible core, so a rigid cell pressed against a
+        // limp one is the limp one that gives. Symmetric — both sides of the pair compute the
+        // same number from the same two cells, which Jacobi separation requires — and exactly
+        // equal to the expression it replaces when every cell is at `CORE_PERMILLE`.
+        let core = ((ri as i64 * permille[i] as i64 + radii[j] as i64 * permille[j] as i64) / 1000)
+            as i32;
+        let crushed = (core - d).max(0);
 
-            // Being crushed, charged to this cell — except by whatever it is joined to. An organism
-            // is *meant* to hold its cells against each other, and billing it for that would make
-            // being multicellular a way to die.
-            //
-            // Charged on the whole compression, which is safe now that [`CORE_PERMILLE`] bounds it at
-            // a twentieth of the touching distance. It was briefly charged on core penetration only,
-            // to stop an ordinary crowd being lethal back when a cell could legitimately rest more
-            // than halfway inside its neighbour — with a core this tight nothing penetrates it and
-            // that measure would read zero for every cell on the slide, quietly deleting crowding
-            // pressure altogether.
-            //
-            // First pass only. The later passes are the same contacts relaxed further, not new ones,
-            // and charging for each would make the price of being in a crowd depend on how many times
-            // the solver looked at it.
-            if first_pass && !joined(cells, i, j) {
-                out.crowding = out.crowding.saturating_add(squeeze);
-                // And how *stuck* the pair is, which is a different question from how deep they
-                // overlap and the one that decides whether there is room to bud into.
-                //
-                // Zero where the two merely touch and `Q10_ONE` where they are bottomed out on their
-                // cores and the solver has nothing left to give. Summed over contacts, so it rises
-                // both with how many neighbours press and with how hard each presses — the
-                // combination that means "pressed into a space too small" rather than merely
-                // "surrounded". A cell ringed by neighbours all resting lightly is enclosed and not
-                // under pressure: its whole neighbourhood still has somewhere to expand into.
-                //
-                // Normalised against the band rather than the radius, so it does not change when a
-                // population shrinks: being jammed is being jammed at any size, and the size question
-                // is [`crate::ecology`]'s to answer.
-                // Against a **fixed reference band**, not this pair's own. The two are the same
-                // number until a cell can be stiffer than the default, and then they part company
-                // badly: a fully rigid pair has `want == core`, so its own band is zero, and the
-                // guard below then skips it — pressure is never accumulated, nothing is ever
-                // considered crowded, and `split_pressure` and `growth_pressure` both stop working.
-                // Measured, that took a settled pack from 266 cells to 394 and tripled its jitter.
-                //
-                // It is also the right meaning. Pressure is *how hard this cell is being squeezed*,
-                // and normalising it by the cell's own compressibility asks a different question —
-                // how far through its personal range it is — so a stiff cell reads as jammed the
-                // instant it touches anything and a soft one never does. Against a fixed reference,
-                // a firm pair resting tangent is squeezed by nothing and correctly reads zero.
-                let band = ((want as i64 * (1000 - CORE_PERMILLE) as i64) / 1000) as i32;
-                if band > 0 {
-                    let one = crate::fixed::Q10_ONE as i64;
-                    let share = (((squeeze.max(0) as i64) * one) / band as i64).clamp(0, one) as i32;
-                    out.pressure = out.pressure.saturating_add(share);
-                }
-            }
-
-            let (dx, dy) = (cells.x[i] - cells.x[j], cells.y[i] - cells.y[j]);
-            // Exactly coincident cells have no line to push along, so they get a fixed nudge derived
-            // from their slots — deterministic, and enough to break the tie. Antisymmetric in `i` and
-            // `j`, so the two sides of the pair still choose opposite directions now that each
-            // decides for itself.
-            let (ux, uy) = if dx == 0 && dy == 0 {
-                let away = if i < j { 1 } else { -1 };
-                (
-                    if (i + j) % 2 == 0 { POS_ONE } else { -POS_ONE } * away,
-                    if (i / 2 + j / 2) % 2 == 0 {
-                        POS_ONE
-                    } else {
-                        -POS_ONE
-                    } * away,
-                )
-            } else {
-                let scale = d.max(1);
-                (
-                    (dx as i64 * POS_ONE as i64 / scale as i64) as i32,
-                    (dy as i64 * POS_ONE as i64 / scale as i64) as i32,
-                )
-            };
-            // Soft everywhere, plus a second term that only exists inside the core. The sum is
-            // continuous at the knee, because `crushed` is zero there.
-            //
-            // Halved once for the sixteenths and once more because both cells move, so the pair
-            // closes by the full fraction while each travels half of it.
-            let soft_push = squeeze.saturating_mul(CONTACT_STRENGTH);
-            let stiff_push = crushed.saturating_mul(CORE_STRENGTH);
-            let push = soft_push.saturating_add(stiff_push);
-            let shove = push / 16 / 2;
-            // Clamped per contact, not drawn from a per-tick pool. See [`MAX_SHOVE`]: the pool
-            // starved the inside of a crowd, which is the one place that has to work.
-            let cap = (ri / MAX_SHOVE).min(radii[j] / MAX_SHOVE).max(1);
-            let allowed = shove.min(cap).max(0);
-            if allowed <= 0 {
-                return false;
-            }
-            out.touching = true;
-            out.contacts = out.contacts.saturating_add(1);
-            // Split by which branch asked for it, so the relaxation below can be aimed at the one that
-            // needs it — but **only when there is a relaxation to aim**, because splitting one rounded
-            // multiply into two is not a no-op. Two roundings instead of one is a few `POS` units per
-            // contact, and in a system where a pack's arrangement is chaotic that is enough to
-            // reshuffle every seeded acceptance result. At `relax == 0` this is the arithmetic that
-            // shipped, digit for digit.
-            if relax > 0 {
-                let stiff = if push > 0 {
-                    ((allowed as i64 * stiff_push as i64) / push as i64) as i32
-                } else {
-                    0
-                };
-                let soft = allowed - stiff;
-                out.dx = out
-                    .dx
-                    .saturating_add((ux as i64 * soft as i64 / POS_ONE as i64) as i32);
-                out.dy = out
-                    .dy
-                    .saturating_add((uy as i64 * soft as i64 / POS_ONE as i64) as i32);
-                out.sdx = out
-                    .sdx
-                    .saturating_add((ux as i64 * stiff as i64 / POS_ONE as i64) as i32);
-                out.sdy = out
-                    .sdy
-                    .saturating_add((uy as i64 * stiff as i64 / POS_ONE as i64) as i32);
-                if stiff > 0 {
-                    out.stiff_contacts = out.stiff_contacts.saturating_add(1);
-                }
-            } else {
-                out.dx = out
-                    .dx
-                    .saturating_add((ux as i64 * allowed as i64 / POS_ONE as i64) as i32);
-                out.dy = out
-                    .dy
-                    .saturating_add((uy as i64 * allowed as i64 / POS_ONE as i64) as i32);
-            }
-            true
-        };
-
-        // Candidates: walked once and remembered, replayed by the passes after it.
+        // Being crushed, charged to this cell — except by whatever it is joined to. An organism
+        // is *meant* to hold its cells against each other, and billing it for that would make
+        // being multicellular a way to die.
         //
-        // The walk is the phase. Measured by cutting `SEPARATION_PASSES` to one, each
-        // pass costs 2.30ms against 0.63ms of setup, and nearly all of a pass is
-        // rejecting candidates: the neighbourhood holds about seventy cells and about
-        // six of them are actually touching. Replaying the six skips the seventy.
+        // Charged on the whole compression, which is safe now that [`CORE_PERMILLE`] bounds it at
+        // a twentieth of the touching distance. It was briefly charged on core penetration only,
+        // to stop an ordinary crowd being lethal back when a cell could legitimately rest more
+        // than halfway inside its neighbour — with a core this tight nothing penetrates it and
+        // that measure would read zero for every cell on the slide, quietly deleting crowding
+        // pressure altogether.
         //
-        // **This is a trajectory change and the only one in this milestone.** A pair
-        // that is not overlapping when the first pass looks, and is pushed into
-        // contact by the second or third, is not seen until the next tick. That is a
-        // real difference and not a rounding one, which is why it is recorded here
-        // rather than described as an optimisation.
-        //
-        // It is small for a reason the solver already relies on: a pass moves a pair
-        // by `CONTACT_STRENGTH` in sixteenths, halved again because both cells move,
-        // so a correction is a thirty-second of an overlap. A pair a whole radius
-        // apart cannot be closed by three of those.
-        if first_pass || seen.overflow || !reuse {
-            seen.len = 0;
-            seen.overflow = false;
-            for j in index.around_radius(sx, sy, ri) {
-                if !pair(j, &mut out) {
-                    continue;
-                }
-                match seen.n.get_mut(seen.len as usize) {
-                    Some(slot) => {
-                        *slot = j as u32;
-                        seen.len = seen.len.saturating_add(1);
-                    }
-                    // More contacts than the list can hold. Rather than drop one, the
-                    // cell is marked and re-walks every pass, so a crowded outlier
-                    // stays exactly as correct as it was before.
-                    None => seen.overflow = true,
-                }
-            }
-        } else {
-            for n in 0..seen.len as usize {
-                let Some(&j) = seen.n.get(n) else { break };
-                pair(j as usize, &mut out);
+        // First pass only. The later passes are the same contacts relaxed further, not new ones,
+        // and charging for each would make the price of being in a crowd depend on how many times
+        // the solver looked at it.
+        if first_pass && !joined(cells, i, j) {
+            out.crowding = out.crowding.saturating_add(squeeze);
+            // And how *stuck* the pair is, which is a different question from how deep they
+            // overlap and the one that decides whether there is room to bud into.
+            //
+            // Zero where the two merely touch and `Q10_ONE` where they are bottomed out on their
+            // cores and the solver has nothing left to give. Summed over contacts, so it rises
+            // both with how many neighbours press and with how hard each presses — the
+            // combination that means "pressed into a space too small" rather than merely
+            // "surrounded". A cell ringed by neighbours all resting lightly is enclosed and not
+            // under pressure: its whole neighbourhood still has somewhere to expand into.
+            //
+            // Normalised against the band rather than the radius, so it does not change when a
+            // population shrinks: being jammed is being jammed at any size, and the size question
+            // is [`crate::ecology`]'s to answer.
+            // Against a **fixed reference band**, not this pair's own. The two are the same
+            // number until a cell can be stiffer than the default, and then they part company
+            // badly: a fully rigid pair has `want == core`, so its own band is zero, and the
+            // guard below then skips it — pressure is never accumulated, nothing is ever
+            // considered crowded, and `split_pressure` and `growth_pressure` both stop working.
+            // Measured, that took a settled pack from 266 cells to 394 and tripled its jitter.
+            //
+            // It is also the right meaning. Pressure is *how hard this cell is being squeezed*,
+            // and normalising it by the cell's own compressibility asks a different question —
+            // how far through its personal range it is — so a stiff cell reads as jammed the
+            // instant it touches anything and a soft one never does. Against a fixed reference,
+            // a firm pair resting tangent is squeezed by nothing and correctly reads zero.
+            let band = ((want as i64 * (1000 - CORE_PERMILLE) as i64) / 1000) as i32;
+            if band > 0 {
+                let one = crate::fixed::Q10_ONE as i64;
+                let share = (((squeeze.max(0) as i64) * one) / band as i64).clamp(0, one) as i32;
+                out.pressure = out.pressure.saturating_add(share);
             }
         }
+
+        let (dx, dy) = (cells.x[i] - cells.x[j], cells.y[i] - cells.y[j]);
+        // Exactly coincident cells have no line to push along, so they get a fixed nudge derived
+        // from their slots — deterministic, and enough to break the tie. Antisymmetric in `i` and
+        // `j`, so the two sides of the pair still choose opposite directions now that each
+        // decides for itself.
+        let (ux, uy) = if dx == 0 && dy == 0 {
+            let away = if i < j { 1 } else { -1 };
+            (
+                if (i + j) % 2 == 0 { POS_ONE } else { -POS_ONE } * away,
+                if (i / 2 + j / 2) % 2 == 0 {
+                    POS_ONE
+                } else {
+                    -POS_ONE
+                } * away,
+            )
+        } else {
+            let scale = d.max(1);
+            (
+                (dx as i64 * POS_ONE as i64 / scale as i64) as i32,
+                (dy as i64 * POS_ONE as i64 / scale as i64) as i32,
+            )
+        };
+        // Soft everywhere, plus a second term that only exists inside the core. The sum is
+        // continuous at the knee, because `crushed` is zero there.
+        //
+        // Halved once for the sixteenths and once more because both cells move, so the pair
+        // closes by the full fraction while each travels half of it.
+        let soft_push = squeeze.saturating_mul(CONTACT_STRENGTH);
+        let stiff_push = crushed.saturating_mul(CORE_STRENGTH);
+        let push = soft_push.saturating_add(stiff_push);
+        let shove = push / 16 / 2;
+        // Clamped per contact, not drawn from a per-tick pool. See [`MAX_SHOVE`]: the pool
+        // starved the inside of a crowd, which is the one place that has to work.
+        let cap = (ri / MAX_SHOVE).min(radii[j] / MAX_SHOVE).max(1);
+        let allowed = shove.min(cap).max(0);
+        if allowed <= 0 {
+            continue;
+        }
+        out.touching = true;
+        out.contacts = out.contacts.saturating_add(1);
+        // Split by which branch asked for it, so the relaxation below can be aimed at the one that
+        // needs it — but **only when there is a relaxation to aim**, because splitting one rounded
+        // multiply into two is not a no-op. Two roundings instead of one is a few `POS` units per
+        // contact, and in a system where a pack's arrangement is chaotic that is enough to
+        // reshuffle every seeded acceptance result. At `relax == 0` this is the arithmetic that
+        // shipped, digit for digit.
+        if relax > 0 {
+            let stiff = if push > 0 {
+                ((allowed as i64 * stiff_push as i64) / push as i64) as i32
+            } else {
+                0
+            };
+            let soft = allowed - stiff;
+            out.dx = out
+                .dx
+                .saturating_add((ux as i64 * soft as i64 / POS_ONE as i64) as i32);
+            out.dy = out
+                .dy
+                .saturating_add((uy as i64 * soft as i64 / POS_ONE as i64) as i32);
+            out.sdx = out
+                .sdx
+                .saturating_add((ux as i64 * stiff as i64 / POS_ONE as i64) as i32);
+            out.sdy = out
+                .sdy
+                .saturating_add((uy as i64 * stiff as i64 / POS_ONE as i64) as i32);
+            if stiff > 0 {
+                out.stiff_contacts = out.stiff_contacts.saturating_add(1);
+            }
+        } else {
+            out.dx = out
+                .dx
+                .saturating_add((ux as i64 * allowed as i64 / POS_ONE as i64) as i32);
+            out.dy = out
+                .dy
+                .saturating_add((uy as i64 * allowed as i64 / POS_ONE as i64) as i32);
+        }
+    }
 
     // The stiff corrections, shared out among the contacts that asked for them.
     //
@@ -1482,11 +1410,6 @@ pub struct SeparationScratch {
     touching: Vec<bool>,
     /// One pass's corrections, gathered in slot order.
     deltas: Vec<(u32, Correction)>,
-    /// Each occupant's contacts, found on the first pass and replayed by the rest.
-    ///
-    /// Indexed by position in `NeighbourIndex::occupants`, not by slot, because that is the
-    /// order the passes iterate in and the index is not rebuilt between them.
-    seen: Vec<PairList>,
 }
 
 impl SeparationScratch {
@@ -1498,12 +1421,6 @@ impl SeparationScratch {
         self.push_y.resize(capacity, 0);
         self.touching.clear();
         self.touching.resize(capacity, false);
-    }
-
-    /// Size the contact lists for one tick's occupants.
-    fn begin_pairs(&mut self, occupants: usize) {
-        self.seen.clear();
-        self.seen.resize(occupants, PairList::default());
     }
 }
 
@@ -1566,33 +1483,11 @@ pub fn resolve_collisions(
     //
     // Reused across ticks rather than allocated per call. See [`SeparationScratch`].
     scratch.begin(cells.capacity());
-    // Whether a contact found on the first pass is the whole story for the later ones.
-    //
-    // It is, when nothing can move a cell far enough between passes to create a contact that was
-    // not already there. A soft correction is `CONTACT_STRENGTH` in sixteenths, halved again
-    // because both cells move — a thirty-second of an overlap — and three of those cannot close a
-    // gap. Two things break that and both are measurable rather than hypothetical, because the
-    // state hash said so before this gate existed:
-    //
-    // * **Barriers.** `barrier_correction` is one-sided and drives a cell right out of a wall,
-    //   which is a large move and can press it into neighbours it was clear of.
-    //   `scenarios/the_drift.ron` diverged on it.
-    // * **Rigidity.** Past the core the response is `CORE_STRENGTH` rather than
-    //   `CONTACT_STRENGTH`, sixteen times larger, and with `rigidity_gain` on every contact takes
-    //   that branch. `scenarios/the_marbles.ron` diverged on it.
-    //
-    // Both are scenario-level facts, so the question is asked once rather than per cell, and a
-    // world that has either simply walks its neighbourhood every pass as it always did. On the
-    // default physics — no barriers, no rigidity — `soup.ron` at 20,000 ticks and
-    // `predator_introduction.ron` at 8,000 are bit-identical with this on.
-    let reuse = blocked.is_empty() && rates.rigidity_gain <= 0;
-    scratch.begin_pairs(index.occupants().len());
     let SeparationScratch {
         push_x,
         push_y,
         touching,
         deltas,
-        seen,
     } = scratch;
 
     for pass in 0..SEPARATION_PASSES {
@@ -1637,13 +1532,11 @@ pub fn resolve_collisions(
         index
             .occupants()
             .par_iter()
-            .zip(seen.par_iter_mut())
-            .map(|(&i, seen)| {
+            .map(|&i| {
                 (
                     i,
                     correction_for(
                         arena, index, radii_ref, perm_ref, blocked, i as usize, first, relax,
-                        seen, reuse,
                     ),
                 )
             })
