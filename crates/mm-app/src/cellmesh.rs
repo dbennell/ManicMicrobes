@@ -42,8 +42,9 @@ use crate::slide::CellDot;
 /// * `x` — the cell's seed, which fixes its silhouette for life.
 /// * `y` — edge softness, which is the depth of field.
 /// * `z` — membrane integrity, 1 whole and 0 failing.
-/// * `w` — 1 to evaluate the field, 0 to draw a plain quad. "Rounded cells: off" is this,
-///   through the same draw call rather than a second code path.
+/// * `w` — 1 to evaluate the field, 0 to draw a plain quad. The microscope always asks for the
+///   field; the plain quad is the bench's calibration, through the same draw call rather than a
+///   second code path.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct Shape {
     pub seed: f32,

@@ -6,7 +6,7 @@
 // outline, it stays crisp at any zoom, and it can respond to what the cell is actually doing.
 //
 // See `docs/UI.md` §7 for the design and `art.rs` for the baked version, which is still what
-// organelles and dust use and is still what "rounded cells: off" selects.
+// dust on the objective wears.
 
 #import bevy_sprite::{
     mesh2d_functions::{get_world_from_local, mesh2d_position_local_to_clip},
@@ -23,7 +23,9 @@ struct Vertex {
     // y: edge softness, which is the depth of field.
     // z: membrane integrity, 1 whole and 0 failing.
     // w: > 0.5 when the SDF is wanted at all; below that the cell is drawn as a plain quad,
-    //    which is what "rounded cells: off" gets and is exactly the pre-M10.5 look.
+    //    which is the pre-M10.5 look. The microscope never asks for it; `shaderbench` does,
+    //    because a quad's edges are where its vertices are and nothing else, which is what
+    //    calibrates the field against the picture's coordinates.
     @location(3) shape: vec4<f32>,
     // Four seams where this cell is squashed against a neighbour, one per component: the
     // direction packed as a pair of 16-bit snorms, and how far along it the seam sits.

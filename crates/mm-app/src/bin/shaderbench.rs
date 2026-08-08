@@ -132,10 +132,11 @@ struct State {
     /// Where to write the same frame's geometry as numbers. See [`dump`].
     dump: Option<String>,
     show_panel: bool,
-    /// The signed-distance field, or plain quads. Off is the application's "rounded cells: off",
-    /// through the same draw call — and it is the bench's calibration, because a quad's edges are
-    /// where the vertices are and nothing else. If those do not measure where they were put, the
-    /// disagreement is in the picture's coordinates and not in the field.
+    /// The signed-distance field, or plain quads. Both go through the same draw call, and the
+    /// quads are the bench's calibration, because a quad's edges are where the vertices are and
+    /// nothing else. If those do not measure where they were put, the disagreement is in the
+    /// picture's coordinates and not in the field. The microscope has no such switch — it always
+    /// draws the field.
     rounded: bool,
     /// Draw through `cellpipe::DotMaterial` — the narrow layout the microscope uses below
     /// `slide::Lod::Packed` — instead of `CellMaterial`.

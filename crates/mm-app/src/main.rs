@@ -48,7 +48,6 @@
 //! | `b` `,` `e` `d` | windows: build, parameters, editor, debugger |
 //! | `f` | the ecology pane, on the food web |
 //! | `s` | the build window, on the scenario it would save |
-//! | `c` | rounded cells |
 //! | `t` | track the selected cell |
 //! | `home` | reset the camera |
 //! | `F1`–`F5` | tool: select, move, remove, wall, erase |
@@ -138,8 +137,9 @@ use mm_core::{CellId, LightRegime, MutationRates, Organelle, OrganelleType, Scen
 ///
 /// `MM_SHOT_TICK` is the one to reach for: it photographs a *state*, so two runs of different
 /// speed produce comparable pictures. `MM_SHOT_AFTER` is in frames and is what there was
-/// before, which is a proxy for wall-clock and therefore for how fast the build happened to be; `MM_SHOT_ZOOM` and `MM_SHOT_FLAT` set the camera and the cell style up front,
-/// because a run that exits after one photograph has nobody to drive it.
+/// before, which is a proxy for wall-clock and therefore for how fast the build happened to be;
+/// `MM_SHOT_ZOOM` sets the camera up front, because a run that exits after one photograph has
+/// nobody to drive it.
 ///
 /// **The frame rate in a `MM_SHOT` run means nothing.** Bevy's default `WinitSettings` waits a
 /// second between redraws while the window is unfocused, and a run driven from a script never
@@ -204,9 +204,6 @@ fn screenshot(
         view.centre = Vec2::new(w as f32 / 2.0, h as f32 / 2.0);
         if let Ok(zoom) = std::env::var("MM_SHOT_ZOOM") {
             view.zoom = zoom.parse().unwrap_or(view.zoom);
-        }
-        if std::env::var("MM_SHOT_FLAT").is_ok() {
-            view.rounded = false;
         }
     }
     // Arranged one frame before the photograph rather than at startup, so a panel that needs a
@@ -1336,12 +1333,6 @@ struct View {
     focus: Focus,
     /// Keep the camera centred on the selected cell.
     follow: bool,
-    /// Draw cells as shaded, irregular blobs rather than as flat squares (M10.5).
-    ///
-    /// Presentation only, like everything else in this struct — it changes which tile of a
-    /// baked atlas each sprite samples and nothing else. Off is the M2 look, which is still the
-    /// right one for a screenshot meant to show data.
-    rounded: bool,
     /// Draw the organelles inside each cell.
     ///
     /// On, because they are most of what a cell *is*. Off is for looking at the cells
@@ -1523,7 +1514,6 @@ impl Default for View {
             viewport: Rect::default(),
             focus: Focus::default(),
             follow: false,
-            rounded: true,
             organelles: true,
             genome_reading: true,
             genome_follow_ip: true,
@@ -1984,9 +1974,6 @@ fn keyboard(keys: &ButtonInput<KeyCode>, view: &mut View, sim: &mut SlideRes) {
             sim.engine
                 .set_overlays(ui::step_solo(sim.engine.overlays(), n, step));
         }
-    }
-    if keys.just_pressed(KeyCode::KeyC) {
-        view.rounded = !view.rounded;
     }
     if keys.just_pressed(KeyCode::KeyN) {
         view.organelles = !view.organelles;
@@ -3050,7 +3037,7 @@ fn redraw(
                 // cell stops being a cell.
                 softness: (blur / body.max(1.0)).clamp(0.0, 0.25),
                 integrity: 1.0,
-                rounded: if view.rounded { 1.0 } else { 0.0 },
+                rounded: 1.0,
             },
             squash: squash_of(dot),
             // `body` above is already the swollen size. This is how much of it is swell, so the
@@ -3094,7 +3081,7 @@ fn redraw(
                         ),
                         softness: 0.0,
                         integrity: 1.0,
-                        rounded: if view.rounded { 1.0 } else { 0.0 },
+                        rounded: 1.0,
                     },
                     // Organelles are not squashed. They sit inside a cell that may be, and a
                     // nucleus flattening against the neighbouring *cell* would be drawing a
@@ -4175,15 +4162,6 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                         }
                     }
                 });
-                if skin::menu_toggle(ui, "Rounded cells", "C", view.rounded)
-                    .on_hover_text(
-                        "shaded, irregular cells rather than flat squares. Presentation only \
-                         — it changes which tile of a baked atlas each sprite samples",
-                    )
-                    .clicked()
-                {
-                    view.rounded = !view.rounded;
-                }
                 if skin::menu_toggle(ui, "Organelles", "N", view.organelles)
                     .on_hover_text(
                         "the blobs inside each cell. Off is how you look at the cells \
