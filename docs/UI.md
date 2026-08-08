@@ -335,10 +335,15 @@ microscope could show a world with a day/night cycle or a stirred beaker and cou
 to make one, and the whole of §17.6 in `SPEC.md` — cells holding station in flowing water —
 was unwatchable in the instrument built for watching.
 
-They are now the first group in the parameter drawer: a variant picker each, the chosen
-variant's fields beside it, and their own apply. Drafted rather than live because
-`set_current` invalidates the entire prescribed velocity field, so a strength dragged through
-a slider would rebuild it once per frame of the drag.
+They are now a variant picker each, the chosen variant's fields beside it, and an apply. Drafted
+rather than live because `set_current` invalidates the entire prescribed velocity field, so a
+strength dragged through a slider would rebuild it once per frame of the drag.
+
+> **They were the parameter editor's first group and §9.6 moved them into the build window.** The
+> grounds for putting them there were that they are configuration, which is true and is not the
+> useful distinction: everything else in that editor is what the *living* half costs to run, and
+> these are what kind of world it is. Setting a slide up meant crossing from the window with the
+> tools in it to the window with the costs in it, for the two settings that decide the most.
 
 **They are not on the intervention record, and that is a known hole rather than an oversight.**
 `Intervention` is `{ tick, biology }`, so it cannot carry them; `set_light` and `set_current`
@@ -385,9 +390,11 @@ high there, and a source is a *cause* where the overlay is the *effect*.
 
 #### An edit has to survive being saved, and three of them did not
 
-`Slide → New scenario…` gives an empty stopped slide to build on — not `New slide` with no
-founders, which is a petri dish, lit and seeded with three chemicals you did not ask for and
-cannot see. Build it, then Save from the same menu.
+`Slide → New scenario…` gives a stopped slide to build on — not `New slide` with no founders,
+which is a petri dish, lit and seeded with three chemicals you did not ask for and cannot see.
+Build it, then Save from the same menu. (§9.6 later made the sheet ask *which* three and how
+much, which is the same argument carried through: a chemistry you did not choose is one you
+cannot reason about, whether or not you can see it.)
 
 For that to mean anything, everything the tools do has to reach the `Scenario`, and three things
 did not:
@@ -1267,6 +1274,76 @@ and CLAUDE.md is unambiguous: there is no fitness function in this codebase and 
 be one. A person comparing two runs is not selection pressure inside the simulation, so the idea
 is defensible — but a panel that headlines one number per genome and colours the winner teaches
 people to read it as a score, and that is worth more thought than a milestone deadline gives it.
+
+### 9.6 What kind of world it is
+
+M10.7 gave the interface everything needed to author a slide *square by square* — a brush, walls,
+sources, founders — and the three things that decide what kind of world it is are not properties
+of any square. They were reachable as follows:
+
+| | where it lived | what it cost to reach |
+| --- | --- | --- |
+| light | Parameters ▸ environment | a different window from the one you author in |
+| current | Parameters ▸ environment | likewise |
+| starting chemistry | **nowhere** | a text editor |
+
+The third is the one that matters. `Seeding::Uniform` has been in the format since M1 and had no
+caller in the front end at all, because the brush records a `Seeding::Spike` *per square*
+(§4.3) — so washing a 270-square slide in carbon is 72,900 entries in a file whose entire job is
+to be read by a person. "Start this world short of carbon" is the first thing anybody wants from
+a scenario, because scarcity is what there is to compete over, and it was the one thing the
+editor could not say.
+
+**So `build` gets a third view, `world`,** on the drawer shape of §8.6: the light regime, the
+current, and a table of what one square of water starts with. `World::set_uniform_seeding` is the
+mechanism — a *level* and not a dose, so lowering it takes matter off the slide through the
+ledger in both currencies, exactly as `extract` does. It replaces everything the recipe said
+about that chemical, hand-painted spikes included, because a wash with spikes still listed
+underneath is a file that reopens as a different slide than the one that was saved.
+
+It joins `set_light`, `set_current` and the barrier tools in **not being on the intervention
+record**, and the apply button says so. That hole is still one piece of work, still owed, and now
+owed by four callers rather than three.
+
+#### The sheet asks, rather than describing
+
+`New scenario…` offered a size and a table of five hardcoded strings saying what you would get.
+One of them read `light  Uniform(intensity: 0)` while the code built the slide at `Q10_ONE` —
+full daylight. Nothing could have caught it: there was nothing to compare a description against.
+
+The table is replaced by the controls it was describing — size, light, the three chemicals a cell
+cannot do without, and who to put on it — which is the only version that cannot go out of step
+with what Create does. `library::NewWorld` is the type, in the library rather than in `main.rs`
+for the reason that module's header gives, and "the controls produce the scenario they describe"
+is a test.
+
+It is deliberately not the whole of the `world` view: one uniform intensity against six regimes,
+three chemicals against sixteen. A starting point that can be got wrong and corrected is worth
+having, and a second full editor for the same fields would be a second thing to keep in step.
+
+**And the two `New…` sheets now say how they differ**, which was the actual complaint: both
+opened on a size and a paragraph about themselves, and nothing said that one is a dish that runs
+and the other is a recipe stopped at tick 0. That difference — §9.1's authoring state — is the
+entire reason there are two.
+
+#### Two labels that were wrong
+
+- **`270 squares` is an edge.** Both sheets offer one number, because the slide is square, and
+  suffixed it ` squares` — so 72,900 squares announced itself as 270 of them. `library::size_reading`
+  says `270 × 270 — 72,900 squares in all`.
+- **A light intensity had no reading.** `819` is how the file says it and "80% light" is how a
+  person does, and working out that full daylight is 1024 meant reading SPEC §7. The picker
+  carries the percentage beside it, off the *brightest* the regime ever reaches — the question it
+  answers is whether a chloroplast can live here, and that is set by the best it ever gets.
+
+#### The seeding tool names one genome out of eighteen
+
+`PlaceCell` takes a genome by name and the interface offered a text box hinting `ancestor.mm`.
+Eighteen genomes ship in `genomes/`; seventeen of them were reachable only by somebody who had
+gone and listed the directory. `library::genomes()` lists them and the picker offers them, with
+the box kept beside it — `Inhabitant.genome` is resolved by `mm_asm::locate` against whatever is
+on disk, so a genome written five minutes ago is a legal thing to type and a picker that had
+eaten the field would have made it unseedable.
 
 ---
 

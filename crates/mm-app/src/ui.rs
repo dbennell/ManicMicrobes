@@ -488,17 +488,29 @@ impl Ecology {
 pub enum Build {
     /// The tools, the brush, the loaded chemical, and what is on the slide.
     Tools,
+    /// The weather and the starting chemistry: what kind of world this is, before anything is
+    /// drawn on it.
+    ///
+    /// The tools author a slide *square by square*, and three of the things that decide what
+    /// kind of world it is are not properties of any square: the light regime, the current, and
+    /// how much of each chemical the water starts with. Light and current were reachable only
+    /// from the parameter editor, which is a different window from the one you author in; the
+    /// starting chemistry was reachable from nowhere at all, because the brush records a
+    /// `Seeding::Spike` per square and a slide washed with it is tens of thousands of lines of
+    /// scenario file.
+    World,
     /// The scenario the slide would be saved as, and the RON that Save would write.
     Scenario,
 }
 
 impl Build {
-    pub const ALL: [Build; 2] = [Build::Tools, Build::Scenario];
+    pub const ALL: [Build; 3] = [Build::Tools, Build::World, Build::Scenario];
 
     #[must_use]
     pub fn title(self) -> &'static str {
         match self {
             Build::Tools => "tools",
+            Build::World => "world",
             Build::Scenario => "scenario",
         }
     }
@@ -905,6 +917,20 @@ mod tests {
             .map(Panel::title)
             .collect();
         assert_eq!(tabs, ["genome", "ecology"]);
+    }
+
+    /// The build window's views, stated as a list for the same reason the drawer's are: a view
+    /// is a claim that these are the parts of one job, and adding one should cost a test.
+    #[test]
+    fn the_build_window_authors_a_scenario_in_three_parts() {
+        let views: Vec<&str> = Build::ALL.into_iter().map(Build::title).collect();
+        // The order is the order the job is done in: set what kind of world it is, draw on it,
+        // read back what would be saved.
+        assert_eq!(views, ["tools", "world", "scenario"]);
+        let mut unique = views.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), views.len(), "two views share a title");
     }
 }
 

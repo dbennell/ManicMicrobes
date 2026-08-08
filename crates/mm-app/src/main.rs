@@ -387,6 +387,13 @@ fn arrange(spec: &str, sim: &mut SlideRes, view: &mut View) {
                 view.panels.set(Panel::Build, true);
                 view.build = Build::Scenario;
             }
+            // The third view, added when the light, the current and the starting chemistry came
+            // together into one place. `environment` is the spelling it answered to as a
+            // parameter page, kept so the scripts that photographed it still find it.
+            "world" | "environment" => {
+                view.panels.set(Panel::Build, true);
+                view.build = Build::World;
+            }
             // `menu:view` holds a menu open, so a menu can be photographed at all. The name is
             // the one the menu bar prints, lowercased.
             "menu" => match sub {
@@ -416,7 +423,10 @@ fn arrange(spec: &str, sim: &mut SlideRes, view: &mut View) {
             // An empty stopped slide, which is the state the authoring caption exists for and
             // the one a running default slide can never be photographed in.
             "newscenario" => {
-                sim.new_scenario(96);
+                sim.new_scenario(&library::NewWorld {
+                    size: 96,
+                    ..library::NewWorld::default()
+                });
                 view.centre = Vec2::splat(48.0);
                 view.zoom = (BASE_SCALE * 6.0 / 96.0).clamp(0.05, 40.0);
                 view.tool = Tool::Paint;
@@ -473,7 +483,6 @@ fn arrange(spec: &str, sim: &mut SlideRes, view: &mut View) {
                     view.params_page = ParamPage::Group(*group);
                 } else if !sub.is_empty() {
                     view.params_page = match sub {
-                        "environment" => ParamPage::Environment,
                         "pathways" => ParamPage::Pathways,
                         "catalogue" => ParamPage::Catalogue,
                         other => {
@@ -740,6 +749,8 @@ struct SlideRes {
     /// Edits are applied on a button rather than on a keystroke, because every apply is an
     /// intervention that goes on the record and one per keystroke would be a useless record.
     draft: Option<Draft>,
+    /// The build window's `world` view, while it is open. See [`WorldDraft`].
+    world_draft: Option<WorldDraft>,
 }
 
 /// The ecology pane's copy of the world's history.
@@ -793,6 +804,50 @@ struct Environment {
     current: mm_core::light::CurrentField,
 }
 
+/// What the build window's `world` view is editing: the weather, and what is dissolved in the
+/// water before anything happens.
+///
+/// Drafted and applied on a button, for the same two reasons the parameter editor is.
+/// `set_current` invalidates the entire prescribed velocity field, so a strength dragged through
+/// a slider would rebuild it once per frame of the drag; `set_uniform_seeding` walks every square
+/// on the slide, which at 270 squares is seventy-odd thousand of them per frame.
+struct WorldDraft {
+    env: Environment,
+    env_live: Environment,
+    /// How much of each chemical one square of water starts with — the `Seeding::Uniform` entry
+    /// for it, by index.
+    ///
+    /// `None` where the recipe says nothing about that chemical, because "not seeded" and
+    /// "seeded with none of it" are different claims and only the second one belongs in a file.
+    /// A row removed goes to `None` and applies as a wash down to zero, which is the same thing
+    /// said in the mechanism the scenario actually has.
+    seeding: Vec<Option<i32>>,
+    seeding_live: Vec<Option<i32>>,
+}
+
+impl WorldDraft {
+    /// Read the world as it stands. The scenario *is* what is in force — `set_light`,
+    /// `set_current` and `set_uniform_seeding` all write straight into it — so there is no
+    /// separate founding value for any of this to be reverted to.
+    fn read(world: &mm_core::World, chemicals: usize) -> WorldDraft {
+        let env = Environment {
+            light: world.scenario().light.clone(),
+            current: world.scenario().current.clone(),
+        };
+        let seeding: Vec<Option<i32>> = (0..chemicals).map(|c| world.uniform_seeding(c)).collect();
+        WorldDraft {
+            env_live: env.clone(),
+            env,
+            seeding_live: seeding.clone(),
+            seeding,
+        }
+    }
+
+    fn dirty(&self) -> bool {
+        self.env != self.env_live || self.seeding != self.seeding_live
+    }
+}
+
 /// The parameter editor's state while it is open.
 struct Draft {
     /// What will be applied.
@@ -801,14 +856,6 @@ struct Draft {
     live: BiologyConfig,
     /// What the scenario says, so a value that has drifted from the file can be marked.
     founding: BiologyConfig,
-    /// The environment being edited, and what is in force.
-    ///
-    /// Drafted rather than applied on each keystroke for a reason that is not only consistency
-    /// with the rest of the pane: `set_current` invalidates the whole prescribed velocity
-    /// field, so a strength dragged through a slider would rebuild it on every frame of the
-    /// drag.
-    env: Environment,
-    env_live: Environment,
 }
 
 impl SlideRes {
@@ -866,6 +913,7 @@ impl SlideRes {
             ecology: None,
             scenario_view: None,
             draft: None,
+            world_draft: None,
         }
     }
 
@@ -934,28 +982,22 @@ impl SlideRes {
     /// Stopped, because authoring a slide that is running means placing a cell into a current
     /// and watching it leave. The tools all work on a stopped world — that is what the pause
     /// was built to allow.
-    fn new_scenario(&mut self, size: u32) {
-        let blank = Scenario {
-            name: "untitled".to_string(),
-            seed: 1,
-            width: size,
-            height: size,
-            light: LightRegime::Uniform {
-                intensity: mm_core::Q10_ONE,
-            },
-            current: CurrentField::Still,
-            ..Scenario::default()
-        };
+    fn new_scenario(&mut self, want: &library::NewWorld) {
+        let size = want.size;
         {
             let held = self.engine.handle();
             let mut slide = held.slide();
-            match mm_core::World::new(blank) {
+            match mm_core::World::new(want.scenario()) {
                 Ok(w) => slide.set_world(w),
                 Err(e) => {
                     eprintln!("cannot make a {size}-square slide: {e:?}");
                     return;
                 }
             }
+            // The scenario names its inhabitants; this is the half that needs a filesystem and
+            // an assembler. Same path a library scenario takes, so a sheet-built slide and an
+            // opened one are populated by one piece of code rather than two.
+            seed_into(&mut slide, 0);
         }
         self.engine.set_rate(Rate::Paused);
         self.selected = None;
@@ -1320,6 +1362,10 @@ struct View {
     /// than in the menu closure because a menu is rebuilt every frame and would forget.
     new_size: u32,
     new_founders: u32,
+    /// What `New scenario…` is set to. Its own settings rather than a share of the two above,
+    /// because it is a different question: `New slide` asks how big and how many, and this asks
+    /// what kind of world.
+    new_world: library::NewWorld,
     paused: bool,
     /// Which panels are showing. One place rather than eight booleans, so the View menu and
     /// the keyboard are generated from the same list and cannot drift apart.
@@ -1469,8 +1515,6 @@ enum Sheet {
 /// was a column of numbers with nothing saying what they were.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ParamPage {
-    /// The light falling on the slide and the water moving under it.
-    Environment,
     Group(params::Group),
     /// Which reactions this world offers.
     Pathways,
@@ -1480,9 +1524,11 @@ enum ParamPage {
 
 impl ParamPage {
     /// The rail, in order.
+    /// The rail, in order. **The living half only** — the light and the current moved to the
+    /// build window's `world` view when that was built (`docs/UI.md` §9.6), because they are
+    /// what kind of world it is and everything left here is what the cells cost to run.
     fn all() -> Vec<ParamPage> {
-        let mut out = vec![ParamPage::Environment];
-        out.extend(params::Group::ALL.map(ParamPage::Group));
+        let mut out: Vec<ParamPage> = params::Group::ALL.map(ParamPage::Group).into();
         out.push(ParamPage::Pathways);
         out.push(ParamPage::Catalogue);
         out
@@ -1490,7 +1536,6 @@ impl ParamPage {
 
     fn title(self) -> &'static str {
         match self {
-            ParamPage::Environment => "environment",
             ParamPage::Group(g) => g.title(),
             ParamPage::Pathways => "pathways",
             ParamPage::Catalogue => "catalogue",
@@ -1505,6 +1550,12 @@ impl Default for View {
             // from a number you have to discover.
             new_size: slide_size(),
             new_founders: 16,
+            new_world: library::NewWorld {
+                // From where you are, so the sheet starts at the slide you have open rather
+                // than at a number you have to discover. Same argument as `new_size`.
+                size: slide_size(),
+                ..library::NewWorld::default()
+            },
             // The middle of whatever slide the app opened on. It was a constant of 48, which
             // was the middle of a 96-square slide and has been the middle of nothing since.
             centre: Vec2::splat(slide_size() as f32 / 2.0),
@@ -3510,11 +3561,16 @@ fn panels(
     // `egui_wants_pointer` half of the rule was written for the sheets and covers these too.
     windows(&mut root, &mut sim, &mut view);
     status_bar(&mut root, &sim, &view, &frame, &diagnostics);
-    // The parameter draft belongs to the panel that edits it: when that window is shut, the
-    // draft goes with it, so reopening reads the world afresh rather than presenting edits from
-    // ten minutes ago as though they were still pending.
+    // A draft belongs to the panel that edits it: when that window is shut, the draft goes with
+    // it, so reopening reads the world afresh rather than presenting edits from ten minutes ago
+    // as though they were still pending. The world view's draft goes when the build window
+    // closes *or* when it is showing one of the other two views, because the tools write to the
+    // same scenario it is drafting and a stale copy would offer to undo them.
     if !view.panels.is_open(Panel::Parameters) {
         sim.draft = None;
+    }
+    if !view.panels.is_open(Panel::Build) || view.build != Build::World {
+        sim.world_draft = None;
     }
     drawer(&mut root, &mut sim, &mut view);
 
@@ -3616,12 +3672,14 @@ fn new_slide_sheet(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
     ui.label(skin::text(
         Role::Body,
         "A lit petri dish, seeded with the default chemistry, ancestors spread over it. Starts \
-         at tick 0 and runs.",
+         at tick 0 and runs. Nothing to decide but how big and how many — for a world you \
+         choose the light and the chemistry of, there is New scenario.",
     ));
     ui.add_space(theme::SECTION_GAP);
 
     skin::section(ui, "size", false);
     ranged_drag(ui, &mut view.new_size, 16..=1024, 4.0, "", " squares");
+    ui.label(skin::text(Role::Small, library::size_reading(view.new_size)));
     ui.label(skin::text(
         Role::Small,
         "The slide is square. Everything scales with the area: the matter seeded into it, the \
@@ -3659,40 +3717,109 @@ fn new_slide_sheet(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
     });
 }
 
-/// An empty stopped slide to build a scenario on.
+/// A slide you choose the conditions of, stopped at tick 0 so it can be saved and replayed.
+///
+/// This was a size and a table of five strings describing what you were about to get, one of
+/// which — `light  Uniform(intensity: 0)` — said the slide would be dark while the code built it
+/// at full daylight. The table has been replaced by the controls it was describing, which is the
+/// only version of it that cannot go out of step with what Create does.
 fn new_scenario_sheet(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
     ui.label(skin::text(
         Role::Body,
-        "An empty slide, stopped, to build one on. No light gradient, no chemistry, no walls, \
-         nobody home.",
+        "A slide you set the conditions of, stopped at tick 0. Nothing on it but the water: no \
+         walls, and nobody home unless you say so below.",
     ));
     ui.add_space(theme::SECTION_GAP);
 
     skin::section(ui, "size", false);
-    ranged_drag(ui, &mut view.new_size, 16..=1024, 4.0, "", " squares");
+    ranged_drag(ui, &mut view.new_world.size, 16..=1024, 4.0, "", " squares");
+    ui.label(skin::text(Role::Small, library::size_reading(view.new_world.size)));
 
-    skin::section(ui, "what you get", true);
-    for (field, value) in [
-        ("light", "Uniform(intensity: 0)"),
-        ("current", "Still"),
-        ("seeding", "[]"),
-        ("barriers", "[]"),
-        ("inhabitants", "[]"),
-    ] {
-        skin::stat(ui, field, value);
+    skin::section(ui, "light", true);
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::Slider::new(&mut view.new_world.light, 0..=mm_core::Q10_ONE).show_value(false),
+        );
+        ui.label(skin::text(Role::Value, view.new_world.light.to_string()));
+        ui.label(skin::text(
+            Role::Label,
+            format!(
+                "{}% of full daylight",
+                view.new_world.light * 100 / mm_core::Q10_ONE
+            ),
+        ));
+    });
+    ui.label(skin::text(
+        Role::Small,
+        "Uniform, so nothing here rewards moving. The other five regimes — day/night, a \
+         gradient, a slow decline — are in the build window.",
+    ));
+
+    skin::section(ui, "starting chemistry", true);
+    for (chemical, per_square) in &mut view.new_world.chemistry {
+        ui.horizontal(|ui| {
+            if let Some(rgb) = sim.chem_colours.get(*chemical).copied() {
+                skin::swatch(ui, rgb, true);
+            }
+            ui.add_sized(
+                egui::vec2(130.0, theme::row::HEIGHT),
+                egui::Label::new(skin::text(
+                    Role::Value,
+                    sim.chem_names
+                        .get(*chemical)
+                        .cloned()
+                        .unwrap_or_else(|| chemical.to_string()),
+                ))
+                .truncate(),
+            );
+            ui.add(
+                egui::DragValue::new(per_square)
+                    .speed(64.0)
+                    .range(0..=1_000_000),
+            );
+            ui.label(skin::text(Role::Label, "per square"));
+        });
     }
+    ui.label(skin::text(
+        Role::Small,
+        "Carbon is what a body is built out of, and matter is conserved — so this is a hard \
+         ceiling on how much body the slide can hold. It sits a long way above where it starts \
+         to bite: 400 a square can go down to 10 before a population notices.",
+    ));
+
+    skin::section(ui, "founders", true);
+    ui.horizontal(|ui| {
+        genome_picker(ui, &mut view.new_world.genome);
+        ui.add(
+            egui::DragValue::new(&mut view.new_world.founders)
+                .speed(0.25)
+                .range(0..=64)
+                .prefix("× "),
+        );
+    });
+    ui.label(skin::text(
+        Role::Small,
+        if view.new_world.founders == 0 {
+            "None: an empty dish to draw on. Seed F10 drops them where you point, later."
+        } else {
+            "Spread over the slide. Seed F10 places them somewhere particular instead."
+        },
+    ));
 
     ui.add_space(theme::SECTION_GAP);
     skin::hairline(ui);
     ui.add_space(4.0);
     ui.horizontal(|ui| {
-        ui.label(skin::text(Role::Small, "Opens with paint selected."));
+        ui.label(skin::text(
+            Role::Small,
+            "Stopped, so what you build replays exactly.",
+        ));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if skin::chip(ui, "Create", None, true).clicked() {
-                let size = view.new_size;
-                sim.new_scenario(size);
+                let size = view.new_world.size;
+                sim.new_scenario(&view.new_world);
                 look_at(view, size);
-                // Straight into the tool you need first: a blank slide is a slide with nothing
+                // Straight into the tool you need first: a fresh slide is a slide with nothing
                 // to select.
                 view.tool = Tool::Paint;
                 view.panels.set(Panel::Build, true);
@@ -3705,6 +3832,7 @@ fn new_scenario_sheet(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
         });
     });
 }
+
 
 /// What is in `scenarios/`, and what the one you have picked actually says.
 fn library_sheet(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
@@ -4846,8 +4974,252 @@ fn build_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
     ui.separator();
     match view.build {
         Build::Tools => toolbox_body(ui, sim, view),
+        Build::World => world_body(ui, sim),
         Build::Scenario => scenario_body(ui, sim, view),
     }
+}
+
+/// What kind of world this is, before anything is drawn on it (`docs/UI.md` §9.6).
+///
+/// The tools author a slide square by square, and the three things that decide what kind of world
+/// it is are not properties of any square. **Light** and **current** were reachable only from the
+/// parameter editor — a different window from the one you author in, filed under the costs and
+/// rates of the living half, which is not what they are. **The starting chemistry** was reachable
+/// from nowhere: the brush records a `Seeding::Spike` per square, so washing a 270-square slide
+/// in carbon is 72,900 lines of a file whose whole job is to be read, and the `Seeding::Uniform`
+/// the format has had since M1 had no way to be written from the interface at all.
+///
+/// So "start this world short of carbon and at four-fifths light" — which is the first thing
+/// anybody wants from a scenario, because scarcity is what there is to compete over — needed a
+/// text editor. That is the gap this view closes.
+fn world_body(ui: &mut egui::Ui, sim: &mut SlideRes) {
+    if sim.world_draft.is_none() {
+        let held = sim.engine.handle();
+        let slide = held.slide();
+        sim.world_draft = Some(WorldDraft::read(slide.world(), sim.chem_names.len()));
+    }
+    let Some(mut draft) = sim.world_draft.take() else {
+        return;
+    };
+    let mut apply = false;
+
+    skin::drawer_split(
+        ui,
+        "world_notes",
+        |ui| {
+            let height = ui.available_height() - FOOTER_HEIGHT;
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_min_size(egui::vec2(ui.available_width(), height));
+                    egui::ScrollArea::vertical()
+                        .id_salt("world_scroll")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            environment_editor(ui, &mut draft.env);
+                            ui.add_space(theme::SECTION_GAP);
+                            skin::hairline(ui);
+                            seeding_table(ui, &mut draft, &sim.chem_names, &sim.chem_colours);
+                        });
+                },
+            );
+
+            skin::hairline(ui);
+            ui.add_space(3.0);
+            ui.horizontal(|ui| {
+                let dirty = draft.dirty();
+                if dirty {
+                    ui.label(skin::moody(Role::Label, Mood::Warn, "not applied"));
+                } else {
+                    ui.label(skin::text(Role::Label, "in force"));
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add_enabled(dirty, egui::Button::new(skin::text(Role::Label, "apply")))
+                        .on_hover_text(
+                            "change the light, the flow and what is dissolved in the water. NOT \
+                             recorded as an intervention — a slide file resumes correctly, but \
+                             replaying the original scenario will not reproduce this run.",
+                        )
+                        .clicked()
+                    {
+                        apply = true;
+                    }
+                    if ui
+                        .add_enabled(dirty, egui::Button::new(skin::text(Role::Label, "discard")))
+                        .on_hover_text("back to what the world is running on")
+                        .clicked()
+                    {
+                        draft.env = draft.env_live.clone();
+                        draft.seeding = draft.seeding_live.clone();
+                    }
+                });
+            });
+        },
+        |ui| {
+            skin::section(ui, "a level, not a dose", false);
+            ui.label(skin::text(
+                Role::Body,
+                "The brush adds what you set to whatever is already in the square. This sets \
+                 every square to the number, so dragging it down takes matter off the slide as \
+                 readily as raising it puts matter on — and a slide seeded with 40 carbon is 40 \
+                 carbon a square however many times you apply it.",
+            ));
+            skin::section(ui, "why it is not the brush", true);
+            ui.label(skin::text(
+                Role::Body,
+                "Painting records where each stroke landed, one entry per square, which is what \
+                 you want for a patch and hopeless for a wash: this slide is tens of thousands \
+                 of squares. One line saying what the water is made of is a file somebody can \
+                 read, so setting a level here replaces everything the recipe said about that \
+                 chemical — including anything you painted of it.",
+            ));
+            skin::section(ui, "scarcity is the experiment", true);
+            ui.label(skin::text(
+                Role::Body,
+                "A world where every strategy pays for itself measures nothing, so this is \
+                 where you make one of them cost something. Which number binds is worth \
+                 measuring rather than assuming, and carbon is the cautionary case: the shipped \
+                 chemistry sits so far above the point where it limits anything that dropping \
+                 it fortyfold barely moves the population, and only below about ten units a \
+                 square does it start to fall away. CHEMISTRY.md §6 has the figures.",
+            ));
+            skin::section(ui, "read a trend, not a tick", true);
+            ui.label(skin::text(
+                Role::Body,
+                "A population here oscillates — it overshoots, starves back and settles — so \
+                 one reading at one tick is not a carrying capacity, and two scenarios compared \
+                 at the same tick can rank either way by luck. Watch the metrics rail for a \
+                 while before believing a number.",
+            ));
+            skin::section(ui, "the weather is not physiology", true);
+            ui.label(skin::text(
+                Role::Body,
+                "Light and current live here rather than in Parameters because they are \
+                 scenario fields — what falls on the slide and what moves through it, not what \
+                 the cells cost to run. Parameters is the living half; this is the world it \
+                 lives in.",
+            ));
+        },
+    );
+
+    if apply {
+        let held = sim.engine.handle();
+        let mut slide = held.slide();
+        let world = slide.world_mut();
+        if draft.env != draft.env_live {
+            world.set_light(draft.env.light.clone());
+            world.set_current(draft.env.current.clone());
+        }
+        for (c, (want, have)) in draft
+            .seeding
+            .iter()
+            .zip(draft.seeding_live.iter())
+            .enumerate()
+        {
+            if want == have {
+                continue;
+            }
+            // A row taken away is a wash down to nothing, which is the same claim said in the
+            // mechanism the scenario has — there is no "unseed".
+            world.set_uniform_seeding(c, want.unwrap_or(0));
+        }
+        draft.env_live = draft.env.clone();
+        draft.seeding_live = draft.seeding.clone();
+        // The recipe just changed, and the scenario view should say so before its twice-a-second
+        // refresh would have got round to it.
+        sim.scenario_view = None;
+    }
+    sim.world_draft = Some(draft);
+}
+
+/// What one square of water starts with, per chemical.
+///
+/// Only the chemicals the recipe actually mentions get a row, plus whatever you add. Sixteen rows
+/// of zero would bury the three that matter, and a scenario listing every chemical at nothing is
+/// a file that says less than the empty one it started as.
+fn seeding_table(
+    ui: &mut egui::Ui,
+    draft: &mut WorldDraft,
+    names: &[String],
+    colours: &[[u8; 3]],
+) {
+    skin::section(ui, "starting chemistry", true);
+    ui.label(skin::text(
+        Role::Small,
+        "per square, before the first tick. 1024 is one unit.",
+    ));
+    ui.add_space(3.0);
+
+    if draft.seeding.iter().all(Option::is_none) {
+        ui.label(skin::text(
+            Role::Small,
+            "nothing dissolved. A slide with no carbon in it is a slide nothing can build a \
+             body out of — add one below.",
+        ));
+    }
+
+    let mut drop = None;
+    for (c, name) in names.iter().enumerate() {
+        let Some(level) = draft.seeding.get_mut(c).and_then(Option::as_mut) else {
+            continue;
+        };
+        ui.horizontal(|ui| {
+            if let Some(rgb) = colours.get(c).copied() {
+                skin::swatch(ui, rgb, true);
+            }
+            ui.add_sized(
+                egui::vec2(130.0, theme::row::HEIGHT),
+                egui::Label::new(skin::text(Role::Value, name)).truncate(),
+            );
+            ui.add(egui::DragValue::new(level).speed(64.0).range(0..=1_000_000));
+            ui.label(skin::text(
+                Role::Label,
+                format!("= {:.1} units", *level as f32 / mm_core::Q10_ONE as f32),
+            ));
+            // Beside the row it removes rather than out at the edge of the column, for the
+            // reason `on_slide_row` gives: this window is resizable, and a × that tracks the
+            // right-hand edge is a × that gets further from its row the wider you drag it.
+            ui.add_space(8.0);
+            if skin::chip(ui, "×", None, false)
+                .on_hover_text("wash it back out of the water")
+                .clicked()
+            {
+                drop = Some(c);
+            }
+        });
+    }
+    if let Some(c) = drop {
+        if let Some(slot) = draft.seeding.get_mut(c) {
+            *slot = None;
+        }
+    }
+
+    ui.add_space(3.0);
+    ui.horizontal(|ui| {
+        ui.label(skin::text(Role::Label, "add"));
+        egui::ComboBox::from_id_salt("seed a chemical")
+            .selected_text(skin::text(Role::Label, "chemical…"))
+            .show_ui(ui, |ui| {
+                for (c, name) in names.iter().enumerate() {
+                    if draft.seeding.get(c).is_some_and(Option::is_some) {
+                        continue;
+                    }
+                    if ui.selectable_label(false, name).clicked() {
+                        if let Some(slot) = draft.seeding.get_mut(c) {
+                            // The soup's level, because a row that appears at zero looks like it
+                            // did nothing and the number you want is almost never zero.
+                            *slot = Some(mm_core::fixed::q10(400));
+                        }
+                    }
+                }
+            });
+        ui.label(skin::text(
+            Role::Small,
+            "carbon builds bodies · carbon_dioxide and an oxidant are what a chloroplast needs",
+        ));
+    });
 }
 
 /// The scenario the slide would be saved as (M10.7, `docs/UI.md` §9.2).
@@ -5214,12 +5586,16 @@ fn toolbox_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
         "toolbox_notes",
         |ui| toolbox_work(ui, sim, view),
         |ui| {
-            skin::section(ui, "why this is a panel", false);
+            // What to do, before why it was built this way. This column opened on "why this is
+            // a panel" — a defence of the decision not to use a menu — which is the answer to a
+            // question nobody has while looking at a blank slide with a brush in their hand.
+            // The argument is worth keeping and it is worth keeping *last*.
+            skin::section(ui, "these draw on one square at a time", false);
             ui.label(skin::text(
                 Role::Body,
-                "A menu shuts the moment you click the slide, so changing a dose between two \
-                 strokes was open, change, close, paint, and open again. Anything you adjust \
-                 while working has to stay on screen while you work.",
+                "Right-click the slide; drag to pan. For what the whole slide is made of — the \
+                 light, the current, how much of each chemical is dissolved in the water — \
+                 there is the world view, next to this one.",
             ));
             skin::section(ui, "one chemical, four tools", true);
             ui.label(skin::text(
@@ -5227,6 +5603,14 @@ fn toolbox_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
                 "Paint, unpaint, source and drain all use the chemical above — they are four \
                  things you do to one chemical, and four separate settings would be four places \
                  to notice you had the wrong one.",
+            ));
+            skin::section(ui, "dose and drain", true);
+            ui.label(skin::text(
+                Role::Body,
+                "A dose is what one stamp puts in a square, and what a new source supplies per \
+                 step; 1024 is one unit. A drain takes a share of a square rather than an \
+                 amount, so it settles into balance with whatever reaches it instead of \
+                 scouring the slide dry.",
             ));
             skin::section(ui, "a brush is a disc", true);
             ui.label(skin::text(
@@ -5236,13 +5620,12 @@ fn toolbox_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
                  diagonal; at one, a diagonal run touches only at its corners and a cell fits \
                  through the gap.",
             ));
-            skin::section(ui, "dose and drain", true);
+            skin::section(ui, "why this is a panel", true);
             ui.label(skin::text(
                 Role::Body,
-                "A dose is what one stamp puts in a square, and what a new source supplies per \
-                 step; 1024 is one unit. A drain takes a share of a square rather than an \
-                 amount, so it settles into balance with whatever reaches it instead of \
-                 scouring the slide dry.",
+                "A menu shuts the moment you click the slide, so changing a dose between two \
+                 strokes was open, change, close, paint, and open again. Anything you adjust \
+                 while working has to stay on screen while you work.",
             ));
         },
     );
@@ -5308,13 +5691,7 @@ fn toolbox_work(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
 
         ui.add_space(10.0);
         ui.label(skin::text(Role::Label, "seed"));
-        ui.add(
-            egui::TextEdit::singleline(&mut view.place_genome)
-                .desired_width(150.0)
-                .font(skin::font(Role::Value))
-                .hint_text("ancestor.mm"),
-        )
-        .on_hover_text("a file in genomes/. The seed tool drops founders of it.");
+        genome_picker(ui, &mut view.place_genome);
         ui.add(
             egui::DragValue::new(&mut view.place_count)
                 .speed(0.2)
@@ -5348,7 +5725,8 @@ fn toolbox_work(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
         ui.label(skin::text(
             Role::Small,
             "nothing yet. Draw a wall, paint a chemical, drag a source, or seed a founder — \
-             each one writes itself into the scenario as well as onto the slide.",
+             each one writes itself into the scenario as well as onto the slide. To fill the \
+             whole slide with something rather than paint it on, use the world view.",
         ));
         return;
     }
@@ -5417,6 +5795,40 @@ fn toolbox_work(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
         let held = sim.engine.handle();
         held.slide().world_mut().remove_flux(i);
     }
+}
+
+/// Which genome to seed: the ones in `genomes/`, and a box for anything else.
+///
+/// It was the box alone, hinting `ancestor.mm`. Eighteen genomes ship in `genomes/` and the
+/// interface named one of them, so seeding a `predator` or a `sponge` — the reason the tool
+/// takes a name at all — required having gone and listed the directory yourself. A picker is not
+/// a convenience here; without it the other seventeen are undiscoverable.
+///
+/// The box stays beside it rather than being replaced by it. `Inhabitant.genome` is resolved by
+/// [`mm_asm::locate`] against whatever is on disk, so a genome written five minutes ago in a
+/// directory the picker did not scan is still a legal thing to type, and a picker that had eaten
+/// the field would have made it unseedable.
+fn genome_picker(ui: &mut egui::Ui, into: &mut String) {
+    let found = library::genomes();
+    egui::ComboBox::from_id_salt("seed genome")
+        .selected_text(skin::text(Role::Label, "genomes…"))
+        .show_ui(ui, |ui| {
+            if found.is_empty() {
+                ui.label(skin::text(Role::Small, "no genomes/ directory found"));
+            }
+            for name in &found {
+                if ui.selectable_label(into == name, name).clicked() {
+                    *into = name.clone();
+                }
+            }
+        });
+    ui.add(
+        egui::TextEdit::singleline(into)
+            .desired_width(150.0)
+            .font(skin::font(Role::Value))
+            .hint_text("ancestor.mm"),
+    )
+    .on_hover_text("a file in genomes/. The seed tool drops founders of it where you right-click.");
 }
 
 /// One row of "what is on the slide": a swatch, what kind of thing it is, what it is of, where
@@ -5778,26 +6190,16 @@ fn parameters_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
         let held = sim.engine.handle();
         let slide = held.slide();
         let live = slide.world().biology().clone();
-        // `set_light` and `set_current` write straight into the running scenario, so the
-        // scenario *is* what is in force. There is no separate founding value to revert an
-        // environment to, which is why it has no "back to the scenario" of its own.
-        let env = Environment {
-            light: slide.world().scenario().light.clone(),
-            current: slide.world().scenario().current.clone(),
-        };
         sim.draft = Some(Draft {
             editing: live.clone(),
             live,
             founding: slide.world().scenario().biology.clone(),
-            env: env.clone(),
-            env_live: env,
         });
     }
     let Some(mut draft) = sim.draft.take() else {
         return;
     };
     let mut apply = false;
-    let mut apply_env = false;
 
     // How far the world has drifted from the file that describes it, and how much of that is
     // not in force yet. Two different questions, and the editor answered neither: one global
@@ -5856,9 +6258,6 @@ fn parameters_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
                     |ui| {
                         ui.set_min_size(egui::vec2(ui.available_width(), height));
                         match view.params_page {
-                            ParamPage::Environment => {
-                                environment_editor(ui, &mut draft, &mut apply_env);
-                            }
                             ParamPage::Group(group) => {
                                 parameter_table(ui, &mut draft, group, &sim.chem_names);
                             }
@@ -5980,18 +6379,17 @@ fn parameters_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
         held.slide().world_mut().set_biology(draft.editing.clone());
         draft.live = draft.editing.clone();
     }
-    if apply_env {
-        let held = sim.engine.handle();
-        let mut slide = held.slide();
-        let world = slide.world_mut();
-        world.set_light(draft.env.light.clone());
-        world.set_current(draft.env.current.clone());
-        draft.env_live = draft.env.clone();
-    }
     sim.draft = Some(draft);
 }
 
 /// The light falling on the slide and the water moving under it.
+///
+/// Lives in the build window's `world` view rather than in the parameter editor, and moved there
+/// when that view was built (`docs/UI.md` §9.6). It had been the parameter editor's first page
+/// since M10.2 on the grounds that it was configuration, which is true and is not the useful
+/// distinction: everything else in that editor is what the *living* half costs to run, and this
+/// is what kind of world it is. Setting up a slide meant crossing from the window with the tools
+/// in it to the window with the costs in it, for the two settings that decide the most.
 ///
 /// # Why this is not part of the intervention record, and why that is a problem
 ///
@@ -6003,19 +6401,21 @@ fn parameters_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
 /// so a light regime changed at tick 40,000 is indistinguishable on reload from one the
 /// scenario always had. A `.mmslide` is unaffected — it carries the world's state and its
 /// current scenario, so it resumes correctly — but replaying the original `.ron` no longer
-/// reproduces the run. The barrier tools have had the same hole since M6.
+/// reproduces the run. The barrier tools have had the same hole since M6, and
+/// `set_uniform_seeding` joins them.
 ///
 /// Closing it means `Intervention` growing beyond `BiologyConfig`, which bumps the snapshot
 /// format and touches the diff view that reconstructs "what changed". That is its own change;
 /// this one says so in the interface rather than leaving it to be discovered.
-fn environment_editor(ui: &mut egui::Ui, draft: &mut Draft, apply: &mut bool) {
+fn environment_editor(ui: &mut egui::Ui, env: &mut Environment) {
     use mm_core::light::{CurrentField, LightRegime};
 
-    ui.small(
-        "The weather. Light is what enters the world and the current is what carries \
-         everything through it — including cells, which drift with the water unless \
-         something holds them.",
-    );
+    skin::section(ui, "the weather", false);
+    ui.label(skin::text(
+        Role::Small,
+        "Light is what enters the world and the current is what carries everything through it \
+         — including cells, which drift with the water unless something holds them.",
+    ));
     ui.add_space(4.0);
 
     let q10 = |v: &mut i32, ui: &mut egui::Ui, label: &str| {
@@ -6027,20 +6427,29 @@ fn environment_editor(ui: &mut egui::Ui, draft: &mut Draft, apply: &mut bool) {
     };
 
     ui.horizontal(|ui| {
-        ui.label("light");
-        let mut kind = light_kind(&draft.env.light);
+        ui.label(skin::text(Role::Label, "light"));
+        let mut kind = light_kind(&env.light);
         egui::ComboBox::from_id_salt("light regime")
-            .selected_text(kind)
+            .selected_text(skin::text(Role::Value, kind))
             .show_ui(ui, |ui| {
                 for name in LIGHT_KINDS {
                     ui.selectable_value(&mut kind, name, name);
                 }
             });
-        if kind != light_kind(&draft.env.light) {
-            draft.env.light = default_light(kind);
+        if kind != light_kind(&env.light) {
+            env.light = default_light(kind);
+        }
+        // What the number means, which is the whole question anybody has about it. "80% light"
+        // is how a person says this and `819` is how the file does; without the reading, working
+        // out that full daylight is 1024 means reading SPEC §7.
+        if let Some(share) = brightest(&env.light) {
+            ui.label(skin::text(
+                Role::Label,
+                format!("{}% of full daylight", share * 100 / mm_core::Q10_ONE),
+            ));
         }
     });
-    ui.horizontal_wrapped(|ui| match &mut draft.env.light {
+    ui.horizontal_wrapped(|ui| match &mut env.light {
         LightRegime::Uniform { intensity } => q10(intensity, ui, "intensity"),
         LightRegime::DayNight {
             period_ticks,
@@ -6113,22 +6522,22 @@ fn environment_editor(ui: &mut egui::Ui, draft: &mut Draft, apply: &mut bool) {
 
     ui.add_space(6.0);
     ui.horizontal(|ui| {
-        ui.label("current");
-        let mut kind = current_kind(&draft.env.current);
+        ui.label(skin::text(Role::Label, "current"));
+        let mut kind = current_kind(&env.current);
         egui::ComboBox::from_id_salt("current field")
-            .selected_text(kind)
+            .selected_text(skin::text(Role::Value, kind))
             .show_ui(ui, |ui| {
                 for name in CURRENT_KINDS {
                     ui.selectable_value(&mut kind, name, name);
                 }
             });
-        if kind != current_kind(&draft.env.current) {
-            draft.env.current = default_current(kind);
+        if kind != current_kind(&env.current) {
+            env.current = default_current(kind);
         }
     });
-    ui.horizontal_wrapped(|ui| match &mut draft.env.current {
+    ui.horizontal_wrapped(|ui| match &mut env.current {
         CurrentField::Still => {
-            ui.weak("no flow");
+            ui.label(skin::text(Role::Small, "no flow"));
         }
         CurrentField::Uniform { vx, vy } => {
             q10(vx, ui, "vx");
@@ -6138,38 +6547,32 @@ fn environment_editor(ui: &mut egui::Ui, draft: &mut Draft, apply: &mut bool) {
         | CurrentField::Shear { strength }
         | CurrentField::Convergent { strength } => q10(strength, ui, "strength"),
     });
-    ui.small(format!(
-        "velocity is Q10 squares per fluid step; the solver clamps at {} \
-         (a quarter of a square).",
-        mm_core::fixed::Q10_ONE / 4
+    ui.label(skin::text(
+        Role::Small,
+        format!(
+            "velocity is Q10 squares per fluid step; the solver clamps at {} \
+             (a quarter of a square).",
+            mm_core::fixed::Q10_ONE / 4
+        ),
     ));
+}
 
-    ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        let dirty = draft.env != draft.env_live;
-        if ui
-            .add_enabled(dirty, egui::Button::new("apply environment"))
-            .on_hover_text(
-                "change the light and the flow on the running world. NOT recorded as an \
-                 intervention — a slide file resumes correctly, but replaying the original \
-                 scenario will not reproduce this run.",
-            )
-            .clicked()
-        {
-            *apply = true;
-        }
-        if ui
-            .add_enabled(dirty, egui::Button::new("discard"))
-            .clicked()
-        {
-            draft.env = draft.env_live.clone();
-        }
-        if dirty {
-            ui.colored_label(egui::Color32::from_rgb(240, 200, 120), "not applied");
-        } else {
-            ui.weak("in force");
-        }
-    });
+/// The brightest light this regime ever reaches, `Q10`, for the "% of full daylight" reading.
+///
+/// The brightest rather than an average, because what it answers is "can a chloroplast live
+/// here" and the answer to that is set by the best it ever gets. `None` for the two regimes where
+/// one number would be a lie: a point source falls off with distance, so its intensity is what
+/// one square gets and not what the slide does.
+fn brightest(light: &mm_core::light::LightRegime) -> Option<i32> {
+    use mm_core::light::LightRegime as L;
+    match light {
+        L::Uniform { intensity } => Some(*intensity),
+        L::DayNight { day, .. } => Some(*day),
+        L::Directional { bright, .. } => Some(*bright),
+        L::SlowDecline { start, .. } => Some(*start),
+        L::Seasonal { summer_day, .. } => Some(*summer_day),
+        L::PointSource { .. } => None,
+    }
 }
 
 const LIGHT_KINDS: [&str; 6] = [
