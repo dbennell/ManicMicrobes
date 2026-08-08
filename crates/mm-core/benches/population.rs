@@ -28,6 +28,7 @@ use mm_core::cell::{CellId, CellSeed};
 use mm_core::fixed::{pos, q10};
 use mm_core::light::CurrentField;
 use mm_core::neighbours::{self, NeighbourIndex};
+use mm_core::organelle::SLOT_COUNT;
 use mm_core::{LightRegime, MutationRates, Organelle, OrganelleType, Scenario, Seeding, World};
 
 const TARGET_CELLS: usize = 50_000;
@@ -142,6 +143,173 @@ fn grown(genome_file: &str, seed: u64) -> Option<World> {
         Err(e) => eprintln!("  {genome_file}: could not snapshot the grown world: {e:?}"),
     }
     Some(world)
+}
+
+/// The archetypes, and how many founders each gets.
+///
+/// Chosen to cover the catalogue rather than to be an ecology, so that no phase of the tick is
+/// priced against a code path that never runs.
+///
+/// Between them these build every organelle any shipped genome builds: membrane and nucleus and
+/// the two metabolic ones everywhere, plus vacuole (4), cilium (6), chemosensor (7), photosensor
+/// (8), touch sensor (9), junction port (10), lysosome (11), spike (12), oscillator (13) and
+/// holdfast (14).
+///
+/// Two catalogue entries are **not** covered and cannot be. Slot 15 is `ReservedB`, a documented
+/// no-op. Slot 5 is the pump, which SPEC §6.2 specifies and M2 lists as a deliverable and which
+/// does not exist — it has no arm in `read_sensor`, no effect in `metabolism::step` and no
+/// transport code anywhere, so a genome that built one would pay upkeep for nothing and price
+/// nothing here. When it is implemented this list needs a genome that carries one.
+///
+/// **Mutation is off while this grows**, which is the whole trick. `docs/FEEDING.md` §4 measured
+/// that predation does not pay under default parameters — "there is no high gear" — and
+/// `SPEC.md` §17.8 says being buried is the best place to be, so a *selecting* population
+/// converges on the autotroph and the mix is gone by the time it reaches the target. With
+/// mutation off every lineage breeds true, so the composition survives to be measured.
+///
+/// That makes this a **bound, not an ecology**. It is what the tick costs when everything the
+/// engine can do is being done at once, which is the number an optimisation must not regress.
+/// The typical case is the autotroph slide beside it, and the truth is somewhere between.
+const MIXED: [(&str, u32); 10] = [
+    // The autotroph everything else is measured against.
+    ("ancestor.mm", 12),
+    // Cilia and a chemosensor: thrust, the impulse scatter into the fluid, a sensor read.
+    ("drifter.mm", 8),
+    // The only photosensor in `genomes/`, and a spike, a lysosome and cilia with it.
+    ("stalker.mm", 8),
+    // A holdfast: the one organelle that resists the fluid rather than riding it.
+    ("sponge.mm", 8),
+    // Spike and lysosome without the sensors, so the ecology phase has work to do.
+    ("predator.mm", 8),
+    ("scavenger.mm", 6),
+    // Cilia and a touch sensor, and it joins junctions every tick — the constraint solver's
+    // only customer here.
+    ("reflex.mm", 4),
+    // The clock, catalogue slot 13, which nothing else in the library builds.
+    ("oscillator.mm", 4),
+    // A vacuole, which is otherwise only in `marble.mm`.
+    ("hoarder.mm", 3),
+    // The junction *port*, catalogue slot 10, which nothing else here builds — `reflex.mm`
+    // joins without one because the port reads zero to everything (docs/NEURONS.md §3).
+    ("parasite.mm", 3),
+];
+
+/// A grown mixed population, from cache when there is one.
+fn grown_mixed(seed: u64) -> Option<World> {
+    let path = cache_path("mixed", seed);
+    if std::env::var("MM_BENCH_REGROW").is_err() {
+        if let Ok(bytes) = std::fs::read(&path) {
+            match mm_core::Snapshot::read(&bytes) {
+                Ok(world) => {
+                    eprintln!("  mixed: {} cells from cache", world.cells().len());
+                    return Some(world);
+                }
+                Err(e) => eprintln!("  mixed: cache unusable ({e:?}); regrowing"),
+            }
+        }
+    }
+    let world = grow_mixed(seed)?;
+    if let Ok(bytes) = mm_core::Snapshot::write(&world) {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(&path, bytes);
+    }
+    Some(world)
+}
+
+/// Grow the mixed population, the long way.
+fn grow_mixed(seed: u64) -> Option<World> {
+    let mut world = World::new(slide(seed)).expect("world");
+    // Mutation off. See `MIXED` for why this is load-bearing rather than a simplification.
+    world.set_biology(BiologyConfig {
+        mutation: MutationRates::none(),
+        ..BiologyConfig::default()
+    });
+
+    // Founders on the same 8x8 lattice `grow` uses, so the two slides start from the same
+    // spacing and any difference between them is the genomes rather than the geometry.
+    let mut k = 0u32;
+    for (file, count) in MIXED {
+        let bytes = assemble(file);
+        for _ in 0..count {
+            let genome = world.genomes().intern(bytes.clone()).expect("interned");
+            let id = world.spawn_cell(CellSeed {
+                x: pos((16 + (k % 8) * 28) as i32),
+                y: pos((16 + (k / 8) * 28) as i32),
+                mass: q10(30),
+                energy: q10(400),
+                membrane: 24,
+                key: 11,
+                badge: 0,
+                species: 0,
+                parent: CellId::NONE,
+                birth_tick: 0,
+                genome,
+            });
+            // The same bootstrap `grow` gives its founders — a working body, so a founder does
+            // not have to build one out of nothing before it can do anything. Whatever else a
+            // genome wants, its own `#build` gene puts there.
+            if let Some(i) = world.cells_mut().index(id) {
+                let cells = world.cells_mut();
+                cells.slots_mut(i)[1] = Organelle::finished(OrganelleType::Nucleus, 64);
+                cells.slots_mut(i)[2] = Organelle::finished(OrganelleType::Mitochondrion, 50);
+                cells.slots_mut(i)[3] = Organelle::finished(OrganelleType::Chloroplast, 60);
+                cells.interior_mut(i)[11] = q10(40);
+                cells.interior_mut(i)[14] = q10(40);
+            }
+            k += 1;
+        }
+    }
+    world.adopt_current_contents_as_baseline();
+
+    for _ in 0..4_000 {
+        world.run(25);
+        let n = world.cells().len();
+        if n >= TARGET_CELLS {
+            break;
+        }
+        if n == 0 {
+            eprintln!("  mixed: went extinct while growing");
+            return None;
+        }
+    }
+    // Reported rather than asserted, and it is the number to read first: if one archetype has
+    // taken the slide, the mix this exists to measure is not there and the breakdown below is
+    // the autotroph one again under another name.
+    report_composition(&world);
+    Some(world)
+}
+
+/// What is actually on the mixed slide, by the organelles its cells carry.
+///
+/// By loadout rather than by lineage, deliberately — that is what the *tick* costs, and it is
+/// also the only thing an archetype means here. There is no cell-type enum and there must not
+/// be one (CLAUDE.md).
+fn report_composition(world: &World) {
+    let cells = world.cells();
+    let mut counts = [0u32; SLOT_COUNT];
+    let mut population = 0u32;
+    for i in 0..cells.capacity() {
+        if !cells.occupied(i) {
+            continue;
+        }
+        population += 1;
+        for o in cells.slots(i) {
+            if o.is_active() {
+                counts[o.kind as u8 as usize] += 1;
+            }
+        }
+    }
+    eprintln!("  mixed: {population} cells, by active organelle:");
+    for (n, count) in counts.iter().enumerate() {
+        if *count == 0 {
+            continue;
+        }
+        let kind = OrganelleType::from_operand(n as i16);
+        let pct = *count as f64 / population.max(1) as f64 * 100.0;
+        eprintln!("    {:<14} {count:>7}  {pct:5.1}% of cells", kind.name());
+    }
 }
 
 /// Grow a population from scratch, the long way.
@@ -271,8 +439,21 @@ fn phase_breakdown(_c: &mut Criterion) {
     if cfg!(debug_assertions) {
         return;
     }
-    if let Some(world) = grown("ancestor.mm", 1) {
-        breakdown_of("autotroph (ancestor.mm)", world);
+    // Two populations, because one of them cannot answer the question.
+    //
+    // `ancestor.mm` builds a nucleus, a mitochondrion and a chloroplast and nothing else. On
+    // that slide `sensing::step_physics` runs with no cilia, so the thrust branch and the
+    // impulse scatter are never taken; `execute` runs a genome that makes no sensor reads; and
+    // `gather_touch` builds an index nothing queries. Those three phases are floors rather than
+    // measurements, and two of them are phases M9 is about to change.
+    //
+    // The mixed slide engages every one of them. See `MIXED`.
+    for (label, world) in [
+        ("autotroph (ancestor.mm)", grown("ancestor.mm", 1)),
+        ("mixed archetypes", grown_mixed(1)),
+    ] {
+        let Some(world) = world else { continue };
+        breakdown_of(label, world);
     }
 }
 
