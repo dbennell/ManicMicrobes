@@ -20,7 +20,130 @@
 
 use std::path::{Path, PathBuf};
 
-use mm_core::{Scenario, ScenarioError};
+use mm_core::light::{CurrentField, LightRegime};
+use mm_core::{Inhabitant, Scenario, ScenarioError, Seeding};
+
+/// What `New scenario…` will build (`docs/UI.md` §9.6).
+///
+/// The sheet used to offer a size and nothing else, and describe what you would get in a table of
+/// five hardcoded strings — one of which said `light  Uniform(intensity: 0)` while the code built
+/// the slide at full daylight. Both halves of that were the same mistake: the dialog was
+/// *describing* a constant rather than *being* the decision, so there was nothing to keep the
+/// description honest.
+///
+/// It is the decision now, and deliberately not all of it. Light is one uniform intensity here
+/// where the build window's `world` view has all six regimes, and the chemistry is the three a
+/// cell cannot do without where that view reaches all sixteen. A starting point that can be got
+/// wrong and corrected is worth having; a second full editor for the same fields would be a
+/// second thing to keep in step with the first.
+///
+/// Here rather than in `main.rs` for the reason the module header gives: nothing in `main.rs` can
+/// be tested, and "the controls produce the scenario they describe" is exactly the claim that
+/// wants a test.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct NewWorld {
+    /// The edge, in squares. The slide is square.
+    pub size: u32,
+    /// Uniform daylight, `Q10`. 1024 is full.
+    pub light: i32,
+    /// `(chemical, per square)` for carbon, carbon dioxide and the oxidant — what a body is
+    /// built out of, and what a chloroplast runs on.
+    pub chemistry: [(usize, i32); 3],
+    /// Who lives here, as a name the scenario can write down and [`mm_asm::locate`] can find.
+    pub genome: String,
+    /// Zero is a legal answer, and is the one you want when the point is to draw the world
+    /// first.
+    pub founders: u32,
+}
+
+/// Carbon: what a cell builds its body out of, and so the one a slide is most often short of.
+pub const CARBON: usize = 4;
+/// Carbon dioxide, and the oxidant that goes with it. What a chloroplast runs on.
+pub const CARBON_DIOXIDE: usize = 11;
+/// The oxidant.
+pub const OXIDANT: usize = 14;
+
+impl Default for NewWorld {
+    fn default() -> Self {
+        NewWorld {
+            size: 256,
+            light: mm_core::Q10_ONE,
+            // The soup's levels, which is the control condition every other scenario is a
+            // variation on — so the number being changed has something to be a change *from*.
+            chemistry: [
+                (CARBON, mm_core::fixed::q10(400)),
+                (CARBON_DIOXIDE, mm_core::fixed::q10(400)),
+                (OXIDANT, mm_core::fixed::q10(400)),
+            ],
+            genome: "ancestor.mm".to_string(),
+            founders: 0,
+        }
+    }
+}
+
+impl NewWorld {
+    /// The recipe this describes.
+    ///
+    /// Nothing is placed here. `World::new` seeds the chemistry from the `seeding` list, and the
+    /// front end's `seed_into` places the inhabitants it names — the same path a scenario opened
+    /// from the library takes, so a slide built from the sheet and one opened from a file are
+    /// populated by one piece of code rather than two.
+    #[must_use]
+    pub fn scenario(&self) -> Scenario {
+        Scenario {
+            name: "untitled".to_string(),
+            seed: 1,
+            width: self.size,
+            height: self.size,
+            light: LightRegime::Uniform {
+                intensity: self.light,
+            },
+            current: CurrentField::Still,
+            // A chemical set to nothing is left out rather than written as zero: a recipe that
+            // lists what it does not contain says less than one that does not mention it.
+            seeding: self
+                .chemistry
+                .iter()
+                .filter(|(_, per_square)| *per_square > 0)
+                .map(|(chemical, per_square)| Seeding::Uniform {
+                    chemical: *chemical,
+                    per_square: *per_square,
+                })
+                .collect(),
+            inhabitants: if self.founders == 0 || self.genome.trim().is_empty() {
+                Vec::new()
+            } else {
+                vec![Inhabitant {
+                    genome: self.genome.trim().to_string(),
+                    count: self.founders,
+                    // Spread, because founders piled on one square are a pile and not a
+                    // population. The seed tool is how you say *where*.
+                    at: None,
+                }]
+            },
+            ..Scenario::default()
+        }
+    }
+}
+
+/// `270 squares` is an edge and it reads as an area. Say which.
+///
+/// Both `New…` sheets offer one number, because the slide is square, and suffix it ` squares` —
+/// so a slide of 72,900 squares announces itself as 270 of them, wrong by the side length.
+/// Nothing downstream was affected; the label was, and it is the first number anybody setting up
+/// a world reads.
+#[must_use]
+pub fn size_reading(size: u32) -> String {
+    let digits = (u64::from(size) * u64::from(size)).to_string();
+    let mut grouped = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(c);
+    }
+    format!("{size} × {size} — {grouped} squares in all")
+}
 
 /// Where the shipped scenarios are, tried in order.
 ///
@@ -73,6 +196,38 @@ pub fn scenarios() -> Vec<Entry> {
             continue;
         }
         found.sort_by(|a, b| a.label.cmp(&b.label));
+        return found;
+    }
+    Vec::new()
+}
+
+/// Every `.mm` in `genomes/`, sorted, as file names.
+///
+/// The seeding tool takes a genome by *name* — `Inhabitant.genome` is a path the scenario writes
+/// down and the caller resolves, because `mm-core` has no filesystem — and until now the only way
+/// to supply one was to type it into a box hinting `ancestor.mm`. Eighteen files ship in
+/// `genomes/` and the interface named exactly one of them, so the other seventeen were reachable
+/// only by somebody who had gone and listed the directory themselves.
+///
+/// File names rather than [`Entry`], because a genome's name is what has to reach the scenario
+/// verbatim: `ancestor.mm` prettified to `ancestor` is a string the assembler cannot find again.
+/// The same first-directory-wins rule as [`scenarios`], for the same reason.
+#[must_use]
+pub fn genomes() -> Vec<String> {
+    for root in mm_asm::locate::search_roots() {
+        let Ok(read) = std::fs::read_dir(root.join("genomes")) else {
+            continue;
+        };
+        let mut found: Vec<String> = read
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "mm"))
+            .filter_map(|p| Some(p.file_name()?.to_str()?.to_string()))
+            .collect();
+        if found.is_empty() {
+            continue;
+        }
+        found.sort();
         return found;
     }
     Vec::new()
@@ -213,6 +368,139 @@ mod tests {
             !labels.iter().any(|l| l.contains('_')),
             "underscores reached the menu: {labels:?}"
         );
+    }
+
+    /// The picker lists names, and a name has to be one the assembler can find again.
+    #[test]
+    fn the_genome_list_is_names_that_can_be_seeded() {
+        let found = genomes();
+        assert!(
+            found.len() >= 8,
+            "the library found {} genomes; there are eighteen in the repository",
+            found.len()
+        );
+        assert!(
+            found.contains(&"ancestor.mm".to_string()),
+            "the default founder is missing: {found:?}"
+        );
+        let mut sorted = found.clone();
+        sorted.sort();
+        assert_eq!(found, sorted, "a picker whose items move cannot be learned");
+        for name in &found {
+            assert!(
+                name.ends_with(".mm"),
+                "{name} is not a name the seeding tool could hand to the assembler"
+            );
+            assert!(
+                mm_asm::locate::file("genomes", name).is_some(),
+                "{name} is offered by the picker and cannot be found again"
+            );
+        }
+    }
+
+    /// The claim the sheet makes: the controls are the world you get.
+    ///
+    /// The version this replaces described itself in five hardcoded strings, one of which said
+    /// the slide would be dark while the code built it at full daylight. Nothing could have
+    /// caught that, because there was nothing to compare the description against.
+    #[test]
+    fn the_new_scenario_sheet_builds_the_world_it_describes() {
+        let want = NewWorld {
+            size: 270,
+            light: mm_core::Q10_ONE * 4 / 5,
+            chemistry: [
+                (CARBON, mm_core::fixed::q10(40)),
+                (CARBON_DIOXIDE, mm_core::fixed::q10(400)),
+                (OXIDANT, mm_core::fixed::q10(400)),
+            ],
+            genome: "predator.mm".to_string(),
+            founders: 6,
+        };
+        let s = want.scenario();
+        assert_eq!((s.width, s.height), (270, 270));
+        assert_eq!(s.light, LightRegime::Uniform { intensity: 819 });
+        assert_eq!(s.current, CurrentField::Still);
+        assert_eq!(
+            s.seeding,
+            vec![
+                Seeding::Uniform {
+                    chemical: CARBON,
+                    per_square: mm_core::fixed::q10(40)
+                },
+                Seeding::Uniform {
+                    chemical: CARBON_DIOXIDE,
+                    per_square: mm_core::fixed::q10(400)
+                },
+                Seeding::Uniform {
+                    chemical: OXIDANT,
+                    per_square: mm_core::fixed::q10(400)
+                },
+            ]
+        );
+        assert_eq!(
+            s.inhabitants,
+            vec![Inhabitant {
+                genome: "predator.mm".to_string(),
+                count: 6,
+                at: None
+            }]
+        );
+        assert!(s.barriers.is_empty(), "nothing is drawn on it yet");
+    }
+
+    /// A slide with nothing in the water is a legal and useful thing to ask for, and it has to
+    /// come out as a recipe that *says nothing* rather than one listing three zeroes.
+    #[test]
+    fn a_chemical_set_to_nothing_is_left_out_of_the_recipe() {
+        let s = NewWorld {
+            chemistry: [(CARBON, 0), (CARBON_DIOXIDE, 0), (OXIDANT, 0)],
+            ..NewWorld::default()
+        }
+        .scenario();
+        assert!(s.seeding.is_empty());
+    }
+
+    /// Zero founders is the empty dish the sheet is for, and it must not name a genome nobody
+    /// asked to be placed.
+    #[test]
+    fn nobody_home_is_no_inhabitants_and_not_a_count_of_zero() {
+        for want in [
+            NewWorld {
+                founders: 0,
+                ..NewWorld::default()
+            },
+            NewWorld {
+                founders: 8,
+                genome: "   ".to_string(),
+                ..NewWorld::default()
+            },
+        ] {
+            assert!(want.scenario().inhabitants.is_empty());
+        }
+    }
+
+    /// The whole point of the reading: the number on the dial is an edge.
+    #[test]
+    fn the_size_reading_says_edge_and_area_and_not_one_pretending_to_be_the_other() {
+        assert_eq!(size_reading(270), "270 × 270 — 72,900 squares in all");
+        assert_eq!(size_reading(16), "16 × 16 — 256 squares in all");
+        assert_eq!(size_reading(1024), "1024 × 1024 — 1,048,576 squares in all");
+    }
+
+    /// Whatever the sheet builds has to be a scenario the engine will actually accept, and one
+    /// that survives being written down — it is the thing Save writes.
+    #[test]
+    fn a_sheet_built_world_loads_and_round_trips() {
+        let want = NewWorld {
+            size: 32,
+            light: 819,
+            founders: 3,
+            ..NewWorld::default()
+        };
+        let s = want.scenario();
+        mm_core::World::new(s.clone()).expect("the sheet built a world that cannot exist");
+        let back = Scenario::from_ron(&s.to_ron().unwrap()).unwrap();
+        assert_eq!(back, s);
     }
 
     #[test]
