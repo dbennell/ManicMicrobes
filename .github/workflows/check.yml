@@ -1,0 +1,57 @@
+name: Check
+
+# The gate, on every push.
+#
+# `release.yml` has always had this job, but it fires on a `v*` tag and nothing else — so the
+# first time anything was built from a clean checkout against the committed lockfile was the
+# moment a release was being cut, which is the worst moment to find out that it cannot be. This
+# runs the same two commands on every branch instead, where a failure costs a fix rather than a
+# retracted tag.
+#
+# Deliberately not the full suite. `cargo fast` is every unit test, the totality fuzz, the
+# hard-rule guards and the determinism suite, in release, in seconds. `cargo slow` is the four
+# evolutionary acceptance runs and the better part of an hour; it belongs to a tag, not to a
+# push. See `.cargo/config.toml` for what each alias covers and why they run in release.
+
+on:
+  push:
+    # Branches only. A tag push is `release.yml`'s, and its first job is these same two
+    # commands — there is no reason to run them twice against one commit.
+    branches: ["**"]
+  workflow_dispatch:
+
+concurrency:
+  # Unlike the release, this one is safe to interrupt: pushing twice inside a minute should
+  # test the second commit rather than queue behind the first.
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Toolchain
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustc --version
+
+      # `--locked` on both. Cargo.lock is committed, and the whole point of a clean-checkout run
+      # is to notice when the dependency graph resolves differently here than in a working tree
+      # that has been warm for a week.
+      #
+      # No dependency cache, matching `release.yml`. This is a cold release build of mm-core and
+      # mm-asm every time, which is the honest measurement of what a fresh clone costs. If it
+      # ever becomes the slow part of a push, a Rust cache action is the knob to reach for — not
+      # a smaller set of tests.
+      - name: cargo fast
+        run: cargo fast --locked
+
+      # `fast` is mm-core and mm-asm. This one lives in mm-app: the guard that the build script
+      # can still include the icon module, whose failure is otherwise only discoverable on the
+      # Windows runner, two jobs and eight minutes into a release.
+      - name: The build script can still include the icon
+        run: cargo build-include --locked

@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# The gate, before anything leaves the machine.
+#
+# Exactly the two commands `.github/workflows/check.yml` runs, and deliberately not one more: a
+# hook that tests more than CI trains you to reach for `--no-verify`, and a hook that tests less
+# is not a gate. Both are release builds, both are warm after any ordinary edit, and together
+# they are seconds rather than minutes. What they are *not* is `cargo slow` or the mm-app suite;
+# those belong to a tag and to the change that touched them.
+#
+# Hooks are never installed by cloning. One line, once per clone:
+#
+#     git config core.hooksPath .githooks
+#
+# `git push --no-verify` skips it on the occasion you mean to.
+
+set -uo pipefail
+
+# One line per ref on stdin: <local ref> <local sha> <remote ref> <remote sha>. A deletion has an
+# all-zero local sha and nothing to test, so a push that only deletes a branch runs nothing.
+zero='0000000000000000000000000000000000000000'
+pushing=''
+tag=''
+while read -r local_ref local_sha _remote_ref _remote_sha; do
+    [ "$local_sha" = "$zero" ] && continue
+    pushing=1
+    case "$local_ref" in
+    refs/tags/v*) tag="${local_ref#refs/tags/}" ;;
+    esac
+done
+[ -n "$pushing" ] || exit 0
+
+# A tag is the version. It was already once a tag that disagreed with Cargo.toml, and what ships
+# under that disagreement is the number in the manifest wearing the name of the tag. The
+# prerelease suffix is the tag's alone — v0.2.0-rc.1 releases the 0.2.0 in the manifest.
+if [ -n "$tag" ]; then
+    want="${tag#v}"
+    want="${want%%-*}"
+    have=$(sed -n '/^\[workspace\.package\]/,/^\[/p' Cargo.toml |
+        sed -n 's/^version *= *"\(.*\)"/\1/p' | head -1)
+    if [ "$want" != "$have" ]; then
+        echo "pre-push: $tag would publish $have, the version in Cargo.toml" >&2
+        echo "          bump the manifest and commit it, or tag v$have" >&2
+        exit 1
+    fi
+fi
+
+for gate in fast build-include; do
+    echo "pre-push: cargo $gate"
+    if ! cargo "$gate" --locked --quiet; then
+        echo "pre-push: cargo $gate failed — nothing pushed" >&2
+        exit 1
+    fi
+done
