@@ -981,7 +981,7 @@ fn seed_one(world: &mut World, genome: &[u8], n: u32) {
 }
 
 /// Every scenario the library ships, so a new one cannot be added without being checked.
-const LIBRARY: [&str; 11] = [
+const LIBRARY: [&str; 12] = [
     "soup.ron",
     "photosynthesis_or_die.ron",
     "predator_introduction.ron",
@@ -993,6 +993,7 @@ const LIBRARY: [&str; 11] = [
     "the_drift.ron",
     "the_black_smoker.ron",
     "the_thicket.ron",
+    "the_marbles.ron",
 ];
 
 /// Scenarios that are deliberately not part of the curated library.

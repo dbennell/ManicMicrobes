@@ -1,0 +1,49 @@
+// The marbles — soup.ron, seeded with a lineage that has paid to stay round.
+//
+// This file exists so the two pictures can be put side by side without any tool use. Open
+// `soup.ron` and you get a tessellation: cells flattened into polygons, sharing walls, no gaps
+// anywhere. Open this and you get a heap of separate round bodies. Nothing about the world
+// differs between them — the chemistry, the light, the size and the seeding are `soup.ron`'s,
+// copied — and nothing about the *simulation* differs either. Only the genome does.
+//
+//   mm-cli run scenarios/the_marbles.ron --ticks 20000 --check
+//
+// The mechanism is in `docs/STIFFNESS.md` and the arithmetic is in `genomes/marble.mm`'s own
+// header. In one line: a cell bulges into the space its neighbours leave unless it is either
+// glued to them or too firm to bulge, and `marble.mm` is neither glued nor soft.
+//
+// Measured, on this slide against the same slide seeded with `ancestor.mm`:
+//
+//   genome         population   membrane   rigidity   swell   radius
+//   ancestor.mm         1 113         24       0.09    1.229     1.12
+//   marble.mm             436        255       1.00    1.015     1.00
+//
+// where 1.000 is a perfect sphere cut by its seams and 1.237 is a cell inflated until its
+// clipped outline keeps the area it has. **Under half the carrying capacity** is what the
+// picture costs, and it is charged every tick forever rather than once.
+//
+// Note that `soup.ron` names no inhabitants at all, which is why it falls back to the ancestor —
+// see `seed_into` in `mm-app`. Naming them here is also how a saved slide remembers who was on
+// it, so this is the ordinary way to author a population rather than a special case for a demo.
+(
+    name: "the marbles",
+    seed: 20250728,
+    width: 64,
+    height: 64,
+
+    light: Uniform(intensity: 1024),
+    current: Still,
+    fluid_interval: 1,
+
+    // soup.ron's, unchanged. The world is the control; the genome is the experiment.
+    seeding: [
+        Uniform(chemical: 11, per_square: 409600),
+        Uniform(chemical: 14, per_square: 409600),
+        Uniform(chemical: 4, per_square: 409600),
+    ],
+    barriers: [],
+
+    inhabitants: [
+        (genome: "marble.mm", count: 16),
+    ],
+)
