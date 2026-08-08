@@ -457,6 +457,34 @@ impl NeighbourIndex {
     /// population by one big cell, four times a tick, because the walk runs once for touch and
     /// once per separation pass.
     ///
+    /// # The largest is not seven any more, and three optimisations died of believing it was
+    ///
+    /// `phase_breakdown` prints the distribution now, and on a grown fifty-thousand-cell slide it
+    /// is **p50 1.12, p90 1.38, p99 2.62, max 2.62** squares. The mixed-archetype slide reaches
+    /// 2.75. So the remaining overestimate is about sixfold rather than twelve, and — much more
+    /// importantly — **the distribution is tight**. There are no outliers left to tax the
+    /// population; there is barely any size variation at all.
+    ///
+    /// That is what killed every attempt to recover it, and the attempts are worth listing
+    /// because they look different and failed for one reason:
+    ///
+    /// * A per-*row* maximum, so each row is walked only as far as its own biggest occupant
+    ///   could reach. Bit-exact, measured +4.4% (p = 0.10), nothing.
+    /// * A coarse layer at eight squares to a bucket holding the largest radius in each, so a
+    ///   query could take the maximum over the handful of blocks in reach rather than over the
+    ///   slide. Bit-exact, `collisions` unchanged (p = 0.70), and it *regressed*
+    ///   `neighbour_rebuild` by 8.2% for the fill — exactly cancelling the cursor win.
+    ///
+    /// Both compute a local maximum, and with p90 at 1.38 against a max of 2.62 the local
+    /// maximum over any decent sample simply *is* the global one. Size is not spatially
+    /// clustered here, and there is almost nothing to cluster.
+    ///
+    /// What is left is not a spatial bound. It would have to be the neighbour's own radius,
+    /// which is the one thing an index exists to avoid looking up — or a size-tiered index,
+    /// which is not exact, because merging two walks changes the order a cell accumulates in.
+    /// Before building either, re-read the distribution above: at twenty-odd candidates for six
+    /// contacts there is far less here than the paragraph above this one implies.
+    ///
     /// Still `max_radius` and not the neighbour's actual radius, because the whole point of an
     /// index is not to have looked at the neighbour yet. What this removes is the half of the
     /// overestimate that was never about the caller at all.

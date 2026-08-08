@@ -464,6 +464,31 @@ fn breakdown_of(label: &str, mut world: World) {
 
     eprintln!("\nPhase breakdown — {label} — at {population} cells ({w}x{h}):");
 
+    // The radius distribution, because every bound on the neighbour walk is sized from it and
+    // the figure everyone has been reasoning from — "median 1.25 squares, largest 7" — is a
+    // comment in `neighbours.rs` rather than something this bench ever printed.
+    {
+        let cells = world.cells();
+        let mut r: Vec<i32> = cells
+            .iter()
+            .map(|i| mm_core::fixed::q10_to_pos(mm_core::biology::radius(cells, i)))
+            .collect();
+        r.sort_unstable();
+        let at = |p: usize| -> f64 {
+            r.get(r.len().saturating_mul(p) / 100)
+                .copied()
+                .unwrap_or(0) as f64
+                / 256.0
+        };
+        eprintln!(
+            "  radius, squares:  p50 {:.2}  p90 {:.2}  p99 {:.2}  max {:.2}",
+            at(50),
+            at(90),
+            at(99),
+            r.last().copied().unwrap_or(0) as f64 / 256.0
+        );
+    }
+
     // The whole tick first, before anything below has touched the world.
     //
     // Every phase measured after this one is called directly and repeatedly, which advances that
