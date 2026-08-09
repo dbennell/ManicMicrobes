@@ -16,6 +16,78 @@ cargo test --release -p mm-core --test economy_probe -- --ignored --nocapture --
 
 ---
 
+## 0. Where this stands, for whoever comes back to it
+
+This document has grown by measurement, and several of its later sections **correct earlier
+ones**. Read this page before trusting anything below it.
+
+### What is settled
+
+* **Respiration is the only income, and its rate depends on one organelle** (§1). No entry in the
+  catalogue but the mitochondrion appears in the income expression, so every other organelle can
+  only ever move the upkeep column. This is the finding everything else turns out to be a face of.
+* **The carrying capacity is spatial, not economic** (§3). A saturated soup has eaten 8% of its
+  structural carbon and refuses thirty divisions a tick for want of room.
+* **Organelles are not too dear** (§9a). Scaling the whole catalogue from a quarter to double
+  changes the evolved loadout not at all, and changes a matched pair's share by about 5%.
+* **Light is not scarce anywhere the library measures** (§5), and making it scarce is the only
+  dial that moves which strategy wins (§9).
+* **A fat prey is worth 240% of a division to its killer, by `EAT` alone** — `apply_deaths`
+  returns the whole cytoplasm to the square before any of predation's lossy arithmetic applies.
+
+### What has been corrected, and where
+
+| do not believe | believe instead |
+| --- | --- |
+| §2, "the ranking is upkeep upside down" | §2a — that was one world. Across five, the median contender moves 536 of 1000 |
+| §6, "the `#feed` genes eat on a timer and swell the cell" | §6a — it is oxygen from a chloroplast bigger than its mitochondrion. §6b is what happened when it was fixed |
+| §10a, "re-cut `seasons` first" | §11 — the winter already thins rather than culls, and the hoarder's death was never about it |
+| §10, "dimming the light comes first" | §11.4 — nothing can afford to get fat in the dark, so the cost side has to move first |
+| §12.1, "the earning pair cannot be stacked" | fixed. A lysosome is now catalase; see below |
+
+### What has landed in the code
+
+* **`sentinel.mm` and `stalker.mm` draw their weapons** (§4a). They never had, in any run, because
+  their kin check reads an unbadged cell as an empty square.
+* **`hoarder.mm` builds two granules** (§11.2). One could not exempt enough solute to keep the
+  cell alive, because a vacuole's `param` is a `u8`.
+* **A lysosome decomposes the cell's own peroxide** (§12.1). This was named in a comment in
+  `metabolism.rs` and never built, and it was the wall that stopped any cell carrying more than
+  two mitochondria.
+* **Six parameters reach the state hash** that did not, and a guard enumerates the config so it
+  cannot happen again.
+
+### The open questions, in the order they matter
+
+1. **Does specialising lose because the world is packed?** With catalase, a metabolic specialist
+   survives at depth 3, 4 and 6 — and its share *falls* with depth: 365, 294, 230, 221. The
+   hypothesis is §3 returning: `radius` goes as the square root of mass, a fifteen-organelle cell
+   takes more area, and a share counted in cells falls by construction. **This is unmeasured.** It
+   wants the specialist's mass and radius against the ancestor's, and it is the single most
+   valuable hour left in this document — if it holds, a space-bound world always rewards "small
+   and numerous", no amount of earning beats it, and §10.4 stops being an also-ran.
+2. **Give the acquisition routes something to deliver** (§10.2, §12.2). Lysis on the spike's free
+   `control[1]`, and a wound that leaks. Unchanged and still the largest piece of work.
+3. **Price the vacuole on what it holds rather than how large it is** (§11.4). It is the one
+   catalogue entry whose function is economic and the one where the price decides the outcome.
+4. **Measure on worlds that vary.** Free, and already paying: `drifter.mm` is 19‰ in the still
+   soup and 927‰ in the drift. The sensors and cilia are not broken; they have been judged on the
+   one slide where nothing they report is worth knowing.
+
+### How to run any of it
+
+```
+cargo run -p mm-cli --release -- balance          # the panel, and its fairness control
+cargo test --release -p mm-core --test balance -- --ignored --nocapture
+cargo test --release -p mm-core --test economy_probe -- --ignored --nocapture --test-threads=1
+```
+
+The gates live in `tests/balance.rs`; the measurements behind this document live in
+`tests/economy_probe.rs`. Both are `#[ignore]`d, because a probe answers a question once and an
+acceptance test guards an answer forever, and only the second kind belongs in the default run.
+
+---
+
 ## 1. The finding, in one line
 
 **Respiration is the only income in the engine, its rate depends on one organelle, and every
@@ -957,7 +1029,50 @@ The cell drowns in its own waste somewhere between two pairs and three.
 
 Nothing had ever tried to carry three mitochondria, so nothing had ever met this. It is the
 cheapest of the three problems and the most surprising: the only organelles in the engine that
-genuinely pay are capped by their own exhaust rather than by their price or their yield.
+genuinely pay were capped by their own exhaust rather than by their price or their yield.
+
+#### Fixed, on the organelle the code had already named
+
+`metabolism.rs` carried a note where the mechanism should have been — *"a cell does not decompose
+its own peroxide … catalase is a lysosome, an M8 organelle this cell does not have"* — which named
+the organelle and did nothing about it. A lysosome now decomposes the cell's own reactive
+byproduct into inert waste, at its existing capacity, through the ledger like every other species
+change. Measured, alone on the soup, `+cat` being the same body with one lysosome added:
+
+```text
+     pairs  organelles   alone   poisoned   share
+         3           8       0        153       0
+         4          10       0         32       0
+     3+cat           9     557          0     294
+     4+cat          11     502          0     230
+     6+cat          15     433          0     221
+     7+cat          16       0         65       0
+```
+
+Extinct becomes alive at three, four and six pairs, and poisoning goes to zero. Three properties
+are why this is a mechanism rather than a knob.
+
+**Stacking is now a coupled investment.** More mitochondria demand more catalase; both cost slots
+and upkeep. The gate in `tests/balance.rs` *still failed* after this landed, until its specialist
+was given a lysosome — which is the coupling working rather than a bug.
+
+**It gives the lysosome something to earn**, where before it paid off only where carrion happened
+to be lying. That puts one of §12.2's group into §12.1's, which is the shape the whole rebalance
+wants.
+
+**Senescence is untouched.** `background_damage` ages every cell whatever it is doing and no
+lysosome touches it; what a catalase removes is the *extra* ageing a cell brings on itself by
+respiring hard, which is what an antioxidant is for. It is kept out of the water for the reason
+the note it replaces gives: free interior decay made *retaining* peroxide an advantage, because it
+decayed into carbon dioxide right where photosynthesis needed it.
+
+**The wall moves rather than disappearing, and where it moves to is the finding.** Depth seven
+asks for seventeen slots against sixteen, builds sixteen and dies poisoned — so the *slot cap* is
+the ceiling now, which is where the design's soft cap was always meant to sit. And the share falls
+with depth all the way: 365, 350, 294, 230, 221. **A specialist survives and still loses, and
+loses more the deeper it goes.** That is not upkeep — six pairs cost about 1,480 `Q10` a tick
+against roughly 14,400 of income, a tenth of it. §0's first open question is what that leaves, and
+it is unmeasured.
 
 ### 12.2 The ones that could earn and do not
 
@@ -1006,3 +1121,14 @@ one organelle must at least be able to live.
   evolution finds the same ordering is a different and longer experiment.
 * **The junction economy.** `junctions.transfer_cost` and the whole of SPEC §8 are outside this
   audit; `reflex_probe` covers the parts of it that have been measured.
+* **Why a specialist that survives still loses.** §0's first open question, and the largest one
+  outstanding. The hypothesis is §3 — a bigger cell takes more area and a share counted in cells
+  falls by construction — and it has not been measured. One run comparing the specialist's mass
+  and radius against the ancestor's settles it.
+* **Whether the active organelles behave like the passive ones.** §9a scaled the *catalogue*, and
+  `spike_upkeep`, `THRUST_ENERGY` and `HOLDFAST_ENERGY` sit outside it — the per-tick cost of
+  actually using a spike, a cilium or a holdfast was never in that sweep. Everything §9a concludes
+  is about organelles that cost the same whether or not they are doing anything.
+* **What a lysosome should cost now that it does two jobs.** It digests carrion and decomposes
+  peroxide on one capacity and one upkeep. That is defensible — one machine, two substrates — but
+  it was priced when it did one of them.
