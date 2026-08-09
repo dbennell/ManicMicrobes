@@ -647,3 +647,316 @@ fn whether_storing_against_the_dark_pays() {
     }
     eprintln!("\n* = extinct at the end of every seed.");
 }
+
+/// The same question with the search taken out of it: is a *richer body* viable if it is cheaper?
+///
+/// `economy_probe::do_organelles_cost_too_much_to_be_worth_building` scaled the whole catalogue
+/// under mutation and found the loadout unmoved at 4.00 organelles across an eightfold range of
+/// price. That result has a hole in it, and it is worth stating plainly: **mutation has to find a
+/// genome that builds a fifth organelle before the price of one can matter.** If no such variant
+/// is ever produced, the sweep measured mutation's search and not the economy, and concluded
+/// nothing.
+///
+/// This removes the search. `genomes/` is built as matched pairs — `scavenger` is the ancestor
+/// plus a lysosome, `sponge` plus a holdfast, `oscillator` plus a clock, `hoarder` plus granules
+/// — so racing each against the reference at several prices asks the question directly: given a
+/// body that already carries the thing, does making it cheaper to carry make it pay?
+///
+/// What to watch is **where the shares stop**. §1 predicts they climb towards a dead heat and
+/// never past it: cheaper upkeep can refund what the machinery costs, and nothing can pay for
+/// what it does, because no organelle but the mitochondrion is in the income expression. A
+/// contender that goes *above* 500 has an organelle that earns — and that would be the first one.
+#[test]
+#[ignore = "the panel, four prices; minutes"]
+fn whether_a_richer_body_pays_when_it_is_cheaper() {
+    let reference = Contender::new("ancestor", assemble("ancestor.mm"));
+    let contenders: Vec<Contender> = ["scavenger", "sponge", "oscillator", "hoarder"]
+        .into_iter()
+        .map(|n| Contender::new(n, assemble(&format!("{n}.mm"))))
+        .collect();
+
+    eprintln!("\non the soup, three seeds, mutation off. permille; 500 is a dead heat.\n");
+    eprint!("{:>8}", "upkeep");
+    for c in &contenders {
+        eprint!(" {:>14}", c.name);
+    }
+    eprintln!();
+    eprintln!("{:>8}{}", "", "   share  them/ancestor".repeat(1));
+
+    for percent in [25i64, 50, 100, 200] {
+        let base = scenario("soup.ron");
+        let mut bio = base.biology.clone();
+        bio.mutation = MutationRates::none();
+        let mut specs = *bio.metabolism.catalogue.specs();
+        for spec in specs.iter_mut() {
+            spec.upkeep = ((spec.upkeep as i64 * percent) / 100) as i32;
+            spec.upkeep_per_param = ((spec.upkeep_per_param as i64 * percent) / 100) as i32;
+        }
+        bio.metabolism.catalogue.set_specs(specs);
+
+        let arena = Arena {
+            label: "soup".into(),
+            scenario: Scenario { biology: bio, ..base },
+            layout: Layout::Vertical,
+            ticks: 12_000,
+            founders: 8,
+        };
+        eprint!("{percent:>7}%");
+        for c in &contenders {
+            let results = bouts(&arena, c, &reference, &SEEDS[..3]).expect("bouts");
+            let mut shares: Vec<u32> = results.iter().map(|b| b.share).collect();
+            // The absolute counts as well as the share, because a share is a ratio and a ratio
+            // cannot tell a contender thriving from a reference collapsing — which is exactly
+            // the ambiguity the first run of this left behind.
+            let mut mine: Vec<u32> = results.iter().map(|b| b.challenger).collect();
+            let mut theirs: Vec<u32> = results.iter().map(|b| b.reference).collect();
+            mine.sort_unstable();
+            theirs.sort_unstable();
+            eprint!(
+                " {:>4} {:>4}/{:<4}",
+                median(&mut shares),
+                mine[mine.len() / 2],
+                theirs[theirs.len() / 2],
+            );
+        }
+        eprintln!();
+    }
+    eprintln!(
+        "\n* = extinct at every seed. A share that climbs to {EVEN} and stops is machinery whose \
+         cost\ncan be refunded and whose benefit cannot. One that climbs past it earns something."
+    );
+}
+
+/// What specialising is worth: the returns curve on carrying more of one thing.
+///
+/// The design intuition this measures against is a *shape* rather than a number. Sixteen slots is
+/// the hard cap; a soft cap somewhere around twelve, past which a body should have to be
+/// delivering something extraordinary; and a specialist putting six or eight of its slots into
+/// the one thing it is good at — chloroplasts, granules, cilia, spikes, whichever niche it has
+/// found. Against that, every evolved cell in this engine carries **four**, and
+/// `economy_probe::do_organelles_cost_too_much_to_be_worth_building` could not move it with an
+/// eightfold change in price.
+///
+/// The arithmetic says specialising ought to pay, which is what makes the absence interesting.
+/// `capacity_by_pathway` *sums* over every organelle of a type, so four chloroplasts fix four
+/// times as much and four mitochondria burn four times as much — a matched quadruple should earn
+/// four times an ancestor's income for well under four times its upkeep, because the metabolic
+/// floor and the membrane and the nucleus are paid once either way.
+///
+/// So this builds the matched pairs by hand and races each against the plain ancestor. The column
+/// to read is `built`: a variant that asks for seven pairs and carries four could not afford them,
+/// and that is a different finding from one that carries seven and still loses.
+#[test]
+#[ignore = "seven variants; minutes"]
+fn what_specialising_is_worth() {
+    let src = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../genomes/ancestor.mm"),
+    )
+    .expect("ancestor.mm");
+    let reference = Contender::new("ancestor", assemble("ancestor.mm"));
+
+    // The ancestor builds nucleus@1, mitochondrion@2, chloroplast@3. Extra pairs go into the free
+    // slots from 4 up, and the nucleus is enlarged because the variants are longer and SPEC §4.1
+    // truncates a daughter at the nucleus it built for itself.
+    let variant = |pairs: usize| -> String {
+        let mut extra = String::new();
+        for k in 1..pairs {
+            let (m, c) = (2 + 2 * k, 3 + 2 * k);
+            extra.push_str(&format!(
+                "        IMM     50\n        IMM     2\n        IMM     {m}\n        BUILD\n\
+                 \x20       IMM     60\n        IMM     3\n        IMM     {c}\n        BUILD\n"
+            ));
+        }
+        src.replace(
+            "        IMM     40              ; param",
+            "        IMM     96              ; param — room for the extra builds",
+        )
+        .replace("        IMM     50\n        IMM     2               ; mitochondrion",
+                 &format!("{extra}        IMM     50\n        IMM     2               ; mitochondrion"))
+    };
+
+    eprintln!("\nmatched chloroplast/mitochondrion pairs against the plain ancestor.");
+    eprintln!("soup, three seeds, mutation off. permille; 500 is a dead heat.\n");
+    eprintln!(
+        "{:>6} {:>6} {:>6} {:>7} {:>8} {:>8} {:>14} {:>7}",
+        "pairs", "asked", "built", "alone", "starved", "poisond", "them / ancestor", "share"
+    );
+    for pairs in [1usize, 2, 3, 4, 6, 7] {
+        let source = variant(pairs);
+        let Ok(assembled) = mm_asm::assemble(&source) else {
+            eprintln!("{pairs:>7}  did not assemble");
+            continue;
+        };
+        let contender = Contender::new(format!("x{pairs}"), assembled.bytes.clone());
+        let base = scenario("soup.ron");
+        let arena = Arena {
+            label: "soup".into(),
+            scenario: Scenario {
+                biology: mm_core::BiologyConfig {
+                    mutation: MutationRates::none(),
+                    ..base.biology.clone()
+                },
+                ..base
+            },
+            layout: Layout::Vertical,
+            ticks: 12_000,
+            founders: 8,
+        };
+
+        // What it actually managed to build, and what became of it — **alone**, not in the
+        // bout. `balance::setup` places both lineages, so reading a loadout out of that world
+        // reports the *reference's* four the moment the variant dies, which is exactly the
+        // mistake the first version of this made.
+        let (built, alone, starved, poisoned) = {
+            let mut w = World::new(Scenario {
+                biology: mm_core::BiologyConfig {
+                    mutation: MutationRates::none(),
+                    ..Default::default()
+                },
+                ..scenario("soup.ron")
+            })
+            .expect("world");
+            w.place_founders(&assembled.bytes, 16);
+            let (mut s, mut p, mut peak) = (0u64, 0u64, 0usize);
+            for _ in 0..12_000 {
+                w.step();
+                s += u64::from(w.report().metabolism.starved);
+                p += u64::from(w.report().metabolism.poisoned);
+                peak = peak.max(
+                    w.cells()
+                        .iter()
+                        .map(|i| w.cells().slots(i).iter().filter(|o| o.is_active()).count())
+                        .max()
+                        .unwrap_or(0),
+                );
+            }
+            (peak, w.cells().len(), s, p)
+        };
+
+        let results = bouts(&arena, &contender, &reference, &SEEDS[..3]).expect("bouts");
+        let mut shares: Vec<u32> = results.iter().map(|b| b.share).collect();
+        let mut mine: Vec<u32> = results.iter().map(|b| b.challenger).collect();
+        let mut theirs: Vec<u32> = results.iter().map(|b| b.reference).collect();
+        mine.sort_unstable();
+        theirs.sort_unstable();
+        eprintln!(
+            "{:>6} {:>6} {:>6} {:>7} {:>8} {:>8} {:>6} / {:<5} {:>7}",
+            pairs,
+            2 + 2 * pairs,
+            built,
+            alone,
+            starved,
+            poisoned,
+            mine[mine.len() / 2],
+            theirs[theirs.len() / 2],
+            median(&mut shares),
+        );
+    }
+    eprintln!(
+        "\n`asked` counts the membrane and nucleus too, so a cell asking for eight pairs wants \
+         eighteen\nslots and there are sixteen. `built` is what a grown cell was actually \
+         carrying."
+    );
+}
+
+/// A body carrying four of one organelle must at least be able to live.
+///
+/// The fifth gate, and the one this document's §12 exists to explain. `SPECIALIST_DEPTH` carries
+/// the reasoning; the short version is that the engine offers sixteen slots and every evolved cell
+/// carries four, which is the loadout it was seeded with, and no price moves it (§9a).
+///
+/// **It asks for viability, not victory.** A specialist should lose in a world that does not
+/// reward its speciality, and a gate demanding otherwise would be the fitness function this
+/// project must not have. What it refuses to accept is a depth that is simply fatal.
+///
+/// The specialist is metabolic because that is the only speciality the engine currently rewards at
+/// all — `capacity_by_pathway` sums over organelles of a type, so more mitochondria really do burn
+/// more. If a depth of four is unreachable *there*, it is unreachable everywhere, and the failure
+/// is about the engine rather than about which organelle was chosen.
+#[test]
+#[ignore = "part of the balance suite; a minute"]
+fn a_specialist_can_carry_four_of_its_speciality() {
+    use mm_core::balance::SPECIALIST_DEPTH;
+
+    let src = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../genomes/ancestor.mm"),
+    )
+    .expect("ancestor.mm");
+
+    // The ancestor builds nucleus@1, mitochondrion@2, chloroplast@3. The extra pairs go into the
+    // free slots from 4 up, and the nucleus is enlarged because the variant is longer and SPEC
+    // §4.1 truncates a daughter at the nucleus it built for itself.
+    let mut extra = String::new();
+    for k in 1..SPECIALIST_DEPTH {
+        let (m, c) = (2 + 2 * k, 3 + 2 * k);
+        extra.push_str(&format!(
+            "        IMM     50\n        IMM     2\n        IMM     {m}\n        BUILD\n\
+             \x20       IMM     60\n        IMM     3\n        IMM     {c}\n        BUILD\n"
+        ));
+    }
+    let source = src
+        .replace(
+            "        IMM     40              ; param",
+            "        IMM     96              ; param — room for the extra builds",
+        )
+        .replace(
+            "        IMM     50\n        IMM     2               ; mitochondrion",
+            &format!("{extra}        IMM     50\n        IMM     2               ; mitochondrion"),
+        );
+    let bytes = mm_asm::assemble(&source)
+        .expect("the specialist assembles")
+        .bytes;
+
+    let mut world = World::new(Scenario {
+        biology: mm_core::BiologyConfig {
+            mutation: MutationRates::none(),
+            ..Default::default()
+        },
+        ..scenario("soup.ron")
+    })
+    .expect("world");
+    world.place_founders(&bytes, 16);
+
+    let (mut starved, mut poisoned, mut deepest) = (0u64, 0u64, 0usize);
+    for _ in 0..12_000 {
+        world.step();
+        starved += u64::from(world.report().metabolism.starved);
+        poisoned += u64::from(world.report().metabolism.poisoned);
+        deepest = deepest.max(
+            world
+                .cells()
+                .iter()
+                .map(|i| {
+                    world.cells().slots(i)
+                        .iter()
+                        .filter(|o| o.is_active() && o.kind == mm_core::OrganelleType::Mitochondrion)
+                        .count()
+                })
+                .max()
+                .unwrap_or(0),
+        );
+    }
+
+    let alive = world.cells().len();
+    eprintln!(
+        "\ndepth {SPECIALIST_DEPTH}: {alive} alive after 12,000 ticks, deepest loadout carried \
+         {deepest} mitochondria,\n{starved} starved and {poisoned} poisoned along the way."
+    );
+
+    // Built at all: separates "the engine would not let it carry them" from "it carried them and
+    // died", which are different findings and want different work.
+    assert!(
+        deepest >= SPECIALIST_DEPTH,
+        "a body asking for {SPECIALIST_DEPTH} mitochondria never carried more than {deepest}. \
+         That is a build cost, a slot budget or a mass ceiling rather than an economy, and \
+         `docs/ECONOMY.md` §12.1 is the account of which."
+    );
+    assert!(
+        alive > 0,
+        "a body carrying {SPECIALIST_DEPTH} of one organelle cannot live on the control slide: \
+         {starved} starved and {poisoned} poisoned. Four of one thing is a modest specialist and \
+         the engine offers sixteen slots.\n\
+         This is a finding rather than a number to tune — see `docs/ECONOMY.md` §12.1, which \
+         traces it to respiration's exhaust scaling with respiration while excretion does not."
+    );
+}

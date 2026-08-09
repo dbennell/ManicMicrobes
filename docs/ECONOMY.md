@@ -913,7 +913,88 @@ does something only when there is something in it, and it is priced as though it
 
 ---
 
-## 12. What this audit did not settle
+## 12. Why nothing specialises, which is three different problems
+
+The loadout every evolved cell converges on is **four organelles** — membrane, nucleus,
+mitochondrion, chloroplast — and §9a establishes that price is not what holds it there. The design
+intuition it is failing against is a shape rather than a number: sixteen slots is the hard cap, a
+soft cap somewhere near twelve past which a body should have to be delivering something
+extraordinary, and a specialist putting four or six or eight of its slots into the one thing its
+niche rewards. Against that, **four of the same organelle is currently an extreme outlier**.
+
+The catalogue splits three ways under that question, and the three want different work.
+
+### 12.1 The two that already earn cannot be stacked, and it is not economics
+
+`capacity_by_pathway` *sums* over every organelle of a type, so four chloroplasts fix four times as
+much and four mitochondria burn four times as much. A matched specialist should earn near four
+times an ancestor's income for well under four times its upkeep, because the metabolic floor and
+the membrane and the nucleus are paid once either way. It is the one place in the engine where
+carrying more of something is supposed to be worth more.
+
+Measured — matched pairs, built by hand so mutation never has to find them, alone on the soup for
+twelve thousand ticks:
+
+```text
+ pairs  organelles   population   starved   poisoned
+     1           4          818     2,177          0
+     2           6          666       737          0
+     3           8            0        16        153
+     4          10            0         0         32
+     7          14            0         0         16
+```
+
+**They build them.** Eight, ten and fourteen organelles are all constructed successfully, so
+neither the slot count, the build cost nor `max_mass` is the wall. And they die of **poison**, not
+of starvation — the counters are unambiguous and the default chemical table has exactly one toxic
+species.
+
+It is peroxide. `reactive_fraction` is a fixed share of respiratory throughput, so three
+mitochondria make three times the exhaust, while excretion is one `EMIT` per pass of the genome.
+And it is a double squeeze, because the second half is easy to miss: **adding organelles lengthens
+the genome, which lengthens the cycle, so `#grow` runs less often exactly as it needs to run more.**
+The cell drowns in its own waste somewhere between two pairs and three.
+
+Nothing had ever tried to carry three mitochondria, so nothing had ever met this. It is the
+cheapest of the three problems and the most surprising: the only organelles in the engine that
+genuinely pay are capped by their own exhaust rather than by their price or their yield.
+
+### 12.2 The ones that could earn and do not
+
+Spike, lysosome, holdfast. Each delivers something, and what it delivers is either capped by the
+mitochondrion (§4: food it cannot burn is not food) or not scarce (§8a: the filter works perfectly
+and loses, because structural matter is lying about unused). This is the largest group and it is
+where §10.2's lysis and blood in the water land.
+
+### 12.3 The ones that can never earn directly, and are not broken
+
+Chemosensor, photosensor, touch sensor, oscillator. These are *information*, and information pays
+only where the world varies — no pricing of a chemosensor can make it earn on a slide with no
+gradient in it.
+
+They are not the problem they look like. §2a measured `drifter.mm` at **19‰ in the still soup and
+927‰ in the drift**: the same body, the same cilia, the same sensor, and the difference is entirely
+that one world has somewhere better to be. These organelles work. They have been measured on
+`soup.ron`, which is the one world in the library where nothing they report is worth knowing.
+
+### 12.4 What that means for the order of work
+
+The three groups want, in order of cost:
+
+1. **Let the earning pair stack.** Faster excretion, a lower `reactive_fraction`, or a peroxide
+   sink that is not one `EMIT` a cycle. Any of them unblocks the only specialisation the engine
+   already rewards, and none of them is a new mechanism.
+2. **Measure on worlds that vary.** Already done and already paying: the panel's five worlds move
+   the median contender by 536 of 1000 where the soup moves nothing (§2a). This costs no code.
+3. **Give the acquisition routes something to deliver.** §10.2, unchanged, and still the largest
+   piece of work.
+
+`SPECIALIST_DEPTH` in `mm_core::balance` is this section written as a gate: a body carrying four of
+one organelle must at least be able to live.
+
+---
+
+## 13. What this audit did not settle
 
 * **Whether the sponge would win if carbon were scarce.** §8a shows the filter working into a
   world with 717,000 spare units of detritus. `the_thicket.ron` already seeds structural carbon

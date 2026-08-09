@@ -85,6 +85,29 @@ pub const MIRROR_TOLERANCE: u32 = 50;
 /// a cell pays upkeep for.
 pub const PAYOFF_FLOOR: u32 = 400;
 
+/// How many of one organelle a specialist should be able to carry and still live.
+///
+/// The catalogue gives a cell sixteen slots, and every evolved cell in the engine carries four —
+/// membrane, nucleus, mitochondrion, chloroplast — which is the loadout it was seeded with. The
+/// design intends a softer ceiling somewhere near twelve, past which a body has to be delivering
+/// something extraordinary, and a specialist devoting several of its slots to whatever its niche
+/// rewards. Four of one thing is a modest reading of that and is currently an extreme outlier.
+///
+/// **Deliberately a viability floor and not a competitive one.** The gate asks whether such a body
+/// can *live*, not whether it wins: a specialist should lose in a world that does not reward its
+/// speciality, and a gate that demanded otherwise would be the fitness function this project must
+/// not have. What it refuses to accept is a depth that is simply fatal.
+///
+/// Four rather than six or eight, and the reason is arithmetic rather than modesty: a *matched*
+/// metabolic specialist needs two slots per unit of depth plus the membrane and the nucleus, so
+/// eight is eighteen slots and unreachable by construction. Four is seven of sixteen and leaves
+/// half the body for everything else.
+///
+/// `docs/ECONOMY.md` §12 is what this measures and why it currently fails — not for cost, not for
+/// slots and not for yield, but because respiration's exhaust scales with respiration while
+/// excretion does not.
+pub const SPECIALIST_DEPTH: usize = 4;
+
 /// How much the panel must be able to move a strategy's fortunes, in permille.
 ///
 /// The spread between a contender's best world and its worst. If the median spread across the
