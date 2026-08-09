@@ -608,6 +608,45 @@ predation dials touches it.
 
 ---
 
+## 9a. Do organelles cost too much? No — and that is the worse answer
+
+The obvious reading of §1 is that the catalogue is priced too dear, and it is the first thing
+anybody says on seeing that a `param 80` spike at full extension costs 1,482 `Q10` a tick against
+a gross income of 2,400. It is worth testing rather than assuming, because if it were true the fix
+would be a column of numbers.
+
+It is not true. Every `upkeep` and `upkeep_per_param` in the catalogue, scaled together, sixteen
+founders on the soup with **mutation on** — the one question in this document that needs it —
+forty thousand ticks:
+
+```text
+  upkeep   cells    organs  loadouts   types carried by 1% or more of the population
+     25%    1023      4.00         1   membrane, nucleus, mitochondrion, chloroplast
+     50%    1041      4.00         2   the same four
+    100%    1031      4.00         3   the same four
+    200%     997      3.98         4   the same four
+```
+
+**Four times cheaper buys nothing.** The mean organelle count does not move off 4.00 — the loadout
+the founders were seeded with — across an eightfold range of price, and no fifth type reaches one
+per cent of the population at any of them.
+
+The reason is §1 read the other way round. A price suppresses a thing that would otherwise pay;
+these do not otherwise pay. **No organelle but the mitochondrion appears in the income
+expression**, so a free chemosensor earns nothing, a free cilium earns nothing on a uniform slide,
+and a free spike earns nothing because the mitochondrion cap binds before the food does. Zero cost
+against zero benefit is zero, and there is no gradient for evolution to climb at any price.
+
+That is the more useful answer, because it rules out the cheap fix. Repricing the catalogue is a
+morning's work and would have produced exactly the table above with the population column jittering.
+
+**One entry is genuinely mispriced, and it is the exception that shows the rule.** §11 is the
+vacuole, whose upkeep is charged on the container while its saving is only on the contents — the
+one organelle whose function *is* in the economy, and the one where the price does decide the
+outcome.
+
+---
+
 ## 10. The recommendation
 
 Ranked by how much of §1–§6 each item repairs, against what it costs to build. Items 1 and 2 are
@@ -787,7 +826,94 @@ So the order the panel argues for, replacing §10's:
    already contains dim worlds and that they discriminate. What was missing was measuring on them,
    not making the control condition darker.
 
-## 11. What this audit did not settle
+## 11. The hoarder, and the falsification of §10's central chain
+
+§10 argues that dimming the light is worth doing before anything else, because dark forces storage,
+storage is matter, and matter is what a dying cell hands to whoever is standing on it. The prey
+half of that is measured and holds — a cell holding 200 units of sugar is worth 240% of a division
+to its killer, by `EAT` alone. The chain still fails, at the first link, and this is the account.
+
+### 11.1 The hoarder could not live anywhere
+
+`hoarder.mm` was extinct in every world in the panel, and the panel column was read as "the winter
+culls" (§10a). It is not the winter. It **starves**, and never once poisons itself — in `seasons`
+by tick 500 and on the control slide by tick 2,500. The world it was written for merely hastens a
+death that was already happening in the soup.
+
+```text
+holds 837 units of free solute, threshold 256
+  excess 581  ->  ratio 9,296  ->  turgor 2,632 Q10 a tick
+  gross income                                2,400 Q10 a tick
+```
+
+The tax on what it was storing exceeded everything it earned, before a single organelle was paid
+for. Setting the two equal locates the cliff exactly: **this engine can hold about 810 units before
+storage costs it everything**, and the hoarder sat at 837 — over the edge by three per cent, which
+is why it died on every slide rather than only the dark ones.
+
+### 11.2 A vacuole exempts `param` units, and `param` is a `u8`
+
+So one granule can hide at most 255 and this cell needs 510. The strategy was never mispriced; it
+was **out of reach in one organelle**, and no amount of tuning a single number could have found it.
+Measured on the soup:
+
+```text
+   granules   cells   exempt   free solute
+          1       0        -             -
+          2     591      510           656
+          3      33      765           393
+```
+
+Two, not three: the third granule is cheaper turgor and a worse cell. Each costs 36 units of
+structural carbon to build and 271 `Q10` a tick to carry whether or not there is anything in it.
+`hoarder.mm` now builds two.
+
+### 11.3 And storing against the dark still does not pay
+
+The two-granule hoarder against the reference, across the panel:
+
+```text
+     world    share
+      soup       71
+   thicket      145
+      dusk        0*   the light runs out for good
+   seasons        0*   the light comes and goes
+     drift      372
+                       * extinct at every seed
+```
+
+**It is extinct in exactly the two worlds it exists for, and does best where storage is
+irrelevant.** The arithmetic is the same shape as §11.1 and the term is different:
+
+```text
+seasons, mean light about 376 of 1024
+  photosynthesis 3,200 x 376/1024 = 1,175 Q10 a tick of substrate
+  respiration recovers 0.75 x     =   881 Q10 a tick of energy
+
+  ancestor upkeep             460  ->  net  +421   lives
+  hoarder  upkeep 460 + 542  1,002  ->  net  -121   dies
+```
+
+The two granules alone flip it from solvent to insolvent. **Upkeep is charged on the container and
+the saving is only on the contents**, so a storage organelle costs the same empty as full — and in
+the dark, where income falls, the fixed cost is what becomes unaffordable. A storage organelle that
+costs more per tick than the storage saves is not a storage organelle.
+
+### 11.4 What this does to §10
+
+The prey half of the chain is intact and the predator half never gets to start, because **nothing
+can afford to get fat in the dark**. So the cost side has to be fixed before the scarcity side does
+anything, which reverses §10.1 and §10.2 for the second time.
+
+The specific change this argues for is narrow rather than a reprice of the catalogue — §9a rules
+that out — and it is a *shape* change rather than a number: the vacuole should be charged for what
+it holds rather than for how large it is, or its upkeep should be small enough that an empty one is
+free. Every other organelle in the catalogue does something every tick it is carried. A vacuole
+does something only when there is something in it, and it is priced as though it did not.
+
+---
+
+## 12. What this audit did not settle
 
 * **Whether the sponge would win if carbon were scarce.** §8a shows the filter working into a
   world with 717,000 spare units of detritus. `the_thicket.ron` already seeds structural carbon

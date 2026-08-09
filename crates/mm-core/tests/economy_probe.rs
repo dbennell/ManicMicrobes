@@ -974,3 +974,93 @@ fn what_a_swollen_cell_is_swollen_with() {
         mm_core::MetabolicRates::default().osmotic_threshold / Q10_ONE
     );
 }
+
+/// Do organelles cost too much to be worth building?
+///
+/// The question is the right shape and the premise wants checking first, because "they never get
+/// built" is an impression and this is the measurement that would confirm or kill it. **Mutation
+/// is on here, unlike everywhere else in this file**, and it has to be: the question is not what
+/// a hand-written loadout is worth, it is what evolution converges on when it is free to choose.
+///
+/// `upkeep` scales every entry in the catalogue at once — both `upkeep` and `upkeep_per_param`,
+/// for all sixteen types — so the sweep asks one thing and not sixteen. What to watch is not the
+/// population, which is bounded by space (§3), but the **census**: how many organelles a typical
+/// cell carries, and which types appear at all. A world where cheaper machinery buys richer
+/// bodies is a world where the price was the thing stopping them.
+#[test]
+#[ignore = "a probe; run it on purpose. Mutation is on"]
+fn do_organelles_cost_too_much_to_be_worth_building() {
+    let bytes = assemble("ancestor.mm");
+    eprintln!("\nsixteen founders on the soup, mutation ON, 40,000 ticks.\n");
+    eprintln!(
+        "{:>8} {:>7} {:>9} {:>9}   {}",
+        "upkeep", "cells", "organs", "loadouts", "types carried by 1% or more of the population"
+    );
+
+    for percent in [25i64, 50, 100, 200] {
+        let mut bio = mm_core::BiologyConfig::default();
+        let mut specs = *bio.metabolism.catalogue.specs();
+        for spec in specs.iter_mut() {
+            spec.upkeep = ((spec.upkeep as i64 * percent) / 100) as i32;
+            spec.upkeep_per_param = ((spec.upkeep_per_param as i64 * percent) / 100) as i32;
+        }
+        bio.metabolism.catalogue.set_specs(specs);
+
+        let mut world = World::new(Scenario {
+            biology: bio,
+            ..dish()
+        })
+        .expect("world");
+        // The dish is mutation-off by construction; this question needs it on.
+        let mut with_mutation = world.biology().clone();
+        with_mutation.mutation = mm_core::MutationRates::default();
+        world.set_biology(with_mutation);
+        world.place_founders(&bytes, 16);
+        world.run(40_000);
+
+        let cells = world.cells();
+        let n = cells.len().max(1);
+        let mut organs = 0usize;
+        let mut census = [0usize; mm_core::organelle::SLOT_COUNT];
+        let mut loadouts = std::collections::BTreeSet::new();
+        for i in cells.iter() {
+            let mut kinds = Vec::new();
+            for o in cells.slots(i) {
+                if o.is_active() {
+                    organs += 1;
+                    census[(o.kind as u8 as usize) % mm_core::organelle::SLOT_COUNT] += 1;
+                    if !kinds.contains(&o.kind) {
+                        kinds.push(o.kind);
+                    }
+                }
+            }
+            kinds.sort();
+            loadouts.insert(kinds);
+        }
+        let carried: Vec<String> = OrganelleType::all()
+            .iter()
+            .filter(|k| census[(**k as u8 as usize) % mm_core::organelle::SLOT_COUNT] * 100 >= n)
+            .map(|k| {
+                format!(
+                    "{} {}%",
+                    k.name(),
+                    census[(*k as u8 as usize) % mm_core::organelle::SLOT_COUNT] * 100 / n
+                )
+            })
+            .collect();
+
+        eprintln!(
+            "{:>7}% {:>7} {:>9.2} {:>9}   {}",
+            percent,
+            cells.len(),
+            organs as f64 / n as f64,
+            loadouts.len(),
+            carried.join(", ")
+        );
+    }
+    eprintln!(
+        "\nthe ancestor is seeded with four: membrane, nucleus, mitochondrion, chloroplast.\n\
+         Anything above four is machinery evolution paid for; anything below is machinery it \
+         shed."
+    );
+}
