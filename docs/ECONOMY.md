@@ -1465,12 +1465,40 @@ open-water speed for one to four cilia at the default `rigidity_gain` of zero �
 and the first cilium is still the weak step. What has changed is that two cilia now cover half a
 square a tick *inside a full slide*, where before they covered a fiftieth.
 
-Two things this does not fix, both still open and both cheap:
+### 14.8 And the genome side, which was two wrong constants
 
-* **The throttle.** `drifter.mm` at its shipped quarter power manages 0.20 squares a tick in open
-  water and 0.02 in a mat. Until `#swim` writes 1024 the way `stalker.mm`'s spike gene already
-  does, a swimmer is running its engine at a quarter and the crowd eats the rest.
+The engine fix leaves `drifter.mm` running its engines at a quarter throttle, because a control
+input is a `Q10` fraction of 1024 and `IMM` cannot push more than 255. Both drifters now shift for
+it — `ONE / IMM 10 / SHL`, which is `stalker.mm`'s idiom for its spike, and the two files stay
+byte-identical in length so the blind control is still a control.
+
+The second constant was not written at all. `Organelle::finished` leaves `control[1]` at zero,
+zero is due east, and neither drifter ever set it — so **both cilia pushed the same way** and the
+slot comments describing one +x and one +y described a cell the genome did not build. That is not
+cosmetic: a cell with one axis cannot steer whatever it reads, so the four instructions M3 has
+been waiting for had nowhere to go. `stalker.mm` had it right all along and says why — two
+perpendicular mounts make steering two independent scalars rather than an arctangent nobody can
+compute in this instruction set.
+
+```text
+            genome    cilia     thrust  dx, 600 ticks
+        drifter.mm        2        158           -8.5     before §14.7
+        drifter.mm        2        158         +121.5     engine fixed
+        drifter.mm        2        640         +245.8     and the genome
+```
+
+The last row is one cilium's worth of *x*; the other is now pushing north, which is the point.
+
+One thing this deliberately does not touch. `stalker.mm`'s `#hunt` writes the metabolic-glow
+gradient straight to `control[0]` rather than a literal, so it is a proportional controller and
+its 144 `Q10` on a flat slide is the signal being small rather than a ceiling being hit. Whether
+it wants a gain is a separate question from this one, and it is unmeasured.
+
+Still open, and cheap:
+
 * **`rigidity_gain`.** Item 3 above, unchanged.
+* **What a cilium is now worth**, which is §14.6 item 4 and is the whole reason for the exercise.
+  Every motility number in this document was taken on a body that could not move forward.
 * **What a lysosome should cost now that it does two jobs.** It digests carrion and decomposes
   peroxide on one capacity and one upkeep. That is defensible — one machine, two substrates — but
   it was priced when it did one of them.

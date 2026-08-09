@@ -35,7 +35,7 @@
 ; ---------------------------------------------------------------- build the body
 
         GENE    #build
-        IMM     64              ; nucleus: 8 bytes of genome per unit, and this genome is 329,
+        IMM     64              ; nucleus: 8 bytes of genome per unit, and this genome is 344,
         IMM     1               ; so anything under 42 cannot copy itself at all
         IMM     1
         BUILD
@@ -97,21 +97,53 @@
 
 ; ---------------------------------------------------------------- swim
 ;
-; Full power on both cilia, every tick, in whatever direction they were mounted. The power is
-; written to control input 0 and the mount angle to control input 1; a mutation that made
-; either of them depend on `OGET 1 7` — the sensor's x gradient — would be chemotaxis.
+; Full power on both cilia, every tick, on perpendicular mounts. The power is written to control
+; input 0 and the mount angle to control input 1; a mutation that made either of them depend on
+; `OGET 1 7` — the sensor's x gradient — would be chemotaxis.
 ;
-; It does not. It writes a constant.
+; It does not. It writes constants.
+;
+; Both constants used to be wrong, and each was wrong in a way that made the experiment above it
+; unwinnable rather than merely unwon.
+;
+; The power was `IMM 255`, and a control input is a `Q10` fraction of 1024, so this genome ran
+; its engines at a quarter throttle under a comment claiming full power. A template value is a
+; `u8` and `IMM` cannot push more than 255, so full power needs arithmetic — the idiom is
+; `stalker.mm`'s, which shifts for its spike. At a quarter throttle two cilia made 158 `Q10`
+; against the 192 a cell needed to out-push its own wake, so this genome travelled *backwards*:
+; measured, 8.5 squares the wrong way in 600 ticks where it now goes 121 the right way. The
+; engine side of that is fixed too — see `ECONOMY.md` §14.7 — but a quarter throttle is still a
+; quarter throttle, and in a crowd it is the difference between half a square a tick and a
+; fiftieth.
+;
+; The mounts were never written at all. `Organelle::finished` leaves `control[1]` at zero and
+; zero is due east, so both cilia pushed the same way and the slot comments above — one +x, one
+; +y — described a cell this genome did not build. A cell with one axis cannot steer, whatever
+; it reads, so the four instructions M3 is waiting for had nowhere to go. `stalker.mm` says why
+; the pair has to be perpendicular: it makes steering two independent scalars rather than an
+; arctangent nobody can compute in this instruction set.
 
         GENE    #swim
-        IMM     255
+        ONE
+        IMM     10
+        SHL                     ; 1024 — full power, which IMM alone cannot reach
         ZERO
         IMM     6
         OSET                    ; cilium 6, power
-        IMM     255
+        ONE
+        IMM     10
+        SHL
         ZERO
         IMM     8
         OSET                    ; cilium 8, power
+        ZERO
+        ONE
+        IMM     6
+        OSET                    ; cilium 6, mounted +x
+        IMM     12
+        ONE
+        IMM     8
+        OSET                    ; cilium 8, mounted +y
         RET
 
 ; ---------------------------------------------------------------- divide
