@@ -27,10 +27,10 @@
 use std::path::Path;
 
 use mm_core::balance::{
-    median, tournament, Arena, Contender, Layout, Report, DISCRIMINATION_FLOOR, EVEN,
+    bouts, median, tournament, Arena, Contender, Layout, Report, DISCRIMINATION_FLOOR, EVEN,
     MIRROR_TOLERANCE, PAYOFF_FLOOR, SEEDS,
 };
-use mm_core::Scenario;
+use mm_core::{MutationRates, Scenario, World};
 
 fn assemble(name: &str) -> Vec<u8> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -308,4 +308,342 @@ fn the_median_ties_low() {
     assert_eq!(median(&mut [1, 2, 3, 4]), 2);
     assert_eq!(median(&mut []), 0);
     assert_eq!(median(&mut [EVEN]), EVEN);
+}
+
+/// What winter thins rather than culls.
+///
+/// The `seasons` entry of the panel came back with nine of eleven contenders extinct, which is
+/// not a season, it is a cull — and a world that kills everything discriminates between nothing.
+/// `docs/ECONOMY.md` §10a asked for it to be re-cut, and this is the measurement that decides
+/// where.
+///
+/// # Why the constant-light numbers do not carry over
+///
+/// §5 swept a *uniform* intensity and found the population flat from 1024 down to 512, at 32
+/// cells by 256, and extinct at 128. `Seasonal` is a triangle inside a triangle: the year
+/// interpolates noon from `summer_day` to `winter_day`, and the day interpolates from `night` up
+/// to that noon. With `night: 0` a triangular day averages **half of noon**, so the shipped
+/// `winter_day: 224` is a mean of 112 — below the level at which a constant slide is already
+/// dead, and nothing in the file says so.
+///
+/// The mean is not the whole story either, which is why this is measured rather than divided by
+/// two. A cell under a day/night cycle sees zero every night whatever the mean is, so a world can
+/// be survivable on average and lethal in detail — and that gap is the whole reason to have the
+/// world at all, because closing it is what storing against the dark is *for*.
+///
+/// Run with
+/// `cargo test --release -p mm-core --test balance -- --ignored --nocapture what_winter`.
+#[test]
+#[ignore = "a sweep; run it when re-cutting the panel"]
+fn what_winter_thins_rather_than_culls() {
+    let ancestor = assemble("ancestor.mm");
+    let hoarder = assemble("hoarder.mm");
+
+    eprintln!(
+        "\nsixteen founders, three compressed years (60,000 ticks), mutation off.\n\
+         `mean` is the daily average a triangular day gives: half of noon, with night at zero.\n"
+    );
+    eprintln!(
+        "{:>6} {:>6}   {:>18}   {:>18}",
+        "noon", "mean", "ancestor pk/tr/end", "hoarder  pk/tr/end"
+    );
+
+    for winter_day in [224i32, 320, 448, 576, 704, 832] {
+        let mut row = Vec::new();
+        for genome in [&ancestor, &hoarder] {
+            let mut world = World::new(Scenario {
+                light: mm_core::LightRegime::Seasonal {
+                    day_ticks: 240,
+                    year_ticks: 20_000,
+                    summer_day: mm_core::Q10_ONE * 5 / 4,
+                    winter_day,
+                    night: 0,
+                },
+                biology: mm_core::BiologyConfig {
+                    mutation: MutationRates::none(),
+                    ..Default::default()
+                },
+                ..scenario("seasons.ron")
+            })
+            .expect("world");
+            world.place_founders(genome, 16);
+
+            // Sampled through the run rather than read at the end: the question is the *shape* of
+            // the year, and a population that recovers by midsummer looks identical at tick
+            // 60,000 to one that never dipped.
+            let (mut peak, mut trough) = (0usize, usize::MAX);
+            // The first year is the founding race, not a season. Only the second and third count.
+            for step in 0..60u32 {
+                world.run(1_000);
+                let n = world.cells().len();
+                if step >= 20 {
+                    peak = peak.max(n);
+                    trough = trough.min(n);
+                }
+            }
+            row.push((peak, trough, world.cells().len()));
+        }
+        eprintln!(
+            "{:>6} {:>6}   {:>5} {:>5} {:>5}   {:>5} {:>5} {:>5}",
+            winter_day,
+            winter_day / 2,
+            row[0].0,
+            row[0].1,
+            row[0].2,
+            row[1].0,
+            row[1].1,
+            row[1].2,
+        );
+    }
+    eprintln!(
+        "\nwanted: a trough well below the peak, and nothing at zero. A world that empties \
+         discriminates\nbetween nothing, and one that never dips is not a season."
+    );
+}
+
+/// What actually kills `hoarder.mm`.
+///
+/// `what_winter_thins_rather_than_culls` swept the winter six ways and the hoarder was extinct at
+/// every one, including the two where the ancestor barely notices — so the depth of winter is not
+/// what kills it and re-cutting the world cannot save it.
+///
+/// This asks the engine rather than inferring: `MetabolicReport` counts `starved` and `poisoned`
+/// apart, so a run can say which of the two ways out a population took. The soup is here as the
+/// control, because the hoarder dies there too — and if it dies the same way in both, the dark
+/// has nothing to do with it.
+#[test]
+#[ignore = "a probe; run it on purpose"]
+fn what_actually_kills_the_hoarder() {
+    for world_name in ["soup.ron", "seasons.ron"] {
+        eprintln!("\n{world_name}");
+        eprintln!(
+            "{:>10} {:>6} {:>7} {:>8} {:>8} {:>9} {:>9}",
+            "genome", "tick", "cells", "med E", "med load", "starved", "poisoned"
+        );
+        for name in ["ancestor.mm", "hoarder.mm"] {
+            let bytes = assemble(name);
+            let base = scenario(world_name);
+            let mut world = World::new(Scenario {
+                // The panel's compressed year, so this and the panel are about one world.
+                light: if world_name == "seasons.ron" {
+                    mm_core::LightRegime::Seasonal {
+                        day_ticks: 240,
+                        year_ticks: 20_000,
+                        summer_day: mm_core::Q10_ONE * 5 / 4,
+                        winter_day: 224,
+                        night: 0,
+                    }
+                } else {
+                    base.light.clone()
+                },
+                biology: mm_core::BiologyConfig {
+                    mutation: MutationRates::none(),
+                    ..Default::default()
+                },
+                ..base
+            })
+            .expect("world");
+            world.place_founders(&bytes, 16);
+
+            let (mut starved, mut poisoned) = (0u64, 0u64);
+            for k in 0..40u32 {
+                for _ in 0..500 {
+                    world.step();
+                    starved += u64::from(world.report().metabolism.starved);
+                    poisoned += u64::from(world.report().metabolism.poisoned);
+                }
+                let cells = world.cells();
+                let mut energy: Vec<i32> = cells.iter().map(|i| cells.energy[i]).collect();
+                let mut load: Vec<i64> = cells
+                    .iter()
+                    .map(|i| mm_core::biology::osmotic_load(cells, i))
+                    .collect();
+                energy.sort_unstable();
+                load.sort_unstable();
+                // Only every fourth sample, or this is forty lines a genome and unreadable.
+                if k % 4 == 3 || cells.len() == 0 {
+                    eprintln!(
+                        "{:>10} {:>6} {:>7} {:>8} {:>8} {:>9} {:>9}",
+                        name.trim_end_matches(".mm"),
+                        (k + 1) * 500,
+                        cells.len(),
+                        energy.get(energy.len() / 2).copied().unwrap_or(0) / mm_core::Q10_ONE,
+                        load.get(load.len() / 2).copied().unwrap_or(0) / mm_core::Q10_ONE as i64,
+                        starved,
+                        poisoned,
+                    );
+                }
+                if world.cells().len() == 0 {
+                    break;
+                }
+            }
+        }
+    }
+    eprintln!(
+        "\nthe osmotic threshold is {} units; a membrane at param 24 fails past {} damage.",
+        mm_core::MetabolicRates::default().osmotic_threshold / mm_core::Q10_ONE,
+        24
+    );
+}
+
+/// The hoarder's vacuole is too small, and the cliff it falls off is exactly locatable.
+///
+/// `what_actually_kills_the_hoarder` says it starves, holding 837 units of solute against a
+/// threshold of 256. `turgor_cost` is quadratic in the excess, so that load costs 2,632 `Q10` a
+/// tick against a `param 50` mitochondrion's gross income of 2,400 — the tax on what it is
+/// storing is larger than everything it earns, before a single organelle is paid for.
+///
+/// Setting the two equal gives the ceiling. A cell with this engine can hold about **810 units**
+/// before turgor takes all of it, and the hoarder sits at 837. It is over the edge by three per
+/// cent, which is why it dies everywhere rather than only in the dark.
+///
+/// A vacuole exempts `param` units and `param` is a `u8`, so one can hide at most 255 and the
+/// shipped genome asks for 200. This is how many it actually needs, in the control world and in
+/// the world it was written for. Variants are made by editing the source and reassembling rather
+/// than by forcing the organelle — forcing one makes the genome rebuild it every tick and pay
+/// `build_energy` each time, which is how `predator_probe` measured its own instrument.
+#[test]
+#[ignore = "a probe; run it on purpose"]
+fn how_many_vacuoles_the_hoarder_needs() {
+    let src = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../genomes/hoarder.mm"),
+    )
+    .expect("hoarder.mm");
+    let shipped = "        IMM     200             ; and the granule, which is the whole of the difference";
+    let build = |n: usize| -> String {
+        let mut granules = String::new();
+        for k in 0..n {
+            granules.push_str(&format!(
+                "        IMM     255
+        IMM     4
+        IMM     {}
+        BUILD
+",
+                4 + k
+            ));
+        }
+        // Replace the shipped granule and the three lines that follow it.
+        let head = src.find(shipped).expect("the granule");
+        let tail = src[head..].find("        BUILD
+").expect("its BUILD") + head + "        BUILD
+".len();
+        format!("{}{}{}", &src[..head], granules, &src[tail..])
+    };
+
+    for world in ["soup.ron", "seasons.ron"] {
+        eprintln!("
+{world} — sixteen founders, 12,000 ticks, mutation off.");
+        eprintln!(
+            "{:>10} {:>7} {:>9} {:>9} {:>9}",
+            "granules", "cells", "exempt", "med load", "starved"
+        );
+        for n in 1..=3usize {
+            let Ok(assembled) = mm_asm::assemble(&build(n)) else {
+                eprintln!("{n:>10}  did not assemble");
+                continue;
+            };
+            let base = scenario(world);
+            let mut w = World::new(Scenario {
+                light: if world == "seasons.ron" {
+                    mm_core::LightRegime::Seasonal {
+                        day_ticks: 240,
+                        year_ticks: 20_000,
+                        summer_day: mm_core::Q10_ONE * 5 / 4,
+                        winter_day: 224,
+                        night: 0,
+                    }
+                } else {
+                    base.light.clone()
+                },
+                biology: mm_core::BiologyConfig {
+                    mutation: MutationRates::none(),
+                    ..Default::default()
+                },
+                ..base
+            })
+            .expect("world");
+            w.place_founders(&assembled.bytes, 16);
+            let mut starved = 0u64;
+            for _ in 0..12_000 {
+                w.step();
+                starved += u64::from(w.report().metabolism.starved);
+            }
+            let cells = w.cells();
+            let mut load: Vec<i64> = cells
+                .iter()
+                .map(|i| mm_core::biology::osmotic_load(cells, i))
+                .collect();
+            load.sort_unstable();
+            let exempt = cells
+                .iter()
+                .map(|i| mm_core::biology::sequestered(cells.slots(i)))
+                .max()
+                .unwrap_or(0);
+            eprintln!(
+                "{:>10} {:>7} {:>9} {:>9} {:>9}",
+                n,
+                cells.len(),
+                exempt / mm_core::Q10_ONE as i64,
+                load.get(load.len() / 2).copied().unwrap_or(0) / mm_core::Q10_ONE as i64,
+                starved,
+            );
+        }
+    }
+    eprintln!(
+        "
+threshold {} units; each granule costs {} Q10 a tick to carry, against a gross of 2,400.",
+        mm_core::MetabolicRates::default().osmotic_threshold / mm_core::Q10_ONE,
+        16 + 255,
+    );
+}
+
+/// Does storing against the dark pay, once the cell can afford to store?
+///
+/// This is the question `docs/ECONOMY.md` §10 is built on and has never been able to ask.
+/// `hoarder.mm` is extinct in every world in the panel, so its column said nothing about
+/// storage — it said the genome cannot pay its own turgor bill, which
+/// `whether_a_bigger_vacuole_saves_the_hoarder` traced to a vacuole that exempts 200 units where
+/// it needs 510, and a `param` that is a `u8` and so cannot reach it in one organelle.
+///
+/// With two vacuoles it survives. So this is the experiment §10 predicted: dark forces storage,
+/// storage is matter, and matter is what a dying cell hands to whoever is standing on it. If the
+/// prediction holds, the two-vacuole hoarder should do markedly better where the light comes and
+/// goes than where it does not.
+#[test]
+#[ignore = "the panel, one contender; minutes"]
+fn whether_storing_against_the_dark_pays() {
+    let src = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../genomes/hoarder.mm"),
+    )
+    .expect("hoarder.mm");
+    let two = src
+        .replace(
+            "        IMM     200             ; and the granule, which is the whole of the difference",
+            "        IMM     255             ; the granule",
+        )
+        .replace(
+            "        RET\n\n; ---------------------------------------------------------------- feed",
+            "        IMM     255\n        IMM     4\n        IMM     5\n        BUILD\n        RET\n\n; ---------------------------------------------------------------- feed",
+        );
+    let bytes = mm_asm::assemble(&two).expect("the variant assembles").bytes;
+    let hoarder = Contender::new("hoarder+2", bytes);
+    let reference = Contender::new("ancestor", assemble("ancestor.mm"));
+
+    eprintln!("\ntwo-vacuole hoarder against the ancestor, median of three seeds.");
+    eprintln!("permille of the two-lineage population; 500 is a dead heat.\n");
+    eprintln!("{:>10} {:>8}   {}", "world", "share", "the limit it poses");
+    for entry in mm_core::balance::shipped_panel() {
+        let arena = entry.arena(scenario(entry.file), 100);
+        let results = bouts(&arena, &hoarder, &reference, &SEEDS[..3]).expect("bouts");
+        let mut shares: Vec<u32> = results.iter().map(|b| b.share).collect();
+        let alive = results.iter().any(|b| b.alive);
+        eprintln!(
+            "{:>10} {:>8}{}   {}",
+            entry.label,
+            median(&mut shares),
+            if alive { " " } else { "*" },
+            entry.poses,
+        );
+    }
+    eprintln!("\n* = extinct at the end of every seed.");
 }
