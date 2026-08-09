@@ -116,6 +116,7 @@ cargo bench --workspace                      # criterion gates
 cargo run -p mm-cli -- run scenarios/soup.ron --ticks 1000000 --metrics out.ndjson
 cargo run -p mm-cli -- sweep scenarios/soup.ron --param mutation --range 1..64  # or duplication, fluid, light
 cargo run -p mm-cli -- hash scenarios/soup.ron --ticks 100000   # determinism check
+cargo run -p mm-cli -- run scenarios/soup.ron --ruleset rival_light   # same world, other rules
 cargo run -p mm-cli -- run scenarios/soup.ron --archive species.ndjson   # the species archive
 cargo run -p mm-cli -- match genomes/a.mm genomes/b.mm --ticks 20000     # an arena match
 cargo run -p mm-app --features render --release   # the microscope
@@ -149,11 +150,20 @@ docs/MILESTONES.md  delivery plan and acceptance tests.
 docs/UI.md        normative for the front-end, as SPEC.md is for the core.
 docs/CHEMISTRY.md the metabolic pathways, and the investigation behind them.
 docs/FEEDING.md   the ways of making a living, the control-word ledger, and the catalogue budget.
+docs/ECONOMY.md   what a cell earns and pays, why the autotroph wins everything, and the rebalance.
+                  Its harness is `mm_core::balance` + `tests/balance.rs`; run it before and after
+                  any change to a price, a rate or a light regime.
 docs/NEURONS.md   nervous systems from junctions: what works, what blocks it, what not to build.
 docs/STIFFNESS.md the contact model, turgor, and which of the squish is physics and which is drawn.
 docs/OVERLAPS.md  the overlapping cells: what it was, what it was not, and the bench.
 README.md         what this is and where to look. Written for somebody arriving.
 tools/            scripts that turn a screenshot into numbers.
-scenarios/        .ron scenario configs.
+scenarios/        .ron scenario configs — the *worlds*: size, light, current, chemistry seeding,
+                  barriers, and `inhabitants` (which genomes start where, via `mm_core::Placement`
+                  — Spread, At, Grid, Hex or Scatter, all of them barrier-aware).
+rulesets/         .ron named parameter sets — the *rules*: what a cell may do, as dotted-path
+                  diffs. A scenario says `ruleset: "name"` to inherit one and may override it
+                  inline. Resolved at load, stored resolved, name kept only as provenance —
+                  see `mm_core::ruleset` for why that is what keeps hard rule 7 intact.
 genomes/          .mm assembly sources.
 ```
