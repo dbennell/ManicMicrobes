@@ -442,9 +442,17 @@ mod tests {
                 name.ends_with(".mm"),
                 "{name} is not a name the seeding tool could hand to the assembler"
             );
+            let Some(path) = mm_asm::locate::file("genomes", name) else {
+                panic!("{name} is offered by the picker and cannot be found again");
+            };
+            // And found is not enough: the seed tool assembles what it is handed, and a name
+            // that does not assemble reaches the user as "did not assemble" from a list the
+            // program itself wrote. If a broken `.mm` lands in `genomes/`, it should fail here
+            // rather than in somebody's hand.
+            let src = std::fs::read_to_string(&path).expect("the picker offered an unreadable file");
             assert!(
-                mm_asm::locate::file("genomes", name).is_some(),
-                "{name} is offered by the picker and cannot be found again"
+                mm_asm::assemble(&src).is_ok(),
+                "{name} is offered by the picker and does not assemble"
             );
         }
     }

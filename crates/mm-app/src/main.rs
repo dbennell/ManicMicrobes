@@ -4427,6 +4427,42 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                         ui.close();
                     }
                 }
+                // What the seed tool will drop, right under the row that arms it.
+                //
+                // The seed tool is the only one that needs a second thing chosen before it does
+                // anything, and until now that thing lived in the build panel — so the tool and
+                // its ammunition were two rooms apart and the row above said "seed" without
+                // saying seed *what*. Picking here does both: it sets the genome and arms the
+                // tool, which is the whole gesture in one place.
+                //
+                // A submenu rather than a copy of the panel's combo box, and the "a menu shuts
+                // the moment you click the slide" argument below does not apply to it. That is
+                // about settings adjusted *between* strokes; which organism you are seeding is
+                // chosen once and then used, and the panel keeps its copy for when it is not.
+                ui.menu_button(
+                    skin::text(Role::Body, format!("   ↳ {}", view.place_genome)),
+                    |ui| {
+                        skin::menu(ui);
+                        skin::menu_caption(ui, "genomes/");
+                        let found = library::genomes();
+                        if found.is_empty() {
+                            ui.label(skin::text(Role::Small, "no genomes/ directory found"));
+                        }
+                        for name in found {
+                            let chosen =
+                                view.place_genome == name && view.tool == Tool::PlaceCell;
+                            if skin::menu_toggle(ui, &name, "", chosen).clicked() {
+                                view.place_genome = name;
+                                view.tool = Tool::PlaceCell;
+                                ui.close();
+                            }
+                        }
+                    },
+                )
+                .response
+                .on_hover_text(
+                    "which organism the seed tool drops. Choosing one also picks the tool.",
+                );
                 skin::menu_rule(ui);
                 // The settings live in the build window, not here. A menu closes the moment you
                 // click the slide, so a dose adjusted from a menu costs open-change-close for
@@ -4680,6 +4716,12 @@ fn status_bar(
                         Tool::DrawBarrier | Tool::EraseBarrier => {
                             format!("tool {} · brush {}", view.tool.name(), view.brush)
                         }
+                        // What it will drop, because "seed" alone does not say, and the answer
+                        // is set two rooms away in the build panel.
+                        Tool::PlaceCell => format!(
+                            "tool seed · {} × {}",
+                            view.place_genome, view.place_count
+                        ),
                         _ => format!("tool {}", view.tool.name()),
                     },
                 ));
@@ -5924,8 +5966,18 @@ fn toolbox_work(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
 /// the field would have made it unseedable.
 fn genome_picker(ui: &mut egui::Ui, into: &mut String) {
     let found = library::genomes();
+    // The selection, not the word "genomes…". A combo box whose closed state is a constant is
+    // not a picker, it is a menu that appears to do nothing: what it is set to was visible only
+    // in the text field beside it, and nothing said the two were the same setting.
     egui::ComboBox::from_id_salt("seed genome")
-        .selected_text(skin::text(Role::Label, "genomes…"))
+        .selected_text(skin::text(
+            Role::Value,
+            if into.is_empty() {
+                "genomes…".to_string()
+            } else {
+                into.clone()
+            },
+        ))
         .show_ui(ui, |ui| {
             if found.is_empty() {
                 ui.label(skin::text(Role::Small, "no genomes/ directory found"));
