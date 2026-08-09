@@ -142,12 +142,32 @@
 ; solitary cell arms permanently and pays the dearest upkeep in the catalogue to menace open
 ; water.
 
+; **It asks the touch sensor how many things are in reach, and it used to ask what the nearest one
+; was wearing.** That looked equivalent and was not, and the difference is the whole of why this
+; genome had never wounded anything in any run. "Nobody there" reads as a badge of zero — and so
+; does *somebody wearing nothing*, which is every cell `World::place_founders` seeds and every
+; genome in this library but two. So the guard against menacing open water was also a guard
+; against attacking anything that had not chosen a badge, and the weapon was never drawn.
+;
+; Measured, eight of these among eight `ancestor.mm` over eight thousand ticks: from 0 cell-ticks
+; with a spike out and 0 wounds, to a predator that draws on a stranger and puts the spike away
+; for its own children. It is still far more selective than the kin-blind `predator.mm`, which is
+; the point — that one is armed on 7,980 ticks of 8,000.
+;
+; Found by a dial sweep in which making the weapon eight times cheaper to hold changed the
+; population by not one cell, which can only happen if the cost was never charged.
+; `economy_probe::whether_the_armed_lineages_ever_draw` is the guard and `docs/ECONOMY.md` §4a is
+; the account. Reading 0 is `TouchReading::contacts` and has been there since M3 — nothing needed
+; building; the genome was asking the wrong question of a sensor that could already answer the
+; right one.
         GENE    #watch
-        IMM     3
-        IMM     7               ; the nearest one's badge
+        ZERO
+        IMM     7               ; touch reading 0: how many are in reach
         OGET
-        DUP
         JMPZ    kin             ; nobody in reach
+        IMM     3
+        IMM     7               ; reading 3: the nearest one's badge
+        OGET
         IMM     21
         ZERO                    ; my own badge
         OGET
