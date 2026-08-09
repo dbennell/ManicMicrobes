@@ -741,8 +741,14 @@ fn cilia_push_on_the_water_rather_than_on_nothing() {
     world.adopt_current_contents_as_baseline();
 
     // A still slide with one cell on it: any momentum in the water came from that cell.
+    //
+    // `stir`, not `impulses`. A cilium's reaction is rebuilt from the cilia every physics phase
+    // rather than accumulated and decayed — `ECONOMY.md` §14.7, and the reason is that a wake
+    // which accumulates to sixteen times one tick's injection saturates whatever made it, so no
+    // cell can be exempted from its own. `impulses` is still there and is now written only by
+    // the microscope's stir tool.
     let impulse_total = |w: &World| -> i64 {
-        let (ix, iy) = w.impulses();
+        let (ix, iy) = w.stir();
         ix.iter().map(|v| *v as i64).sum::<i64>() + iy.iter().map(|v| *v as i64).sum::<i64>()
     };
     assert_eq!(impulse_total(&world), 0, "the water starts still");
@@ -754,7 +760,7 @@ fn cilia_push_on_the_water_rather_than_on_nothing() {
         peak = peak.max(impulse_total(&world).abs());
     }
     assert!(peak > 0, "nothing ever pushed on the water");
-    // Bounded: the impulse layer is clamped per square and decays every fluid step, so a cell
+    // Bounded: the stir layer is clamped per square and rebuilt every physics phase, so a cell
     // beating for fifteen hundred ticks cannot accumulate momentum without limit.
     let squares = (WIDTH as i64) * (HEIGHT as i64);
     assert!(

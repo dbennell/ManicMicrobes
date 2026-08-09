@@ -23,8 +23,16 @@
 //! A cilium applies thrust to its own cell and injects the opposite impulse into the fluid.
 //! That is what makes colony locomotion emergent at M7 — cilia on one cell of a cluster push
 //! that cell, and the junction constraints drag the rest — and it is also what stops a cell
-//! rowing against nothing. The impulse decays, so momentum is not conserved and is not
-//! claimed to be; what is bounded is how much a cilium can inject per tick.
+//! rowing against nothing. Momentum is not conserved and is not claimed to be; what is bounded
+//! is how much a cilium can inject per tick.
+//!
+//! **And a cell is not carried by its own wake.** The water it is beating is moving relative to
+//! the cell by construction, so it reads it as `slip` — which is what makes a ciliate a pump as
+//! well as a swimmer, since `ecology::captured` charges a filter on exactly that — but it is not
+//! swept along by it. Without that exemption the two paths were wildly asymmetric, because
+//! thrust is damped by [`DRAG_RETAIN`] on the way in and drift is not damped at all, and every
+//! cilium in `genomes/` was below the threshold where forward beat backward. `ECONOMY.md` §14
+//! is the measurement, and `step_physics` is where both halves live.
 
 use rayon::prelude::*;
 
@@ -480,8 +488,20 @@ pub struct BodyForces {
 pub fn step_physics(
     cells: &mut CellArena,
     substrate: &Substrate,
-    impulse_x: &mut [i32],
-    impulse_y: &mut [i32],
+    // The cilia's own contribution to the water, rebuilt from scratch every tick.
+    //
+    // Separate from `World::impulse_x/y`, which accumulates at `impulse_retain` and which only
+    // `World::inject_impulse` writes now — this phase no longer touches it at all. A cilium's reaction must *not* accumulate, and the reason
+    // is `ECONOMY.md` §14: at 15/16 a steady beat builds to sixteen times one tick's injection
+    // and saturates at `fluid::MAX_VELOCITY` however small the cilium, so every cell's own wake
+    // was the same size and the exemption below could not be sized to the cell that earned it.
+    // Rebuilt each tick it is exactly `-thrust`, which is a quantity this loop already has.
+    //
+    // It is also the better answer for a colony: one accumulating cell saturates its square on
+    // its own, so a hundred ciliated cells stir no harder than one. Summed fresh, a hundred of
+    // them stir a hundred times as hard.
+    stir_x: &mut [i32],
+    stir_y: &mut [i32],
     forces: BodyForces,
     // Written, not read: the speed of the water *past* each cell, `Q10`.
     //
@@ -505,6 +525,10 @@ pub fn step_physics(
     let mut report = PhysicsReport::default();
     slip.clear();
     slip.resize(cells.capacity(), 0);
+    // Last tick's stir has already been published into the velocity field and read back as
+    // drift; what the cilia are doing *now* replaces it rather than adding to it.
+    stir_x.fill(0);
+    stir_y.fill(0);
     let w = substrate.width() as i32;
     let h = substrate.height() as i32;
     // Empty on a slide with no barriers, which makes `touches_barrier` a single branch and a
@@ -573,11 +597,51 @@ pub fn step_physics(
         cells.vx[i] = q10_scale(cells.vx[i], DRAG_RETAIN).saturating_add(fx);
         cells.vy[i] = q10_scale(cells.vy[i], DRAG_RETAIN).saturating_add(fy);
 
-        // The fluid carries the cell along with it.
-        let sq = substrate.index(pos_to_square(cells.x[i]), pos_to_square(cells.y[i]));
+        // The fluid carries the cell along with it. Kept as coordinates as well as an index,
+        // because the reaction at the bottom of the loop needs the square *behind* this one and
+        // by then the position has already been integrated.
+        let (sqx, sqy) = (pos_to_square(cells.x[i]), pos_to_square(cells.y[i]));
+        let sq = substrate.index(sqx, sqy);
         let (svx, svy) = substrate.velocity();
         let mut drift_x = svx.get(sq).copied().unwrap_or(0);
         let mut drift_y = svy.get(sq).copied().unwrap_or(0);
+
+        // --- a cell is carried by the water, but not by the part of it that is its own wake ---
+        //
+        // `ECONOMY.md` §14. The two paths into a cell are not symmetric: thrust arrives through
+        // `vx` and is damped by `DRAG_RETAIN`, so `f` settles the cell at `4f/3`; the reaction
+        // arrives here, as drift, and is added straight to the position step undamped. A cell
+        // reading its own wake back therefore had a threshold at 192 `Q10` of thrust below which
+        // it travelled *backwards*, and every cilium in `genomes/` was under it.
+        //
+        // The fix is not to hide the wake — the wake is the point, it stirs the chemistry, it
+        // pushes the neighbours, and `slip` below reads it as water going past, which is what
+        // makes a ciliate a pump as well as a swimmer. The fix is that a swimmer does not ride
+        // its own current. A cell in a river is carried by the river; a cell beating water past
+        // itself is not carried by the water it is beating, because that water's motion is
+        // *relative to the cell* by construction. Both halves of that are what a cilium is for
+        // in the first place, and until now the second half was drowning the first.
+        //
+        // Only ever toward zero, and never by more than the cell's own contribution. That is
+        // what makes this an exemption rather than a free anchor: a cell facing into a current
+        // can cancel exactly as much of it as it is itself generating and no more, so holding
+        // station against a river costs the full thrust of swimming up it. The cap is exact
+        // because `stir` does not accumulate — one tick's injection is the whole of this cell's
+        // share of it.
+        let exempt = |drift: &mut i32, thrust: i32| {
+            if thrust == 0 {
+                return;
+            }
+            // The wake is antiparallel to the thrust; anything parallel is somebody else's.
+            if drift.signum() == thrust.signum() {
+                return;
+            }
+            let own = thrust.saturating_abs().min(drift.saturating_abs());
+            *drift -= own * drift.signum();
+        };
+        // `thrust_x`, not `body.thrust_x`: what the cell could *afford* is what it injected.
+        exempt(&mut drift_x, thrust_x);
+        exempt(&mut drift_y, thrust_y);
 
         // --- the holdfast: how much of that carrying a cell can refuse ---
         //
@@ -688,11 +752,26 @@ pub fn step_physics(
         // against gravity's terminal 0.008 — so the water won by roughly eight to one and
         // carried the whole population out with it. Gravity was never backwards; it was
         // fighting a current it had itself created.
+        //
+        // **Into `stir`, under the cell, and not accumulated.** See `ECONOMY.md` §14 and the
+        // exemption above, which is the other half of this and cannot be written without it.
+        //
+        // Under the cell because that is where a cilium's water is: `slip` is read at the cell's
+        // own square, `ecology::captured` charges a filter on `slip`, and a ciliate's feeding
+        // current is the same beating that moves it. Putting the wake anywhere else buys a
+        // clean swimmer at the price of the pump, and a cilium is both.
+        //
+        // Into `stir` rather than `impulse` because `impulse` accumulates at 15/16 and a steady
+        // beat therefore reaches sixteen times one tick's injection and saturates, which makes
+        // every wake the same size whatever made it — and a wake that cannot be attributed
+        // cannot be exempted. Rebuilt fresh, this square holds exactly the sum of what the cells
+        // standing in it are doing right now.
         if thrust_x != 0 || thrust_y != 0 {
-            if let Some(slot) = impulse_x.get_mut(sq) {
+            report.stirred = report.stirred.saturating_add(1);
+            if let Some(slot) = stir_x.get_mut(sq) {
                 *slot = slot.saturating_sub(thrust_x).clamp(-Q10_ONE, Q10_ONE);
             }
-            if let Some(slot) = impulse_y.get_mut(sq) {
+            if let Some(slot) = stir_y.get_mut(sq) {
                 *slot = slot.saturating_sub(thrust_y).clamp(-Q10_ONE, Q10_ONE);
             }
         }
@@ -713,6 +792,9 @@ pub struct PhysicsReport {
     pub constraints: u32,
     /// Junctions broken because an end died or drifted out of range.
     pub junctions_broken: u32,
+    /// Cells that put something into the water this tick, so the caller knows the velocity
+    /// field is out of date without having to scan the slide to find out.
+    pub stirred: u32,
 }
 
 #[cfg(test)]
@@ -731,8 +813,8 @@ mod tests {
     fn step_physics(
         cells: &mut CellArena,
         substrate: &Substrate,
-        impulse_x: &mut [i32],
-        impulse_y: &mut [i32],
+        stir_x: &mut [i32],
+        stir_y: &mut [i32],
         forces: BodyForces,
         slip: &mut Vec<i32>,
         tick: u64,
@@ -741,7 +823,7 @@ mod tests {
         let mut scan = Vec::new();
         super::scan_bodies_into(cells, &mut scan);
         super::step_physics(
-            cells, substrate, impulse_x, impulse_y, forces, slip, &scan, tick, seed,
+            cells, substrate, stir_x, stir_y, forces, slip, &scan, tick, seed,
         )
     }
 
@@ -933,12 +1015,84 @@ mod tests {
         assert!(cells.x[0] > before_x, "the cell did not move");
         assert!(cells.energy[0] < before_energy, "swimming was free");
         assert!(report.energy_spent > 0);
-        let sq = substrate.index(8, 8);
+
+        // Under the cell, because that is where a cilium's water is and `slip` is read there:
+        // a ciliate is a pump as well as a swimmer, and the wake is the pump. What stops the
+        // wake from also driving the cell backwards is the exemption in `step_physics`, not
+        // moving the wake somewhere the cell cannot feel it — see `ECONOMY.md` §14 and
+        // `a_swimmer_does_not_have_to_outrun_its_own_wake` below, which is the other half.
+        let under = substrate.index(8, 8);
         assert!(
-            ix[sq] < 0,
-            "the water was not pushed the other way: {}",
-            ix[sq]
+            ix[under] < 0,
+            "the water under the cell was not pushed the other way: {}",
+            ix[under]
         );
+        assert_eq!(
+            ix[under], -cilium_thrust(&cilium),
+            "the stir layer must hold exactly one tick of thrust, not an accumulation"
+        );
+    }
+
+    #[test]
+    fn a_swimmer_does_not_have_to_outrun_its_own_wake() {
+        // `ECONOMY.md` §14, as two assertions rather than a place. A cell beating steadily must
+        // end up ahead of where it started at *any* power — the weakest cilium in the catalogue
+        // is the case that used to end up at the far wall behind it — and it must get exactly as
+        // far as it would in water it had not stirred, because it does not ride its own current.
+        //
+        // Both are needed and they guard different things. The first fails if a cilium's
+        // reaction goes back to accumulating in `impulse`; the second fails if the exemption in
+        // `step_physics` is dropped, which costs a swimmer three quarters of its speed without
+        // ever reversing it.
+        //
+        // The control is the same run with the stir layer never published: same thrust, same
+        // drag, water that stays still.
+        let pool = GenomePool::new();
+        for param in [8u8, 20, 40, 80, 200] {
+            let mut swim = |publish: bool| -> i32 {
+                let mut cilium = Organelle::finished(OrganelleType::Cilium, param);
+                cilium.control[0] = Q10_ONE as i16;
+                cilium.control[1] = 0; // due +x
+                let mut cells = one_cell(&pool, &[(6, cilium)]);
+                let mut substrate = Substrate::new(64, 16).unwrap();
+                let mut sx = vec![0i32; substrate.len()];
+                let mut sy = vec![0i32; substrate.len()];
+                let nil = vec![0i32; substrate.len()];
+                let before = cells.x[0];
+                for tick in 0..200u64 {
+                    step_physics(
+                        &mut cells,
+                        &substrate,
+                        &mut sx,
+                        &mut sy,
+                        BodyForces {
+                            jitter: 0,
+                            gravity: 0,
+                        },
+                        &mut Vec::new(),
+                        tick,
+                        1,
+                    );
+                    // What `World::step` does between phases: publish the stir layer into the
+                    // velocity field. It is rebuilt from the cilia every tick rather than
+                    // decayed, which is what lets the exemption be sized to the cell exactly.
+                    if publish {
+                        crate::light::CurrentField::Still.apply(&mut substrate, &nil, &nil, &sx, &sy);
+                    }
+                }
+                cells.x[0] - before
+            };
+            let stirred = swim(true);
+            let still = swim(false);
+            assert!(
+                stirred > 0,
+                "a param {param} cilium drove its cell backwards: {stirred}"
+            );
+            assert_eq!(
+                stirred, still,
+                "a param {param} cilium was taxed by water it stirred itself"
+            );
+        }
     }
 
     #[test]

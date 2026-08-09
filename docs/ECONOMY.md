@@ -44,8 +44,8 @@ ones**. Read this page before trusting anything below it.
 | §10a, "re-cut `seasons` first" | §11 — the winter already thins rather than culls, and the hoarder's death was never about it |
 | §10, "dimming the light comes first" | §11.4 — nothing can afford to get fat in the dark, so the cost side has to move first |
 | §12.1, "the earning pair cannot be stacked" | fixed. A lysosome is now catalase; see below |
-| §4b, "not the cost of swimming — motility is nearly free and nearly useless" | §14 — the cost is right and the rest is not. Below 192 `Q10` of thrust a cell is driven *backwards* by its own wake, and every cilium in the library is under it |
-| §12.3, "the sensors and cilia work, and have been judged on the wrong slide" | §14.4 — half withdrawn. `drifter.mm`'s 927‰ in the drift is its cilia holding station against the current with their backwash, not swimming |
+| §4b, "not the cost of swimming — motility is nearly free and nearly useless" | §14 — the cost is right and the rest is not. Below 192 `Q10` of thrust a cell was driven *backwards* by its own wake, and every cilium in the library was under it. **Fixed in §14.7** |
+| §12.3, "the sensors and cilia work, and have been judged on the wrong slide" | §14.4 — half withdrawn. `drifter.mm`'s 927‰ in the drift was its cilia holding station against the current with their backwash, not swimming. Every motility number in this document predating §14.7 is about a body that could not move forward |
 
 ### What has landed in the code
 
@@ -56,6 +56,10 @@ ones**. Read this page before trusting anything below it.
 * **A lysosome decomposes the cell's own peroxide** (§12.1). This was named in a comment in
   `metabolism.rs` and never built, and it was the wall that stopped any cell carrying more than
   two mitochondria.
+* **A cilium no longer swims its cell backwards** (§14.7). Its reaction stopped accumulating, and
+  a cell stopped being carried by the part of the water that is its own wake. `drifter.mm` went
+  from −8.5 squares in 600 ticks to +121.5, and an anchored ciliate still reads the current it is
+  making, so a cilium is a pump and a propeller rather than one or the other.
 * **Six parameters reach the state hash** that did not, and a guard enumerates the config so it
   cannot happen again.
 
@@ -1245,20 +1249,24 @@ and twenty-one the right way in water that did not push back.
 Two separate faults put it there, and the second is an ISA-level trap:
 
 **A genome cannot ask for full power in one instruction.** `Template::value` is a `u8`, so `IMM`
-pushes at most 255, and a control input is a `Q10` fraction of 1024. Every `#swim` gene in the
-library is `IMM 255 / ZERO / IMM <slot> / OSET`, which is **a quarter throttle**, and
-`drifter.mm`'s own comment above it reads "Full power on both cilia". Reaching 1024 needs
-arithmetic — `IMM 4 / IMM 8 / SHL` — and nothing does it. Two cilia at `param` 80 at a quarter
-throttle make 158 `Q10`, which is under the 192 of §14.1 by 18%.
+pushes at most 255, and a control input is a `Q10` fraction of 1024. `drifter.mm`'s `#swim` gene
+is `IMM 255 / ZERO / IMM <slot> / OSET`, which is **a quarter throttle**, and the comment above it
+reads "Full power on both cilia". Two cilia at `param` 80 at a quarter throttle make 158 `Q10`,
+which is under the 192 of §14.1 by 18%.
+
+Reaching 1024 needs arithmetic, and the idiom is already in the tree: `stalker.mm` writes
+`IMM 255 / IMM 2 / SHL` for its spike. It is a genome fix rather than an engine one, and nothing
+that drives a cilium does it.
 
 **And `Organelle::finished` starts a new organelle at `control = [1024, 0]`.** So a cilium that no
 genome ever touches runs at *four times* the power one that is deliberately switched on does:
 `#swim` does not turn drifter's cilia on, it turns them down. That is also why `reflex.mm` reads
 thrust 0 — it is the one genome that writes a zero.
 
-`control[1]`, the mount angle, is never written by any genome in the library, so **every cilium in
-`genomes/` is mounted due east** and the "two cilia, one +x and one +y" in `drifter.mm`'s slot
-comment is not what it builds.
+`drifter.mm` never writes `control[1]`, the mount angle, so **both its cilia are mounted due
+east** and the "one +x and one +y" in its slot comment is not what it builds. `stalker.mm` does
+write it — angles 0 and 12, which is the perpendicular pair drifter's comment describes — so this
+is drifter's bug rather than a gap in the ISA.
 
 The M3 acceptance test does not catch this. `cilia_actually_move_a_population_around` asserts that
 some cell's position differs from the founder's start, and eight squares of backwash satisfies it
@@ -1381,21 +1389,8 @@ Three things, and the third is the one that matters most.
 
 The first two are faults rather than balance, and neither is a price.
 
-**1. Stop a cell sitting in its own wake.** This is the whole of §14.1 and most of §14.2 and
-§14.4, and it is small. Three candidates, and the first is the one to try:
-
-  * **Put the reaction in the square the thrust points away from** rather than the one the cell is
-    standing on. A cilium pushes water *behind* it; depositing the impulse under the cell is what
-    makes a swimmer its own headwind. One expression in `step_physics`, physically more honest
-    than what is there, and it keeps the reaction that SPEC wants.
-  * Or exempt a cell from the drift it itself created this tick, which is cheaper still but
-    special-cases a cell against its own wake and would not fix two cells swimming side by side.
-  * Or route the drift through drag the way `Scenario::gravity` already is, which removes the
-    asymmetry at its root but changes how *every* current acts on *every* body — a much larger
-    blast radius, and it would need every acceptance number re-taken.
-
-  **This is a decision that wants review**, because all three change measured physics. Nothing has
-  been changed in the code; §14 is measurement only.
+**1. Stop a cell sitting in its own wake — done, and §14.7 is what it did.** This was the whole
+of §14.1 and most of §14.2 and §14.4.
 
 **2. Make the throttle reachable, and fix the genomes.** A genome cannot write 1024 with one
 `IMM` and every genome in the library tries to. Two halves:
@@ -1417,6 +1412,65 @@ taken on bodies that could not move forward. `drifter.mm` at 19‰ in the soup a
 is not a swimmer being judged on the wrong slide, as §12.3 concluded — it is a body whose cilia
 have never once produced net forward motion, scoring twice on the merits of its backwash. **That
 paragraph is withdrawn and the question is open again.**
+
+### 14.7 What was changed, and what it bought
+
+Two changes, both in `sensing::step_physics`, and neither of them a price. They have to be read
+together: either alone removes the reversal and only the pair gives a cilium both of its jobs.
+
+**A cilium's reaction no longer accumulates.** It goes into a new `stir` layer — one entry per
+square, rebuilt from the cilia every physics phase and consumed by `refresh_velocity` in the same
+tick, so it is scratch on the same terms as `slip` and `crowding` and adds nothing to the state
+hash. `impulse` stays what it always was and is now written only by `World::inject_impulse`. The
+distinction is that `impulse` is a *disturbance* — something happened and the water is still
+moving — while `stir` is a *machine*: cilia are beating here now, and when they stop it stops.
+
+That matters twice. A wake that accumulates to sixteen times one tick's injection saturates at
+`MAX_VELOCITY` however small the cilium, so every wake was the same size and none could be
+attributed to what made it. And a saturating wake means **one ciliate stirs its square as hard as
+a hundred do** — which is precisely the wrong shape for a colony.
+
+**And a cell is not carried by its own wake.** Its drift is moved toward zero by no more than the
+thrust it is itself producing, and only against the direction it is thrusting, so it can never
+gain from the correction — a cell facing into a current can cancel exactly as much of it as it is
+generating and no more, and holding station in a river still costs the full thrust of swimming up
+it. The cap is exact because `stir` does not accumulate.
+
+The wake stays **under** the cell, which is the point: `slip` is read at the cell's own square and
+`ecology::captured` charges a filter on `slip`, so the same beating that moves a ciliate is the
+current it feeds on. Depositing it astern also removes the reversal and was tried first; it buys a
+clean swimmer at the price of the pump, and measured, an anchored ciliate's `slip` went to zero.
+
+Measured, one sterile body, still water, 60 ticks — `no wake` being the same body with the fluid
+solver switched off:
+
+```text
+ cilia  param  power   thrust | with wake   no wake     lost   water under
+     1     20   1024       80 |       6.1       6.1       0%          -80
+     1     40   1024      160 |      12.4      12.4       0%         -160
+     1     80   1024      320 |      24.7      24.7       0%         -256
+     2     80    255      158 |      12.1      12.1       0%         -158
+     2     80   1024      640 |      49.6      49.6       0%         -256
+     3     80   1024      960 |      74.4      74.4       0%         -256
+     2    255   1024     2040 |     158.3     158.3       0%         -256
+```
+
+**Zero loss at every power, and displacement exactly linear in thrust** — against 198% loss and a
+reversal at the bottom of the old table. The last column is the pump still working. The shipped
+swimmer settles it: `drifter.mm` goes from **−8.5 squares in 600 ticks to +121.5**, which is
+exactly what it does in water it has not stirred.
+
+In a saturated mat the crowd's own tax is unchanged and still convex — 24%, 60%, 69%, 74% of
+open-water speed for one to four cilia at the default `rigidity_gain` of zero — so §14.3 stands
+and the first cilium is still the weak step. What has changed is that two cilia now cover half a
+square a tick *inside a full slide*, where before they covered a fiftieth.
+
+Two things this does not fix, both still open and both cheap:
+
+* **The throttle.** `drifter.mm` at its shipped quarter power manages 0.20 squares a tick in open
+  water and 0.02 in a mat. Until `#swim` writes 1024 the way `stalker.mm`'s spike gene already
+  does, a swimmer is running its engine at a quarter and the crowd eats the rest.
+* **`rigidity_gain`.** Item 3 above, unchanged.
 * **What a lysosome should cost now that it does two jobs.** It digests carrion and decomposes
   peroxide on one capacity and one upkeep. That is defensible — one machine, two substrates — but
   it was priced when it did one of them.

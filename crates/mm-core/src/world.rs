@@ -51,6 +51,15 @@ pub struct World {
     /// prescribed current because it is state, not configuration.
     impulse_x: Vec<i32>,
     impulse_y: Vec<i32>,
+    /// What the cilia are doing to the water *right now*, one entry per square.
+    ///
+    /// Rebuilt from the population every physics phase and consumed by `refresh_velocity` in the
+    /// same tick, so it never carries anything across a tick boundary — scratch on the same
+    /// terms as `slip` and `crowding`, and excluded from equality, hashing and snapshots for the
+    /// same reason. `impulse_x/y` above is the other kind: a disturbance that outlives what made
+    /// it. `ECONOMY.md` §14 is why a cilium's reaction has to be this one.
+    stir_x: Vec<i32>,
+    stir_y: Vec<i32>,
     /// Cached so a static light regime is not rewritten over the whole grid every step.
     light_written: bool,
     /// Whether the velocity field is already correct for the current impulse layer.
@@ -332,6 +341,8 @@ impl World {
             tick: 0,
             impulse_x: vec![0; n],
             impulse_y: vec![0; n],
+            stir_x: vec![0; n],
+            stir_y: vec![0; n],
             light_written: false,
             velocity_written: false,
             active_impulses: 0,
@@ -580,6 +591,16 @@ impl World {
         &self.pressure
     }
 
+    /// What the cilia are doing to the water this tick, one entry per square.
+    ///
+    /// Rebuilt from the population every physics phase, so unlike [`World::impulses`] it holds
+    /// what is happening rather than what happened. See the field for why a cilium's reaction
+    /// has to be the first kind.
+    #[must_use]
+    pub fn stir(&self) -> (&[i32], &[i32]) {
+        (&self.stir_x, &self.stir_y)
+    }
+
     pub fn impulses(&self) -> (&[i32], &[i32]) {
         (&self.impulse_x, &self.impulse_y)
     }
@@ -670,8 +691,8 @@ impl World {
             report.physics = crate::sensing::step_physics(
                 &mut self.cells,
                 &self.substrate,
-                &mut self.impulse_x,
-                &mut self.impulse_y,
+                &mut self.stir_x,
+                &mut self.stir_y,
                 crate::sensing::BodyForces {
                     jitter: self.scenario.jitter,
                     gravity: self.scenario.gravity,
@@ -681,7 +702,10 @@ impl World {
                 tick,
                 seed,
             );
-            if report.physics.moved != 0 || report.physics.energy_spent != 0 {
+            if report.physics.moved != 0
+                || report.physics.energy_spent != 0
+                || report.physics.stirred != 0
+            {
                 // A cilium that pushed on the water changed the velocity field.
                 self.velocity_written = false;
                 self.active_impulses = self
@@ -741,6 +765,17 @@ impl World {
                 self.biology.separation_relax,
                 &mut self.separation,
             );
+        } else {
+            // Nobody is beating, and `step_physics` — which is what rebuilds the stir layer
+            // every tick — did not run to say so. Without this the last thing that swam leaves
+            // its current behind it forever, which is exactly what `stir` exists not to do.
+            // The scan short-circuits on the first non-zero and then costs one pass of zeroes
+            // per tick over a slide with nothing alive on it.
+            if self.stir_x.iter().chain(self.stir_y.iter()).any(|v| *v != 0) {
+                self.stir_x.fill(0);
+                self.stir_y.fill(0);
+                self.velocity_written = false;
+            }
         }
 
         // 5. Fluid, at fluid_hz.
@@ -1823,7 +1858,7 @@ impl World {
         // Take the impulse buffers out so the substrate can be borrowed mutably.
         let ix = std::mem::take(&mut self.impulse_x);
         let iy = std::mem::take(&mut self.impulse_y);
-        current.apply(&mut self.substrate, &ix, &iy);
+        current.apply(&mut self.substrate, &ix, &iy, &self.stir_x, &self.stir_y);
         self.impulse_x = ix;
         self.impulse_y = iy;
     }

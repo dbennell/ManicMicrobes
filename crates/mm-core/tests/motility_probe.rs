@@ -438,6 +438,83 @@ fn what_the_drifters_cilia_are_for() {
     eprintln!("downstream wall and fewer of them alive.");
 }
 
+/// What an anchored ciliate reads as water going past it.
+///
+/// `slip` is what `ecology::captured` charges a filter on, and a cell reads it at **its own
+/// square**. Before the wake moved astern, a beating cell's own backwash sat in that square, so
+/// an anchored ciliate read its own stirring as a current and could in principle have filtered
+/// on it — `FEEDING.md` §7 and `ECONOMY.md` §8 both flag that as never run. Moving the wake one
+/// square back is exactly the thing that would take it away, so it wants measuring rather than
+/// assuming.
+#[test]
+#[ignore = "a probe; run it on purpose"]
+fn what_a_stirring_cell_reads_as_slip() {
+    eprintln!("\nwater velocity around a beating cell, `Q10`, after 200 ticks.");
+    eprintln!("a holdfast needs a barrier, so the anchored rows sit against a wall.\n");
+    eprintln!(
+        "{:>10} {:>7} {:>8} {:>9} {:>9} {:>9}",
+        "body", "cilia", "thrust", "under", "astern", "moved"
+    );
+    for (label, anchored, cilia) in [
+        ("free", false, 0usize),
+        ("free", false, 1),
+        ("free", false, 2),
+        ("anchored", true, 0),
+        ("anchored", true, 1),
+        ("anchored", true, 2),
+    ] {
+        let mut cfg = dish(32, 32);
+        // A wall along the bottom for a holdfast to grip.
+        cfg.barriers = vec![mm_core::Barrier::Rect {
+            x: 0,
+            y: 30,
+            width: 32,
+            height: 2,
+        }];
+        let mut world = World::new(cfg).expect("world");
+        let id = swimmer(&mut world, 16, 29, cilia, 80, 1024);
+        if anchored {
+            if let Some(i) = world.cells_mut().index(id) {
+                world.cells_mut().slots_mut(i)[8] =
+                    Organelle::finished(OrganelleType::Holdfast, 200);
+            }
+        }
+        let start = at(&world, id).unwrap_or((0, 0));
+        world.run(200);
+        let Some(i) = world.cells().index(id) else {
+            eprintln!("{label:>10} {cilia:>7}   died");
+            continue;
+        };
+        let end = at(&world, id).unwrap_or(start);
+        let sx = mm_core::fixed::pos_to_square(world.cells().x[i]);
+        let sy = mm_core::fixed::pos_to_square(world.cells().y[i]);
+        let water = |dx: i32| {
+            let at = world.substrate().index((sx + dx).clamp(0, 31), sy);
+            world.substrate().velocity().0.get(at).copied().unwrap_or(0)
+        };
+        eprintln!(
+            "{:>10} {:>7} {:>8} {:>9} {:>9} {:>9}",
+            label,
+            cilia,
+            world
+                .cells()
+                .slots(i)
+                .iter()
+                .map(|o| cilium_thrust(o).abs())
+                .sum::<i32>(),
+            water(0),
+            water(-1),
+            format!(
+                "{:.1}",
+                ((end.0 - start.0).abs() + (end.1 - start.1).abs()) as f64 / Q10_ONE as f64
+            ),
+        );
+    }
+    eprintln!("\n`slip` is read at the cell's own square — the `under` column. `captured`");
+    eprintln!("multiplies concentration by it, so a zero there is a filter that catches nothing");
+    eprintln!("however hard the cell is beating.");
+}
+
 /// The same swimmer, in the mat.
 ///
 /// This is the measurement `ECONOMY.md` §4b never took. A cell on the microscope is never alone

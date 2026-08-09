@@ -409,10 +409,24 @@ impl CurrentField {
         )
     }
 
-    /// Write the prescribed field into the substrate, adding the decaying impulse layer.
+    /// Write the prescribed field into the substrate, adding both layers cells write to it.
+    ///
+    /// Two layers, not one, and they are different kinds of thing. `impulse` is a *disturbance*:
+    /// something happened here and the water is still moving because of it, so it accumulates
+    /// and decays at `Scenario::impulse_retain`. `stir` is a *machine*: cilia are beating here
+    /// right now, so it is rebuilt from the cilia every tick and does not decay, because when
+    /// they stop it should stop. See `sensing::step_physics` and `ECONOMY.md` §14 for why a
+    /// cilium's reaction has to be the second kind.
     ///
     /// A blocked square has no velocity: nothing flows inside a barrier.
-    pub fn apply(&self, substrate: &mut Substrate, impulse_x: &[i32], impulse_y: &[i32]) {
+    pub fn apply(
+        &self,
+        substrate: &mut Substrate,
+        impulse_x: &[i32],
+        impulse_y: &[i32],
+        stir_x: &[i32],
+        stir_y: &[i32],
+    ) {
         let w = substrate.width();
         let h = substrate.height();
         let (vx, vy, blocked_snapshot) = substrate.velocity_and_blocked_mut();
@@ -427,9 +441,11 @@ impl CurrentField {
                 let (bx, by) = self.velocity_at(x, y, w, h);
                 let ix = impulse_x.get(i).copied().unwrap_or(0);
                 let iy = impulse_y.get(i).copied().unwrap_or(0);
+                let sx = stir_x.get(i).copied().unwrap_or(0);
+                let sy = stir_y.get(i).copied().unwrap_or(0);
                 let lim = MAX_VELOCITY as i64;
-                vx[i] = (bx as i64 + ix as i64).clamp(-lim, lim) as i32;
-                vy[i] = (by as i64 + iy as i64).clamp(-lim, lim) as i32;
+                vx[i] = (bx as i64 + ix as i64 + sx as i64).clamp(-lim, lim) as i32;
+                vy[i] = (by as i64 + iy as i64 + sy as i64).clamp(-lim, lim) as i32;
             }
         }
         // The field was written in bulk, so the "is anything flowing" flag has to be
@@ -713,13 +729,14 @@ mod tests {
         let mut s = Substrate::new(4, 4).unwrap();
         let mut ix = vec![0i32; s.len()];
         let mut iy = vec![0i32; s.len()];
+        let none = vec![0i32; s.len()];
         ix[s.index(1, 1)] = 100;
-        CurrentField::Uniform { vx: 100, vy: 0 }.apply(&mut s, &ix, &iy);
+        CurrentField::Uniform { vx: 100, vy: 0 }.apply(&mut s, &ix, &iy, &none, &none);
         assert_eq!(s.velocity_at(1, 1), (200, 0), "impulse adds to the current");
         assert_eq!(s.velocity_at(0, 0), (100, 0));
         // ...and the sum is still held to the CFL limit, however hard the cilium pushed.
         ix[s.index(2, 2)] = MAX_VELOCITY * 4;
-        CurrentField::Uniform { vx: 100, vy: 0 }.apply(&mut s, &ix, &iy);
+        CurrentField::Uniform { vx: 100, vy: 0 }.apply(&mut s, &ix, &iy, &none, &none);
         assert_eq!(s.velocity_at(2, 2), (MAX_VELOCITY, 0));
 
         for _ in 0..64 {
@@ -738,7 +755,7 @@ mod tests {
             vx: i32::MAX,
             vy: i32::MIN,
         }
-        .apply(&mut s, &ix, &iy);
+        .apply(&mut s, &ix, &iy, &ix, &iy);
         for i in 0..s.len() {
             let (vx, vy) = s.velocity();
             assert!(vx[i].abs() <= MAX_VELOCITY && vy[i].abs() <= MAX_VELOCITY);
