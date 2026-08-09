@@ -88,7 +88,30 @@ pub struct Sample {
 
     /// Trophic composition: what fraction of the world's energy income came from light, in
     /// parts per thousand (SPEC §13).
+    ///
+    /// **Reads 1000 in every scenario, and that is the finding rather than a stuck needle.**
+    /// Respiration is the only thing in the engine that adds to a cell's energy, and the only
+    /// thing that fills it is light, so the share is one by construction — see `docs/ECONOMY.md`
+    /// §1. It will move the day a second way of earning exists, and not before. It is kept
+    /// beside [`Sample::light`] deliberately: a varying line above a flat one is that finding
+    /// made visible.
+    ///
+    /// The microscope draws it as `energy income ‰`. It was `light income ‰`, which read as a
+    /// quantity of light and meant a share of energy — a confusion that only became a collision
+    /// once there was a real light reading next to it.
     pub trophic_light: i64,
+
+    /// The light actually falling on the slide, averaged over every square.
+    ///
+    /// Distinct from `trophic_light` above, which sounds like it and is not: this is the
+    /// *intensity*, in the same `Q10` units a scenario's `LightRegime` is written in. Nothing in
+    /// the microscope showed it, so a slide running `seasons.ron` looked identical at midsummer
+    /// and midwinter unless you counted ticks and did the interpolation by hand.
+    ///
+    /// A mean over the squares rather than the regime's parameter, so it is one number for every
+    /// regime: `Directional` and `PointSource` light part of a slide and not the rest, and their
+    /// average is what the population is actually living on.
+    pub light: i64,
     /// The guild census (M8): cells carrying a chloroplast, a lysosome, a spike, and cells
     /// carrying none of the machinery that would make them anything but an osmotroph.
     ///
@@ -226,6 +249,14 @@ impl Sample {
             mean_fidelity: fidelity / with_nucleus.max(1),
             no_nucleus,
             trophic_light: ledger.trophic_share(crate::TrophicSource::Light),
+            light: {
+                let plane = world.substrate().light();
+                if plane.is_empty() {
+                    0
+                } else {
+                    plane.iter().map(|v| *v as i64).sum::<i64>() / plane.len() as i64
+                }
+            },
             producers: mix.producers as u64,
             scavengers: mix.scavengers as u64,
             predators: mix.predators as u64,
