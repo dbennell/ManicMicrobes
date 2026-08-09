@@ -755,6 +755,7 @@ impl crate::state_hash::StateHash for BiologyConfig {
         h.i32(self.division_energy);
         h.i32(self.split_pressure);
         h.i32(self.max_mass);
+        h.i32(self.separation_relax);
         h.u64(self.structural_chemical as u64);
         h.i32(self.copy_energy_per_byte);
 
@@ -778,6 +779,9 @@ impl crate::state_hash::StateHash for BiologyConfig {
         h.i32(e.crowding_damage);
         h.i32(e.crowding_reference_radius);
         h.u32(e.crowding_grace);
+        h.i32(e.capture_efficiency);
+        h.i32(e.capture_rate);
+        h.i32(e.em_range);
 
         let r = &self.metabolism.rates;
         h.i32(r.photosynthesis_efficiency);
@@ -796,6 +800,16 @@ impl crate::state_hash::StateHash for BiologyConfig {
         h.i32(r.osmotic_upkeep);
         h.i32(r.energy_reserve);
         h.i32(r.energy_leak);
+        // Added late, and missing from this list for two milestones. Both change what the
+        // simulation *does* — occlusion scales the light a chloroplast sees, rigidity scales
+        // `neighbours::CORE_PERMILLE` and therefore how a crowd packs — so two worlds differing
+        // only in them were reporting the same state hash, and `the_thicket.ron` sets both.
+        //
+        // Exactly the omission the note above warns about, which is why
+        // `tests/hard_rules.rs::every_parameter_reaches_the_state_hash` now enumerates the
+        // config rather than trusting anyone to remember.
+        h.i32(r.light_occlusion);
+        h.i32(r.rigidity_gain);
 
         let c = &self.metabolism.catalogue;
         let chem = c.metabolism;

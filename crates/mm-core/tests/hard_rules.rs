@@ -385,3 +385,57 @@ fn vm_state_fits_the_per_cell_budget() {
          organelles, chemistry and physics still have to fit"
     );
 }
+
+/// Every parameter in the biology config reaches the state hash.
+///
+/// `BiologyConfig::hash_state` is written out field by field, and its own note says why: "adding a
+/// parameter and forgetting to hash it is a visible omission here rather than an invisible one
+/// everywhere." It was not visible enough. `light_occlusion` and `rigidity_gain` were added at
+/// SPEC §17.8 and §17.7, both change what the simulation does, and neither reached the hash for
+/// two milestones — so `mm-cli hash` could not tell `the_thicket.ron`'s economy from `soup.ron`'s,
+/// and a determinism check would have passed straight across the difference.
+///
+/// This enumerates the config through `params::fields`, which walks the *serialised* form, so a
+/// parameter that exists is a parameter this test knows about. Nobody has to remember.
+#[test]
+fn every_parameter_reaches_the_state_hash() {
+    use mm_core::params::{self, Value};
+    use mm_core::state_hash::{StateHash, StateHasher};
+
+    let hash_of = |config: &mm_core::BiologyConfig| -> u64 {
+        let mut h = StateHasher::new();
+        config.hash_state(&mut h);
+        h.finish()
+    };
+
+    let base = mm_core::BiologyConfig::default();
+    let baseline = hash_of(&base);
+    let mut missed: Vec<String> = Vec::new();
+
+    for (path, value) in params::fields(&base) {
+        // A value that is certainly different and certainly still fits an `i32`.
+        let changed = match value {
+            Value::Bool(b) => Value::Bool(!b),
+            Value::Int(v) if v > 0 => Value::Int(v - 1),
+            Value::Int(v) => Value::Int(v + 1),
+        };
+        let Some(moved) = params::set(&base, &path, changed) else {
+            // A field that will not take the value is not this test's business; `params`'s own
+            // tests cover the setter.
+            continue;
+        };
+        if moved == base {
+            continue;
+        }
+        if hash_of(&moved) == baseline {
+            missed.push(path);
+        }
+    }
+
+    assert!(
+        missed.is_empty(),
+        "these parameters change the configuration and not its state hash, so two worlds that \
+         differ only in them are indistinguishable to every determinism check in the tree:\n  {}",
+        missed.join("\n  ")
+    );
+}
