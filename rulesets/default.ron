@@ -1,0 +1,20 @@
+// The engine's own numbers, named.
+//
+// Empty on purpose. It exists so that a scenario can say `ruleset: "default"` and mean it —
+// an explicit statement that it runs the baseline economy, rather than the silence that means
+// the same thing and reads like an omission. Every other ruleset in this directory is a diff
+// against it, so `of: "default"` is also the way to say "start from the engine".
+//
+// It is also the thing to copy when starting a new one, because the format is small enough that
+// the example is the documentation:
+//
+//   set: { "<dotted path into Rules>": <integer or bool>, ... }
+//
+// The paths are the ones the in-app parameter editor lists, prefixed by which of the three
+// config blocks they live in: `biology.`, `vm.` or `chemicals.`. `mm-cli balance` and
+// `mm_core::params::fields` will both enumerate them.
+(
+    name: "default",
+    notes: "The engine's own numbers. See crates/mm-core for where each of them is set and why.",
+    set: {},
+)

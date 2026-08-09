@@ -295,7 +295,58 @@ fn describe(path: &Path, e: &ScenarioError) -> FileError {
 pub fn load(path: &Path) -> Result<Scenario, FileError> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| FileError::Io(format!("cannot read {}: {e}", path.display())))?;
-    Scenario::from_ron(&text).map_err(|e| describe(path, &e))
+    // Through the ruleset library, not `Scenario::from_ron` — the difference is only visible for
+    // a file that names a ruleset, and there it is the difference between running the economy the
+    // file asked for and silently running the default one. See `mm_core::ruleset`.
+    rulesets(path).load_scenario(&text).map_err(|e| match e {
+        // A file that will not parse is not a scenario, and says so in those words — the
+        // resolver's own message would say "ruleset does not parse", which is true and unhelpful
+        // when what the reader has is a file of rubbish.
+        mm_core::ruleset::RulesetError::Parse(m) => describe(path, &ScenarioError::Parse(m)),
+        // Naming a ruleset that is missing, circular or full of typos is a fault in the scenario
+        // and not in the reader's disk, so it is reported as one.
+        other => FileError::Scenario(format!("{}: {other}", path.display())),
+    })
+}
+
+/// Every ruleset that applies to a scenario at `path`: a `rulesets/` beside its directory, then
+/// one in the working directory.
+///
+/// Missing is not an error — a tree with no `rulesets/` is one where no scenario names a set, and
+/// a scenario that names one that is not there fails at resolution with the name in the message.
+fn rulesets(path: &Path) -> mm_core::ruleset::RulesetLibrary {
+    let mut library = mm_core::ruleset::RulesetLibrary::new();
+    let mut roots: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(parent) = path.parent().and_then(Path::parent) {
+        roots.push(parent.join("rulesets"));
+    }
+    roots.push(std::path::PathBuf::from("rulesets"));
+    for root in roots {
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        // Sorted: the order a filesystem hands files back is not a thing a run may depend on.
+        let mut files: Vec<std::path::PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "ron"))
+            .collect();
+        files.sort();
+        for file in files {
+            let stem = file
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            if let Ok(text) = std::fs::read_to_string(&file) {
+                let _ = library.insert(&stem, &text);
+            }
+        }
+        if !library.is_empty() {
+            break;
+        }
+    }
+    library
 }
 
 /// Write a scenario out as a `.ron`.

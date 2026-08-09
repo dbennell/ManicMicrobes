@@ -115,14 +115,15 @@
     ],
     barriers: [],
 
-    // See 3 above. Off everywhere else, including in `BiologyConfig::default`, because it changes
-    // what every existing measurement means and M8 owns balancing.
-    biology: (
-        metabolism: (
-            rates: (
-                light_occlusion: 128,
-                rigidity_gain: 16384,
-            ),
-        ),
-    ),
+    // See 3 and 4 above. Off everywhere else, including in `BiologyConfig::default`, because it
+    // changes what every existing measurement means and M8 owns balancing.
+    //
+    // Named rather than written out, so that any other world can be run under the same economy —
+    // `mm-cli balance --ruleset rival_light` is the sweep this file's findings ask for and could
+    // not express while the two numbers lived here. `rulesets/rival_light.ron` carries them and
+    // the argument for why they are one setting rather than two.
+    //
+    // The carbon seeding of 1 above stays here, and the split is the general rule: a ruleset says
+    // what a cell may do, a scenario says what is in the world and where.
+    ruleset: "rival_light",
 )

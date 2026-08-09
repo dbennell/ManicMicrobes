@@ -439,3 +439,70 @@ fn every_parameter_reaches_the_state_hash() {
         missed.join("\n  ")
     );
 }
+
+/// Every shipped scenario that names a ruleset actually gets it.
+///
+/// The footgun this closes is quiet and specific. `Scenario::from_ron` applies no ruleset — which
+/// is correct for a snapshot, whose parameters are already complete, and wrong for a hand-written
+/// file. A caller that uses it on `the_thicket.ron` gets a world with the thicket's terrain and
+/// the *default* economy, under the thicket's name, with nothing anywhere reporting a problem.
+///
+/// So this asserts the difference is real: for every shipped scenario naming a ruleset, resolving
+/// it must produce different rules from not resolving it. A ruleset that changed nothing would be
+/// a file with no reason to exist, and a loader that ignored it would look exactly the same.
+#[test]
+fn a_scenario_that_names_a_ruleset_is_changed_by_it() {
+    let root = workspace_root();
+    let mut library = mm_core::ruleset::RulesetLibrary::new();
+    let mut sets: Vec<PathBuf> = std::fs::read_dir(root.join("rulesets"))
+        .expect("rulesets/")
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "ron"))
+        .collect();
+    sets.sort();
+    for path in &sets {
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let text = std::fs::read_to_string(path).expect("ruleset");
+        library
+            .insert(stem, &text)
+            .unwrap_or_else(|e| panic!("{stem}: {e}"));
+    }
+    assert!(!library.is_empty(), "no rulesets found at all");
+
+    let mut scenarios: Vec<PathBuf> = std::fs::read_dir(root.join("scenarios"))
+        .expect("scenarios/")
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "ron"))
+        .collect();
+    scenarios.sort();
+
+    let mut checked = 0;
+    for path in scenarios {
+        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        let text = std::fs::read_to_string(&path).expect("scenario");
+        // Every shipped scenario must load through the resolver at all — an unknown ruleset name
+        // is an error here rather than a surprise in a run.
+        let resolved = library
+            .load_scenario(&text)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        if resolved.ruleset.is_empty() {
+            continue;
+        }
+        checked += 1;
+        let plain = mm_core::Scenario::from_ron(&text).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_ne!(
+            plain.biology, resolved.biology,
+            "{name} names ruleset `{}`, and resolving it changes nothing — so either the ruleset \
+             is empty or the two are the same by accident, and either way a loader that skipped \
+             it would be undetectable",
+            resolved.ruleset
+        );
+    }
+    assert!(
+        checked > 0,
+        "no shipped scenario names a ruleset, so this guard is not guarding anything. \
+         If that is deliberate, delete it."
+    );
+}

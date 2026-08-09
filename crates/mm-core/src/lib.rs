@@ -60,6 +60,7 @@ pub mod organelle;
 pub mod params;
 pub mod phylogeny;
 pub mod rng;
+pub mod ruleset;
 pub mod scenario;
 pub mod sensing;
 pub mod snapshot;

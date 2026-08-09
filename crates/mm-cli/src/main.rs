@@ -47,6 +47,7 @@ OPTIONS:
     --save <file>          write a snapshot when the run ends
     --load <file>          resume from a snapshot instead of a scenario
     --check                verify the invariants at every sample, and fail if one breaks
+    --ruleset <name>       override the ruleset the scenario names (see rulesets/)
 
 MATCH OPTIONS:
     --ticks <n>            tick limit for the match             [default: 20000]
@@ -97,6 +98,8 @@ struct Options {
     prune_keep: u32,
     load: Option<PathBuf>,
     check: bool,
+    /// Override whatever ruleset the scenario names. See `mm_core::ruleset`.
+    ruleset: Option<String>,
     param: Option<String>,
     range: Option<(i64, i64)>,
     steps: u32,
@@ -119,6 +122,7 @@ impl Default for Options {
             prune_keep: 32,
             load: None,
             check: false,
+            ruleset: None,
             param: None,
             range: None,
             steps: 8,
@@ -141,7 +145,6 @@ fn run(args: &[String]) -> Result<(), String> {
     if command == "match" {
         return cmd_match(&args[1..]);
     }
-
     let mut opts = parse(&args[1..])?;
     if opts.scenario.as_os_str().is_empty() && opts.load.is_none() {
         return Err("no scenario given; try `mm-cli --help`".to_string());
@@ -286,6 +289,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
             }
             "--load" => o.load = Some(PathBuf::from(value()?)),
             "--check" => o.check = true,
+            "--ruleset" => o.ruleset = Some(value()?),
             "--param" => o.param = Some(value()?),
             "--steps" => o.steps = parse_u64(&value()?, "--steps")?.max(1) as u32,
             "--range" => {
@@ -329,10 +333,7 @@ fn build(opts: &Options) -> Result<World, String> {
         return Snapshot::read(&bytes).map_err(|e| format!("{}: {e}", path.display()));
     }
 
-    let text = std::fs::read_to_string(&opts.scenario)
-        .map_err(|e| format!("cannot read {}: {e}", opts.scenario.display()))?;
-    let mut scenario =
-        Scenario::from_ron(&text).map_err(|e| format!("{}: {e}", opts.scenario.display()))?;
+    let mut scenario = open_scenario(&opts.scenario, opts.ruleset.as_deref())?;
     if let Some(seed) = opts.seed {
         scenario.seed = seed;
     }
@@ -383,6 +384,64 @@ fn seed_inhabitants(world: &mut World, root: &Path) -> Result<(), String> {
 fn genome_root() -> PathBuf {
     mm_asm::locate::dir("genomes")
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../genomes"))
+}
+
+
+
+/// Every ruleset in a directory, by file stem.
+///
+/// Missing directory is not an error: a tree without `rulesets/` is one where no scenario names
+/// a set, and a scenario that names one it cannot find fails loudly at resolution rather than
+/// here. Sorted, because the order files come back from the filesystem is not a thing a run may
+/// depend on (hard rule 6).
+fn rulesets(dir: &Path) -> Result<mm_core::ruleset::RulesetLibrary, String> {
+    let mut library = mm_core::ruleset::RulesetLibrary::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(library);
+    };
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "ron"))
+        .collect();
+    files.sort();
+    for path in files {
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        library
+            .insert(&stem, &text)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    Ok(library)
+}
+
+/// Open a scenario file, resolving whatever ruleset it names.
+///
+/// **The one place a scenario is read from disk.** `Scenario::from_ron` applies no ruleset, which
+/// is right for a saved snapshot and wrong for a hand-written file, so every front-end path goes
+/// through here instead.
+fn open_scenario(path: &Path, override_with: Option<&str>) -> Result<mm_core::Scenario, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let library = rulesets(&ruleset_dir(path))?;
+    library
+        .load_scenario_as(&text, override_with)
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Where to look for rulesets, given a scenario's path: a sibling `rulesets/` beside the
+/// scenario's own directory, then `rulesets/` in the working directory.
+fn ruleset_dir(scenario: &Path) -> PathBuf {
+    if let Some(parent) = scenario.parent().and_then(Path::parent) {
+        let beside = parent.join("rulesets");
+        if beside.is_dir() {
+            return beside;
+        }
+    }
+    PathBuf::from("rulesets")
 }
 
 fn cmd_run(opts: &Options) -> Result<(), String> {
@@ -589,9 +648,7 @@ fn cmd_sweep(opts: &mut Options) -> Result<(), String> {
         return Err(format!("--range {lo}..{hi} runs backwards"));
     }
 
-    let text = std::fs::read_to_string(&opts.scenario)
-        .map_err(|e| format!("cannot read {}: {e}", opts.scenario.display()))?;
-    let base = Scenario::from_ron(&text).map_err(|e| e.to_string())?;
+    let base = open_scenario(&opts.scenario, opts.ruleset.as_deref())?;
 
     println!(
         "{:<28} {:>10} {:>8} {:>8} {:>12} {:>18}",

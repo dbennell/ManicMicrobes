@@ -209,6 +209,20 @@ pub struct Scenario {
     #[serde(default)]
     pub flux: Vec<Flux>,
 
+    /// The named parameter set these rules came from, or `None` for the engine's own.
+    ///
+    /// **Provenance, not a reference.** It records where the numbers came from and is never
+    /// re-applied over values that are already here — see [`crate::ruleset`] for why that is what
+    /// keeps hard rule 7 intact, and for the test that says so.
+    ///
+    /// Resolution happens once, at load, in [`crate::ruleset::RulesetLibrary::load_scenario`].
+    /// [`Scenario::from_ron`] carries this through and applies nothing, which is right for a
+    /// saved scenario (whose parameters are already complete) and wrong for a hand-written one —
+    /// so a front end loads through the library.
+    /// A `String` rather than an `Option<String>`, empty meaning "the engine's own", for the
+    /// reason [`crate::ruleset::Ruleset::of`] is one: RON spells a present option `Some("x")`,
+    /// and these files are written by hand.
+    pub ruleset: String,
     pub vm: VmConfig,
 
     /// Costs, rates, mutation, junctions, ecology and the organelle catalogue (M10.2).
@@ -244,6 +258,7 @@ impl Default for Scenario {
             barriers: Vec::new(),
             inhabitants: Vec::new(),
             flux: Vec::new(),
+            ruleset: String::new(),
             vm: VmConfig::DEFAULT,
             biology: crate::biology::BiologyConfig::default(),
         }

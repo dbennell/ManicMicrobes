@@ -1,0 +1,26 @@
+// Light that runs out, and cells stiff enough that being buried costs something.
+//
+// The four settings `the_thicket.ron` discovered, lifted out of that scenario so that any world
+// can be run under them. Its own header is the argument and should be read before this is used;
+// the short version is that **none of them does anything on its own**, which is why they are one
+// ruleset rather than four.
+//
+// `docs/ECONOMY.md` §5 and §9 are why this exists as a named set at all: making light rival is
+// the only dial measured so far that changes which strategy wins, and until there was somewhere
+// to put it, testing "the whole library under rival light" meant editing every scenario.
+//
+// The two carbon settings from `the_thicket.ron` are *not* here. Seeding is terrain, not rules —
+// a world says how much carbon is in it, and this says what a cell may do with it.
+(
+    name: "rival light",
+    of: "default",
+    notes: "the_thicket.ron's economy, available to any world. Measured; see that file.",
+    set: {
+        // The only shape light rivalry can take on a slide lit from outside the plane: a cell is
+        // shaded by what is lying over it. See MetabolicRates::light_occlusion.
+        "biology.metabolism.rates.light_occlusion": 128,
+        // Without this, occlusion reaches parity and stops: a shaded cell grows less, shrinks,
+        // overlaps less and is therefore shaded less. Stiffness closes that loop.
+        "biology.metabolism.rates.rigidity_gain": 16384,
+    },
+)
