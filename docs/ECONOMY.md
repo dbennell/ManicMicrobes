@@ -44,6 +44,8 @@ ones**. Read this page before trusting anything below it.
 | §10a, "re-cut `seasons` first" | §11 — the winter already thins rather than culls, and the hoarder's death was never about it |
 | §10, "dimming the light comes first" | §11.4 — nothing can afford to get fat in the dark, so the cost side has to move first |
 | §12.1, "the earning pair cannot be stacked" | fixed. A lysosome is now catalase; see below |
+| §4b, "not the cost of swimming — motility is nearly free and nearly useless" | §14 — the cost is right and the rest is not. Below 192 `Q10` of thrust a cell is driven *backwards* by its own wake, and every cilium in the library is under it |
+| §12.3, "the sensors and cilia work, and have been judged on the wrong slide" | §14.4 — half withdrawn. `drifter.mm`'s 927‰ in the drift is its cilia holding station against the current with their backwash, not swimming |
 
 ### What has landed in the code
 
@@ -72,7 +74,22 @@ ones**. Read this page before trusting anything below it.
    catalogue entry whose function is economic and the one where the price decides the outcome.
 4. **Measure on worlds that vary.** Free, and already paying: `drifter.mm` is 19‰ in the still
    soup and 927‰ in the drift. The sensors and cilia are not broken; they have been judged on the
-   one slide where nothing they report is worth knowing.
+   one slide where nothing they report is worth knowing. — **The cilia are broken; see §14.** The
+   worlds still want varying and the 927‰ is not evidence for it.
+
+### What §14 adds, and it is the largest thing outstanding
+
+**Nothing in this engine has ever swum forward.** A cell producing under 192 `Q10` of thrust is
+driven backwards by the wake it makes, because its thrust reaches it through a dragged velocity
+and its own reaction reaches it through an undragged drift that accumulates sixteenfold first.
+Every cilium in `genomes/` is under that threshold, `drifter.mm` included, and `IMM` cannot push
+the number that would clear it. In a crowd the first cilium returns 3% of its open-water speed and
+the third returns 67%, so the gradient into motility is convex where evolution needs it concave.
+
+This displaces the ranking above rather than joining it, because motility is upstream of most of
+it: the pursuit predator, the bloodhound, the pack hunter and the ram feeder in §8 are all
+strategies that have to get somewhere first, and none of them has ever been tested on a body that
+could.
 
 ### How to run any of it
 
@@ -342,6 +359,12 @@ Measured, so that nobody spends a week re-deriving it.
 * **Not the cost of swimming.** Two cilia at `param 80` at full power cost 160 `Q10` a tick, under
   7% of gross. Motility is nearly free. It is also nearly useless, because on a uniformly lit,
   uniformly fed slide there is nowhere better to be.
+
+  **The second sentence is right and the third is not the reason — see §14.** That measurement was
+  taken on one cell alone in open water, at a power no shipped genome can command. Below 192 `Q10`
+  of thrust a cell is pushed backwards by the wake it makes, `drifter.mm` produces 158, and in a
+  crowd the first cilium returns 3% of its open-water speed. Motility is not a cheap thing nothing
+  needs; it is a thing the engine does not currently do.
 * **Not blindness.** `hunting_probe` established that a photosensor reading the metabolic band
   steers a cell to a crowd five squares away, and that swimming blind does not. Homing works.
 
@@ -1092,6 +1115,12 @@ They are not the problem they look like. §2a measured `drifter.mm` at **19‰ i
 that one world has somewhere better to be. These organelles work. They have been measured on
 `soup.ron`, which is the one world in the library where nothing they report is worth knowing.
 
+**The last two sentences are withdrawn; see §14.4.** The 927‰ is not a swimmer in a world worth
+swimming in — `drifter.mm`'s cilia point east into an eastward current, and what keeps its
+population off the downstream wall is the *westward wake* they make. It has never produced net
+forward motion on any slide. The sensors may well be fine and the cilia are not, so the two halves
+of this paragraph have to be re-measured apart from one another.
+
 ### 12.4 What that means for the order of work
 
 The three groups want, in order of cost:
@@ -1128,7 +1157,266 @@ one organelle must at least be able to live.
 * **Whether the active organelles behave like the passive ones.** §9a scaled the *catalogue*, and
   `spike_upkeep`, `THRUST_ENERGY` and `HOLDFAST_ENERGY` sit outside it — the per-tick cost of
   actually using a spike, a cilium or a holdfast was never in that sweep. Everything §9a concludes
-  is about organelles that cost the same whether or not they are doing anything.
+  is about organelles that cost the same whether or not they are doing anything. **§14 is the
+  cilium's half of this and it turns out not to be a pricing question at all.**
+
+---
+
+## 14. Nothing swims, and the reason is not economic
+
+Prompted by an observation from the microscope rather than from the ledger: on a full slide every
+cell sits still and grows from its chloroplasts, and no lineage has ever been watched to move
+under its own steam. §4b answered that question once — *"not the cost of swimming… motility is
+nearly free, and nearly useless, because on a uniformly lit slide there is nowhere better to
+be"* — and that answer is **half right and measured in the wrong place**. It costs what §4b says
+it costs. It does not do what §4b assumes it does.
+
+Everything below is `crates/mm-core/tests/motility_probe.rs`:
+
+```
+cargo test --release -p mm-core --test motility_probe -- --ignored --nocapture --test-threads=1
+```
+
+### 14.1 A cell below 192 `Q10` of thrust is driven backwards by its own wake
+
+One sterile body, alone, still water, 60 ticks, against the same body with the fluid solver
+switched off so that the only difference is the water it stirs:
+
+```text
+ cilia  param  power   thrust | with wake   no wake     lost  wake Q10
+     1     20   1024       80 |      -4.5       4.6     198%      -256
+     1     40   1024      160 |      -1.4      11.1     112%      -256
+     1     80   1024      320 |      13.2      24.2      46%      -256
+     2     80    255      158 |      -1.5      10.9     113%      -230
+     2     80   1024      640 |      46.4      49.6       7%      -256
+     3     80   1024      960 |      74.4      74.4       0%         0
+     4     80   1024     1280 |      99.3      99.3       0%         0
+     2    255   1024     2040 |     158.3     158.3       0%         0
+```
+
+**A weak swimmer swims backwards.** Not slowly — *backwards*, in the direction opposite the one
+its cilia are pointing, at up to 198% of the distance it would have covered in water that did not
+push back.
+
+The mechanism is exact, and it is an **asymmetry between two paths into the same cell**:
+
+* **Thrust reaches the cell through its velocity**, which is dragged. `DRAG_RETAIN` is a quarter,
+  so a cilium producing `f` settles the cell at `4f/3`.
+* **The reaction reaches the cell through the drift**, which is *not*. `step_physics` adds
+  `drift` straight to the position step, deliberately and with a comment saying so — a cell
+  carried by a current has a velocity of zero. So the wake acts at full strength.
+* **And the wake is amplified sixteenfold before it saturates.** `impulse_retain` is 15/16, so a
+  cell beating steadily in one square accumulates its own reaction to `16f`, and
+  `CurrentField::apply` then clamps the water to `MAX_VELOCITY` = 256 `Q10`. **Any cilium
+  producing more than 16 `Q10` saturates the water underneath it**, so the backwash is 256
+  whatever the cell is doing.
+
+Set the two equal and the threshold is a number:
+
+```text
+    4f/3 = 256   ->   f = 192 Q10 of thrust
+```
+
+Below 192 a cell moves backwards; above it, forwards. At full power that is **one cilium above
+`param` 48** — and the `lost` column shows the second half, which is that a cell fast enough to
+leave the square before the impulse accumulates escapes the wake entirely rather than merely
+outweighing it. At three cilia the loss is not small, it is *zero*.
+
+So motility has a **hard threshold with a reversal below it**, and neither is a price.
+
+### 14.2 Every cilium in the library is under that threshold
+
+The shipped genomes, assembled and run as written — one founder, empty slide, 600 ticks:
+
+```text
+            genome    cilia     thrust  dx (wake) dx (none)     cells
+        drifter.mm        2        158       -8.5      121.5        6
+  drifter_blind.mm        2        158       -8.5      121.5        6
+        stalker.mm        2         28       -1.4        2.4        2
+         reflex.mm        1          0        0.0        0.0        1
+       ancestor.mm        0          0        1.4        1.4        8
+```
+
+**`drifter.mm` swims backwards.** The genome written to be M3's chemotaxis ancestor — whose header
+says *"the cell swims, in whatever direction its cilia happen to be mounted, forever"* — travels
+eight and a half squares the wrong way in six hundred ticks, and would have travelled a hundred
+and twenty-one the right way in water that did not push back.
+
+Two separate faults put it there, and the second is an ISA-level trap:
+
+**A genome cannot ask for full power in one instruction.** `Template::value` is a `u8`, so `IMM`
+pushes at most 255, and a control input is a `Q10` fraction of 1024. Every `#swim` gene in the
+library is `IMM 255 / ZERO / IMM <slot> / OSET`, which is **a quarter throttle**, and
+`drifter.mm`'s own comment above it reads "Full power on both cilia". Reaching 1024 needs
+arithmetic — `IMM 4 / IMM 8 / SHL` — and nothing does it. Two cilia at `param` 80 at a quarter
+throttle make 158 `Q10`, which is under the 192 of §14.1 by 18%.
+
+**And `Organelle::finished` starts a new organelle at `control = [1024, 0]`.** So a cilium that no
+genome ever touches runs at *four times* the power one that is deliberately switched on does:
+`#swim` does not turn drifter's cilia on, it turns them down. That is also why `reflex.mm` reads
+thrust 0 — it is the one genome that writes a zero.
+
+`control[1]`, the mount angle, is never written by any genome in the library, so **every cilium in
+`genomes/` is mounted due east** and the "two cilia, one +x and one +y" in `drifter.mm`'s slot
+comment is not what it builds.
+
+The M3 acceptance test does not catch this. `cilia_actually_move_a_population_around` asserts that
+some cell's position differs from the founder's start, and eight squares of backwash satisfies it
+as readily as a hundred of swimming.
+
+### 14.3 In a crowd the return on thrust is convex, so the first cilium buys nothing
+
+§4b measured one cell alone in open water. Every cell anybody has *watched* is in a mat. The same
+bodies dropped into one end of a saturated ancestor mat — 1,840 cells on a 300×24 channel, so
+nothing here reaches the far wall — against the same bodies in open water, 100 ticks each:
+
+```text
+rigidity_gain 0  (the default)
+ cilia  param  power   open sq |    mat sq  mat path ticks v>0   Q10/t of open
+     0      0      0       0.0 |       0.7       9.6         0       0      0%
+     1     80   1024      22.0 |       0.8       6.2        38      80      3%
+     2     80   1024      77.4 |      27.0      32.2        49     160     34%
+     3     80   1024     124.2 |      83.7      96.0        91     240     67%
+     4     80   1024     165.9 |     124.0     133.5        93     320     74%
+     2     80    255       2.8 |       1.1       5.9         1      38     40%
+     2    255   1024     264.4 |     209.0     219.6        96     510     79%
+```
+
+**The return on investment rises with the investment: 3%, 34%, 67%, 74%.** That is the wrong shape
+for anything evolution has to climb. A lineage can only add one cilium at a time, and the first
+one returns three per cent of its open-water speed while costing 80 `Q10` a tick from the first
+tick it exists. The regime where swimming works starts at three.
+
+Raced as genomes rather than hand-built bodies — `ancestor.mm` with *n* extra `BUILD`s for a
+cilium, against `ancestor.mm`, on the arena slide, 20,000 ticks — the gradient is not merely flat,
+it is monotonically downhill:
+
+```text
+   cilia   1      2      3      4
+   share   33‰    28‰    15‰    17‰
+```
+
+So on the control slide there is no path to the working regime at all: every step towards it is
+punished, and the reward at the end of the four steps is a world where nothing needed the trip.
+
+**And `rigidity_gain` is zero by default**, which is the second half of this and the one that is
+plainly a mistake rather than a trade. `neighbours::firmness` returns 0 unconditionally when the
+gain is zero, so the membrane and the turgor a genome pays for in matter and upkeep buy *nothing*
+in the contact solver: every cell is maximally limp, `CONTACT_FRICTION` takes three quarters of
+its sliding speed every tick, and `REST_SPEED` pins it outright below `Q10/24`. The code's own
+comment says exactly what that costs — *"getting into a crowd, through it and out again is
+exactly the manoeuvre a soft cell cannot do"* — and then the parameter that would let a cell buy
+its way out is set to zero everywhere but `the_marbles.ron` and `the_thicket.ron`. Turning it up:
+
+```text
+   two cilia at param 80, full power, in the same mat
+   rigidity_gain       0    1024   16384
+   of open water     34%     30%     72%
+   ticks v>0          49      62     100
+```
+
+At the high gain the pinning stops entirely — the cell has some velocity on all hundred ticks
+instead of half of them — and a two-cilium body keeps 72% of its open-water speed instead of 34%.
+The first cilium is still worth 8%, so firmness lifts the curve without unbending it: the
+convexity of §14.3 is the wake of §14.1 and the crowd is on top of it.
+
+### 14.4 And on the one slide where cilia pay, they are working as an anchor
+
+§2a has `drifter.mm` at 19‰ in the still soup and **927‰ in the drift**, which reads as a swimmer
+finally earning its keep. It is not. `the_drift.ron` runs a uniform current east at 128 `Q10`;
+every cilium in the library is mounted due east, *with* it. Sixteen founders of `drifter.mm` with
+one immediate changed — the value `#swim` writes to both cilia — 20,000 ticks:
+
+```text
+     power   thrust     wake    cells   mean x    at x>80
+         0        0     +128       48       94         48
+        64       40      -87      672       69        214
+       128       80     -256     1141       53        217
+       255      158     -256      964       52        179
+      1024      640     -256       28       94         28
+```
+
+The channel's downstream wall is at x=90. **At zero power all 48 survivors are piled against it,
+and at full power all 28 of them are too** — a cell rowing east in an eastward current arrives
+faster and dies there. The population that lives is the one at power 128, sitting at x=53 in
+mid-channel, and what holds it there is the **westward wake**, which saturates at −256 and cancels
+the +128 current twice over.
+
+So the cilia are not carrying the cell anywhere. They are a holdfast made of backwash, on a slide
+with no barrier to grip. The trait §2a credits with the largest swing in the panel is
+station-keeping by accident, and the shipped throttle is next to the optimum by luck — 128 beats
+255 by 18% and beats both extremes by twenty-four fold.
+
+### 14.5 There is nowhere to swim to anyway, and nothing dies to make room
+
+The slide the observation came from, run headless: `predator_introduction.ron`, sixteen
+`ancestor.mm` founders, mutation as shipped.
+
+```text
+   tick   cells   births   deaths   refused  contacts moved/cell    thrust    cilia
+   1000     510     1528     1034      1154       230      28.90         0        0
+   4000    3456     2907     2577     92815      4016      80.73         0        0
+   7000    3959      188       87    116344      6551      84.22         0        0
+  10000    4135      121       54    119134      7296      85.32         0        0
+
+what the 4135 survivors carry:
+   membrane 4135   nucleus 4118   mitochondrion 4124   chloroplast 4126   photosensor 4
+```
+
+Three things, and the third is the one that matters most.
+
+* **`thrust` is zero in every interval.** Not one cell in ten thousand ticks beat anything, and
+  there is not one cilium in the final population. §9a said no fifth organelle type reaches one
+  per cent at any price; this is the same finding with the type named.
+* **119,134 divisions are refused per thousand ticks against 121 births.** The slide is 99.9%
+  blocked, which is §3's packing ceiling arriving at three times the scale.
+* **Deaths fall to 54 per thousand ticks in a population of 4,135** — a turnover of about one per
+  cent per thousand ticks, with a mean age of 4,498 at tick 8,000. A saturated slide is not an
+  equilibrium with vacancies being competed for. **It is a jam of near-immortal cells**, and a
+  world where nothing dies is a world with no selection in it, whatever its mutation rate. That
+  is what the microscope is showing: not cells choosing to sit still, but a population that has
+  stopped having a history.
+
+### 14.6 What this argues for, in order
+
+The first two are faults rather than balance, and neither is a price.
+
+**1. Stop a cell sitting in its own wake.** This is the whole of §14.1 and most of §14.2 and
+§14.4, and it is small. Three candidates, and the first is the one to try:
+
+  * **Put the reaction in the square the thrust points away from** rather than the one the cell is
+    standing on. A cilium pushes water *behind* it; depositing the impulse under the cell is what
+    makes a swimmer its own headwind. One expression in `step_physics`, physically more honest
+    than what is there, and it keeps the reaction that SPEC wants.
+  * Or exempt a cell from the drift it itself created this tick, which is cheaper still but
+    special-cases a cell against its own wake and would not fix two cells swimming side by side.
+  * Or route the drift through drag the way `Scenario::gravity` already is, which removes the
+    asymmetry at its root but changes how *every* current acts on *every* body — a much larger
+    blast radius, and it would need every acceptance number re-taken.
+
+  **This is a decision that wants review**, because all three change measured physics. Nothing has
+  been changed in the code; §14 is measurement only.
+
+**2. Make the throttle reachable, and fix the genomes.** A genome cannot write 1024 with one
+`IMM` and every genome in the library tries to. Two halves:
+
+  * The genome fix is free and should happen regardless: `#swim` should write `IMM 4 / IMM 8 /
+    SHL`, and something should write `control[1]` so that a cell with two cilia is not pointing
+    both of them the same way. This is §10.5's list with a fifth entry.
+  * Whether `Organelle::finished` should default a *cilium* to full power is a real question. It
+    is the right default for a chloroplast, and for a cilium it means the first thing a mutation
+    builds sets off east at full tilt. Worth deciding deliberately rather than inheriting.
+
+**3. Turn `rigidity_gain` on somewhere that is not one of two scenarios.** It is built, it is
+measured, it is in the state hash, and at zero it makes the membrane's contribution to the contact
+model unbuyable — the same shape of fault as `light_occlusion` in §10.1. §14.3 measures what it is
+worth. The `the_thicket.ron` caution in §9 applies: its settings move as a unit.
+
+**4. Only then ask what a cilium is worth.** Every number in §4b, §9a and §12.3 about motility was
+taken on bodies that could not move forward. `drifter.mm` at 19‰ in the soup and 927‰ in the drift
+is not a swimmer being judged on the wrong slide, as §12.3 concluded — it is a body whose cilia
+have never once produced net forward motion, scoring twice on the merits of its backwash. **That
+paragraph is withdrawn and the question is open again.**
 * **What a lysosome should cost now that it does two jobs.** It digests carrion and decomposes
   peroxide on one capacity and one upkeep. That is defensible — one machine, two substrates — but
   it was priced when it did one of them.
