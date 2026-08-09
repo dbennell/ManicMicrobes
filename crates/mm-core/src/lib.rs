@@ -35,6 +35,7 @@
 #![warn(missing_debug_implementations)]
 
 pub mod arena;
+pub mod balance;
 pub mod biology;
 pub mod cell;
 pub mod chem;

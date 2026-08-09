@@ -32,6 +32,7 @@ USAGE:
     mm-cli sweep <scenario.ron> [options]     run it once per parameter value
     mm-cli hash  <scenario.ron> [options]     print the state hash, for determinism checks
     mm-cli match <left.mm> <right.mm> [opts]  play an arena match and report it
+    mm-cli balance [options]                  run the balance panel and report the matrix
 
 OPTIONS:
     --ticks <n>            how long to run                     [default: 100000]
@@ -53,6 +54,16 @@ MATCH OPTIONS:
     --ticks <n>            tick limit for the match             [default: 20000]
     --seed <n>             the match seed
     --population <n>       cells per side                       [default: 8]
+
+BALANCE OPTIONS:
+    --scale <pct>          fraction of each world's full bout length   [default: 100]
+    --seeds <n>            how many of the recorded seeds to use, 1..5 [default: 3]
+    --genomes <dir>        where the contenders live                   [default: genomes]
+    --scenarios <dir>      where the panel's worlds live               [default: scenarios]
+    --only <a,b,...>       just these contenders, by name
+    --ndjson <file>        write the matrix as NDJSON as well as printing it
+    --mirror-only          run just the fairness control and stop
+    --ruleset <name>       run every world under this ruleset instead of its own
 
 SWEEP OPTIONS:
     --param <name>         one of: mutation, duplication, fluid, light
@@ -145,6 +156,11 @@ fn run(args: &[String]) -> Result<(), String> {
     if command == "match" {
         return cmd_match(&args[1..]);
     }
+    // `balance` takes no scenario either: it runs a whole panel of them.
+    if command == "balance" {
+        return cmd_balance(&args[1..]);
+    }
+
     let mut opts = parse(&args[1..])?;
     if opts.scenario.as_os_str().is_empty() && opts.load.is_none() {
         return Err("no scenario given; try `mm-cli --help`".to_string());
@@ -457,6 +473,225 @@ fn ruleset_dir(scenario: &Path) -> PathBuf {
         }
     }
     PathBuf::from("rulesets")
+}
+
+/// Run the balance panel: every shipped organism against the reference, on every shipped world.
+///
+/// The economy's counterpart to `cargo bench` and `shaderbench`. It answers one question — is any
+/// way of making a living other than the first one anybody wrote worth living? — and it answers it
+/// as a matrix rather than a verdict, because the useful output of a balance pass is knowing
+/// *which* world makes *which* strategy pay.
+///
+/// The first thing it prints is the fairness control, and nothing below it means anything until
+/// that reads level: two identical lineages, mirrored, on each world. See `mm_core::balance`.
+fn cmd_balance(args: &[String]) -> Result<(), String> {
+    let mut scale = 100u64;
+    let mut seeds = 3usize;
+    let mut genomes = PathBuf::from("genomes");
+    let mut scenarios = PathBuf::from("scenarios");
+    let mut only: Option<Vec<String>> = None;
+    let mut ndjson: Option<PathBuf> = None;
+    let mut mirror_only = false;
+    // The half of balancing the panel could not do before `mm_core::ruleset` existed: hold the
+    // worlds fixed and vary the rules.
+    let mut ruleset: Option<String> = None;
+
+    let mut i = 0usize;
+    while i < args.len() {
+        let Some(flag) = args[i].strip_prefix("--") else {
+            return Err(format!("unexpected argument `{}`", args[i]));
+        };
+        if flag == "mirror-only" {
+            mirror_only = true;
+            i += 1;
+            continue;
+        }
+        let value = args
+            .get(i + 1)
+            .ok_or_else(|| format!("--{flag} needs a value"))?;
+        match flag {
+            "scale" => scale = value.parse().map_err(|_| "--scale wants a number".to_string())?,
+            "seeds" => {
+                seeds = value
+                    .parse::<usize>()
+                    .map_err(|_| "--seeds wants a number".to_string())?
+                    .clamp(1, mm_core::balance::SEEDS.len())
+            }
+            "genomes" => genomes = PathBuf::from(value),
+            "scenarios" => scenarios = PathBuf::from(value),
+            "only" => only = Some(value.split(',').map(|s| s.trim().to_string()).collect()),
+            "ndjson" => ndjson = Some(PathBuf::from(value)),
+            "ruleset" => ruleset = Some(value.clone()),
+            other => return Err(format!("unknown option `--{other}`")),
+        }
+        i += 2;
+    }
+
+    let assemble = |name: &str| -> Result<Vec<u8>, String> {
+        let path = genomes.join(name);
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(mm_asm::assemble(&text)
+            .map_err(|e| format!("{} does not assemble:\n{e}", path.display()))?
+            .bytes)
+    };
+
+    let panel: Vec<mm_core::balance::Arena> = mm_core::balance::shipped_panel()
+        .iter()
+        .map(|entry| {
+            let path = scenarios.join(entry.file);
+            let scenario = open_scenario(&path, ruleset.as_deref())?;
+            Ok(entry.arena(scenario, scale))
+        })
+        .collect::<Result<_, String>>()?;
+
+    println!("the panel, and the limit each world poses:");
+    for entry in mm_core::balance::shipped_panel() {
+        println!("  {:>9}  {}", entry.label, entry.poses);
+    }
+
+    let reference = mm_core::balance::Contender::new("ancestor", assemble("ancestor.mm")?);
+    let seeds = &mm_core::balance::SEEDS[..seeds];
+
+    // Names, not paths: `ancestor_sloppy` is a deliberately broken control and the five ISA
+    // demonstrations build no body, so neither belongs in a contest about ways of living.
+    const LIBRARY: [&str; 11] = [
+        "drifter", "hoarder", "hunter", "marble", "oscillator", "parasite", "predator",
+        "scavenger", "sentinel", "sponge", "stalker",
+    ];
+    let wanted: Vec<&str> = match &only {
+        Some(list) => LIBRARY
+            .into_iter()
+            .filter(|n| list.iter().any(|w| w == n))
+            .collect(),
+        None => LIBRARY.into_iter().collect(),
+    };
+    let contenders: Vec<mm_core::balance::Contender> = if mirror_only {
+        Vec::new()
+    } else {
+        wanted
+            .iter()
+            .map(|n| {
+                Ok(mm_core::balance::Contender::new(
+                    *n,
+                    assemble(&format!("{n}.mm"))?,
+                ))
+            })
+            .collect::<Result<_, String>>()?
+    };
+
+    let report = mm_core::balance::tournament(&panel, &contenders, &reference, seeds)
+        .map_err(|e| e.to_string())?;
+
+    // The control, first and on its own, because nothing below it means anything until it reads
+    // level.
+    println!("\nfairness control — the reference against itself, mirrored:");
+    for (world, m) in report.arenas.iter().zip(report.mirror.iter()) {
+        let off = m.abs_diff(mm_core::balance::EVEN);
+        let verdict = if off <= mm_core::balance::MIRROR_TOLERANCE {
+            "level"
+        } else {
+            "TILTED — this world has a better half and its column is meaningless"
+        };
+        println!("  {world:>9}  {m:>4}  {verdict}");
+    }
+    if !report.unfair().is_empty() {
+        println!("\nrefusing to report a matrix taken on an unfair panel.");
+        return Err(format!("unfair worlds: {:?}", report.unfair()));
+    }
+    if mirror_only {
+        return Ok(());
+    }
+
+    print!("\n{:>12}", "");
+    for a in &report.arenas {
+        print!(" {a:>9}");
+    }
+    println!("   {:>6} {:>7} {:>5}", "best", "spread", "wins");
+    for row in &report.rows {
+        print!("{:>12}", row.name);
+        for (a, share) in row.share.iter().enumerate() {
+            let mark = if row.alive.get(a).copied().unwrap_or(false) {
+                ' '
+            } else {
+                '*'
+            };
+            print!(" {share:>8}{mark}");
+        }
+        println!(
+            "   {:>6} {:>7} {:>5}",
+            row.best(),
+            row.spread(),
+            row.wins()
+        );
+    }
+    println!(
+        "\npermille of the two-lineage population, median of {} seeds. 500 is a dead heat.\n\
+         * = the lineage was extinct at the end of every seed in that world.",
+        seeds.len()
+    );
+
+    println!("\nbest share reached by any contender carrying each organelle:");
+    for (kind, best) in report.by_organelle() {
+        let flag = if best < mm_core::balance::PAYOFF_FLOOR {
+            "  <-- pays nowhere in this panel"
+        } else {
+            ""
+        };
+        println!("  {:>14}  {best:>4}{flag}", kind.name());
+    }
+
+    println!("\nthe four gates:");
+    let gate = |ok: bool| if ok { "pass" } else { "FAIL" };
+    println!(
+        "  viability      {}   extinct everywhere: {:?}",
+        gate(report.extinct().is_empty()),
+        report.extinct()
+    );
+    println!(
+        "  payoff         {}   pays nowhere (floor {}): {:?}",
+        gate(report.stranded().is_empty()),
+        mm_core::balance::PAYOFF_FLOOR,
+        report.stranded()
+    );
+    println!(
+        "  discrimination {}   median spread {} (floor {}), distinct winners {}",
+        gate(
+            report.discrimination() >= mm_core::balance::DISCRIMINATION_FLOOR
+                && report.distinct_winners() >= 2
+        ),
+        report.discrimination(),
+        mm_core::balance::DISCRIMINATION_FLOOR,
+        report.distinct_winners()
+    );
+    println!(
+        "  no sweep       {}   swept the panel: {:?}",
+        gate(report.sweepers().is_empty()),
+        report.sweepers()
+    );
+
+    if let Some(path) = ndjson {
+        let mut out = String::new();
+        for (a, world) in report.arenas.iter().enumerate() {
+            out.push_str(&format!(
+                "{{\"world\":\"{world}\",\"mirror\":{}}}\n",
+                report.mirror[a]
+            ));
+        }
+        for row in &report.rows {
+            for (a, share) in row.share.iter().enumerate() {
+                out.push_str(&format!(
+                    "{{\"genome\":\"{}\",\"world\":\"{}\",\"share\":{share},\"alive\":{}}}\n",
+                    row.name,
+                    report.arenas[a],
+                    row.alive.get(a).copied().unwrap_or(false)
+                ));
+            }
+        }
+        std::fs::write(&path, out).map_err(|e| format!("{}: {e}", path.display()))?;
+        println!("\nwrote {}", path.display());
+    }
+    Ok(())
 }
 
 fn cmd_run(opts: &Options) -> Result<(), String> {
