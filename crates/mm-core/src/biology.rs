@@ -336,6 +336,17 @@ pub fn osmotic_load_against(interior: &[i32], silent: i64) -> i64 {
     (solute - silent).max(0)
 }
 
+/// The smallest nucleus `param` that would hold a genome of `bytes`.
+///
+/// The inverse of [`nucleus_capacity`], and the thing a genome's own `#build` gene is choosing
+/// when it writes an immediate: `stalker.mm`'s comment "nucleus: 640 bytes" is this arithmetic
+/// done by hand. Saturating at `u8::MAX`, which is 2,040 bytes — a genome longer than that
+/// cannot be held by one nucleus at all and [`CellHost::bud`] will refuse to copy it.
+#[must_use]
+pub fn nucleus_param_for(bytes: usize) -> u8 {
+    bytes.div_ceil(GENOME_BYTES_PER_NUCLEUS_PARAM).min(u8::MAX as usize) as u8
+}
+
 /// How many genome bytes a cell's nuclei can hold.
 #[must_use]
 pub fn nucleus_capacity(cells: &CellArena, i: usize) -> usize {

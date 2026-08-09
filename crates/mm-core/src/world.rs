@@ -1133,6 +1133,9 @@ impl World {
             return 0;
         }
         let structural = self.biology.structural_chemical;
+        // Sized here, from the bytes, before `genome` is shadowed by the interned `Arc`. See
+        // where it is used below for why it is not the fixed 40 it was.
+        let nucleus = crate::biology::nucleus_param_for(genome.len()).max(40);
         let (w, h) = (
             self.substrate.width() as i32,
             self.substrate.height() as i32,
@@ -1163,8 +1166,28 @@ impl World {
             let Some(i) = self.cells.index(id) else {
                 continue;
             };
-            self.cells.slots_mut(i)[1] =
-                crate::organelle::Organelle::finished(crate::organelle::OrganelleType::Nucleus, 40);
+            // Big enough to hold the genome it is being handed, and never smaller than the 40
+            // this was fixed at.
+            //
+            // A fixed 40 is 320 bytes, and **six of the twenty-one genomes in `genomes/` are
+            // longer than that** — `stalker.mm` is 596. `CellHost::bud` returns zero when the
+            // genome will not fit the nucleus, so those founders could not divide *at all* until
+            // their own `#build` finished upgrading the nucleus, and a hunter that is paying for
+            // a spike and two cilia may never afford to. It presents as a hand-placed organism
+            // that hunts well, never breeds, and dies — which is what the microscope showed.
+            //
+            // The kit exists because "bootstrapping from a bare membrane is a scenario in its own
+            // right and not something every run should have to survive first", and a nucleus that
+            // silently forbids reproduction fails that for exactly the long genomes that need the
+            // help most. Sizing it to the genome is the same policy applied properly.
+            //
+            // `max` rather than an exact fit, so that every genome which already fitted gets the
+            // nucleus it has always been given and no result taken on one moves. Saturating into
+            // a `u8` bounds it at 2,040 bytes, past which `bud` refuses and the inspector says so.
+            self.cells.slots_mut(i)[1] = crate::organelle::Organelle::finished(
+                crate::organelle::OrganelleType::Nucleus,
+                nucleus,
+            );
             self.cells.slots_mut(i)[2] = crate::organelle::Organelle::finished(
                 crate::organelle::OrganelleType::Mitochondrion,
                 50,
