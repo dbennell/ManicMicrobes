@@ -69,6 +69,13 @@ pub struct Capacities {
     /// upkeep block asks for it, so hoisting it would price a cell's turgor on chemistry it no
     /// longer holds.
     pub upkeep: i32,
+    /// How much of its own reactive byproduct this cell's lysosomes can decompose a tick, by
+    /// pathway.
+    ///
+    /// Catalase. The fourth of these hoists and exact for the same reason the others are: it is a
+    /// function of the organelle slots alone, and nothing in the sequential loop builds, tears
+    /// down or retypes one.
+    pub catalase: [i32; crate::organelle::PATHWAY_COUNT],
     /// How much solute this cell's vacuoles hold out of the osmotic reckoning.
     ///
     /// The loadout-dependent half of `biology::osmotic_load`, and the last instance of the same
@@ -594,6 +601,7 @@ impl Metabolism {
             slot.photosynthesis = self.capacity_by_pathway(cells, i, OrganelleType::Chloroplast);
             slot.respiration = self.capacity_by_pathway(cells, i, OrganelleType::Mitochondrion);
             slot.upkeep = self.catalogue.upkeep(cells.slots(i));
+            slot.catalase = crate::ecology::digestive_capacity_by_pathway(cells, i);
             slot.sequestered = crate::biology::sequestered(cells.slots(i));
         });
     }
@@ -985,19 +993,60 @@ impl Metabolism {
             }
         }
 
-        // Note what does *not* happen here: a cell does not decompose its own peroxide.
+        // --- catalase: a lysosome decomposes the cell's own reactive byproduct ---
         //
-        // It decomposes in the water, and only there. Real hydrogen peroxide needs
-        // catalase to break down at any speed, and catalase is a lysosome — an M8
-        // organelle this cell does not have. So the only way out of a cytoplasm is to
-        // excrete it, and a cell that will not is stuck with it.
+        // Peroxide decomposes in the water on its own, and inside a cell only if something
+        // breaks it down. Real hydrogen peroxide needs catalase to go at any speed, and this
+        // note used to say catalase *is* a lysosome and then not do anything about it — the
+        // mechanism was named here and never built, so the only way out of a cytoplasm was to
+        // excrete it.
         //
-        // This was the other way round to begin with, and the consequence was worth
-        // recording: with interior decay, retaining peroxide was an *advantage*, because
-        // it decayed into carbon dioxide right where photosynthesis needed it. The strain
-        // that dutifully excreted its waste lost, every time, for having given away its
-        // own food supply. A believable mechanism, an emergent result, and the exact
-        // opposite of the physics it was meant to model.
+        // What that cost is `docs/ECONOMY.md` §12.1. Respiration's reactive share is a fixed
+        // fraction of throughput, so a cell carrying four mitochondria makes four times the
+        // peroxide, while excretion is one `EMIT` per pass of its genome — and adding organelles
+        // lengthens the genome, so the cell excretes *less* often exactly as it needs to more.
+        // Measured, a depth-four metabolic specialist reached 14.6 units against a tolerance
+        // threshold of 8 with the water around it nearly empty, and died of it inside four
+        // hundred ticks. The one specialisation the engine rewards was capped by its own exhaust.
+        //
+        // So it is built, on the organelle the note always named. Which makes stacking a
+        // *coupled* investment rather than a free one: more mitochondria demand more catalase,
+        // both cost slots and upkeep, and a cell that takes the engine without the enzyme dies
+        // exactly as it did before.
+        //
+        // **Senescence is untouched.** `background_damage` is what ages every cell whatever it
+        // is doing and no lysosome touches it; what a catalase removes is the *extra* ageing a
+        // cell brings on itself by respiring hard. A scavenger that has paid for a lysosome no
+        // longer also pays for breathing, which is the whole of what an antioxidant is for.
+        //
+        // Kept out of the water deliberately, as before: with interior *decay* — free, needing no
+        // organelle — retaining peroxide was an advantage, because it decayed into carbon dioxide
+        // right where photosynthesis needed it, and the strain that dutifully excreted its waste
+        // lost every time for having given away its own food supply. Charging a slot and an
+        // upkeep for the same service is what keeps that from coming back.
+        {
+            let by_pathway = (*caps).catalase;
+            for (n, &capacity) in by_pathway.iter().enumerate() {
+                if capacity <= 0 {
+                    continue;
+                }
+                let Some(p) = m.pathways.get(n) else {
+                    continue;
+                };
+                let held = (&*cyto)[p.reactive];
+                let broken = capacity.min(held).max(0);
+                if broken <= 0 {
+                    continue;
+                }
+                let interior = &mut *cyto;
+                interior[p.reactive] = interior[p.reactive].saturating_sub(broken);
+                interior[p.waste] = interior[p.waste].saturating_add(broken);
+                // A species change, so it goes through the ledger like every other one — an
+                // unaccounted transmutation is indistinguishable from a conservation bug (I4).
+                ledger.convert(p.reactive, p.waste, broken as i64);
+                report.decayed += broken as i64;
+            }
+        }
 
         // --- toxicity: membrane damage from what the cell is carrying (SPEC §7.1) ---
         //

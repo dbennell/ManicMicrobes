@@ -758,8 +758,14 @@ fn what_specialising_is_worth() {
     // The ancestor builds nucleus@1, mitochondrion@2, chloroplast@3. Extra pairs go into the free
     // slots from 4 up, and the nucleus is enlarged because the variants are longer and SPEC §4.1
     // truncates a daughter at the nucleus it built for itself.
-    let variant = |pairs: usize| -> String {
+    let variant = |pairs: usize, catalase: bool| -> String {
         let mut extra = String::new();
+        if catalase {
+            // One lysosome, in a slot the extra pairs do not reach. See `docs/ECONOMY.md` §12.1:
+            // the reactive share of the exhaust scales with throughput, so an engine without an
+            // enzyme to match it poisons the cell.
+            extra.push_str("        IMM     70\n        IMM     11\n        IMM     15\n        BUILD\n");
+        }
         for k in 1..pairs {
             let (m, c) = (2 + 2 * k, 3 + 2 * k);
             extra.push_str(&format!(
@@ -778,11 +784,14 @@ fn what_specialising_is_worth() {
     eprintln!("\nmatched chloroplast/mitochondrion pairs against the plain ancestor.");
     eprintln!("soup, three seeds, mutation off. permille; 500 is a dead heat.\n");
     eprintln!(
-        "{:>6} {:>6} {:>6} {:>7} {:>8} {:>8} {:>14} {:>7}",
+        "{:>10} {:>6} {:>6} {:>7} {:>8} {:>8} {:>14} {:>7}",
         "pairs", "asked", "built", "alone", "starved", "poisond", "them / ancestor", "share"
     );
-    for pairs in [1usize, 2, 3, 4, 6, 7] {
-        let source = variant(pairs);
+    for (pairs, catalase) in [
+        (1usize, false), (2, false), (3, false), (4, false),
+        (3, true), (4, true), (6, true), (7, true),
+    ] {
+        let source = variant(pairs, catalase);
         let Ok(assembled) = mm_asm::assemble(&source) else {
             eprintln!("{pairs:>7}  did not assemble");
             continue;
@@ -840,9 +849,10 @@ fn what_specialising_is_worth() {
         mine.sort_unstable();
         theirs.sort_unstable();
         eprintln!(
-            "{:>6} {:>6} {:>6} {:>7} {:>8} {:>8} {:>6} / {:<5} {:>7}",
+            "{:>6}{} {:>6} {:>6} {:>7} {:>8} {:>8} {:>6} / {:<5} {:>7}",
             pairs,
-            2 + 2 * pairs,
+            if catalase { "+cat" } else { "    " },
+            2 + 2 * pairs + usize::from(catalase),
             built,
             alone,
             starved,
@@ -894,6 +904,14 @@ fn a_specialist_can_carry_four_of_its_speciality() {
              \x20       IMM     60\n        IMM     3\n        IMM     {c}\n        BUILD\n"
         ));
     }
+    // And a catalase. Stacking respiration is a *coupled* investment: the reactive share of the
+    // exhaust scales with throughput, so an engine without an enzyme to match it poisons the cell
+    // (`docs/ECONOMY.md` §12.1). A specialist that carries four mitochondria and no lysosome is
+    // not a specialist, it is a cell that has not finished the trade — so the body under test
+    // pays for both, in slots and in upkeep.
+    extra.push_str(
+        "        IMM     70\n        IMM     11\n        IMM     10\n        BUILD\n",
+    );
     let source = src
         .replace(
             "        IMM     40              ; param",
