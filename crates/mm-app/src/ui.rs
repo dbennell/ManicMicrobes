@@ -377,11 +377,37 @@ pub fn rails_fit(available_height: f32) -> bool {
     available_height >= RAIL_MIN_HEIGHT
 }
 
+/// How much slide a scale bar spans.
+///
+/// Whole squares while a square is smaller than the bar, and a *fraction* of one once it is not.
+/// The second case is not a nicety: `BASE_SCALE` is eight pixels to a square and the zoom reaches
+/// forty, so at high magnification one square is three hundred and twenty pixels — three times
+/// the room the status bar has for it. Reporting "1 square" there is true and useless, because
+/// the bar saturates at its own width and stops changing while the magnification goes on
+/// changing. A scale bar that does not move when you zoom is not measuring anything.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Span {
+    /// `n` whole squares.
+    Squares(u32),
+    /// One `n`th of a square, `n` being 2, 5, 10, 20, 50 and so on.
+    Fraction(u32),
+}
+
+impl std::fmt::Display for Span {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Span::Squares(1) => write!(f, "1 square"),
+            Span::Squares(n) => write!(f, "{n} squares"),
+            Span::Fraction(n) => write!(f, "1/{n} square"),
+        }
+    }
+}
+
 /// How wide a scale bar should be, and what it measures.
 ///
-/// Returns `(squares, pixels)`: how many substrate squares the bar spans, and how long to draw
-/// it. The bar is the longest of `1, 2, 5, 10, 20, 50, …` squares that fits in `max_pixels`, so
-/// it changes length as you zoom but never reads as an awkward number.
+/// Returns `(span, pixels)`: how much slide the bar spans, and how long to draw it. The bar is
+/// the longest of `…, 1/5, 1/2, 1, 2, 5, 10, 20, 50, …` that fits in `max_pixels`, so it changes
+/// length as you zoom but never reads as an awkward number.
 ///
 /// # Squares, not microns
 ///
@@ -400,11 +426,31 @@ pub fn rails_fit(available_height: f32) -> bool {
 // out the other side as a bar of NaN pixels. `a_degenerate_scale_does_not_divide_by_it` covers
 // it, and would fail on the "tidier" form.
 #[allow(clippy::neg_cmp_op_on_partial_ord)]
-pub fn scale_bar(pixels_per_square: f32, max_pixels: f32) -> (u32, f32) {
+pub fn scale_bar(pixels_per_square: f32, max_pixels: f32) -> (Span, f32) {
     if !(pixels_per_square > 0.0) || !(max_pixels > 0.0) {
-        return (1, 0.0);
+        return (Span::Squares(1), 0.0);
     }
-    let mut best = (1u32, pixels_per_square);
+
+    // One square already too wide for the bar: step *down* through the same sequence read
+    // backwards, and take the largest fraction that fits.
+    if pixels_per_square > max_pixels {
+        for decade in 0..8u32 {
+            for step in [2u32, 5] {
+                let Some(denom) = step.checked_mul(10u32.pow(decade)) else {
+                    return (Span::Fraction(1), pixels_per_square);
+                };
+                let pixels = pixels_per_square / denom as f32;
+                if pixels <= max_pixels {
+                    return (Span::Fraction(denom), pixels);
+                }
+            }
+        }
+        // Beyond any sane magnification. One square, overlong, which the caller clamps — the
+        // honest failure rather than a denominator nobody could read.
+        return (Span::Squares(1), pixels_per_square);
+    }
+
+    let mut best = (Span::Squares(1), pixels_per_square);
     // 1, 2, 5 and then the same again ten times bigger, which is how every scale bar and every
     // axis anybody has ever read is stepped.
     for decade in 0..8u32 {
@@ -416,7 +462,7 @@ pub fn scale_bar(pixels_per_square: f32, max_pixels: f32) -> (u32, f32) {
             if pixels > max_pixels {
                 return best;
             }
-            best = (squares, pixels);
+            best = (Span::Squares(squares), pixels);
         }
     }
     best
@@ -1014,65 +1060,86 @@ mod rail_tests {
 mod scale_tests {
     use super::*;
 
+    /// How many squares a span is, as a float, for the ordering tests below.
+    fn as_squares(s: Span) -> f32 {
+        match s {
+            Span::Squares(n) => n as f32,
+            Span::Fraction(n) => 1.0 / n as f32,
+        }
+    }
+
     #[test]
     fn a_bar_never_exceeds_the_room_it_is_given() {
         for ppq in [0.4f32, 1.0, 8.0, 63.5, 320.0] {
             for room in [40.0f32, 112.0, 300.0] {
-                let (squares, pixels) = scale_bar(ppq, room);
-                assert!(pixels <= room || squares == 1, "{ppq} in {room}: {pixels}");
-                assert!(squares >= 1);
+                let (span, pixels) = scale_bar(ppq, room);
+                assert!(pixels <= room, "{ppq} in {room}: {span} is {pixels}px");
             }
         }
     }
 
     #[test]
     fn a_bar_is_a_number_somebody_would_say() {
-        // 1, 2, 5 and the same again ten times bigger. A bar of 37 squares is arithmetic
-        // showing through, and the whole point of the thing is to be read at a glance.
-        for ppq in [0.05f32, 0.7, 3.0, 8.0, 100.0] {
-            let (squares, _) = scale_bar(ppq, 112.0);
+        // 1, 2, 5 and the same again ten times bigger or smaller. A bar of 37 squares is
+        // arithmetic showing through, and the whole point of the thing is to be read at a glance.
+        for ppq in [0.05f32, 0.7, 3.0, 8.0, 100.0, 320.0, 4000.0] {
+            let (span, _) = scale_bar(ppq, 112.0);
+            let n = match span {
+                Span::Squares(n) | Span::Fraction(n) => n,
+            };
             let mantissa = {
-                let mut s = squares;
+                let mut s = n;
                 while s % 10 == 0 && s > 1 {
                     s /= 10;
                 }
                 s
             };
-            assert!(
-                matches!(mantissa, 1 | 2 | 5),
-                "{squares} squares is not a round number"
-            );
+            assert!(matches!(mantissa, 1 | 2 | 5), "{span} is not a round number");
         }
     }
 
     #[test]
     fn zooming_in_shortens_the_bar_in_squares() {
         // The bar measures the same *distance* until it cannot, so magnifying can only ever
-        // reduce how many squares fit in it.
-        let mut previous = u32::MAX;
-        for ppq in [0.5f32, 1.0, 2.0, 4.0, 8.0, 16.0, 64.0, 256.0] {
-            let (squares, _) = scale_bar(ppq, 112.0);
-            assert!(squares <= previous, "{ppq} gave {squares} after {previous}");
-            previous = squares;
+        // reduce how much slide fits in it — through one square and out the other side.
+        let mut previous = f32::INFINITY;
+        for ppq in [0.5f32, 1.0, 2.0, 4.0, 8.0, 16.0, 64.0, 256.0, 320.0, 1000.0] {
+            let (span, _) = scale_bar(ppq, 112.0);
+            let now = as_squares(span);
+            assert!(now <= previous, "{ppq} gave {span} after {previous} squares");
+            previous = now;
         }
     }
 
     #[test]
     fn a_degenerate_scale_does_not_divide_by_it() {
         // Reached from a saved view, so it cannot assume the caller's clamp held.
-        assert_eq!(scale_bar(0.0, 112.0), (1, 0.0));
-        assert_eq!(scale_bar(-1.0, 112.0), (1, 0.0));
-        assert_eq!(scale_bar(8.0, 0.0), (1, 0.0));
-        assert_eq!(scale_bar(f32::NAN, 112.0), (1, 0.0));
+        assert_eq!(scale_bar(0.0, 112.0), (Span::Squares(1), 0.0));
+        assert_eq!(scale_bar(-1.0, 112.0), (Span::Squares(1), 0.0));
+        assert_eq!(scale_bar(8.0, 0.0), (Span::Squares(1), 0.0));
+        assert_eq!(scale_bar(f32::NAN, 112.0), (Span::Squares(1), 0.0));
     }
 
     #[test]
-    fn a_square_wider_than_the_bar_still_reports_one() {
-        // Zoomed until one square is wider than the whole status bar. One square is the
-        // smallest true statement available, so it is what gets made.
-        let (squares, pixels) = scale_bar(400.0, 112.0);
-        assert_eq!(squares, 1);
-        assert_eq!(pixels, 400.0);
+    fn a_square_wider_than_the_bar_is_reported_as_a_fraction_of_one() {
+        // This used to report one square and a bar longer than its own slot, which the caller
+        // clamped — so from that zoom onward the bar stopped moving while the magnification went
+        // on changing. A scale bar that does not move when you zoom is not measuring anything.
+        let (span, pixels) = scale_bar(400.0, 112.0);
+        assert_eq!(span, Span::Fraction(5));
+        assert!((pixels - 80.0).abs() < 0.01, "{pixels}");
+        assert_eq!(span.to_string(), "1/5 square");
+
+        // And it keeps stepping rather than saturating.
+        let (further, _) = scale_bar(4000.0, 112.0);
+        assert_eq!(further, Span::Fraction(50));
+    }
+
+    #[test]
+    fn the_wording_agrees_with_itself() {
+        assert_eq!(Span::Squares(1).to_string(), "1 square");
+        assert_eq!(Span::Squares(20).to_string(), "20 squares");
+        assert_eq!(Span::Fraction(2).to_string(), "1/2 square");
     }
 }
 

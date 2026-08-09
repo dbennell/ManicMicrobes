@@ -4175,6 +4175,52 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
         // is exactly the strip a title bar would be.
         let bar = ui.max_rect();
         view.title_bar = Rect::new(bar.min.x, bar.min.y, bar.max.x, bar.max.y);
+
+        // The application's name, centred on the strip, because since M10.9 this bar is also the
+        // title bar and a title bar without a title is just a place to grab.
+        //
+        // **Painted rather than laid out.** The row already has two edge-anchored groups — the
+        // menus running left to right and the transport running right to left — and anything
+        // added to the layout joins one of them and is therefore centred on nothing. Painting it
+        // over the bar's own rectangle centres it on the *window*, which is where a title belongs
+        // and where the eye looks for one.
+        //
+        // Styled `Role::Section`: letterspaced mono caps, the same voice as `TRANSPORT` and
+        // `METRICS`. That matters more than it sounds — a word sitting in a menu bar in the same
+        // face as `File` is a menu you cannot open, and half the people who see it will try.
+        // Caps say caption.
+        //
+        // Drawn first so the menus and the transport paint over it rather than under, and skipped
+        // entirely when the window is too narrow to hold it clear of both. A title that collides
+        // with the controls is worse than no title.
+        {
+            // Laid out through the same `Role::Section` font and letterspacing the caption
+            // beside it uses, rather than by handing egui a bare string — the tracking is what
+            // makes the caps read as a caption instead of as shouting.
+            let mut job = egui::text::LayoutJob::default();
+            job.append(
+                "Manic Microbes".to_uppercase().as_str(),
+                0.0,
+                egui::TextFormat {
+                    font_id: skin::font(Role::Section),
+                    color: skin::col(theme::DIM),
+                    extra_letter_spacing: Role::Section.tracking(),
+                    ..Default::default()
+                },
+            );
+            let galley = ui.painter().layout_job(job);
+            // What the two groups need. Generous rather than measured: the menus are four words
+            // and a mark, the transport is a caption and six buttons, and both are fixed. An
+            // exact figure here would have to be re-derived every time either gains an item.
+            const FLANKS: f32 = 640.0;
+            if bar.width() > galley.size().x + FLANKS {
+                let at = egui::pos2(
+                    bar.center().x - galley.size().x / 2.0,
+                    bar.center().y - galley.size().y / 2.0,
+                );
+                ui.painter().galley(at, galley, skin::col(theme::DIM));
+            }
+        }
         egui::MenuBar::new().ui(ui, |ui| {
             // A menu that cannot be photographed is a menu whose width is a guess, and two of
             // them were wrong for a milestone before anybody opened one. `MM_SHOT_VIEW=menu:view`
@@ -4680,6 +4726,32 @@ fn status_bar(
                         ));
                     });
                     tick(ui);
+                    // How big the slide is. Laid out after the level of detail and therefore
+                    // drawn to the left of it, because this row runs right to left.
+                    //
+                    // It reads as a constant and is not: a scenario chooses its own size, the
+                    // library ships slides from 64 to 128 squares, and the microscope opens on
+                    // 256 — so "20 squares" in the scale bar meant something different in each
+                    // and nothing on screen said which. A magnification without an extent is
+                    // half a statement.
+                    skin::fixed_width(ui, MAP_WIDTH, |ui| {
+                        let held = sim.engine.handle();
+                        let slide = held.slide();
+                        let substrate = slide.world().substrate();
+                        let (w, h) = (substrate.width(), substrate.height());
+                        ui.label(skin::text(
+                            Role::Label,
+                            // Square slides are the overwhelming case and `512 x 512` spends half
+                            // its width saying so twice.
+                            if w == h {
+                                format!("map {w}")
+                            } else {
+                                format!("map {w}x{h}")
+                            },
+                        ))
+                        .on_hover_text("the slide's extent, in substrate squares");
+                    });
+                    tick(ui);
                     // Magnification is reported the way the objective would: relative to the
                     // base scale, so "1×" is one substrate square to eight pixels.
                     skin::fixed_width(ui, ZOOM_WIDTH, |ui| {
@@ -4703,7 +4775,9 @@ fn status_bar(
 const RATE_WIDTH: f32 = 138.0;
 const LOD_WIDTH: f32 = 72.0;
 const ZOOM_WIDTH: f32 = 40.0;
-const SQUARES_WIDTH: f32 = 80.0;
+const SQUARES_WIDTH: f32 = 88.0;
+/// Wide enough for `map 1024x1024`, the largest a scenario may ask for.
+const MAP_WIDTH: f32 = 104.0;
 
 /// A separator between two readings in the status bar: a short vertical tick, not a full-height
 /// rule, so the bar reads as one line of readings rather than as a row of boxes.
@@ -4720,19 +4794,19 @@ fn tick(ui: &mut egui::Ui) {
 /// honest answer to "how big is that". Measured in substrate squares rather than in the microns
 /// `docs/UI.md` §2 sketches — see [`ui::scale_bar`] for why that is not a detail.
 fn scale_bar(ui: &mut egui::Ui, pixels_per_square: f32) {
-    const ROOM: f32 = 112.0;
+    // Wider than it was. The bar is the one reading here whose *length* is the reading, so it is
+    // the one that suffers from a narrow slot — and it now has fractions of a square to draw as
+    // well, which need the room to be distinguishable from each other.
+    const ROOM: f32 = 132.0;
 
-    let (squares, length) = ui::scale_bar(pixels_per_square, ROOM);
+    let (span, length) = ui::scale_bar(pixels_per_square, ROOM);
     let length = length.min(ROOM);
     skin::fixed_width(ui, SQUARES_WIDTH, |ui| {
         // Fixed for the same reason the readings beside it are: the count changes as you zoom,
         // and a zoom is a continuous drag.
         ui.label(skin::text(
             Role::Label,
-            format!(
-                "{squares} {}",
-                if squares == 1 { "square" } else { "squares" }
-            ),
+            span.to_string(),
         ));
     });
     ui.add_space(6.0);
@@ -7165,7 +7239,7 @@ fn metrics_body(ui: &mut egui::Ui, sim: &SlideRes) {
     // is energy leaving — and it is what stops four lines in one rail from being four identical
     // green wobbles that have to be told apart by their captions.
     type Series<'a> = (&'a str, Box<dyn Fn(&Sample) -> i64>, theme::Rgb);
-    let series: [Series; 4] = [
+    let series: [Series; 5] = [
         (
             "population",
             Box::new(|s: &Sample| s.population as i64),
@@ -7176,10 +7250,30 @@ fn metrics_body(ui: &mut egui::Ui, sim: &SlideRes) {
             Box::new(|s: &Sample| s.dissipation),
             Mood::Bad.rgb(),
         ),
+        // Its own rail rather than a second line on the one below, and the reason is the
+        // sparkline's scaling. `Series::normalised` maps each series onto its *own* [lo, hi],
+        // so two lines in one box are both stretched to fill it and their heights then say
+        // nothing about each other. Worse for this pair in particular: `trophic_light` is
+        // constant, and a constant normalises to `vec![0.5]` — a flat line down the middle
+        // meaning "no range", not "half". A real series drawn against that would look like it
+        // was being compared to something.
+        //
+        // The two are adjacent on purpose. A light level that swings against an income share
+        // that does not is `docs/ECONOMY.md` §1 on screen: the sun comes and goes and every
+        // joule in the world still arrives the one way.
+        //
+        // `energy income ‰` was called `light income ‰`, which read as a quantity of light and
+        // meant a share of energy — and once there was a real light reading beside it the two
+        // names collided outright.
         (
-            "light income ‰",
-            Box::new(|s: &Sample| s.trophic_light),
+            "light",
+            Box::new(|s: &Sample| s.light),
             Mood::Good.rgb(),
+        ),
+        (
+            "energy income ‰",
+            Box::new(|s: &Sample| s.trophic_light),
+            skin::plot_neutral(),
         ),
         (
             "distinct genomes",
