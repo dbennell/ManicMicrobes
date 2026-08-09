@@ -270,12 +270,12 @@ fn where_the_inhabitants_go_survives_the_round_trip() {
             Inhabitant {
                 genome: "sponge.mm".to_string(),
                 count: 3,
-                at: Some((7, 21)),
+                place: mm_core::Placement::At { x: 7, y: 21 },
             },
             Inhabitant {
                 genome: "ancestor.mm".to_string(),
                 count: 4,
-                at: None,
+                place: mm_core::Placement::Spread,
             },
         ],
         flux: vec![Flux::Drain {
@@ -395,7 +395,7 @@ fn a_slide_built_by_hand_comes_back_the_way_it_was_left() {
         vec![Inhabitant {
             genome: "sponge.mm".to_string(),
             count: 2,
-            at: Some((11, 8)),
+            place: mm_core::Placement::At { x: 11, y: 8 },
         }],
         "who lives there did not come back"
     );
@@ -405,4 +405,209 @@ fn a_slide_built_by_hand_comes_back_the_way_it_was_left() {
     back.run(200);
     back.check_invariants()
         .expect("a hand-built slide broke an invariant when it was played");
+}
+
+/// Every placement puts the founders where it says, and never inside a wall.
+///
+/// The gap this closes was not a bug in the arrangement code — there was no arrangement code.
+/// `Inhabitant::at` was declared, documented at length, round-trip tested, and read by nothing:
+/// both front ends called `place_founders`, which spreads. So a scenario could describe a walled
+/// habitat with a population in it and get a population sprayed across the whole slide, with no
+/// error anywhere.
+#[test]
+fn founders_go_where_the_placement_says_and_never_into_a_wall() {
+    use mm_core::Placement;
+
+    let genome = mm_asm::assemble("        GENE #x\n        HALT\n")
+        .expect("assembles")
+        .bytes;
+
+    // A slide split by a wall down the middle, with a gap in neither half.
+    let scenario = mm_core::Scenario {
+        name: "two rooms".to_string(),
+        width: 40,
+        height: 40,
+        barriers: vec![mm_core::Barrier::Rect {
+            x: 19,
+            y: 0,
+            width: 2,
+            height: 40,
+        }],
+        ..mm_core::Scenario::default()
+    };
+
+    for place in [
+        Placement::Grid {
+            x: 2,
+            y: 2,
+            width: 15,
+            height: 36,
+        },
+        Placement::Hex {
+            x: 2,
+            y: 2,
+            width: 15,
+            height: 36,
+        },
+        Placement::Scatter {
+            x: 2,
+            y: 2,
+            width: 15,
+            height: 36,
+            spacing: 2,
+        },
+    ] {
+        let mut world = mm_core::World::new(scenario.clone()).expect("world");
+        let placed = world.place_inhabitants(&genome, 12, place);
+        assert_eq!(placed, 12, "{place:?} lost founders on an open rectangle");
+
+        for i in world.cells().iter() {
+            let sx = mm_core::fixed::pos_to_square(world.cells().x[i]);
+            let sy = mm_core::fixed::pos_to_square(world.cells().y[i]);
+            assert!(
+                !world.substrate().is_blocked(sx, sy),
+                "{place:?} put a founder inside a wall at ({sx}, {sy})"
+            );
+            assert!(
+                sx < 19,
+                "{place:?} put a founder at ({sx}, {sy}), outside the room it was given"
+            );
+        }
+    }
+}
+
+/// Two species, two rooms, and neither can reach the other.
+///
+/// The thing a scenario could not describe before: a walled-off habitat with a named population
+/// in it. This is the shape `archipelago.ron` is drawn for and could not seed.
+#[test]
+fn two_rooms_can_hold_two_different_populations() {
+    use mm_core::Placement;
+    let a = mm_asm::assemble("        GENE #a\n        HALT\n").expect("a").bytes;
+    let b = mm_asm::assemble("        GENE #b\n        NOP0\n        HALT\n")
+        .expect("b")
+        .bytes;
+    let mut world = mm_core::World::new(mm_core::Scenario {
+        width: 40,
+        height: 40,
+        barriers: vec![mm_core::Barrier::Rect {
+            x: 19,
+            y: 0,
+            width: 2,
+            height: 40,
+        }],
+        ..mm_core::Scenario::default()
+    })
+    .expect("world");
+
+    world.place_inhabitants(
+        &a,
+        8,
+        Placement::Grid {
+            x: 2,
+            y: 2,
+            width: 15,
+            height: 36,
+        },
+    );
+    world.place_inhabitants(
+        &b,
+        8,
+        Placement::Grid {
+            x: 23,
+            y: 2,
+            width: 15,
+            height: 36,
+        },
+    );
+
+    let (mut left, mut right) = (0, 0);
+    for i in world.cells().iter() {
+        let sx = mm_core::fixed::pos_to_square(world.cells().x[i]);
+        let is_a = world.cells().genome[i].bytes() == a.as_slice();
+        if sx < 19 {
+            left += 1;
+            assert!(is_a, "the wrong species is in the left room");
+        } else {
+            right += 1;
+            assert!(!is_a, "the wrong species is in the right room");
+        }
+    }
+    assert_eq!((left, right), (8, 8));
+}
+
+/// A scatter is the same scatter on every machine (hard rule 5).
+#[test]
+fn a_scatter_is_deterministic() {
+    use mm_core::Placement;
+    let genome = mm_asm::assemble("        GENE #x\n        HALT\n")
+        .expect("assembles")
+        .bytes;
+    let place = Placement::Scatter {
+        x: 0,
+        y: 0,
+        width: 32,
+        height: 32,
+        spacing: 3,
+    };
+    let run = || {
+        let mut world = mm_core::World::new(mm_core::Scenario {
+            seed: 99,
+            width: 32,
+            height: 32,
+            ..mm_core::Scenario::default()
+        })
+        .expect("world");
+        world.place_inhabitants(&genome, 10, place);
+        world
+            .cells()
+            .iter()
+            .map(|i| (world.cells().x[i], world.cells().y[i]))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(run(), run());
+
+    // And a different scenario seed scatters differently, or it is not a scatter.
+    let mut other = mm_core::World::new(mm_core::Scenario {
+        seed: 100,
+        width: 32,
+        height: 32,
+        ..mm_core::Scenario::default()
+    })
+    .expect("world");
+    other.place_inhabitants(&genome, 10, place);
+    let moved: Vec<_> = other
+        .cells()
+        .iter()
+        .map(|i| (other.cells().x[i], other.cells().y[i]))
+        .collect();
+    assert_ne!(run(), moved, "the seed does not reach the scatter");
+}
+
+/// `Spread` is the lattice it has always been.
+///
+/// Every acceptance number in the tree was taken on it, so a refactor that moved it by half a
+/// square would move results that have nothing to do with placement.
+#[test]
+fn spread_is_unchanged_by_the_placement_rewrite() {
+    let genome = mm_asm::assemble("        GENE #x\n        HALT\n")
+        .expect("assembles")
+        .bytes;
+    let mut world = mm_core::World::new(mm_core::Scenario {
+        width: 64,
+        height: 64,
+        ..mm_core::Scenario::default()
+    })
+    .expect("world");
+    world.place_founders(&genome, 16);
+    let positions: Vec<(i32, i32)> = world
+        .cells()
+        .iter()
+        .map(|i| (world.cells().x[i], world.cells().y[i]))
+        .collect();
+    // Sixteen founders on a 64-square slide, four across: the middle of each quarter.
+    let step = mm_core::fixed::pos(8);
+    assert_eq!(positions.len(), 16);
+    assert_eq!(positions[0], (step, step));
+    assert_eq!(positions[5], (mm_core::fixed::pos(24), mm_core::fixed::pos(24)));
 }

@@ -370,7 +370,22 @@ fn seed_inhabitants(world: &mut World, root: &Path) -> Result<(), String> {
     let wanted = world.scenario().inhabitants.clone();
     for who in &wanted {
         let path = root.join(&who.genome);
-        seed_population(world, &path, who.count)?;
+        let src = std::fs::read_to_string(&path)
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let assembled = mm_asm::assemble(&src)
+            .map_err(|e| format!("{} does not assemble:\n{e}", path.display()))?;
+        // Through the placement the scenario asked for. This used to call `place_founders`,
+        // which spreads over the whole slide whatever the file said — so `Inhabitant`'s
+        // placement field was declared, documented and ignored. See `mm_core::Placement`.
+        let placed = world.place_inhabitants(&assembled.bytes, who.count, who.place);
+        if placed < who.count {
+            // Not an error: a rectangle that is mostly wall has fewer free squares than the
+            // scenario asked for, and saying so is better than pretending or than refusing.
+            eprintln!(
+                "note: {} asked for {} founders and {placed} fit",
+                who.genome, who.count
+            );
+        }
     }
     Ok(())
 }

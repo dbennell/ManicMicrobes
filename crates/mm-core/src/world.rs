@@ -280,6 +280,29 @@ fn apply_flux(
     }
 }
 
+/// Where the `k`th cell of a square spiral sits, relative to its centre.
+///
+/// Lifted out of `place_founders_at` unchanged, so `Placement::At` rings a square exactly the way
+/// `at: Some(..)` used to: index zero is the centre, and each subsequent ring is walked edge by
+/// edge. A count above one has to land *beside* its predecessor rather than inside it.
+fn ring_offset(k: u32) -> (i32, i32) {
+    let ring = (0..).find(|r| (2 * r + 1) * (2 * r + 1) > k).unwrap_or(0);
+    if ring == 0 {
+        return (0, 0);
+    }
+    let side = 2 * ring + 1;
+    let along = k.saturating_sub((2 * ring - 1) * (2 * ring - 1));
+    let per = side - 1;
+    let (edge, step) = (along / per, (along % per) as i32);
+    let r = ring as i32;
+    match edge {
+        0 => (-r + step, -r),
+        1 => (r, -r + step),
+        2 => (r - step, r),
+        _ => (-r, r - step),
+    }
+}
+
 impl World {
     /// Build a world from a scenario: allocate the grid, raise the barriers, seed the
     /// chemistry, and take the ledger's baseline.
@@ -1047,6 +1070,30 @@ impl World {
     /// count of four dropped on one square is one cell and three refusals. `None` is the grid
     /// spread [`World::place_founders`] describes.
     pub fn place_founders_at(&mut self, genome: &[u8], count: u32, at: Option<(u32, u32)>) -> u32 {
+        let place = match at {
+            Some((x, y)) => crate::Placement::At { x, y },
+            None => crate::Placement::Spread,
+        };
+        self.place_inhabitants(genome, count, place)
+    }
+
+    /// Place founders in an arrangement, skipping the walls.
+    ///
+    /// The one implementation. Both front ends had their own copy of the old two-case version and
+    /// **both of them dropped `Inhabitant::at` on the floor**, so a scenario that said where its
+    /// inhabitants went was ignored by everything that could have read it. That is the drift the
+    /// `place_founders` note below complains about, happening a second time, so the arrangement
+    /// logic lives here now and the front ends pass a [`crate::Placement`] through.
+    ///
+    /// Returns how many actually landed, which may be fewer than asked for: a rectangle that is
+    /// mostly wall has fewer free squares than a scenario may have requested, and reporting the
+    /// shortfall is better than silently stacking founders on top of one another.
+    pub fn place_inhabitants(
+        &mut self,
+        genome: &[u8],
+        count: u32,
+        place: crate::Placement,
+    ) -> u32 {
         if count == 0 {
             return 0;
         }
@@ -1055,55 +1102,15 @@ impl World {
             self.substrate.width() as i32,
             self.substrate.height() as i32,
         );
-        let across = {
-            // Integer ceil-sqrt: no floats in `mm-core`, and `(n as f64).sqrt().ceil()` is what
-            // both front ends were doing.
-            let mut a = 1u32;
-            while a * a < count {
-                a += 1;
-            }
-            a
-        };
+        let seed = self.scenario.seed;
+        let mut taken: Vec<(i32, i32)> = Vec::new();
         let mut placed = 0;
         for k in 0..count {
             let Ok(genome) = self.genomes.intern(genome.to_vec()) else {
                 continue;
             };
-            let spread = |n: u32, extent: i32| {
-                crate::fixed::pos(extent * (2 * n as i32 + 1) / (2 * across as i32))
-            };
-            // Outward in a square spiral from the named square, so a count above one lands
-            // beside its predecessor rather than inside it.
-            let (px, py) = match at {
-                Some((ax, ay)) => {
-                    let ring = (0..).find(|r| (2 * r + 1) * (2 * r + 1) > k).unwrap_or(0);
-                    let side = 2 * ring + 1;
-                    let along = k.saturating_sub(if ring == 0 {
-                        0
-                    } else {
-                        (2 * ring - 1) * (2 * ring - 1)
-                    });
-                    let (dx, dy) = if side <= 1 {
-                        (0i32, 0i32)
-                    } else {
-                        let per = side - 1;
-                        let (edge, step) = (along / per, (along % per) as i32);
-                        let r = ring as i32;
-                        match edge {
-                            0 => (-r + step, -r),
-                            1 => (r, -r + step),
-                            2 => (r - step, r),
-                            _ => (-r, r - step),
-                        }
-                    };
-                    (
-                        crate::fixed::pos((ax as i32 + dx).clamp(0, w - 1))
-                            + crate::fixed::POS_ONE / 2,
-                        crate::fixed::pos((ay as i32 + dy).clamp(0, h - 1))
-                            + crate::fixed::POS_ONE / 2,
-                    )
-                }
-                None => (spread(k % across, w), spread(k / across, h)),
+            let Some((px, py)) = self.slot(place, k, count, w, h, seed, &mut taken) else {
+                continue;
             };
             let id = self.spawn_cell(CellSeed {
                 x: px,
@@ -1138,6 +1145,168 @@ impl World {
         }
         self.adopt_current_contents_as_baseline();
         placed
+    }
+
+    /// Where the `k`th founder of `count` goes, in `POS`, or `None` if there is nowhere for it.
+    #[allow(clippy::too_many_arguments)]
+    fn slot(
+        &self,
+        place: crate::Placement,
+        k: u32,
+        count: u32,
+        w: i32,
+        h: i32,
+        seed: u64,
+        taken: &mut Vec<(i32, i32)>,
+    ) -> Option<(i32, i32)> {
+        use crate::fixed::{pos, POS_ONE};
+        let centre = |sx: i32, sy: i32| (pos(sx) + POS_ONE / 2, pos(sy) + POS_ONE / 2);
+        // A lattice of `n` slots across `extent`, each in the middle of its own share of it.
+        let lattice = |n: u32, extent: i32, i: u32| extent * (2 * i as i32 + 1) / (2 * n.max(1) as i32);
+        // Columns for `Spread`: a square lattice, unchanged, because every acceptance number in
+        // the tree was taken on it.
+        let across = {
+            let mut a = 1u32;
+            while a * a < count {
+                a += 1;
+            }
+            a
+        };
+        // Columns for a rectangle: shaped to the rectangle rather than always square.
+        //
+        // `Grid` over an 80x2 strip along a channel wall wants sixteen columns and one row, and a
+        // square lattice gives it four of each — which stacks the founders in pairs and puts half
+        // of them off the strip. Columns go as `sqrt(count * width / height)`, integer, clamped
+        // to at least one and at most `count`, so a square rectangle still comes out square.
+        let shaped = |rw: i32, rh: i32| -> u32 {
+            if rh <= 0 {
+                return count.max(1);
+            }
+            let want = (count as i64 * rw.max(1) as i64) / rh as i64;
+            let mut a = 1u32;
+            while (a as i64) * (a as i64) < want {
+                a += 1;
+            }
+            a.clamp(1, count.max(1))
+        };
+
+        let (x, y) = match place {
+            // Unchanged, to the position: every acceptance number in the tree was taken on this
+            // lattice, and it is expressed in `POS` rather than as a square centre because that
+            // is what it has always been.
+            crate::Placement::Spread => (
+                pos(lattice(across, w, k % across)),
+                pos(lattice(across, h, k / across)),
+            ),
+            crate::Placement::At { x, y } => {
+                let (dx, dy) = ring_offset(k);
+                centre(
+                    (x as i32 + dx).clamp(0, w - 1),
+                    (y as i32 + dy).clamp(0, h - 1),
+                )
+            }
+            crate::Placement::Grid {
+                x,
+                y,
+                width,
+                height,
+            } => {
+                let (rw, rh) = (width.max(1) as i32, height.max(1) as i32);
+                let cols = shaped(rw, rh);
+                let rows = count.div_ceil(cols).max(1);
+                centre(
+                    x as i32 + lattice(cols, rw, k % cols),
+                    y as i32 + lattice(rows, rh, k / cols),
+                )
+            }
+            crate::Placement::Hex {
+                x,
+                y,
+                width,
+                height,
+            } => {
+                let (rw, rh) = (width.max(1) as i32, height.max(1) as i32);
+                let cols = shaped(rw, rh);
+                let rows = count.div_ceil(cols).max(1);
+                let (col, row) = (k % cols, k / cols);
+                // Every other row shifted half a column step, which is the whole of a hex
+                // lattice: the rows themselves are unchanged.
+                let step = rw / cols.max(1) as i32;
+                let offset = if row % 2 == 1 { step / 2 } else { 0 };
+                centre(
+                    x as i32 + lattice(cols, rw, col) + offset,
+                    y as i32 + lattice(rows, rh, row),
+                )
+            }
+            crate::Placement::Scatter {
+                x,
+                y,
+                width,
+                height,
+                spacing,
+            } => {
+                let ctx = crate::rng::RandCtx::new(seed, u64::from(k), 0);
+                let (rw, rh) = (width.max(1) as i32, height.max(1) as i32);
+                // Bounded dart throwing. Sixty-four attempts, then the last candidate whatever
+                // it is — a rectangle too small for the spacing asked for should crowd rather
+                // than lose founders, and an unbounded search would not terminate at all.
+                let mut chosen = None;
+                for attempt in 0..64u64 {
+                    let sx = x as i32
+                        + ctx.draw_below(crate::rng::Purpose::Placement, attempt * 2, rw as u64)
+                            as i32;
+                    let sy = y as i32
+                        + ctx.draw_below(crate::rng::Purpose::Placement, attempt * 2 + 1, rh as u64)
+                            as i32;
+                    chosen = Some((sx, sy));
+                    let far_enough = spacing == 0
+                        || taken.iter().all(|(tx, ty)| {
+                            (tx - sx).abs() >= spacing as i32 || (ty - sy).abs() >= spacing as i32
+                        });
+                    if far_enough && !self.substrate.is_blocked(sx, sy) {
+                        break;
+                    }
+                }
+                let (sx, sy) = chosen?;
+                taken.push((sx, sy));
+                centre(sx.clamp(0, w - 1), sy.clamp(0, h - 1))
+            }
+        };
+
+        self.off_the_walls(x.clamp(0, pos(w) - 1), y.clamp(0, pos(h) - 1), w, h)
+    }
+
+    /// The nearest free square to a position, or `None` if everything within reach is wall.
+    ///
+    /// A founder placed inside a barrier is a founder that cannot move, cannot divide into any
+    /// direction that is not also wall, and is usually dead — and it is invisible in a scenario
+    /// file, because the file says a count and a rectangle and not which squares those turned out
+    /// to be. So the arrangement is a request and this is what honours it.
+    fn off_the_walls(&self, x: i32, y: i32, w: i32, h: i32) -> Option<(i32, i32)> {
+        use crate::fixed::{pos, pos_to_square, POS_ONE};
+        let (sx, sy) = (pos_to_square(x), pos_to_square(y));
+        if !self.substrate.is_blocked(sx, sy) {
+            return Some((x, y));
+        }
+        // Outward in square rings, and in a fixed order within each ring, so which free square a
+        // displaced founder lands on is a property of the scenario and not of anything else.
+        for radius in 1..=8i32 {
+            for dy in -radius..=radius {
+                for dx in -radius..=radius {
+                    if dx.abs() != radius && dy.abs() != radius {
+                        continue;
+                    }
+                    let (nx, ny) = (sx + dx, sy + dy);
+                    if nx < 0 || ny < 0 || nx >= w || ny >= h {
+                        continue;
+                    }
+                    if !self.substrate.is_blocked(nx, ny) {
+                        return Some((pos(nx) + POS_ONE / 2, pos(ny) + POS_ONE / 2));
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Connected components over hard junctions, rebuilt from the current junctions.
@@ -1477,7 +1646,7 @@ impl World {
             .scenario
             .inhabitants
             .iter_mut()
-            .find(|i| i.genome == genome && i.at == Some(at))
+            .find(|i| i.genome == genome && i.place == crate::Placement::At { x: at.0, y: at.1 })
         {
             existing.count = existing.count.saturating_add(count);
             return;
@@ -1485,7 +1654,7 @@ impl World {
         self.scenario.inhabitants.push(crate::Inhabitant {
             genome: genome.to_string(),
             count,
-            at: Some(at),
+            place: crate::Placement::At { x: at.0, y: at.1 },
         });
     }
 

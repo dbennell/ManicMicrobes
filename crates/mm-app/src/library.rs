@@ -118,7 +118,7 @@ impl NewWorld {
                     count: self.founders,
                     // Spread, because founders piled on one square are a pile and not a
                     // population. The seed tool is how you say *where*.
-                    at: None,
+                    place: mm_core::Placement::Spread,
                 }]
             },
             ..Scenario::default()
@@ -493,7 +493,7 @@ mod tests {
             vec![Inhabitant {
                 genome: "predator.mm".to_string(),
                 count: 6,
-                at: None
+                place: mm_core::Placement::Spread
             }]
         );
         assert!(s.barriers.is_empty(), "nothing is drawn on it yet");

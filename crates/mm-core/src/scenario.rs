@@ -120,14 +120,123 @@ pub struct Inhabitant {
     pub genome: String,
     /// How many founders to place.
     pub count: u32,
-    /// Where to put them, or `None` to spread them over the whole slide.
-    ///
-    /// A scenario laid out by hand needs to say *where*, or the editor can only describe slides
-    /// whose inhabitants happen to land on a square grid — and the whole reason to place a cell
-    /// by hand is that you want it somewhere the grid would not put it: against a wall, in the
-    /// mouth of a channel, on one side of a barrier and not the other.
+    /// Where they go, and in what arrangement.
     #[serde(default)]
-    pub at: Option<(u32, u32)>,
+    pub place: Placement,
+}
+
+/// How a scenario's founders are arranged on the slide.
+///
+/// # Why this is not one pair of coordinates
+///
+/// It was. `Inhabitant` carried `at: Option<(u32, u32)>` with a doc comment arguing exactly the
+/// right case — "the whole reason to place a cell by hand is that you want it somewhere the grid
+/// would not put it: against a wall, in the mouth of a channel, on one side of a barrier and not
+/// the other" — and **neither front end read it**. `mm-cli`'s `seed_inhabitants` and `mm-app`'s
+/// `seed_into` both called `place_founders`, which spreads. The field was declared, documented,
+/// round-trip tested, and inert.
+///
+/// The cost of that shows up in `the_drift.ron`, whose own comment says: *"Twelve rather than
+/// sixteen: the founders are spread over a square grid and a channel is not square, so some of
+/// them would land in the walls."* A scenario author reducing the population to work around a
+/// placement rule is the sign that the placement rule is the thing to fix.
+///
+/// # Nothing is ever placed inside a wall
+///
+/// Every variant is filtered through the barriers: a slot that lands on a blocked square is moved
+/// to the nearest free one, and a founder with nowhere within reach is not placed at all — the
+/// count a scenario asks for is a request, and [`crate::World::place_inhabitants`] returns how
+/// many actually landed. That is what lets a channel scenario ask for sixteen and get sixteen.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum Placement {
+    /// Spread over the whole slide on a square lattice.
+    ///
+    /// The default, and what an `Inhabitant` that says nothing gets. Deliberately the same
+    /// lattice `World::place_founders` has always used, to the position — every acceptance
+    /// number in the tree was taken on it.
+    #[default]
+    Spread,
+
+    /// All of them around one square, spiralling outward as the count needs.
+    ///
+    /// What `at: Some((x, y))` meant, now that something acts on it. A count of one is exactly
+    /// that square; more than one rings it, because a dozen founders dropped on a single square
+    /// is one cell and eleven refusals.
+    At { x: u32, y: u32 },
+
+    /// A square lattice inside a rectangle.
+    ///
+    /// The walled-off-habitat case: two of these in two rooms is two populations that cannot
+    /// reach each other, which is an experiment the scenario format could not previously
+    /// describe.
+    Grid {
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    },
+
+    /// A hexagonal lattice inside a rectangle: every other row offset by half a step.
+    ///
+    /// Closer packing than a square grid at the same spacing, and the arrangement a settled
+    /// monolayer relaxes into anyway — so a colony seeded this way starts where a square-packed
+    /// one would spend a few hundred ticks getting to.
+    Hex {
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    },
+
+    /// Scattered inside a rectangle, no two founders closer than `spacing` squares.
+    ///
+    /// Deterministic: positions come from `hash(seed, k, purpose)` like every other random draw
+    /// in this engine (hard rule 5), so a scenario scatters the same way on every machine and at
+    /// every thread count. `spacing` of zero means no minimum.
+    ///
+    /// This is the variant to reach for when two species should start *interleaved* rather than
+    /// in separate rooms — two entries over the same rectangle mix, where two `Grid`s would sit
+    /// on top of each other.
+    Scatter {
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        spacing: u32,
+    },
+}
+
+impl Placement {
+    /// How to say where these founders go, for the inspector and the wiki.
+    ///
+    /// Here rather than in the front end so that a new variant is a compile error in one place
+    /// and a sentence in one place, instead of a match somebody forgets to extend.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        match self {
+            Placement::Spread => "spread over the slide".to_string(),
+            Placement::At { x, y } => format!("at ({x}, {y})"),
+            Placement::Grid {
+                x,
+                y,
+                width,
+                height,
+            } => format!("on a grid in {width}x{height} at ({x}, {y})"),
+            Placement::Hex {
+                x,
+                y,
+                width,
+                height,
+            } => format!("hex-packed in {width}x{height} at ({x}, {y})"),
+            Placement::Scatter {
+                x,
+                y,
+                width,
+                height,
+                spacing,
+            } => format!("scattered in {width}x{height} at ({x}, {y}), {spacing} apart"),
+        }
+    }
 }
 
 /// Where barriers go.
@@ -418,10 +527,23 @@ impl StateHash for Scenario {
         for i in &self.inhabitants {
             h.bytes(i.genome.as_bytes());
             h.u32(i.count);
-            if let Some((x, y)) = i.at {
-                h.u32(x);
-                h.u32(y);
-            }
+            // The arrangement, as a discriminant and its numbers. Two slides that put the same
+            // founders in different places are different slides.
+            let (tag, a, b, c, d) = match i.place {
+                crate::Placement::Spread => (0u8, 0, 0, 0, 0),
+                crate::Placement::At { x, y } => (1, x, y, 0, 0),
+                crate::Placement::Grid { x, y, width, height } => (2, x, y, width, height),
+                crate::Placement::Hex { x, y, width, height } => (3, x, y, width, height),
+                crate::Placement::Scatter { x, y, width, height, spacing } => {
+                    h.u32(spacing);
+                    (4, x, y, width, height)
+                }
+            };
+            h.u8(tag);
+            h.u32(a);
+            h.u32(b);
+            h.u32(c);
+            h.u32(d);
         }
         h.u64(self.flux.len() as u64);
         self.biology.hash_state(h);
@@ -450,12 +572,12 @@ mod tests {
                 Inhabitant {
                     genome: "sponge.mm".to_string(),
                     count: 12,
-                    at: None,
+                    place: Placement::Spread,
                 },
                 Inhabitant {
                     genome: "drifter.mm".to_string(),
                     count: 4,
-                    at: Some((9, 40)),
+                    place: Placement::At { x: 9, y: 40 },
                 },
             ],
             ..Scenario::default()

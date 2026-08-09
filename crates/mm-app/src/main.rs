@@ -1195,7 +1195,13 @@ fn seed_into(slide: &mut Slide, founders: u32) -> u32 {
     let mut placed = 0;
     for who in &wanted {
         match genome_bytes(&who.genome) {
-            Some(bytes) => placed += slide.world_mut().place_founders(&bytes, who.count),
+            // The arrangement the scenario asked for, not a spread over the whole slide. See
+            // `mm_core::Placement` for what this field used to do, which was nothing.
+            Some(bytes) => {
+                placed += slide
+                    .world_mut()
+                    .place_inhabitants(&bytes, who.count, who.place)
+            }
             None => eprintln!("scenario asks for {}, which did not assemble", who.genome),
         }
     }
@@ -5811,10 +5817,7 @@ fn toolbox_work(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
                 );
             }
             for cell in &inhabitants {
-                let where_ = match cell.at {
-                    Some((x, y)) => format!("({x}, {y})"),
-                    None => "spread over the slide".to_string(),
-                };
+                let where_ = cell.place.describe();
                 on_slide_row(
                     ui,
                     [0x8a, 0xb0, 0x98],

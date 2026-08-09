@@ -36,6 +36,12 @@ pub enum Purpose {
     Jitter = 3,
     /// Test and fuzz harnesses. Never used by the simulation itself.
     Harness = 4,
+    /// Where a scattered founder lands (`Placement::Scatter`). Setup, not simulation: it is
+    /// drawn once when a slide is populated and never again.
+    ///
+    /// Appended rather than inserted, like a catalogue entry: the discriminants are mixed into
+    /// every draw, so renumbering one would change every random number in every existing run.
+    Placement = 5,
 }
 
 /// The part of a random draw that identifies *who* is drawing and *when*.

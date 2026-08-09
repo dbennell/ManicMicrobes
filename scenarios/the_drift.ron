@@ -67,11 +67,22 @@
     ],
 
     // Sponges, because that is what this slide is for — `sponge.mm` builds a holdfast and no
-    // cilia, so where it lands is where it lives. Twelve rather than sixteen: the founders are
-    // spread over a square grid and a channel is not square, so some of them would land in the
-    // walls.
+    // cilia, so where it lands is where it lives.
+    //
+    // Sixteen, along the inside of the upper wall, which is the only place a sponge can work: a
+    // holdfast grips a *barrier*, and a founder in open water has nothing to hold and drifts away
+    // with the current like everything else.
+    //
+    // This used to read "twelve rather than sixteen: the founders are spread over a square grid
+    // and a channel is not square, so some of them would land in the walls" — a scenario author
+    // reducing the population to work around the placement rule. `Placement` is that rule fixed;
+    // the count is back to sixteen and every one of them starts against the wall it needs.
     inhabitants: [
-        (genome: "sponge.mm", count: 12),
+        (
+            genome: "sponge.mm",
+            count: 16,
+            place: Grid(x: 8, y: 34, width: 80, height: 1),
+        ),
     ],
 
     // The channel: two walls thirty-two squares apart, open at both ends so the current runs
