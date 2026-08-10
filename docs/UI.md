@@ -1693,6 +1693,53 @@ worth having; but as windows the problem it was solving does not arise, and the 
 `handle_input` — so the one keystroke opened a panel *and* set the camera chasing a cell. The
 uniqueness test in `ui.rs` could not see it, because `follow` is not a panel. `B` was free.
 
+### 12.2a A window can be a rail instead
+
+§12.2 named the cost of windows out loud — *a window over the slide has to be dragged aside to
+see what your change did* — and said it was paid down by them being movable and never modal.
+
+For three of the four that holds. You open the debugger, read it, close it; the slide is waiting
+underneath. For the **build** window it does not, and the reason is specific rather than a matter
+of taste: the thing that window is *for* is drawing on the slide it is sitting on. Every stroke
+is aimed at the surface the palette is covering, the palette has to stay open between strokes
+(§4.3 is the argument, and it is why this window is not a menu and not modal), and "drag it
+somewhere else" is not an answer when the slide is the whole screen.
+
+A rail cannot be over anything. That is §10.1's first sentence — *whatever egui does not claim
+is, by definition, the slide* — so this is not a second layout to keep in step with the first.
+It is the panel asking to be a rail again, and the slide shrinks to make room exactly as it does
+for the cell inspector.
+
+**`ui::Panels::docked`, one at a time.** A rail is a strip; two of these stacked in one is two
+strips of four hundred points, and at that width there is nothing left to be editing. The drawer
+made the same call for the same reason, and the state has the same shape: *which*, not *whether*.
+Docking a second window floats the first rather than closing it.
+
+**It is a state, not a reclassifying.** `Panel::Build.dock()` still returns `Dock::Window` — that
+is where these four live, the View menu still lists them under *windows*, and
+`a_windows_home_is_still_a_window` is the test that stops a UI toggle quietly overturning §12.2.
+
+| | |
+| --- | --- |
+| into the rail | the `dock left` chip at the top of any of the four windows, or View ▸ In the left rail |
+| back out | the `float` chip in the rail's header, or the same menu |
+| where | outermost on the left, so docking does not shove the cell inspector sideways |
+| width | one `Panel` id for all four — the width you drag it to belongs to the *rail*, not to whichever window is sitting in it |
+
+**A docked body degrades, and one of them degrades differently.** `skin::drawer_split` drops its
+context column below about 690 points, which is what that rule is for: the build window in the
+rail is the toolbox with its help text folded away, which is right for a palette. The parameter
+editor is the exception, because its table lays columns out at absolute offsets from the row's
+left edge — below the sum of them the `was` column is drawn off the edge and clipped, and half a
+number is worse than no number. So `docked_min_width` gives that one panel a floor derived from
+`param_column_x`, rather than a typed constant that can be left behind when a column is widened.
+Docked narrow it loses the per-field detail panel, which is the context column; the hover text is
+still there.
+
+**`MM_SHOT_VIEW=dock:build`** arranges it, for §12.6's reason: a window that has become a rail is
+a different picture of the same panel, and a state a script cannot arrange is a state nobody
+reviews. `dock:none` puts it back.
+
 ### 12.3 The toolbox and the scenario pane are one window
 
 `toolbox` and `scenario` were two tabs and the split was never on a seam. The toolbox is what

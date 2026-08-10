@@ -688,6 +688,31 @@ pub struct Panels {
     pub parameters: bool,
     pub editor: bool,
     pub debugger: bool,
+    /// The window that has been moved into the left rail, if any.
+    ///
+    /// # Why a window needs somewhere else to be
+    ///
+    /// §12.2 chose windows for these four and named the cost out loud: *a window over the slide
+    /// has to be dragged aside to see what your change did*. It said the cost was paid down by
+    /// the windows being movable and never modal. For three of the four that is true — you open
+    /// the debugger, read it, close it. For the **build** window it is not, because the thing it
+    /// is for is drawing on the slide it is sitting on: every stroke is aimed at the surface the
+    /// palette is covering, and dragging the palette out of the way is not a fix when the slide
+    /// is the whole screen and the palette has to stay open (§4.3).
+    ///
+    /// A rail cannot be over anything — §10.1's first sentence — because what egui does not
+    /// claim *is* the slide. So docking is not a second layout, it is the panel asking to be a
+    /// rail again, and the slide shrinks to make room exactly as it does for the cell inspector.
+    ///
+    /// # One at a time, and why it is not a set
+    ///
+    /// A rail is a strip. Two of these stacked in one is two strips of four hundred points, and
+    /// at that width there is no slide left to be editing. The drawer made the same call for the
+    /// same reason and `drawer` above is the same shape: *which*, not *whether*.
+    ///
+    /// [`Dock::Window`] is still where these four *live* — this is a state, not a reclassifying,
+    /// and `a_windows_home_is_still_a_window` is the test that says so.
+    pub docked: Option<Panel>,
 }
 
 impl Default for Panels {
@@ -701,6 +726,7 @@ impl Default for Panels {
             parameters: false,
             editor: false,
             debugger: false,
+            docked: None,
         }
     }
 }
@@ -739,6 +765,13 @@ impl Panels {
                 }
             }
         }
+        // A closed panel is not in the rail. Without this, closing a docked window left the rail
+        // reserved for something invisible: `docked` still named it, `is_docked` still said yes,
+        // and reopening it a minute later would have put it somewhere the user had not asked
+        // for.
+        if !open && self.docked == Some(panel) {
+            self.docked = None;
+        }
     }
 
     pub fn toggle(&mut self, panel: Panel) {
@@ -749,6 +782,42 @@ impl Panels {
     #[must_use]
     pub fn drawer_open(&self) -> bool {
         self.drawer.is_some()
+    }
+
+    /// Move a window into the left rail, opening it if it was shut.
+    ///
+    /// Refused for anything that is not a [`Dock::Window`]: the rails and the drawer already
+    /// have homes, and "dock the cell inspector into the rail it is already in" is not a request
+    /// with a meaning.
+    pub fn dock(&mut self, panel: Panel) {
+        if panel.dock() != Dock::Window {
+            return;
+        }
+        self.set(panel, true);
+        // Set after `set`, which clears `docked` for a panel being closed and would otherwise
+        // have to know not to clear the one it is about to name.
+        self.docked = Some(panel);
+    }
+
+    /// Put whatever is in the left rail back over the slide as a window. It stays open.
+    pub fn float(&mut self) {
+        self.docked = None;
+    }
+
+    /// The window in the left rail, if there is one and it is open.
+    ///
+    /// The open check is belt and braces — [`Panels::set`] clears `docked` when it closes the
+    /// panel named — but this is read by the layout, and a layout that reserves a rail for a
+    /// panel that will draw nothing leaves a blank stripe where the slide should be.
+    #[must_use]
+    pub fn docked(&self) -> Option<Panel> {
+        self.docked.filter(|p| self.is_open(*p))
+    }
+
+    /// Whether this panel is the one in the rail.
+    #[must_use]
+    pub fn is_docked(&self, panel: Panel) -> bool {
+        self.docked() == Some(panel)
     }
 }
 
@@ -951,6 +1020,69 @@ mod tests {
             panels.set(panel, false);
             assert_eq!(panels.drawer, Some(Panel::Genome), "{}", panel.title());
         }
+    }
+
+    #[test]
+    fn a_docked_window_is_in_the_rail_and_still_open() {
+        let mut panels = Panels::default();
+        panels.dock(Panel::Build);
+        assert!(panels.is_open(Panel::Build), "docking closed it");
+        assert!(panels.is_docked(Panel::Build));
+        assert_eq!(panels.docked(), Some(Panel::Build));
+
+        panels.float();
+        assert!(panels.is_open(Panel::Build), "floating closed it");
+        assert!(!panels.is_docked(Panel::Build));
+        assert_eq!(panels.docked(), None);
+    }
+
+    #[test]
+    fn only_one_window_is_in_the_rail_at_a_time() {
+        // A rail is a strip. Two of these stacked in one is two strips of four hundred points,
+        // and at that width there is no slide left to be editing.
+        let mut panels = Panels::default();
+        panels.dock(Panel::Build);
+        panels.dock(Panel::Parameters);
+        assert_eq!(panels.docked(), Some(Panel::Parameters));
+        assert!(
+            panels.is_open(Panel::Build),
+            "displacing it from the rail should float it, not shut it"
+        );
+    }
+
+    #[test]
+    fn closing_a_docked_window_empties_the_rail() {
+        // Otherwise the layout reserves a rail for something that draws nothing, and reopening
+        // the window later puts it somewhere nobody asked for.
+        let mut panels = Panels::default();
+        panels.dock(Panel::Build);
+        panels.set(Panel::Build, false);
+        assert_eq!(panels.docked(), None);
+        assert_eq!(panels.docked, None, "the state was left pointing at it");
+
+        panels.set(Panel::Build, true);
+        assert!(!panels.is_docked(Panel::Build), "it went back on its own");
+    }
+
+    #[test]
+    fn only_a_window_can_be_docked() {
+        // The rails and the drawer already have homes; "dock the cell inspector into the rail it
+        // is already in" is not a request with a meaning.
+        let mut panels = Panels::default();
+        for panel in Panel::ALL.into_iter().filter(|p| p.dock() != Dock::Window) {
+            panels.dock(panel);
+            assert_eq!(panels.docked(), None, "{} took the rail", panel.title());
+        }
+    }
+
+    #[test]
+    fn a_windows_home_is_still_a_window() {
+        // Docking is a state, not a reclassifying. If this ever starts returning `Dock::Left`,
+        // the View menu stops listing the build window under "windows", `windows()` stops
+        // drawing it at all, and §12.2's argument has been quietly overturned by a UI toggle.
+        let mut panels = Panels::default();
+        panels.dock(Panel::Build);
+        assert_eq!(Panel::Build.dock(), Dock::Window);
     }
 
     #[test]

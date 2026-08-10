@@ -399,6 +399,20 @@ fn arrange(spec: &str, sim: &mut SlideRes, view: &mut View) {
                 view.panels.set(Panel::Build, true);
                 view.build = Build::World;
             }
+            // `dock:build` puts a window in the left rail, so the docked layout can be
+            // photographed — a window that has become a rail is a different picture of the same
+            // panel, and §12.6's whole point is that a state a script cannot arrange is a state
+            // nobody reviews. `dock:none` puts it back.
+            "dock" => match sub {
+                "none" | "" => view.panels.float(),
+                name => match Panel::ALL.into_iter().find(|p| p.title() == name) {
+                    Some(panel) if panel.dock() == Dock::Window => view.panels.dock(panel),
+                    // Said out loud rather than ignored: the failure would otherwise be a
+                    // photograph of an undocked window, which is what this working looks like
+                    // when it is pointed at the wrong panel.
+                    _ => eprintln!("MM_SHOT_VIEW: `{name}` is not a window that can be docked"),
+                },
+            },
             // `menu:view` holds a menu open, so a menu can be photographed at all. The name is
             // the one the menu bar prints, lowercased.
             "menu" => match sub {
@@ -3733,6 +3747,53 @@ fn panels(
     let room = root.available_rect_before_wrap().height();
     let rails = ui::rails_fit(room);
 
+    // The window that asked to be a rail, if any (`ui::Panels::docked`). Outermost on the left,
+    // so docking and undocking does not shove the cell inspector sideways — and so the two read
+    // as what they are: the app's working surface at the edge, and the slide's own caption next
+    // to the slide.
+    //
+    // One `Panel` id for all four, so the width you drag it to is the *rail's* width and is kept
+    // when a different window is put in it. The rail is the piece of furniture; which window is
+    // sitting in it is not.
+    if let Some(panel) = view.panels.docked().filter(|_| rails) {
+        let mut float = false;
+        let mut close = false;
+        egui::Panel::left("rail_docked")
+            .resizable(true)
+            .default_size(380.0)
+            // The floor is per panel and not a taste: §12.4's rule is that a size which trips a
+            // body's own width rule is a size that looks broken. The parameter table lays its
+            // columns out at absolute offsets from the row's left edge, so below the sum of them
+            // the `was` column is drawn off the edge of the rail and clipped — a number half
+            // there is worse than a number not there. Everything else degrades honestly: it is
+            // `skin::drawer_split` dropping its context column, which is what that is for.
+            //
+            // The ceiling is half a 1440 screen, and above the ~690 `drawer_split` wants, so the
+            // scenario view's RON preview is reachable in the rail and not only in the window.
+            .size_range(docked_min_width(panel)..=760.0)
+            .frame(skin::panel_frame())
+            .show(&mut root, |ui| {
+                docked_header(ui, panel, &mut float, &mut close);
+                match panel {
+                    Panel::Build => build_body(ui, &mut sim, &mut view),
+                    Panel::Parameters => parameters_body(ui, &mut sim, &mut view),
+                    Panel::Editor => editor_body(ui, &mut sim, &mut view),
+                    Panel::Debugger => debugger_body(ui, &mut sim),
+                    Panel::Cell
+                    | Panel::Metrics
+                    | Panel::Legend
+                    | Panel::Genome
+                    | Panel::Ecology => {}
+                }
+            });
+        if float {
+            view.panels.float();
+        }
+        if close {
+            view.panels.set(panel, false);
+        }
+    }
+
     if view.panels.cell && rails {
         egui::Panel::left("rail_left")
             .resizable(true)
@@ -4493,6 +4554,37 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                 {
                     panel_item(ui, view, panel);
                 }
+                // Any of the four can take the left rail instead of covering the slide, one at a
+                // time. In the menu as well as on each window's own chip, for §12.6's reason:
+                // a state that can only be reached from inside the thing it changes is a state
+                // nobody finds, and this one is worth finding — the build window in particular
+                // is a palette for drawing on the surface it sits on.
+                ui.menu_button("In the left rail", |ui| {
+                    skin::menu(ui);
+                    let docked = view.panels.docked();
+                    if skin::menu_toggle(ui, "nothing", "", docked.is_none()).clicked() {
+                        view.panels.float();
+                        ui.close();
+                    }
+                    skin::menu_rule(ui);
+                    for panel in Panel::ALL
+                        .into_iter()
+                        .filter(|p| p.dock() == Dock::Window)
+                    {
+                        let here = docked == Some(panel);
+                        if skin::menu_toggle(ui, panel.title(), "", here).clicked() {
+                            if here {
+                                view.panels.float();
+                            } else {
+                                // Opens it if it was shut: asking for a thing to be in the rail
+                                // is asking to see it, and a menu item that silently did nothing
+                                // because the window happened to be closed would read as broken.
+                                view.panels.dock(panel);
+                            }
+                            ui.close();
+                        }
+                    }
+                });
                 skin::menu_rule(ui);
                 let count = sim.latest.interventions.len();
                 let showing =
@@ -5085,8 +5177,14 @@ fn drawer(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
 /// scrolls inside it.
 fn windows(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
     let screen = root.ctx().viewport_rect();
+    // Applied after the loop, not inside it: docking changes which windows are drawn, and
+    // changing that mid-iteration would take effect a frame late in one direction and
+    // immediately in the other.
+    let mut dock: Option<Panel> = None;
     for panel in Panel::ALL.into_iter().filter(|p| p.dock() == Dock::Window) {
-        if !view.panels.is_open(panel) {
+        // A window that has been put in the left rail is drawn there instead, by `panels`. Not
+        // both: two live copies of one body would be two drafts of the same edit.
+        if !view.panels.is_open(panel) || view.panels.is_docked(panel) {
             continue;
         }
         // Where each one starts, and how big. Wide enough that each opens showing the thing it
@@ -5113,7 +5211,7 @@ fn windows(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
             want.y.min(screen.max.y - at.y - 40.0).max(200.0),
         );
         let mut open = true;
-        egui::Window::new(skin::text(Role::Body, panel.title()))
+        let shown = egui::Window::new(skin::text(Role::Body, panel.title()))
             .id(egui::Id::new(("window", panel.title())))
             .open(&mut open)
             .collapsible(true)
@@ -5126,6 +5224,29 @@ fn windows(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
                 // that and not "as much as you like". See the docstring: without it a body that
                 // fills its height and a container that fits its content have no fixed point.
                 ui.set_min_size(ui.available_size());
+                // The way out of being over the slide. Right-aligned on its own row above the
+                // body, because egui's title bar is not ours to add to and every one of these
+                // four bodies begins with something of its own.
+                //
+                // **`horizontal` around the `with_layout`, and it is load-bearing.** A bare
+                // right-to-left layout takes `available_size`, and the line above has just told
+                // this `Ui` that it is the whole window — so the chip's row claimed the entire
+                // height, the body was pushed off the bottom edge, and the window then grew to
+                // fit the two of them stacked. §12.4's runaway exactly, in a third place, from
+                // one missing row.
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if skin::chip(ui, "dock left", None, false)
+                            .on_hover_text(
+                                "move it into a rail down the left, where it takes its own space \
+                                 instead of covering the slide",
+                            )
+                            .clicked()
+                        {
+                            dock = Some(panel);
+                        }
+                    });
+                });
                 match panel {
                     Panel::Build => build_body(ui, sim, view),
                     Panel::Parameters => parameters_body(ui, sim, view),
@@ -5138,10 +5259,83 @@ fn windows(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
                     | Panel::Ecology => {}
                 }
             });
+        // What size the window actually came out, every frame, to stderr.
+        //
+        // **A window that grows two points a frame does not look like a bug in a screenshot, it
+        // looks like a big window.** `docs/UI.md` §12.4 records this failure twice; it has since
+        // happened twice more, in the parameter editor and the build window's world view, and
+        // both had been shipping unnoticed because a still frame cannot show a rate. What finds
+        // it in one run is a column of numbers:
+        //
+        // ```text
+        // MM_WINDOW_PROBE=1 MM_SHOT_VIEW=params:metabolism MM_SHOT=/tmp/p.png \
+        //   MM_SHOT_AFTER=25 ./target/release/mm-app 2>&1 | grep PROBE
+        // ```
+        //
+        // First line and last line equal is the whole test. Anything monotonic is a body asking
+        // for more than the window it is in, and the fix is always the same: lay the footer out
+        // bottom-up and give the body the remainder, rather than guessing its height.
+        if std::env::var("MM_WINDOW_PROBE").is_ok() {
+            if let Some(rect) = shown.map(|r| r.response.rect) {
+                eprintln!(
+                    "PROBE {} {:.0}x{:.0} at {:.0},{:.0}",
+                    panel.title(),
+                    rect.width(),
+                    rect.height(),
+                    rect.min.x,
+                    rect.min.y
+                );
+            }
+        }
         if !open {
             view.panels.set(panel, false);
         }
     }
+    if let Some(panel) = dock {
+        view.panels.dock(panel);
+    }
+}
+
+/// The narrowest the left rail may be while holding a given panel.
+///
+/// See the note where this is used: a body that degrades by dropping a column can be given any
+/// width, and one that lays its columns out at absolute offsets cannot.
+fn docked_min_width(panel: Panel) -> f32 {
+    match panel {
+        // The four columns of the parameter table plus the least a note can be read in. Derived
+        // rather than typed, so widening a column cannot leave this behind saying the old number.
+        Panel::Parameters => param_column_x(4) + 60.0,
+        _ => 300.0,
+    }
+}
+
+/// The one row a panel gains by being in the rail instead of in a window: what it is, the way
+/// back out, and the way to shut it.
+///
+/// A window carries those last two in a title bar egui draws. A `Panel` has no title bar, and
+/// without this a docked window would be a body with no name on it and no way to close it but
+/// the menu — which is exactly the "where has it gone" that §12 was written about.
+fn docked_header(ui: &mut egui::Ui, panel: Panel, float: &mut bool, close: &mut bool) {
+    ui.horizontal(|ui| {
+        ui.label(skin::text(Role::Section, panel.title()));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add(egui::Button::new(skin::text(Role::Label, "×")).frame(false))
+                .on_hover_text(format!("close it ({})", panel.key()))
+                .clicked()
+            {
+                *close = true;
+            }
+            if skin::chip(ui, "float", None, false)
+                .on_hover_text("put it back over the slide as a window you can move")
+                .clicked()
+            {
+                *float = true;
+            }
+        });
+    });
+    skin::hairline(ui);
+    ui.add_space(3.0);
 }
 
 /// A cell's flattened sides, as the mesh wants them.
