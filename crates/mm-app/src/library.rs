@@ -318,37 +318,200 @@ pub fn load(path: &Path) -> Result<Scenario, FileError> {
 /// a scenario that names one that is not there fails at resolution with the name in the message.
 fn rulesets(path: &Path) -> mm_core::ruleset::RulesetLibrary {
     let mut library = mm_core::ruleset::RulesetLibrary::new();
-    let mut roots: Vec<std::path::PathBuf> = Vec::new();
+    let mut roots: Vec<PathBuf> = Vec::new();
     if let Some(parent) = path.parent().and_then(Path::parent) {
         roots.push(parent.join("rulesets"));
     }
-    roots.push(std::path::PathBuf::from("rulesets"));
+    // Then wherever the app's own library lives. **Not just the working directory**, which is
+    // what this did — and what made a scenario saved anywhere but inside the project tree a file
+    // that would not reopen. That did not show while every saved scenario was written complete
+    // and inherited nothing; a file that names a ruleset needs the set to be findable from
+    // wherever it was put, and the installed `rulesets/` is where it is.
+    roots.extend(ruleset_paths());
     for root in roots {
-        let Ok(entries) = std::fs::read_dir(&root) else {
-            continue;
-        };
-        // Sorted: the order a filesystem hands files back is not a thing a run may depend on.
-        let mut files: Vec<std::path::PathBuf> = entries
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|e| e == "ron"))
-            .collect();
-        files.sort();
-        for file in files {
-            let stem = file
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_string();
-            if let Ok(text) = std::fs::read_to_string(&file) {
-                let _ = library.insert(&stem, &text);
-            }
-        }
+        read_rulesets_into(&mut library, &root);
         if !library.is_empty() {
             break;
         }
     }
     library
+}
+
+/// Where rulesets live, in the same first-directory-wins order as [`search_paths`].
+#[must_use]
+pub fn ruleset_paths() -> Vec<PathBuf> {
+    mm_asm::locate::search_roots()
+        .into_iter()
+        .map(|root| root.join("rulesets"))
+        .collect()
+}
+
+/// Every named ruleset the app can see, resolved.
+///
+/// The front end had no way to reach these at all: [`rulesets`] was built at load, used once and
+/// dropped, so the interface could run the economy a scenario named and never say which one it
+/// was, what else was available, or what any of them changed. That is most of what the rules page
+/// exists to answer.
+///
+/// Resolved here rather than in the caller because resolution can fail — a cycle, a typo in a
+/// path — and a set that will not resolve is one the editor must not offer as a baseline. Those
+/// are dropped, with their names kept in the second return value so the interface can say a file
+/// was refused rather than silently listing one fewer.
+#[must_use]
+pub fn ruleset_choices() -> (Vec<Choice>, Vec<String>) {
+    let library = ruleset_library();
+    let mut good = Vec::new();
+    let mut bad = Vec::new();
+    for name in library.names() {
+        let Some(set) = library.get(name) else {
+            continue;
+        };
+        match library.rules(name) {
+            Ok(rules) => good.push(Choice {
+                name: name.to_string(),
+                title: set.name.clone(),
+                notes: set.notes.clone(),
+                of: set.of.clone(),
+                changes: set.set.len(),
+                rules,
+            }),
+            Err(e) => bad.push(format!("{name}: {e}")),
+        }
+    }
+    (good, bad)
+}
+
+/// One named ruleset, resolved, as the parameter editor needs it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Choice {
+    /// The file stem, which is what a scenario's `ruleset:` field names.
+    pub name: String,
+    /// What the document calls itself, for reading.
+    pub title: String,
+    pub notes: String,
+    /// The set it is a diff against, or empty for the engine's own numbers.
+    pub of: String,
+    /// How many parameters it names in its own right, before inheritance.
+    pub changes: usize,
+    /// What it comes to, with its `of` chain applied.
+    pub rules: mm_core::ruleset::Rules,
+}
+
+/// The whole ruleset library, from wherever it is.
+///
+/// The same first-directory-wins rule as [`scenarios`]. [`rulesets`] is the per-scenario version
+/// and looks beside the file being opened; this one answers "what sets exist" with no scenario in
+/// hand, which is what the parameter editor is asking.
+#[must_use]
+pub fn ruleset_library() -> mm_core::ruleset::RulesetLibrary {
+    let mut library = mm_core::ruleset::RulesetLibrary::new();
+    for root in ruleset_paths() {
+        read_rulesets_into(&mut library, &root);
+        if !library.is_empty() {
+            break;
+        }
+    }
+    library
+}
+
+/// Every `.ron` in `root`, inserted by file stem. Missing or unreadable is not an error.
+fn read_rulesets_into(library: &mut mm_core::ruleset::RulesetLibrary, root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    // Sorted: the order a filesystem hands files back is not a thing a run may depend on.
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "ron"))
+        .collect();
+    files.sort();
+    for file in files {
+        let stem = file
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        if let Ok(text) = std::fs::read_to_string(&file) {
+            let _ = library.insert(&stem, &text);
+        }
+    }
+}
+
+/// Write a named ruleset out, into the first `rulesets/` directory that exists.
+///
+/// The other half of "a ruleset is a diff, not a document": `mm_core::params::diff` computes what
+/// a world changed, and this puts it somewhere every other world can name. Until now a ruleset
+/// could only be written in a text editor, which meant that the numbers arrived at by moving
+/// sliders in the parameter editor had to be copied out by hand — and a number copied by hand is
+/// a number that can be copied wrong.
+///
+/// # Errors
+///
+/// If the name is empty or not a legal file stem, or the file cannot be written.
+pub fn save_ruleset(
+    dir: &Path,
+    name: &str,
+    of: &str,
+    notes: &str,
+    changes: &std::collections::BTreeMap<String, mm_core::params::Value>,
+) -> Result<PathBuf, FileError> {
+    let stem = name.trim().replace(' ', "_");
+    // Refused rather than sanitised further: a name with a slash in it is somebody meaning a
+    // path, and quietly writing somewhere else is worse than saying no.
+    if stem.is_empty() || stem.contains(['/', '\\']) {
+        return Err(FileError::Io(format!(
+            "`{name}` is not a name a ruleset file can have"
+        )));
+    }
+    let path = dir.join(format!("{stem}.ron"));
+    let text = mm_core::ruleset::Ruleset::from_diff(name.trim(), of, notes, changes)
+        .to_ron()
+        .map_err(|e| FileError::Scenario(format!("cannot write this ruleset out: {e}")))?;
+    std::fs::create_dir_all(dir)
+        .map_err(|e| FileError::Io(format!("cannot make {}: {e}", dir.display())))?;
+    std::fs::write(&path, text)
+        .map_err(|e| FileError::Io(format!("cannot write {}: {e}", path.display())))?;
+    Ok(path)
+}
+
+/// Where a new ruleset goes: the first `rulesets/` that exists, or one beside the working
+/// directory if none does.
+#[must_use]
+pub fn ruleset_dir() -> PathBuf {
+    ruleset_paths()
+        .into_iter()
+        .find(|d| d.is_dir())
+        .unwrap_or_else(|| PathBuf::from("rulesets"))
+}
+
+/// The text [`save`] will write — so the preview and the file cannot disagree.
+///
+/// `delta` chooses between the two forms `mm_core::scenario` documents at length:
+///
+/// * **the delta** — only what this world changes, against the engine's defaults with whatever
+///   ruleset it names resolved into them. Fifteen lines instead of four hundred and thirty-six,
+///   and the form every hand-written file in `scenarios/` is already in.
+/// * **complete** — every field. What a `.mmslide` embeds, and what to use for a file that must
+///   still mean the same thing after somebody edits a ruleset.
+///
+/// # Errors
+///
+/// If the scenario cannot be serialised, or names a ruleset this library does not have — which is
+/// refused rather than written against the engine's defaults instead, because a file saved
+/// against the wrong baseline is a file that reopens as a different world.
+pub fn scenario_ron(scenario: &Scenario, delta: bool) -> Result<String, FileError> {
+    if !delta {
+        return scenario
+            .to_ron()
+            .map_err(|e| FileError::Scenario(format!("cannot write this scenario out: {e}")));
+    }
+    let base = ruleset_library()
+        .baseline(&scenario.ruleset)
+        .map_err(|e| FileError::Scenario(format!("cannot write a delta: {e}")))?;
+    scenario
+        .to_ron_sparse(&base)
+        .map_err(|e| FileError::Scenario(format!("cannot write this scenario out: {e}")))
 }
 
 /// Write a scenario out as a `.ron`.
@@ -359,11 +522,9 @@ fn rulesets(path: &Path) -> mm_core::ruleset::RulesetLibrary {
 /// # Errors
 ///
 /// If the scenario cannot be serialised, or the file cannot be written.
-pub fn save(path: &Path, scenario: &Scenario) -> Result<PathBuf, FileError> {
+pub fn save(path: &Path, scenario: &Scenario, delta: bool) -> Result<PathBuf, FileError> {
     let path = with_extension(path, "ron");
-    let text = scenario
-        .to_ron()
-        .map_err(|e| FileError::Scenario(format!("cannot write this scenario out: {e:?}")))?;
+    let text = scenario_ron(scenario, delta)?;
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)
@@ -582,11 +743,119 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let original = load(&scenarios()[0].path).expect("a shipped scenario");
         // No extension given, so `save` has to supply one.
-        let written = save(&dir.join("nested/round-trip"), &original).expect("write");
+        let written = save(&dir.join("nested/round-trip"), &original, false).expect("write");
         assert_eq!(written.extension().and_then(|e| e.to_str()), Some("ron"));
         let back = load(&written).expect("read it back");
         assert_eq!(back, original, "a scenario changed by being written down");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn every_shipped_scenario_survives_being_saved_as_a_delta() {
+        // The whole library through the new default, because this is the operation that used to
+        // be lossy in the other direction: open a file, save it, and get four hundred and
+        // thirty-six lines that no longer inherit anything. Every world has to come back the
+        // same world, ruleset and all.
+        let dir = std::env::temp_dir().join("mm-library-delta-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        for entry in scenarios() {
+            let original = load(&entry.path).expect("a shipped scenario");
+            let written =
+                save(&dir.join(&entry.label), &original, true).expect("write the delta");
+            let mut back = load(&written).expect("read it back");
+
+            // `set` is what the file said, kept after it has been applied — provenance, the way
+            // `ruleset` is. A world that wrote its changes as paths carries them; the one it was
+            // written from said the same thing in an inline block or not at all. What has to
+            // match is everything the simulation reads, which is everything else.
+            assert_eq!(
+                mm_core::ruleset::Rules::of(&back),
+                mm_core::ruleset::Rules::of(&original),
+                "{}: the rules changed by being saved as a delta",
+                entry.label
+            );
+            back.set = original.set.clone();
+            assert_eq!(
+                back, original,
+                "{} changed by being saved as a delta",
+                entry.label
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_delta_is_a_fraction_of_the_complete_form() {
+        // The number that is the point of the exercise. Not a fixed threshold on either — the
+        // library will grow — but a saved scenario that is not dramatically shorter than the
+        // engine's own numbers written out is one where this has quietly stopped working.
+        let scenario = load(&scenarios()[0].path).expect("a shipped scenario");
+        let delta = scenario_ron(&scenario, true).expect("delta");
+        let complete = scenario_ron(&scenario, false).expect("complete");
+        assert!(
+            delta.lines().count() * 8 < complete.lines().count(),
+            "the delta is {} lines against the complete form's {}",
+            delta.lines().count(),
+            complete.lines().count()
+        );
+    }
+
+    #[test]
+    fn a_worlds_parameters_can_be_kept_as_a_ruleset_and_read_back() {
+        // The other direction of the same idea: numbers arrived at by dragging values in the
+        // editor become a file any world can name. Until this existed they had to be copied out
+        // by hand, and a number copied by hand is a number that can be copied wrong.
+        let dir = std::env::temp_dir().join("mm-ruleset-save-test");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let base = mm_core::ruleset::Rules::default();
+        let mut moved = base.clone();
+        moved.biology.metabolism.rates.light_occlusion = 128;
+        moved.biology.division_energy = 4_096;
+        let changes = mm_core::params::diff(&base, &moved);
+
+        let path = save_ruleset(&dir, "lean light", "default", "measured", &changes)
+            .expect("write the ruleset");
+        assert_eq!(
+            path.file_name().and_then(|s| s.to_str()),
+            Some("lean_light.ron"),
+            "a name with a space in it should become a file stem without one"
+        );
+
+        let mut library = mm_core::ruleset::RulesetLibrary::new();
+        library
+            .insert("default", "( name: \"default\", set: {} )")
+            .expect("default");
+        library
+            .insert("lean_light", &std::fs::read_to_string(&path).expect("read"))
+            .expect("the file it just wrote should parse");
+        assert_eq!(library.rules("lean_light").expect("resolve"), moved);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_ruleset_name_that_is_really_a_path_is_refused() {
+        let dir = std::env::temp_dir().join("mm-ruleset-save-bad");
+        for name in ["", "  ", "../escape", "sub/dir"] {
+            assert!(
+                save_ruleset(&dir, name, "", "", &Default::default()).is_err(),
+                "`{name}` was accepted as a ruleset name"
+            );
+        }
+    }
+
+    #[test]
+    fn the_shipped_rulesets_all_resolve() {
+        // The parameter editor offers these as baselines to compare against, so one that will
+        // not resolve is one the interface has to say it refused rather than quietly omit.
+        let (good, refused) = ruleset_choices();
+        assert!(refused.is_empty(), "rulesets that would not resolve: {refused:?}");
+        assert!(
+            good.iter().any(|c| c.name == "default"),
+            "the engine's own numbers are not in the library: {:?}",
+            good.iter().map(|c| &c.name).collect::<Vec<_>>()
+        );
     }
 
     #[test]

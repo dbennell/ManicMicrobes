@@ -346,6 +346,11 @@ fn open_scenario(sim: &mut SlideRes, view: &mut View, path: &std::path::Path) {
     sim.sandbox = None;
     sim.breakpoints.rearm();
     sim.draft = None;
+    sim.scenario_view = None;
+    // Which ruleset the save row offers is a fact about the world that was open, not a setting.
+    // Left alone, opening `the_thicket` and then `soup` would have offered to save the soup as
+    // running rival light.
+    view.save_ruleset = None;
     view.centre = Vec2::splat(size as f32 / 2.0);
     view.zoom = (BASE_SCALE * 6.0 / size as f32).clamp(0.05, 40.0);
     view.file_path = path.display().to_string();
@@ -483,6 +488,7 @@ fn arrange(spec: &str, sim: &mut SlideRes, view: &mut View) {
                     view.params_page = ParamPage::Group(*group);
                 } else if !sub.is_empty() {
                     view.params_page = match sub {
+                        "rules" => ParamPage::Rules,
                         "pathways" => ParamPage::Pathways,
                         "catalogue" => ParamPage::Catalogue,
                         other => {
@@ -779,6 +785,15 @@ struct ScenarioView {
     ron: Result<String, String>,
     /// Frames until this is re-read. See [`SCENARIO_STALE_AFTER`].
     stale_in: u32,
+    /// The two choices the preview was rendered under: the delta form, and the ruleset the file
+    /// will name. Held so that changing either busts the cache at once rather than up to
+    /// [`SCENARIO_STALE_AFTER`] frames later — and, more to the point, so that rendering does
+    /// **not** happen every frame. The delta form resolves the ruleset library, which means
+    /// reading a directory, and doing that at frame rate would put the filesystem in the tick.
+    form: (bool, String),
+    /// The names the save row offers, read on the same throttle rather than cached forever — so
+    /// a set written from the parameter editor's `rules` page can be named here a moment later.
+    names: Vec<String>,
 }
 
 const ECOLOGY_STALE_AFTER: u64 = 120;
@@ -856,6 +871,108 @@ struct Draft {
     live: BiologyConfig,
     /// What the scenario says, so a value that has drifted from the file can be marked.
     founding: BiologyConfig,
+    /// What the ruleset the scenario names says, and what it is called.
+    ///
+    /// The layer under the scenario, which the editor could not see. Empty name means the
+    /// scenario named none and this is the engine's own numbers over again.
+    ruleset: String,
+    ruled: BiologyConfig,
+    /// The engine's own numbers, held rather than rebuilt: the draft is made once when the
+    /// editor opens and read every frame.
+    engine: BiologyConfig,
+    /// Which of the three the `was` column compares against.
+    against: Baseline,
+    /// The row the context column is explaining, by path.
+    ///
+    /// A `String` rather than a `&'static str` so it can also name a catalogue or pathway cell,
+    /// which are built per-frame from a prefix and an index.
+    focus: Option<String>,
+    /// The rules the whole library offers, and the names of any files that would not resolve.
+    choices: Vec<library::Choice>,
+    refused: Vec<String>,
+    /// How many parameters each layer moves against the one above it.
+    ///
+    /// Over the whole of `Rules` — biology, VM *and* the chemical table — where everything else
+    /// in this struct is `BiologyConfig`, because that is all the editor can write. The stack is
+    /// describing what a *layer* does, and a ruleset that retunes the chemistry has done
+    /// something whether or not this form can undo it.
+    ///
+    /// Counted once, when the editor opens. Six serialisations of the config tree is nothing
+    /// there and is not something to spend every frame.
+    ruleset_moves: usize,
+    scenario_moves: usize,
+    /// What "save as a ruleset" will be called, and what it will say about itself.
+    new_name: String,
+    new_notes: String,
+    note: Option<Result<String, String>>,
+}
+
+/// Which layer a parameter's `was` column reports.
+///
+/// The editor had one answer to "what should this be" — the scenario's own value — and that is
+/// the least interesting of the three. A number is either the engine's, or something the ruleset
+/// moved, or something this world moved, and *which* is the whole question when the population
+/// does something surprising. `docs/UI.md` §4 asked for "its default" and there are three of
+/// them; this is how you say which one you meant.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Baseline {
+    /// `BiologyConfig::default()` — the numbers compiled into the engine.
+    Engine,
+    /// The named ruleset, resolved. The same as `Engine` when no ruleset is named.
+    Ruleset,
+    /// The scenario file, which is where the editor started and stayed.
+    Scenario,
+}
+
+impl Baseline {
+    fn title(self) -> &'static str {
+        match self {
+            Baseline::Engine => "engine",
+            Baseline::Ruleset => "ruleset",
+            Baseline::Scenario => "scenario",
+        }
+    }
+
+    fn note(self) -> &'static str {
+        match self {
+            Baseline::Engine => {
+                "the numbers compiled into the engine, before any file has said anything"
+            }
+            Baseline::Ruleset => {
+                "the named parameter set this scenario inherits, resolved. The same as the \
+                 engine's when it names none"
+            }
+            Baseline::Scenario => "what the scenario file this world was opened from says",
+        }
+    }
+}
+
+impl Draft {
+    /// The config the `was` column is read from.
+    fn baseline(&self) -> &BiologyConfig {
+        match self.against {
+            Baseline::Engine => &self.engine,
+            Baseline::Ruleset => &self.ruled,
+            Baseline::Scenario => &self.founding,
+        }
+    }
+
+    /// Every parameter that differs from the chosen baseline, as (path, was, now).
+    ///
+    /// Over `mm_core::params::fields` rather than over `params::FIELDS`, so the catalogue and the
+    /// pathways are counted too — the rows the editor draws as grids are still parameters, and a
+    /// world whose only change is one organelle's build cost had been reported as unchanged.
+    fn drift(&self) -> Vec<(String, mm_core::params::Value, mm_core::params::Value)> {
+        let was: std::collections::BTreeMap<String, mm_core::params::Value> =
+            mm_core::params::fields(self.baseline()).into_iter().collect();
+        mm_core::params::fields(&self.editing)
+            .into_iter()
+            .filter_map(|(path, now)| {
+                let before = *was.get(&path)?;
+                (before != now).then_some((path, before, now))
+            })
+            .collect()
+    }
 }
 
 impl SlideRes {
@@ -1481,6 +1598,16 @@ struct View {
     /// Off, because it is four hundred lines of a four-hundred-and-twenty line file and the
     /// preview exists to show the twenty.
     ron_chemicals: bool,
+    /// Whether Save writes the delta rather than every field.
+    ///
+    /// The delta, by default, and that is a change of default rather than a new option. Saving
+    /// wrote four hundred and thirty-six lines of which four hundred were the engine's own
+    /// numbers restated — so a scenario opened in the microscope and saved again stopped being a
+    /// file anybody could read, and stopped inheriting anything from the ruleset it named.
+    /// `scenarios/` is full of files that never had that problem, and this writes that form.
+    save_delta: bool,
+    /// The ruleset the *saved file* will name. `None` until the pane has read the world's own.
+    save_ruleset: Option<String>,
     /// Which page of the parameter editor is showing (M10.6).
     ///
     /// On `View` rather than on `Draft` because the draft is dropped whenever the tab is not
@@ -1521,6 +1648,9 @@ enum Sheet {
 /// was a column of numbers with nothing saying what they were.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ParamPage {
+    /// Where the numbers came from: the layer stack, what this world moves, and what to call it
+    /// if you want to keep it.
+    Rules,
     Group(params::Group),
     /// Which reactions this world offers.
     Pathways,
@@ -1534,7 +1664,11 @@ impl ParamPage {
     /// build window's `world` view when that was built (`docs/UI.md` §9.6), because they are
     /// what kind of world it is and everything left here is what the cells cost to run.
     fn all() -> Vec<ParamPage> {
-        let mut out: Vec<ParamPage> = params::Group::ALL.map(ParamPage::Group).into();
+        // `rules` first, because it is the page that says what the other seven are measured
+        // against — and because "which economy is this world running" is the question somebody
+        // opening the editor on an unfamiliar scenario has before any individual number.
+        let mut out = vec![ParamPage::Rules];
+        out.extend(params::Group::ALL.map(ParamPage::Group));
         out.push(ParamPage::Pathways);
         out.push(ParamPage::Catalogue);
         out
@@ -1542,6 +1676,7 @@ impl ParamPage {
 
     fn title(self) -> &'static str {
         match self {
+            ParamPage::Rules => "rules",
             ParamPage::Group(g) => g.title(),
             ParamPage::Pathways => "pathways",
             ParamPage::Catalogue => "catalogue",
@@ -1602,6 +1737,8 @@ impl Default for View {
             library_pick: None,
             library_detail: None,
             ron_chemicals: false,
+            save_delta: true,
+            save_ruleset: None,
             // Metabolism, because it is the group with sixteen fields and the one being tuned.
             params_page: ParamPage::Group(params::Group::Metabolism),
             tree_floor: 2,
@@ -5405,12 +5542,26 @@ fn seeding_table(
 /// Read-only, deliberately. Everything here is authored with the tools on the slide; a second
 /// way to set the light regime would be a second thing to keep in step with the first.
 fn scenario_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
-    refresh_scenario(sim);
+    // The ruleset the *saved file* will name. `None` means "whatever the world was opened with",
+    // which is what it should be until somebody says otherwise; the moment they do, it is their
+    // choice and it sticks. Not applied to the running world — see `rules_page` for why a set
+    // cannot be handed to one mid-run — but it decides what the delta is written against, and so
+    // what the file inherits when it is opened again.
+    if view.save_ruleset.is_none() {
+        let held = sim.engine.handle();
+        let named = held.slide().world().scenario().ruleset.clone();
+        drop(held);
+        view.save_ruleset = Some(named);
+    }
+    let named = view.save_ruleset.clone().unwrap_or_default();
+
+    refresh_scenario(sim, (view.save_delta, &named));
     let Some(cached) = sim.scenario_view.as_ref() else {
         return;
     };
     let scenario = cached.scenario.clone();
     let ron = cached.ron.clone();
+    let names = cached.names.clone();
     let authoring = ui::authoring(sim.latest.frame.tick, sim.engine.rate().is_running());
 
     let mut save = false;
@@ -5442,6 +5593,29 @@ fn scenario_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
             // had eaten the slide, and the save row itself was never on screen: it was always
             // the part hanging off the bottom.
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                // Which rules this file inherits, and how much of them it writes down. Bottom-up
+                // layout, so these are declared after the save row and appear above it.
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(skin::text(Role::Label, "inherits"));
+                    if skin::chip(ui, "none", None, named.is_empty())
+                        .on_hover_text("the engine's own numbers, and nothing else")
+                        .clicked()
+                    {
+                        view.save_ruleset = Some(String::new());
+                    }
+                    for name in &names {
+                        if skin::chip(ui, name, None, *name == named)
+                            .on_hover_text(format!(
+                                "this file will say `ruleset: \"{name}\"`, and inherit whatever \
+                                 that set says at the time it is opened"
+                            ))
+                            .clicked()
+                        {
+                            view.save_ruleset = Some(name.clone());
+                        }
+                    }
+                });
+                ui.add_space(3.0);
                 ui.horizontal(|ui| {
                     ui.label(skin::text(Role::Label, "save to"));
                     ui.add(
@@ -5505,15 +5679,39 @@ fn scenario_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
                     ui.horizontal(|ui| {
                         ui.label(skin::text(Role::Label, format!("{total} lines")));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if skin::chip(ui, "chemistry", None, view.ron_chemicals)
+                            // Only meaningful in the complete form: a delta writes the table
+                            // only if this world changed it, and then it is one line a change.
+                            if !view.save_delta
+                                && skin::chip(ui, "chemistry", None, view.ron_chemicals)
+                                    .on_hover_text(
+                                        "the chemical table, which is four hundred lines of a \
+                                         four-hundred-and-twenty line file and is the same in \
+                                         every scenario until somebody changes it",
+                                    )
+                                    .clicked()
+                            {
+                                view.ron_chemicals = !view.ron_chemicals;
+                            }
+                            if skin::chip(ui, "complete", None, !view.save_delta)
                                 .on_hover_text(
-                                    "the chemical table, which is four hundred lines of a \
-                                     four-hundred-and-twenty line file and is the same in every \
-                                     scenario until somebody changes it",
+                                    "every field, including the four hundred lines of chemical \
+                                     table that no scenario changes. What a saved slide embeds, \
+                                     and what to write for a file that must go on meaning the \
+                                     same thing after somebody edits a ruleset",
                                 )
                                 .clicked()
                             {
-                                view.ron_chemicals = !view.ron_chemicals;
+                                view.save_delta = false;
+                            }
+                            if skin::chip(ui, "delta", None, view.save_delta)
+                                .on_hover_text(
+                                    "only what this world changes, against the engine's numbers \
+                                     with the ruleset above resolved into them. The form every \
+                                     file in scenarios/ is already written in",
+                                )
+                                .clicked()
+                            {
+                                view.save_delta = true;
                             }
                         });
                     });
@@ -5566,7 +5764,7 @@ fn scenario_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
                 scenario.name = stem.replace('_', " ");
             }
         }
-        view.file_note = Some(match library::save(&path, &scenario) {
+        view.file_note = Some(match library::save(&path, &scenario, view.save_delta) {
             Ok(written) => Ok(format!("wrote {}", written.display())),
             Err(e) => Err(e.to_string()),
         });
@@ -5577,25 +5775,34 @@ fn scenario_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
 }
 
 /// Re-read the scenario pane's copy of the recipe, if it is due.
-fn refresh_scenario(sim: &mut SlideRes) {
+fn refresh_scenario(sim: &mut SlideRes, form: (bool, &str)) {
+    let form = (form.0, form.1.to_string());
     if let Some(view) = sim.scenario_view.as_mut() {
-        if view.stale_in > 0 {
+        // A change to what is being previewed is not something to wait a second for: it is a
+        // control the author just touched, and the preview is the answer.
+        if view.stale_in > 0 && view.form == form {
             view.stale_in -= 1;
             return;
         }
     }
-    let scenario = {
+    let mut scenario = {
         let held = sim.engine.handle();
         let slide = held.slide();
         slide.world().scenario().clone()
     };
-    let ron = scenario
-        .to_ron()
-        .map_err(|e| format!("this scenario cannot be written out: {e:?}"));
+    scenario.ruleset = form.1.clone();
+    let ron = library::scenario_ron(&scenario, form.0).map_err(|e| e.to_string());
+    let names = library::ruleset_library()
+        .names()
+        .into_iter()
+        .map(String::from)
+        .collect();
     sim.scenario_view = Some(ScenarioView {
         scenario,
         ron,
         stale_in: SCENARIO_STALE_AFTER,
+        form,
+        names,
     });
 }
 
@@ -6363,13 +6570,52 @@ fn parameters_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
     // every frame is the whole reason this is cheap enough to leave sitting there. `panels`
     // drops the draft when this tab is not the one on show.
     if sim.draft.is_none() {
-        let held = sim.engine.handle();
-        let slide = held.slide();
-        let live = slide.world().biology().clone();
+        // Scoped so the engine's lock is let go before the filesystem is touched below: reading
+        // a directory while holding the simulation is a stall the slide would show.
+        let (live, founding, named, founding_rules) = {
+            let held = sim.engine.handle();
+            let slide = held.slide();
+            let scenario = slide.world().scenario();
+            (
+                slide.world().biology().clone(),
+                scenario.biology.clone(),
+                scenario.ruleset.clone(),
+                mm_core::ruleset::Rules::of(scenario),
+            )
+        };
+
+        // The library is read from disk, once, when the editor opens. Not every frame — this
+        // walks a directory — and not at startup, because a session that never opens the editor
+        // should not touch the filesystem for it.
+        let (choices, refused) = library::ruleset_choices();
+        // The whole of the named set, or the engine's own numbers when it names none — and also
+        // when it names one this library no longer has, which the page says out loud rather than
+        // reporting a layer that moves nothing.
+        let ruled_rules = choices
+            .iter()
+            .find(|c| c.name == named)
+            .map_or_else(mm_core::ruleset::Rules::default, |c| c.rules.clone());
+        let engine_rules = mm_core::ruleset::Rules::default();
+        let ruleset_moves = mm_core::params::diff(&engine_rules, &ruled_rules).len();
+        let scenario_moves = mm_core::params::diff(&ruled_rules, &founding_rules).len();
+        let ruled = ruled_rules.biology;
+
         sim.draft = Some(Draft {
             editing: live.clone(),
             live,
-            founding: slide.world().scenario().biology.clone(),
+            founding,
+            ruleset: named,
+            ruled,
+            engine: BiologyConfig::default(),
+            against: Baseline::Scenario,
+            focus: None,
+            choices,
+            refused,
+            ruleset_moves,
+            scenario_moves,
+            new_name: String::new(),
+            new_notes: String::new(),
+            note: None,
         });
     }
     let Some(mut draft) = sim.draft.take() else {
@@ -6382,148 +6628,185 @@ fn parameters_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
     // "not applied" label said that *something* had been touched, and with fifty-one fields
     // under six collapsed headers the only way to find out what was to open all six and read.
     let dirty = draft.editing != draft.live;
-    let drifted: usize = params::FIELDS
-        .iter()
-        .filter(|f| {
-            let now = mm_core::params::get(&draft.editing, f.path);
-            now.is_some() && now != mm_core::params::get(&draft.founding, f.path)
-        })
-        .count();
+    // Against whichever layer is selected, and over every parameter rather than over the
+    // fifty-one that have a row: the catalogue and the pathways are parameters too, and a world
+    // whose only change was one organelle's build cost used to report itself unchanged.
+    let drifted = draft.drift().len();
+    let against = draft.against;
+    // Read before the split: the work area holds the draft mutably for the whole of its closure.
+    let detail = draft
+        .focus
+        .as_deref()
+        .and_then(params::describe)
+        .map(|f| ParamDetail::of(&draft, f, &sim.chem_names));
 
     skin::drawer_split(
         ui,
         "parameters_notes",
         |ui| {
-            let height = ui.available_height() - FOOTER_HEIGHT;
-            ui.horizontal_top(|ui| {
-                // The rail of pages.
-                ui.allocate_ui_with_layout(
-                    egui::vec2(theme::GROUP_COLUMN, height),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.set_min_size(egui::vec2(theme::GROUP_COLUMN, height));
-                        let edge = ui.max_rect();
-                        ui.painter().vline(
-                            edge.right(),
-                            edge.y_range(),
-                            egui::Stroke::new(1.0, skin::col(theme::HAIR)),
-                        );
-                        for page in ParamPage::all() {
-                            let count = match page {
-                                ParamPage::Group(g) => params::group(g).len(),
-                                _ => 0,
-                            };
-                            let on = view.params_page == page;
-                            ui.horizontal(|ui| {
-                                if skin::chip(ui, page.title(), None, on).clicked() {
-                                    view.params_page = page;
-                                }
-                                if count > 0 {
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| ui.label(skin::text(Role::Label, count.to_string())),
-                                    );
-                                }
-                            });
-                        }
-                    },
-                );
-                ui.allocate_ui_with_layout(
-                    egui::vec2(ui.available_width(), height),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.set_min_size(egui::vec2(ui.available_width(), height));
-                        match view.params_page {
-                            ParamPage::Group(group) => {
-                                parameter_table(ui, &mut draft, group, &sim.chem_names);
-                            }
-                            ParamPage::Pathways => {
-                                ui.label(skin::text(
-                                    Role::Small,
-                                    "Which reactions this world offers. An organelle picks one \
-                                     with its second control word, so a mitochondrion can only \
-                                     burn what it is set to burn — and a lineage must either \
-                                     make that substrate itself or eat something that does.",
-                                ));
-                                egui::ScrollArea::vertical()
-                                    .id_salt("pathways_scroll")
-                                    .auto_shrink([false, false])
-                                    .show(ui, |ui| {
-                                        pathway_grid(ui, &mut draft, &sim.chem_names);
-                                    });
-                            }
-                            ParamPage::Catalogue => {
-                                egui::ScrollArea::vertical()
-                                    .id_salt("catalogue_scroll")
-                                    .auto_shrink([false, false])
-                                    .show(ui, |ui| catalogue_grid(ui, &mut draft));
-                            }
-                        }
-                    },
-                );
-            });
-
-            // The footer, which is where applying happens and where it says what applying will
-            // cost. The tick is named before you commit rather than described afterwards in a
-            // tooltip: an intervention is a permanent entry on the world's record.
-            skin::hairline(ui);
-            ui.add_space(3.0);
-            ui.horizontal(|ui| {
-                if drifted > 0 {
-                    ui.label(skin::moody(
-                        Role::Label,
-                        Mood::Warn,
-                        format!(
-                            "{drifted} field{} changed from the scenario",
-                            if drifted == 1 { "" } else { "s" }
-                        ),
-                    ));
-                } else {
-                    ui.label(skin::text(Role::Label, "as the scenario has it"));
-                }
-                ui.label(skin::text(
-                    Role::Small,
-                    if dirty {
-                        format!(
-                            "Applying records an intervention at tick {}.",
-                            sim.latest.frame.tick
-                        )
+            // Bottom-up, so the footer is placed *before* the body that fills what is left.
+            //
+            // This was `available_height() - FOOTER_HEIGHT`, with a constant standing in for how
+            // tall the footer would turn out to be — and it was two points short, so the content
+            // came out two points taller than the window, every frame, against a window that had
+            // just grown by two points. Measured at 2px a frame, which at 60fps is the parameter
+            // editor filling the screen in about five seconds. `docs/UI.md` §12.4 records the same
+            // failure in the scenario tab and the fix that worked there: do not guess the height,
+            // lay the footer out first and give the body the remainder.
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                // The footer, which is where applying happens and where it says what applying will
+                // cost. The tick is named before you commit rather than described afterwards in a
+                // tooltip: an intervention is a permanent entry on the world's record.
+                skin::hairline(ui);
+                ui.add_space(3.0);
+                ui.horizontal(|ui| {
+                    if drifted > 0 {
+                        ui.label(skin::moody(
+                            Role::Label,
+                            Mood::Warn,
+                            format!(
+                                "{drifted} field{} changed from the {}",
+                                if drifted == 1 { "" } else { "s" },
+                                against.title()
+                            ),
+                        ));
                     } else {
-                        "In force.".to_string()
-                    },
-                ));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .add_enabled(dirty, egui::Button::new(skin::text(Role::Label, "apply")))
-                        .on_hover_text(
-                            "change the running world. Recorded as an intervention, so the run \
-                             still replays exactly and the timeline says when you did it.",
-                        )
-                        .clicked()
-                    {
-                        apply = true;
+                        ui.label(skin::text(
+                            Role::Label,
+                            format!("as the {} has it", against.title()),
+                        ));
                     }
-                    if ui
-                        .add_enabled(dirty, egui::Button::new(skin::text(Role::Label, "discard")))
-                        .on_hover_text("back to what the world is running on")
-                        .clicked()
-                    {
-                        draft.editing = draft.live.clone();
-                    }
-                    if ui
-                        .add_enabled(
-                            draft.editing != draft.founding,
-                            egui::Button::new(skin::text(Role::Label, "revert all")),
-                        )
-                        .on_hover_text("every value as the scenario file has it")
-                        .clicked()
-                    {
-                        draft.editing = draft.founding.clone();
-                    }
+                    ui.label(skin::text(
+                        Role::Small,
+                        if dirty {
+                            format!(
+                                "Applying records an intervention at tick {}.",
+                                sim.latest.frame.tick
+                            )
+                        } else {
+                            "In force.".to_string()
+                        },
+                    ));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add_enabled(dirty, egui::Button::new(skin::text(Role::Label, "apply")))
+                            .on_hover_text(
+                                "change the running world. Recorded as an intervention, so the run \
+                                 still replays exactly and the timeline says when you did it.",
+                            )
+                            .clicked()
+                        {
+                            apply = true;
+                        }
+                        if ui
+                            .add_enabled(dirty, egui::Button::new(skin::text(Role::Label, "discard")))
+                            .on_hover_text("back to what the world is running on")
+                            .clicked()
+                        {
+                            draft.editing = draft.live.clone();
+                        }
+                        if ui
+                            .add_enabled(
+                                drifted > 0,
+                                egui::Button::new(skin::text(Role::Label, "revert all")),
+                            )
+                            .on_hover_text(format!("every value as the {} has it", against.title()))
+                            .clicked()
+                        {
+                            draft.editing = draft.baseline().clone();
+                        }
+                    });
                 });
+
+                // What is left, read in the usual direction.
+                ui.allocate_ui_with_layout(
+                    ui.available_size(),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_min_size(ui.available_size());
+                        let height = ui.available_height();
+                    ui.horizontal_top(|ui| {
+                        // The rail of pages.
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(theme::GROUP_COLUMN, height),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                ui.set_min_size(egui::vec2(theme::GROUP_COLUMN, height));
+                                let edge = ui.max_rect();
+                                ui.painter().vline(
+                                    edge.right(),
+                                    edge.y_range(),
+                                    egui::Stroke::new(1.0, skin::col(theme::HAIR)),
+                                );
+                                for page in ParamPage::all() {
+                                    let count = match page {
+                                        ParamPage::Group(g) => params::group(g).len(),
+                                        _ => 0,
+                                    };
+                                    let on = view.params_page == page;
+                                    ui.horizontal(|ui| {
+                                        if skin::chip(ui, page.title(), None, on).clicked() {
+                                            view.params_page = page;
+                                        }
+                                        if count > 0 {
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| ui.label(skin::text(Role::Label, count.to_string())),
+                                            );
+                                        }
+                                    });
+                                }
+                            },
+                        );
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(ui.available_width(), height),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                ui.set_min_size(egui::vec2(ui.available_width(), height));
+                                match view.params_page {
+                                    ParamPage::Rules => rules_page(ui, &mut draft, &sim.chem_names),
+                                    ParamPage::Group(group) => {
+                                        parameter_table(ui, &mut draft, group, &sim.chem_names);
+                                    }
+                                    ParamPage::Pathways => {
+                                        ui.label(skin::text(
+                                            Role::Small,
+                                            "Which reactions this world offers. An organelle picks one \
+                                             with its second control word, so a mitochondrion can only \
+                                             burn what it is set to burn — and a lineage must either \
+                                             make that substrate itself or eat something that does.",
+                                        ));
+                                        egui::ScrollArea::vertical()
+                                            .id_salt("pathways_scroll")
+                                            .auto_shrink([false, false])
+                                            .show(ui, |ui| {
+                                                pathway_grid(ui, &mut draft, &sim.chem_names);
+                                            });
+                                    }
+                                    ParamPage::Catalogue => {
+                                        egui::ScrollArea::vertical()
+                                            .id_salt("catalogue_scroll")
+                                            .auto_shrink([false, false])
+                                            .show(ui, |ui| catalogue_grid(ui, &mut draft));
+                                    }
+                                }
+                            },
+                        );
+                    });
+                    },
+                );
             });
         },
         |ui| {
+            // The field the work area is pointing at, if any — its whole note rather than the
+            // truncated one the row has room for, and where its number came from. `docs/UI.md`
+            // §4 asked for the doc comment as hover text; a hover is one field at a time and
+            // vanishes the moment you reach for the value, which is when you want it.
+            if let Some(detail) = &detail {
+                parameter_detail(ui, detail);
+                skin::hairline(ui);
+                ui.add_space(4.0);
+            }
             skin::section(ui, "what applying does", false);
             ui.label(skin::text(
                 Role::Body,
@@ -6532,12 +6815,14 @@ fn parameters_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
                  did it. That is why applying is a button and not a keystroke: one intervention \
                  per keypress is a record nobody can read.",
             ));
-            skin::section(ui, "value, and default", true);
+            skin::section(ui, "value, and what it was", true);
             ui.label(skin::text(
                 Role::Body,
-                "The default column is what the scenario file says. A value that differs from \
-                 it is marked, and the footer counts them — so a world that has drifted from \
-                 the file describing it says so, rather than looking freshly loaded.",
+                "A parameter has three defaults, not one: the engine's, the ruleset's, and the \
+                 scenario's. The was column reports whichever the rules page has selected, a \
+                 value that differs from it is marked, and the footer counts them — so a world \
+                 that has drifted from what describes it says so, rather than looking freshly \
+                 loaded.",
             ));
             skin::section(ui, "the raw number is the truth", true);
             ui.label(skin::text(
@@ -6901,6 +7186,335 @@ fn param_column_x(i: usize) -> f32 {
         .sum()
 }
 
+/// Where this world's numbers came from, what it moved, and how to keep it.
+///
+/// # Why the editor needed a page about itself
+///
+/// `mm_core::ruleset` resolves a scenario's parameters from three layers — the engine's own
+/// numbers, a named ruleset, and whatever the file says inline — and the front end could see
+/// exactly one of them. It loaded through the library, applied the ruleset, and then had no way
+/// to say which one it had applied, what else was on offer, or which of the numbers on screen had
+/// come from where. `rulesets/rival_light.ron` is the whole economy `the_thicket.ron` runs on and
+/// the interface never mentioned it.
+///
+/// So: the stack, in order, with what each layer moves. Picking a baseline retargets the `was`
+/// column on every other page, which is what turns "this number is 128" into "this number is 128
+/// because the ruleset says so, and the engine would have said 0".
+///
+/// # And why there is no "switch this world's ruleset" button
+///
+/// A ruleset may set `vm` and `chemicals` as well as `biology`, and the only thing the running
+/// world can be handed mid-run is `biology` — `World::set_biology` is what an `Intervention`
+/// records, and widening that is the change `docs/UI.md` §9.6 already has written down as its
+/// own. Adopting a set would therefore apply some of it and silently drop the rest.
+///
+/// Which ruleset a *scenario* names is a different question with a safe answer, and it is asked
+/// where it belongs: in the build window, beside Save, where it changes the recipe rather than
+/// the state.
+fn rules_page(ui: &mut egui::Ui, draft: &mut Draft, chemicals: &[String]) {
+    egui::ScrollArea::vertical()
+        .id_salt("rules_scroll")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            layer_stack(ui, draft);
+            ui.add_space(theme::SECTION_GAP);
+            drift_table(ui, draft, chemicals);
+            ui.add_space(theme::SECTION_GAP);
+            keep_as_ruleset(ui, draft);
+        });
+}
+
+/// The three layers, and what each of them moves.
+fn layer_stack(ui: &mut egui::Ui, draft: &mut Draft) {
+    skin::section(ui, "where these numbers come from", false);
+    ui.label(skin::text(
+        Role::Small,
+        "Each layer is sparse and each beats the one above it. Pick one to compare against — \
+         every page's was column follows it.",
+    ));
+    ui.add_space(4.0);
+
+    let named = if draft.ruleset.is_empty() {
+        "none".to_string()
+    } else {
+        draft.ruleset.clone()
+    };
+    // How far each layer sits from the one above, so the stack says which of them is doing the
+    // work rather than just listing three names.
+    let counts = [
+        (Baseline::Engine, "the engine's own numbers".to_string(), 0),
+        (
+            Baseline::Ruleset,
+            format!("ruleset · {named}"),
+            draft.ruleset_moves,
+        ),
+        (
+            Baseline::Scenario,
+            "the scenario file".to_string(),
+            draft.scenario_moves,
+        ),
+    ];
+    for (layer, label, moves) in counts {
+        ui.horizontal(|ui| {
+            if skin::chip(ui, layer.title(), None, draft.against == layer)
+                .on_hover_text(layer.note())
+                .clicked()
+            {
+                draft.against = layer;
+            }
+            ui.label(skin::text(Role::Label, &label));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(skin::text(
+                    Role::Small,
+                    match layer {
+                        Baseline::Engine => "the floor".to_string(),
+                        _ if moves == 0 => "changes nothing".to_string(),
+                        _ => format!("moves {moves}"),
+                    },
+                ));
+            });
+        });
+    }
+
+    // The ruleset's own account of itself, which is usually the best thing written about it.
+    if let Some(choice) = draft.choices.iter().find(|c| c.name == draft.ruleset) {
+        if !choice.notes.is_empty() {
+            ui.add_space(3.0);
+            ui.label(skin::text(Role::Small, &choice.notes));
+        }
+    } else if !draft.ruleset.is_empty() {
+        ui.add_space(3.0);
+        ui.label(skin::moody(
+            Role::Small,
+            Mood::Warn,
+            format!(
+                "`{}` is not in the library now, so the ruleset layer is showing the engine's \
+                 numbers. The world is still running what it was opened with.",
+                draft.ruleset
+            ),
+        ));
+    }
+
+    // What else is on the shelf. Read-only, and it says so — see the function header.
+    if draft.choices.len() > 1 || !draft.refused.is_empty() {
+        ui.add_space(6.0);
+        skin::section(ui, "the library", false);
+        for choice in &draft.choices {
+            // The one in force is marked here as well as above, because this is the list a
+            // person scans when they are choosing what to type into a scenario.
+            let name = if choice.name == draft.ruleset {
+                format!("{} ·  in force", choice.name)
+            } else {
+                choice.name.clone()
+            };
+            skin::stat(ui, &name, &format!("{} parameters", choice.changes));
+            if !choice.notes.is_empty() {
+                // Truncated, and on its own line rather than inside the `stat`. `skin::stat`
+                // lays its value out in a `horizontal`, where a label does not wrap — so a
+                // seventy-character note went through as one unbroken row and dragged the whole
+                // window a hundred and sixty points wider than it asked to be.
+                ui.add(egui::Label::new(skin::text(Role::Small, &choice.notes)).truncate());
+            }
+        }
+        for bad in &draft.refused {
+            ui.label(skin::moody(Role::Small, Mood::Bad, bad));
+        }
+        ui.label(skin::text(
+            Role::Small,
+            "A scenario names one of these in its ruleset field. Which one this world names is \
+             set where the scenario is saved, in the build window — a set may change the VM and \
+             the chemical table as well as the biology, and only the biology can be handed to a \
+             world that is already running.",
+        ));
+    }
+}
+
+/// Every parameter that differs from the chosen baseline, with a revert on each.
+fn drift_table(ui: &mut egui::Ui, draft: &mut Draft, chemicals: &[String]) {
+    let drift = draft.drift();
+    skin::section(
+        ui,
+        &format!("what this world changes from the {}", draft.against.title()),
+        false,
+    );
+    if drift.is_empty() {
+        ui.label(skin::text(
+            Role::Small,
+            "Nothing. Every parameter is what that layer says it is.",
+        ));
+        return;
+    }
+
+    let mut revert = None;
+    for (path, was, now) in &drift {
+        let field = params::describe(path);
+        let label = field.map_or(path.as_str(), |f| f.label);
+        let reading = |v: mm_core::params::Value| {
+            field
+                .and_then(|f| f.reading(v, chemicals))
+                .unwrap_or_else(|| v.to_string())
+        };
+        ui.horizontal(|ui| {
+            if ui
+                .add(egui::Button::new(skin::text(Role::Label, "↺")).small())
+                .on_hover_text("put this one back")
+                .clicked()
+            {
+                revert = Some((path.clone(), *was));
+            }
+            ui.add(egui::Label::new(skin::text(Role::Label, label)).truncate());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(skin::moody(Role::Value, Mood::Warn, reading(*now)));
+                ui.label(skin::text(Role::Small, "→"));
+                ui.label(skin::text(Role::Label, reading(*was)));
+            });
+        })
+        .response
+        // The path, because that is what the file will call it and what a ruleset must name.
+        .on_hover_text(path);
+    }
+    if let Some((path, was)) = revert {
+        if let Some(next) = mm_core::params::set(&draft.editing, &path, was) {
+            draft.editing = next;
+        }
+    }
+}
+
+/// Lift what this world changed out into `rulesets/<name>.ron`.
+fn keep_as_ruleset(ui: &mut egui::Ui, draft: &mut Draft) {
+    skin::section(ui, "keep these as a named set", false);
+    ui.label(skin::text(
+        Role::Small,
+        "Writes what this world changes as a ruleset, so any other scenario can run the same \
+         economy by naming it. The numbers you arrived at by dragging values here are otherwise \
+         only in this session.",
+    ));
+    ui.add_space(4.0);
+
+    // Against the engine, always, whatever the page is comparing against. A ruleset written
+    // against the scenario would only be meaningful to worlds that already had the scenario's
+    // numbers, which is not a thing another scenario can inherit.
+    let changes: std::collections::BTreeMap<String, mm_core::params::Value> =
+        mm_core::params::diff(&draft.engine, &draft.editing);
+
+    ui.horizontal(|ui| {
+        ui.label(skin::text(Role::Label, "called"));
+        ui.add(
+            egui::TextEdit::singleline(&mut draft.new_name)
+                .desired_width(150.0)
+                .font(skin::font(Role::Value))
+                .hint_text("lean_light"),
+        );
+        if ui
+            .add_enabled(
+                !draft.new_name.trim().is_empty() && !changes.is_empty(),
+                egui::Button::new(skin::text(Role::Label, "Save ruleset")),
+            )
+            .on_hover_text("writes rulesets/<name>.ron")
+            .clicked()
+        {
+            let name = draft.new_name.trim().to_string();
+            draft.note = Some(
+                match library::save_ruleset(
+                    &library::ruleset_dir(),
+                    &name,
+                    "default",
+                    draft.new_notes.trim(),
+                    &changes,
+                ) {
+                    Ok(path) => {
+                        // Re-read, so the new set is on the shelf immediately rather than after
+                        // a restart — and so its name can be typed into a scenario now.
+                        let (choices, refused) = library::ruleset_choices();
+                        draft.choices = choices;
+                        draft.refused = refused;
+                        Ok(format!("wrote {}", path.display()))
+                    }
+                    Err(e) => Err(e.to_string()),
+                },
+            );
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label(skin::text(Role::Label, "because"));
+        ui.add(
+            egui::TextEdit::singleline(&mut draft.new_notes)
+                .desired_width(260.0)
+                .font(skin::font(Role::Body))
+                .hint_text("why it exists — for whoever reads it next"),
+        );
+    });
+    ui.add_space(3.0);
+    ui.label(skin::text(
+        Role::Small,
+        format!(
+            "{} parameter{} against the engine's own numbers.",
+            changes.len(),
+            if changes.len() == 1 { "" } else { "s" }
+        ),
+    ));
+    if let Some(note) = &draft.note {
+        match note {
+            Ok(m) => ui.label(skin::moody(Role::Label, Mood::Good, m.clone())),
+            Err(m) => ui.label(skin::moody(Role::Label, Mood::Bad, m.clone())),
+        };
+    }
+}
+
+/// One parameter, said in full: what it is, what it does, and what every layer says it should be.
+///
+/// Gathered into owned strings before the drawer splits rather than read inside the context
+/// column, because the work area holds the draft mutably for the whole of its own closure. The
+/// cost is that the panel describes the row hovered on the *previous* frame, which is a frame
+/// nobody can see.
+struct ParamDetail {
+    label: &'static str,
+    note: &'static str,
+    path: &'static str,
+    /// `(which layer, what it says there)`, in the order the layers apply.
+    layers: Vec<(String, String)>,
+}
+
+impl ParamDetail {
+    fn of(draft: &Draft, field: &'static params::Field, chemicals: &[String]) -> ParamDetail {
+        let mut layers = Vec::new();
+        let mut push = |label: String, config: &BiologyConfig| {
+            if let Some(value) = mm_core::params::get(config, field.path) {
+                let reading = field
+                    .reading(value, chemicals)
+                    .map_or_else(|| value.to_string(), |r| format!("{value}  ({r})"));
+                layers.push((label, reading));
+            }
+        };
+        push("engine".to_string(), &draft.engine);
+        if !draft.ruleset.is_empty() {
+            push(format!("ruleset · {}", draft.ruleset), &draft.ruled);
+        }
+        push("scenario".to_string(), &draft.founding);
+        push("running".to_string(), &draft.live);
+        push("editing".to_string(), &draft.editing);
+        ParamDetail {
+            label: field.label,
+            note: field.note,
+            path: field.path,
+            layers,
+        }
+    }
+}
+
+fn parameter_detail(ui: &mut egui::Ui, detail: &ParamDetail) {
+    skin::section(ui, detail.label, false);
+    ui.label(skin::text(Role::Body, detail.note));
+    ui.add_space(4.0);
+    // The dotted path, because it is what the scenario file and any ruleset will call it — and
+    // the one thing you need in order to write it down yourself.
+    ui.label(skin::text(Role::Code, detail.path));
+    ui.add_space(4.0);
+    for (label, value) in &detail.layers {
+        skin::stat(ui, label, value);
+    }
+}
+
 /// One group's fields, as a table with a header that does not scroll away.
 fn parameter_table(
     ui: &mut egui::Ui,
@@ -6912,7 +7526,7 @@ fn parameter_table(
         egui::vec2(ui.available_width(), theme::row::HEIGHT),
         egui::Sense::hover(),
     );
-    for (i, head) in ["field", "value", "unit", "default"].into_iter().enumerate() {
+    for (i, head) in ["field", "value", "unit", "was"].into_iter().enumerate() {
         param_cell(
             ui,
             row,
@@ -6967,11 +7581,11 @@ fn parameter_row(
         return;
     };
 
-    // Marked when it differs from the file, so a world that has drifted from the scenario
-    // describing it says so rather than looking freshly loaded. A warm ground and a warm left
-    // edge as well as a warm number, because one coloured value in a column of fifty-one is a
-    // thing you find by looking for it rather than a thing you notice.
-    let founding = mm_core::params::get(&draft.founding, field.path);
+    // Marked when it differs from the layer being compared against, so a world that has drifted
+    // from what describes it says so rather than looking freshly loaded. A warm ground and a warm
+    // left edge as well as a warm number, because one coloured value in a column of fifty-one is
+    // a thing you find by looking for it rather than a thing you notice.
+    let founding = mm_core::params::get(draft.baseline(), field.path);
     let moved = founding != Some(value);
     if moved {
         ui.painter().rect_filled(
@@ -7019,22 +7633,38 @@ fn parameter_row(
     });
     param_cell(ui, row, param_column_x(3), PARAM_COLUMNS[3], true, |ui| {
         match founding {
-            // Only where it has moved. A default printed against every one of fifty-one
-            // unchanged rows is a second column of the same numbers, and the eye stops reading
-            // the column that is always the same as the one beside it.
-            Some(was) if moved => ui.label(skin::text(
-                Role::Label,
-                field
+            // Only where it has moved, and as a button that puts it back. A default printed
+            // against every one of fifty-one unchanged rows is a second column of the same
+            // numbers, and the eye stops reading the column that is always the same as the one
+            // beside it. `docs/UI.md` §4 asked for a per-field revert and this is the one place
+            // it can go without a sixth column: the value to revert *to* is already printed
+            // here, so the number is the button.
+            Some(was) if moved => {
+                let text = field
                     .reading(was, chemicals)
-                    .unwrap_or_else(|| was.as_int().to_string()),
-            )),
-            _ => ui.label(skin::text(Role::Label, "·")),
+                    .unwrap_or_else(|| was.as_int().to_string());
+                if ui
+                    .add(egui::Button::new(skin::text(Role::Label, text)).frame(false))
+                    .on_hover_text("put this one back")
+                    .clicked()
+                {
+                    edited = Some(was);
+                }
+            }
+            _ => {
+                ui.label(skin::text(Role::Label, "·"));
+            }
         }
     });
     let note_x = param_column_x(4);
     param_cell(ui, row, note_x, (row.width() - note_x).max(0.0), false, |ui| {
         ui.add(egui::Label::new(skin::text(Role::Small, field.note)).truncate())
     });
+    // Hovering explains it in the context column, in full, rather than in a tooltip that goes
+    // away the moment you reach for the value.
+    if response.hovered() {
+        draft.focus = Some(field.path.to_string());
+    }
     response.on_hover_text(field.note);
 
     if let Some(value) = edited {

@@ -464,7 +464,14 @@ fn open_scenario(path: &Path, override_with: Option<&str>) -> Result<mm_core::Sc
 }
 
 /// Where to look for rulesets, given a scenario's path: a sibling `rulesets/` beside the
-/// scenario's own directory, then `rulesets/` in the working directory.
+/// scenario's own directory, then wherever the installed one is.
+///
+/// The second half used to be `rulesets/` in the working directory and nothing else, which meant
+/// that a scenario kept anywhere but inside the project tree could only be run from the project
+/// root. That was invisible while every scenario the front end saved was written complete and
+/// inherited nothing; now that a saved file names its ruleset and expects to inherit from it,
+/// the set has to be findable from wherever the file was put. `mm_asm::locate` already answers
+/// exactly this question for `genomes/`.
 fn ruleset_dir(scenario: &Path) -> PathBuf {
     if let Some(parent) = scenario.parent().and_then(Path::parent) {
         let beside = parent.join("rulesets");
@@ -472,7 +479,7 @@ fn ruleset_dir(scenario: &Path) -> PathBuf {
             return beside;
         }
     }
-    PathBuf::from("rulesets")
+    mm_asm::locate::dir("rulesets").unwrap_or_else(|| PathBuf::from("rulesets"))
 }
 
 /// Run the balance panel: every shipped organism against the reference, on every shipped world.

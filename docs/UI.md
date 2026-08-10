@@ -446,6 +446,40 @@ same unmodified-key scheme as the other panels rather than the `Ctrl+,` above.
 > form is not about the selection and does not belong in the strip that describes it. The key is
 > unchanged.
 
+#### There are three defaults, not one
+
+*Added with the `rules` page.* "Its default" above is a single value, and there is no such thing.
+`mm_core::ruleset` resolves a parameter from three layers — the engine's own number, a named
+ruleset, and whatever the scenario says — and the editor showed exactly one of them, the
+scenario's, with no way to tell which layer had put it there. `rulesets/rival_light.ron` is the
+whole economy `the_thicket.ron` runs on and the interface never mentioned it existed.
+
+So the rail gets a **`rules` page**, first, holding four things:
+
+- **the stack**, each layer with how many parameters it moves against the one above it, and the
+  ruleset's own `notes` — which is usually the best thing written about it;
+- **a baseline chip**, which retargets the `was` column and the warm marking on every other page.
+  That is what turns *this number is 128* into *this number is 128 because the ruleset says so,
+  and the engine would have said 0*;
+- **what this world changes** from the selected layer, listed, each with a revert. Computed over
+  `mm_core::params::fields` and not over the fifty-one rows, so a world whose only change is one
+  organelle's build cost stops reporting itself unchanged;
+- **keep these as a named set** — writes `rulesets/<name>.ron` from the diff. The numbers arrived
+  at by dragging values here otherwise existed only in that session.
+
+The **per-field revert** §4 asked for and never got arrives with it, and without a sixth column:
+the `was` cell already prints the value to revert *to*, so the number is the button. The context
+column explains the hovered row in full — its whole note, its dotted path, and what every layer
+says it should be — because a tooltip is one field at a time and goes away the moment you reach
+for the value.
+
+**There is no "switch this world's ruleset" button, deliberately.** A set may name `vm` and
+`chemicals` as well as `biology`, and the only thing a running world can be handed is `biology` —
+`World::set_biology` is what an `Intervention` records, and widening that is the change §9.6
+already has written down as its own. Adopting a set would apply part of it and silently drop the
+rest. Which ruleset a *scenario* names is a different question with a safe answer, and it is
+asked in the build window beside Save, where it changes the recipe rather than the state.
+
 ---
 
 ## 5. The genome view
@@ -1284,6 +1318,34 @@ The RON preview is the item worth building this pane for. "A scenario is a recip
 state" is asserted in §4, asserted again in the pane's own footnote, and until you can see the
 file it would write it is only ever an assertion. `library::save` already serialises; this shows
 the string first.
+
+> **And the string was four hundred and thirty-six lines.** Of which four hundred were the
+> chemical table, which no scenario changes — the chip that folds it away is in this pane because
+> of that, and folding a thing away is not the same as not writing it. Every file in `scenarios/`
+> is sparse; `soup.ron` is fifteen lines. So a scenario opened in the microscope and saved again
+> came back as something nobody could read, and, worse, stopped inheriting: a file that restates
+> every parameter has nothing left for a ruleset to reach.
+>
+> **Save writes the delta now, and that is the default.** Only what this world changes, against
+> the engine's numbers with the ruleset it names resolved into them —
+> `Scenario::to_ron_sparse`. The world half through `serde`, because that half has enums and
+> fixed-size arrays whose RON syntax only the derived serialiser knows; the rules half as dotted
+> paths into `Scenario::set`, because a nested block cannot name one chemical without writing all
+> sixteen. A `complete` chip beside the preview writes the old form, which is what a `.mmslide`
+> embeds and what to use for a file that must go on meaning the same thing after somebody edits a
+> ruleset.
+>
+> **Which ruleset the file names is a row of chips above Save**, listing the library. It is not
+> applied to the running world — see §4 — but it decides what the delta is written against and
+> what the file inherits when it is opened again. This is where "switch the economy" belongs,
+> because a scenario is a recipe: changing what it inherits changes what it will be, not what it
+> is.
+>
+> One thing this exposed rather than introduced: `library::load` looked for `rulesets/` beside the
+> scenario and then in the *working directory* only, so a scenario saved anywhere outside the
+> project tree could not find its set and would not reopen. Invisible while every saved file was
+> complete and inherited nothing. It now falls back to `mm_asm::locate`, which is what answers
+> the same question for `genomes/`; `mm-cli` had the identical hole and has the identical fix.
 
 ### 9.3 What is on the slide
 
