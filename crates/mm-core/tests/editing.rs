@@ -709,3 +709,203 @@ fn an_inhabitant_can_be_taken_out_of_the_recipe_without_touching_the_slide() {
         "removed one that is not there"
     );
 }
+
+/// Where every cell is, as squares, sorted — for comparing two placements.
+fn squares_of(world: &World) -> Vec<(i32, i32)> {
+    let cells = world.cells();
+    let mut out: Vec<(i32, i32)> = (0..cells.len())
+        .map(|i| {
+            (
+                cells.x[i] / mm_core::fixed::POS_ONE,
+                cells.y[i] / mm_core::fixed::POS_ONE,
+            )
+        })
+        .collect();
+    out.sort_unstable();
+    out
+}
+
+#[test]
+fn two_genomes_in_one_region_do_not_land_on_top_of_each_other() {
+    // The bug: a slot is a pure function of the placement, `k`, the count and the seed, with
+    // nothing in it saying *which* inhabitant is being placed. So two entries with the same
+    // placement and count were put on exactly the same squares — the lattices coincide, and
+    // `Scatter` draws from the same stream. Two species seeded into one region came out as one
+    // pile of pairs.
+    //
+    // Unreachable until the editor could name two, which is why it survived and why fixing it
+    // moves nothing that was already measured.
+    let a = vec![0x2E; 24];
+    let b = vec![0x2F; 24];
+    for place in [
+        Placement::Spread,
+        Placement::Grid {
+            x: 2,
+            y: 2,
+            width: 28,
+            height: 28,
+        },
+        Placement::Hex {
+            x: 2,
+            y: 2,
+            width: 28,
+            height: 28,
+        },
+        Placement::Scatter {
+            x: 2,
+            y: 2,
+            width: 28,
+            height: 28,
+            spacing: 2,
+        },
+    ] {
+        let mut world = World::new(slide()).expect("world");
+        world.place_cohort(&[(&a, 4), (&b, 4)], place);
+        let mut seen = squares_of(&world);
+        let before = seen.len();
+        assert_eq!(before, 8, "{place:?} did not place all eight");
+        seen.dedup();
+        assert_eq!(
+            seen.len(),
+            before,
+            "{place:?} put two founders on one square"
+        );
+    }
+}
+
+#[test]
+fn a_cohort_lays_its_members_out_as_one_arrangement() {
+    // Not merely "not stacked" — *interleaved*. Four and four over one region has to be the
+    // same eight positions as eight of one genome, or "mixed" would mean two arrangements
+    // sharing a rectangle rather than one arrangement holding both.
+    let a = vec![0x2E; 24];
+    let b = vec![0x2F; 24];
+    let place = Placement::Grid {
+        x: 0,
+        y: 0,
+        width: 32,
+        height: 32,
+    };
+
+    let mut mixed = World::new(slide()).expect("world");
+    mixed.place_cohort(&[(&a, 4), (&b, 4)], place);
+
+    let mut alone = World::new(slide()).expect("world");
+    alone.place_inhabitants(&a, 8, place);
+
+    assert_eq!(squares_of(&mixed), squares_of(&alone));
+}
+
+#[test]
+fn a_mixed_seeding_reopens_as_the_slide_that_was_drawn() {
+    // The round trip the editor depends on. Two entries share a placement, so opening the file
+    // has to place them as one cohort — one at a time is what stacks them, which is the whole
+    // point of `place_recipe`.
+    let a = vec![0x2E; 24];
+    let b = vec![0x2F; 24];
+    let place = Placement::Scatter {
+        x: 4,
+        y: 4,
+        width: 20,
+        height: 20,
+        spacing: 2,
+    };
+    let mut built = World::new(slide()).expect("world");
+    built.seed_cohort(&[("a.mm", &a, 3), ("b.mm", &b, 3)], place);
+    assert_eq!(built.inhabitants().len(), 2, "one entry each");
+
+    let text = built.scenario().to_ron().expect("render");
+    let reopened = Scenario::from_ron(&text).expect("parse");
+    let mut back = World::new(reopened).expect("world");
+    let members: Vec<(&[u8], u32, Placement)> = back
+        .inhabitants()
+        .iter()
+        .map(|i| {
+            let bytes: &[u8] = if i.genome == "a.mm" { &a } else { &b };
+            (bytes, i.count, i.place)
+        })
+        .collect();
+    back.place_recipe(&members);
+
+    assert_eq!(
+        squares_of(&back),
+        squares_of(&built),
+        "the mixed seeding came back as a different slide"
+    );
+}
+
+#[test]
+fn founders_in_their_own_rectangles_stay_in_them() {
+    // The other half of the pair: "apart" is disjoint sub-regions, one per genome, so each type
+    // starts as its own clump. Nothing shared, and nothing to interleave.
+    let a = vec![0x2E; 24];
+    let b = vec![0x2F; 24];
+    let mut world = World::new(slide()).expect("world");
+    world.seed_inhabitant(
+        "a.mm",
+        &a,
+        4,
+        Placement::Grid {
+            x: 0,
+            y: 0,
+            width: 16,
+            height: 32,
+        },
+    );
+    world.seed_inhabitant(
+        "b.mm",
+        &b,
+        4,
+        Placement::Grid {
+            x: 16,
+            y: 0,
+            width: 16,
+            height: 32,
+        },
+    );
+    let left = squares_of(&world).into_iter().filter(|(x, _)| *x < 16).count();
+    assert_eq!(left, 4, "the two clumps ran into each other");
+}
+
+#[test]
+fn every_shipped_scenarys_founders_still_land_where_they_did() {
+    // `place_recipe` is the new way in and it groups by placement. Every shipped scenario names
+    // at most one inhabitant, so grouping must be a no-op for all of them — this is the guard
+    // that says the cohort change moved nothing that was already measured.
+    let genome = vec![0x2E; 24];
+    for place in [
+        Placement::Spread,
+        Placement::At { x: 7, y: 7 },
+        Placement::Grid {
+            x: 1,
+            y: 1,
+            width: 30,
+            height: 30,
+        },
+        Placement::Hex {
+            x: 1,
+            y: 1,
+            width: 30,
+            height: 30,
+        },
+        Placement::Scatter {
+            x: 1,
+            y: 1,
+            width: 30,
+            height: 30,
+            spacing: 2,
+        },
+    ] {
+        let mut one_at_a_time = World::new(slide()).expect("world");
+        one_at_a_time.place_inhabitants(&genome, 9, place);
+
+        let mut through_recipe = World::new(slide()).expect("world");
+        through_recipe.place_recipe(&[(&genome, 9, place)]);
+
+        assert_eq!(
+            squares_of(&through_recipe),
+            squares_of(&one_at_a_time),
+            "{place:?} moved when it went through place_recipe"
+        );
+    }
+}

@@ -384,24 +384,31 @@ fn seed_population(world: &mut World, genome_path: &Path, n: u32) -> Result<(), 
 /// usually to ask what *that* one does here.
 fn seed_inhabitants(world: &mut World, root: &Path) -> Result<(), String> {
     let wanted = world.scenario().inhabitants.clone();
+    // Assembled first, placed second, and placed **all at once**. Through the placement the
+    // scenario asked for — this used to call `place_founders`, which spreads over the whole
+    // slide whatever the file said, so `Inhabitant`'s placement field was declared, documented
+    // and ignored. And through `place_recipe` rather than one entry at a time, because entries
+    // that share a placement are one cohort: placed separately they land on the same squares.
+    // See `mm_core::World::place_cohort`.
+    let mut resolved: Vec<(Vec<u8>, u32, mm_core::Placement)> = Vec::new();
     for who in &wanted {
         let path = root.join(&who.genome);
         let src = std::fs::read_to_string(&path)
             .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
         let assembled = mm_asm::assemble(&src)
             .map_err(|e| format!("{} does not assemble:\n{e}", path.display()))?;
-        // Through the placement the scenario asked for. This used to call `place_founders`,
-        // which spreads over the whole slide whatever the file said — so `Inhabitant`'s
-        // placement field was declared, documented and ignored. See `mm_core::Placement`.
-        let placed = world.place_inhabitants(&assembled.bytes, who.count, who.place);
-        if placed < who.count {
-            // Not an error: a rectangle that is mostly wall has fewer free squares than the
-            // scenario asked for, and saying so is better than pretending or than refusing.
-            eprintln!(
-                "note: {} asked for {} founders and {placed} fit",
-                who.genome, who.count
-            );
-        }
+        resolved.push((assembled.bytes, who.count, who.place));
+    }
+    let members: Vec<(&[u8], u32, mm_core::Placement)> = resolved
+        .iter()
+        .map(|(bytes, count, place)| (bytes.as_slice(), *count, *place))
+        .collect();
+    let placed = world.place_recipe(&members);
+    let asked: u32 = wanted.iter().map(|w| w.count).sum();
+    if placed < asked {
+        // Not an error: a rectangle that is mostly wall has fewer free squares than the
+        // scenario asked for, and saying so is better than pretending or than refusing.
+        eprintln!("note: the scenario asked for {asked} founders and {placed} fit");
     }
     Ok(())
 }

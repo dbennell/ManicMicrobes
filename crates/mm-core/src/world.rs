@@ -1129,6 +1129,56 @@ impl World {
         count: u32,
         place: crate::Placement,
     ) -> u32 {
+        let mut taken = Vec::new();
+        self.place_run(genome, count, place, 0, count, &mut taken)
+    }
+
+    /// Place several genomes over one region as a **single cohort**, sharing the slot sequence.
+    ///
+    /// # The bug this exists for
+    ///
+    /// A slot is a pure function of the placement, the index `k`, the total count and the seed —
+    /// there is nothing in it that says *which* inhabitant is being placed. So two entries with
+    /// the same placement and the same count were placed on **exactly the same squares**: the
+    /// lattices coincide, and `Scatter` draws from `RandCtx::new(seed, k, 0)`, which is the same
+    /// stream for both. Two species seeded into one region came out as one pile of pairs.
+    ///
+    /// It was unreachable until now — no shipped scenario has ever named two inhabitants — which
+    /// is why it survived, and also why fixing it moves no acceptance number in the tree.
+    ///
+    /// The fix is not a per-inhabitant salt, which would only scatter them differently rather
+    /// than fairly. `k` runs across the *whole cohort* and the lattice is sized to the whole
+    /// cohort, so four of one genome and four of another are eight slots of one arrangement,
+    /// interleaved. `taken` is shared too, so `Scatter`'s spacing holds between species and not
+    /// only within one.
+    ///
+    /// Returns how many of each landed, in the order given.
+    pub fn place_cohort(
+        &mut self,
+        members: &[(&[u8], u32)],
+        place: crate::Placement,
+    ) -> Vec<u32> {
+        let total: u32 = members.iter().map(|(_, n)| *n).sum();
+        let mut taken = Vec::new();
+        let mut first = 0;
+        let mut out = Vec::with_capacity(members.len());
+        for (genome, count) in members {
+            out.push(self.place_run(genome, *count, place, first, total, &mut taken));
+            first += *count;
+        }
+        out
+    }
+
+    /// One member of a cohort: `k` runs `first..first + count` out of `total`.
+    fn place_run(
+        &mut self,
+        genome: &[u8],
+        count: u32,
+        place: crate::Placement,
+        first: u32,
+        total: u32,
+        taken: &mut Vec<(i32, i32)>,
+    ) -> u32 {
         if count == 0 {
             return 0;
         }
@@ -1141,13 +1191,12 @@ impl World {
             self.substrate.height() as i32,
         );
         let seed = self.scenario.seed;
-        let mut taken: Vec<(i32, i32)> = Vec::new();
         let mut placed = 0;
-        for k in 0..count {
+        for k in first..first.saturating_add(count) {
             let Ok(genome) = self.genomes.intern(genome.to_vec()) else {
                 continue;
             };
-            let Some((px, py)) = self.slot(place, k, count, w, h, seed, &mut taken) else {
+            let Some((px, py)) = self.slot(place, k, total, w, h, seed, taken) else {
                 continue;
             };
             let id = self.spawn_cell(CellSeed {
@@ -1738,9 +1787,61 @@ impl World {
         count: u32,
         place: crate::Placement,
     ) -> u32 {
-        let placed = self.place_inhabitants(bytes, count, place);
-        self.note_inhabitant(genome, placed, place);
+        self.seed_cohort(&[(genome, bytes, count)], place)
+            .first()
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Several genomes over one region, placed as a cohort and written into the recipe.
+    ///
+    /// What "two of these and three of those, mixed" is: [`World::place_cohort`] interleaves them
+    /// rather than stacking them, and each becomes its own [`crate::Inhabitant`] entry — same
+    /// placement, different genome — so the file says exactly what was drawn.
+    ///
+    /// **Reopening that file has to place them as a cohort too**, or the entries are placed one
+    /// at a time and land on top of each other again. [`World::place_recipe`] is the way in for
+    /// whoever opens a scenario, and it groups by placement so this round-trips.
+    pub fn seed_cohort(
+        &mut self,
+        members: &[(&str, &[u8], u32)],
+        place: crate::Placement,
+    ) -> Vec<u32> {
+        let bytes: Vec<(&[u8], u32)> = members.iter().map(|(_, b, n)| (*b, *n)).collect();
+        let placed = self.place_cohort(&bytes, place);
+        for ((genome, _, _), landed) in members.iter().zip(placed.iter()) {
+            self.note_inhabitant(genome, *landed, place);
+        }
         placed
+    }
+
+    /// Place everyone the recipe names, grouping neighbours that share a placement into cohorts.
+    ///
+    /// **The way to open a scenario.** Placing the entries one at a time is what stacks two
+    /// species seeded into the same region — see [`World::place_cohort`] — and grouping is what
+    /// makes a slide drawn with mixed founders reopen as the slide that was drawn.
+    ///
+    /// Neighbours rather than all-alike, so the grouping is a property of the file's order and
+    /// not of a search: two entries written next to each other are one act, and two written at
+    /// opposite ends of the list are two.
+    ///
+    /// The genomes are resolved by the caller, because `mm-core` has no filesystem and no
+    /// assembler. Returns how many landed in all.
+    pub fn place_recipe(&mut self, members: &[(&[u8], u32, crate::Placement)]) -> u32 {
+        let mut total = 0;
+        let mut i = 0;
+        while i < members.len() {
+            let place = members[i].2;
+            let mut j = i;
+            while j < members.len() && members[j].2 == place {
+                j += 1;
+            }
+            let cohort: Vec<(&[u8], u32)> =
+                members[i..j].iter().map(|(b, n, _)| (*b, *n)).collect();
+            total += self.place_cohort(&cohort, place).iter().sum::<u32>();
+            i = j;
+        }
+        total
     }
 
     /// Who the recipe says lives here.
