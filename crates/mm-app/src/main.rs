@@ -1566,6 +1566,11 @@ struct View {
     place_genome: String,
     /// How many it drops at once.
     place_count: u32,
+    /// How they are arranged. See [`Arrange`].
+    arrange: Arrange,
+    /// The closest two scattered founders may be, in squares. Only [`Arrange::Scatter`]
+    /// reads it.
+    scatter_spacing: u32,
     /// Which species page is open.
     species: Option<mm_core::phylogeny::SpeciesId>,
     /// Which of the ecology pane's three views is showing (M10.4).
@@ -1737,6 +1742,11 @@ impl Default for View {
             flux_from: None,
             place_genome: "ancestor.mm".to_string(),
             place_count: 1,
+            // A click that drops one founder where you point is what the tool has always
+            // done, and changing what an existing gesture means is not a thing to do to
+            // somebody as the price of adding four more.
+            arrange: Arrange::At,
+            scatter_spacing: 4,
             species: None,
             ecology: Ecology::Tree,
             build: Build::Tools,
@@ -1912,6 +1922,106 @@ impl Tool {
                  so reopening the file puts them back — which is what makes a slide you built a \
                  slide you can run again."
             }
+        }
+    }
+}
+
+/// How the seed tool arranges the founders it drops.
+///
+/// [`mm_core::Placement`] has offered five arrangements since it was written, every one of them
+/// barrier-aware, and the editor could reach exactly one: `At`, the square you clicked. So "a
+/// dozen founders spread evenly over this half of the slide" — which is how almost every shipped
+/// scenario seeds itself — was a thing you could write in a file and not a thing you could draw,
+/// and the tool's only way to approximate it was a dozen separate entries.
+///
+/// The gesture follows the shape of the arrangement rather than being a mode you have to
+/// remember: a point is a click, a rectangle is a drag, and the whole slide is neither, so it is
+/// a button.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Arrange {
+    /// One square. Click it.
+    At,
+    /// A square lattice inside a rectangle. Drag it.
+    Grid,
+    /// A hexagonal lattice inside a rectangle — the tighter packing, and the one that does not
+    /// leave founders in rows for the physics to settle out of. Drag it.
+    Hex,
+    /// Pseudo-random inside a rectangle, no two closer than `spacing`. Drag it.
+    Scatter,
+    /// The whole slide, on the lattice `World::place_founders` has always used.
+    Spread,
+}
+
+impl Arrange {
+    const ALL: [Arrange; 5] = [
+        Arrange::At,
+        Arrange::Grid,
+        Arrange::Hex,
+        Arrange::Scatter,
+        Arrange::Spread,
+    ];
+
+    fn title(self) -> &'static str {
+        match self {
+            Arrange::At => "here",
+            Arrange::Grid => "grid",
+            Arrange::Hex => "hex",
+            Arrange::Scatter => "scatter",
+            Arrange::Spread => "everywhere",
+        }
+    }
+
+    fn note(self) -> &'static str {
+        match self {
+            Arrange::At => "all of them around the square you click",
+            Arrange::Grid => "a square lattice inside a rectangle you drag",
+            Arrange::Hex => {
+                "a hexagonal lattice inside a rectangle you drag — packs tighter than a grid, \
+                 and does not start the population in rows"
+            }
+            Arrange::Scatter => {
+                "scattered inside a rectangle you drag, no two closer than the spacing"
+            }
+            Arrange::Spread => "over the whole slide, which is what a scenario naming nobody gets",
+        }
+    }
+
+    /// Whether this one is drawn by dragging a rectangle.
+    fn is_rect(self) -> bool {
+        matches!(self, Arrange::Grid | Arrange::Hex | Arrange::Scatter)
+    }
+
+    /// The placement this arrangement makes out of a rectangle, or out of a square for `At`.
+    fn placement(
+        self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        spacing: u32,
+    ) -> mm_core::Placement {
+        match self {
+            Arrange::At => mm_core::Placement::At { x, y },
+            Arrange::Grid => mm_core::Placement::Grid {
+                x,
+                y,
+                width,
+                height,
+            },
+            Arrange::Hex => mm_core::Placement::Hex {
+                x,
+                y,
+                width,
+                height,
+            },
+            Arrange::Scatter => mm_core::Placement::Scatter {
+                x,
+                y,
+                width,
+                height,
+                spacing,
+            },
+            Arrange::Spread => mm_core::Placement::Spread,
         }
     }
 }
@@ -2589,28 +2699,14 @@ fn handle_mouse(
                     }
                 }
                 Tool::PlaceCell => {
-                    // Founders of a named genome, where you point. The genome is a *name*
-                    // because that is what a scenario can write down — a cell dropped from a
-                    // file the scenario can also name is a cell the saved slide will have.
-                    match genome_bytes(&view.place_genome) {
-                        Some(bytes) => {
-                            let n = view.place_count.max(1);
-                            let at = (square.0.max(0) as u32, square.1.max(0) as u32);
-                            let mut slide = held.slide();
-                            let world = slide.world_mut();
-                            let placed = world.place_founders_at(&bytes, n, Some(at));
-                            world.note_inhabitant(&view.place_genome, placed, at);
-                            sim.last_tool = Some(tools::ToolEvent::Refused(format!(
-                                "seeded {placed} × {}",
-                                view.place_genome
-                            )));
-                        }
-                        None => {
-                            sim.last_tool = Some(tools::ToolEvent::Refused(format!(
-                                "{} did not assemble",
-                                view.place_genome
-                            )))
-                        }
+                    // A click places `At` and nothing else; the rectangle arrangements are a
+                    // drag and are handled with the other rectangle tools below, and `Spread`
+                    // has a button of its own because the whole slide is not a thing to point
+                    // at. See `Arrange`.
+                    if view.arrange == Arrange::At {
+                        drop(held);
+                        let at = (square.0.max(0) as u32, square.1.max(0) as u32);
+                        seed_founders(sim, view, mm_core::Placement::At { x: at.0, y: at.1 });
                     }
                 }
                 // Painted above, for as long as the button is held, rather than once here.
@@ -2625,7 +2721,12 @@ fn handle_mouse(
     // press marks one corner, the release the other, and nothing is committed until the button
     // comes up — which means a drag that started by accident can be abandoned by dragging back
     // onto its own corner.
-    if view.tool.is_rect() && tool_target == Target::Slide {
+    // The seed tool joins them when its arrangement is one of the three that fill a rectangle,
+    // which is why this asks the view rather than the tool: `Grid`, `Hex` and `Scatter` are the
+    // same gesture as a source, and `At` is not.
+    let rect_gesture =
+        view.tool.is_rect() || (view.tool == Tool::PlaceCell && view.arrange.is_rect());
+    if rect_gesture && tool_target == Target::Slide {
         if buttons.just_pressed(MouseButton::Right) {
             view.flux_from = pointer_on_slide(window, view, scale)
                 .map(|(x, y)| (x.floor() as i32, y.floor() as i32));
@@ -2638,36 +2739,53 @@ fn handle_mouse(
                 let (x0, y0) = (from.0.min(to.0).max(0), from.1.min(to.1).max(0));
                 let (x1, y1) = (from.0.max(to.0).max(0), from.1.max(to.1).max(0));
                 let (w, h) = ((x1 - x0 + 1) as u32, (y1 - y0 + 1) as u32);
-                let f = if view.tool == Tool::Source {
-                    mm_core::Flux::Source {
-                        chemical: view.load,
-                        x: x0 as u32,
-                        y: y0 as u32,
-                        width: w,
-                        height: h,
-                        per_tick: view.dose,
-                    }
+                // The seed tool's three rectangle arrangements share this gesture and nothing
+                // else with a source, so they part company here rather than at the top: the
+                // rectangle is worked out once and then means two different things.
+                if view.tool == Tool::PlaceCell {
+                    let place = view.arrange.placement(
+                        x0 as u32,
+                        y0 as u32,
+                        w,
+                        h,
+                        view.scatter_spacing.max(1),
+                    );
+                    seed_founders(sim, view, place);
+                    // `else` rather than an early return: this is the last block in the
+                    // function today, and a bare `return` here is a trap for whoever adds the
+                    // next one.
                 } else {
-                    mm_core::Flux::Drain {
-                        chemical: view.load,
-                        x: x0 as u32,
-                        y: y0 as u32,
-                        width: w,
-                        height: h,
-                        rate: view.drain_rate,
-                    }
-                };
-                let held = sim.engine.handle();
-                held.slide().world_mut().add_flux(f);
-                let name = sim
-                    .chem_names
-                    .get(view.load)
-                    .cloned()
-                    .unwrap_or_else(|| view.load.to_string());
-                sim.last_tool = Some(tools::ToolEvent::Refused(format!(
-                    "{} of {name}, {w}×{h}",
-                    view.tool.name()
-                )));
+                    let f = if view.tool == Tool::Source {
+                        mm_core::Flux::Source {
+                            chemical: view.load,
+                            x: x0 as u32,
+                            y: y0 as u32,
+                            width: w,
+                            height: h,
+                            per_tick: view.dose,
+                        }
+                    } else {
+                        mm_core::Flux::Drain {
+                            chemical: view.load,
+                            x: x0 as u32,
+                            y: y0 as u32,
+                            width: w,
+                            height: h,
+                            rate: view.drain_rate,
+                        }
+                    };
+                    let held = sim.engine.handle();
+                    held.slide().world_mut().add_flux(f);
+                    let name = sim
+                        .chem_names
+                        .get(view.load)
+                        .cloned()
+                        .unwrap_or_else(|| view.load.to_string());
+                    sim.last_tool = Some(tools::ToolEvent::Refused(format!(
+                        "{} of {name}, {w}×{h}",
+                        view.tool.name()
+                    )));
+                }
             }
         }
     }
@@ -6442,11 +6560,61 @@ fn toolbox_work(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
             ui.add(
                 egui::DragValue::new(&mut view.place_count)
                     .speed(0.2)
-                    .range(1..=64)
+                    .range(1..=256)
                     .prefix("× "),
             );
-            ui.label(skin::text(Role::Small, "founders a click"));
+            ui.label(skin::text(Role::Small, "founders"));
         });
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.label(skin::text(Role::Label, "arranged"));
+            for how in Arrange::ALL {
+                if skin::chip(ui, how.title(), None, view.arrange == how)
+                    .on_hover_text(how.note())
+                    .clicked()
+                {
+                    view.arrange = how;
+                }
+            }
+        });
+        if view.arrange == Arrange::Scatter {
+            ui.horizontal(|ui| {
+                ui.label(skin::text(Role::Label, "no closer than"));
+                ui.add(
+                    egui::DragValue::new(&mut view.scatter_spacing)
+                        .speed(0.2)
+                        .range(1..=64),
+                );
+                ui.label(skin::text(Role::Small, "squares apart"));
+            });
+        }
+        // `Spread` has no gesture to give it — it is the whole slide, which is not a thing you
+        // point at — so it gets the one control in this panel that acts on its own. Everything
+        // else here is a setting for a right-click.
+        if view.arrange == Arrange::Spread {
+            ui.horizontal(|ui| {
+                if ui
+                    .add(egui::Button::new(skin::text(Role::Label, "seed the slide")))
+                    .on_hover_text("place them now, over the whole slide")
+                    .clicked()
+                {
+                    seed_founders(sim, view, mm_core::Placement::Spread);
+                }
+                ui.label(skin::text(
+                    Role::Small,
+                    "the whole slide has no corner to click",
+                ));
+            });
+        } else {
+            ui.label(skin::text(
+                Role::Small,
+                if view.arrange.is_rect() {
+                    "right-drag a rectangle on the slide"
+                } else {
+                    "right-click a square on the slide"
+                },
+            ));
+        }
     }
 
     // Everything the tools have put on the slide (UI.md §9.3), not only the flux.
@@ -6479,7 +6647,7 @@ fn toolbox_work(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
         ));
         return;
     }
-    let mut remove = None;
+    let (mut remove, mut drop_founder) = (None, None);
     egui::ScrollArea::vertical()
         .id_salt("on_slide")
         .auto_shrink([false, false])
@@ -6503,7 +6671,14 @@ fn toolbox_work(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
                     &chemical,
                     &rect,
                     &rate,
-                    Some(i),
+                    Some((
+                        i,
+                        if kind == "source" {
+                            "stop it supplying; what it has already put in the water stays"
+                        } else {
+                            "stop it draining; what it has already taken off the slide is gone"
+                        },
+                    )),
                 ) {
                     remove = Some(i);
                 }
@@ -6522,9 +6697,17 @@ fn toolbox_work(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
                     None,
                 );
             }
-            for cell in &inhabitants {
+            for (i, cell) in inhabitants.iter().enumerate() {
                 let where_ = cell.place.describe();
-                on_slide_row(
+                // Removable, the way a source is. Until now this table listed founders and
+                // offered no way to take one out, so a dozen dropped in the wrong place was a
+                // dozen entries in the recipe for good — and `remove` deletes the *cell* while
+                // leaving the entry, so reopening the file put them straight back.
+                //
+                // The recipe only, and the hover says so. Undoing a placement properly means
+                // unspawning a cell through the ledger, which `kill_cell` is not: that returns
+                // the body to the water, which is a death rather than an undo.
+                if let Some(i) = on_slide_row(
                     ui,
                     [0x8a, 0xb0, 0x98],
                     true,
@@ -6533,14 +6716,68 @@ fn toolbox_work(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
                     &cell.genome,
                     &where_,
                     &format!("× {}", cell.count),
-                    None,
-                );
+                    Some((
+                        i,
+                        "take them out of the recipe; cells already on the slide stay",
+                    )),
+                ) {
+                    drop_founder = Some(i);
+                }
             }
         });
     if let Some(i) = remove {
         let held = sim.engine.handle();
         held.slide().world_mut().remove_flux(i);
     }
+    if let Some(i) = drop_founder {
+        let held = sim.engine.handle();
+        held.slide().world_mut().remove_inhabitant(i);
+    }
+}
+
+/// Drop founders of the chosen genome, arranged as the toolbox says, and write them into the
+/// recipe.
+///
+/// One function for all three gestures — the click, the rectangle drag and the whole-slide button
+/// — because they differ only in the [`mm_core::Placement`] they build, and three copies of
+/// "resolve the genome, place, record, report" is three chances for one of them to record
+/// something other than what it placed. `World::seed_inhabitant` closes the last gap in that: the
+/// placement used and the placement written down are one value.
+fn seed_founders(sim: &mut SlideRes, view: &View, place: mm_core::Placement) {
+    // The genome is a *name* because that is what a scenario can write down — a cell dropped
+    // from a file the scenario can also name is a cell the saved slide will have.
+    let Some(bytes) = genome_bytes(&view.place_genome) else {
+        sim.last_tool = Some(tools::ToolEvent::Refused(format!(
+            "{} did not assemble",
+            view.place_genome
+        )));
+        return;
+    };
+    let asked = view.place_count.max(1);
+    let placed = {
+        let held = sim.engine.handle();
+        let mut slide = held.slide();
+        slide
+            .world_mut()
+            .seed_inhabitant(&view.place_genome, &bytes, asked, place)
+    };
+    // The shortfall is said out loud rather than swallowed. A rectangle that is mostly wall has
+    // fewer free squares than the count asked for, and "seeded 16" over a slide holding four is
+    // the kind of quiet lie that gets read as a placement bug.
+    sim.last_tool = Some(tools::ToolEvent::Refused(if placed < asked {
+        format!(
+            "seeded {placed} × {} — {} would not fit, {}",
+            view.place_genome,
+            asked - placed,
+            place.describe()
+        )
+    } else {
+        format!(
+            "seeded {placed} × {}, {}",
+            view.place_genome,
+            place.describe()
+        )
+    }));
 }
 
 /// Which genome to seed: the ones in `genomes/`, and a box for anything else.
@@ -6599,7 +6836,12 @@ fn on_slide_row(
     what: &str,
     rect: &str,
     extra: &str,
-    removable: Option<usize>,
+    // The index to report when the × is clicked, and what removing this row actually does. The
+    // hover is per row rather than a fixed "remove" because the two removable kinds mean
+    // different things: a source stops supplying and leaves behind what it already delivered, a
+    // founder comes out of the recipe and leaves behind the cell. Both are "remove" and neither
+    // is an undo, so the word on its own was the least useful part of the tooltip.
+    removable: Option<(usize, &str)>,
 ) -> Option<usize> {
     let mut removed = None;
     ui.horizontal(|ui| {
@@ -6622,9 +6864,9 @@ fn on_slide_row(
             egui::vec2(120.0, theme::row::HEIGHT),
             egui::Label::new(skin::text(Role::Label, extra)),
         );
-        if let Some(i) = removable {
+        if let Some((i, hint)) = removable {
             if skin::chip(ui, "×", None, false)
-                .on_hover_text("remove")
+                .on_hover_text(hint)
                 .clicked()
             {
                 removed = Some(i);

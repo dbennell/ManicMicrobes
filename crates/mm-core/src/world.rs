@@ -1696,7 +1696,7 @@ impl World {
     /// not the population that grew from them — for the world as it stands there is
     /// `Snapshot`. A repeat placement of the same genome on the same square adds to the count
     /// rather than making a second entry, so leaning on the button reads as "twelve here".
-    pub fn note_inhabitant(&mut self, genome: &str, count: u32, at: (u32, u32)) {
+    pub fn note_inhabitant(&mut self, genome: &str, count: u32, place: crate::Placement) {
         if count == 0 {
             return;
         }
@@ -1704,7 +1704,7 @@ impl World {
             .scenario
             .inhabitants
             .iter_mut()
-            .find(|i| i.genome == genome && i.place == crate::Placement::At { x: at.0, y: at.1 })
+            .find(|i| i.genome == genome && i.place == place)
         {
             existing.count = existing.count.saturating_add(count);
             return;
@@ -1712,8 +1712,57 @@ impl World {
         self.scenario.inhabitants.push(crate::Inhabitant {
             genome: genome.to_string(),
             count,
-            place: crate::Placement::At { x: at.0, y: at.1 },
+            place,
         });
+    }
+
+    /// Place founders **and** write them into the recipe, as one act.
+    ///
+    /// The two halves were two calls, and nothing held them together: the front end placed with
+    /// [`World::place_founders_at`] — which only ever builds `Placement::At` — and recorded with
+    /// [`World::note_inhabitant`], which until now only ever wrote `Placement::At` back. So the
+    /// four arrangements [`crate::Placement`] offers were reachable from a hand-written file and
+    /// from nothing else, and the editor's only way to say "sixteen founders spread over this
+    /// rectangle" was sixteen separate entries.
+    ///
+    /// One call, one `Placement`, used for both: **what was drawn is what reopens, by
+    /// construction** rather than by two callers agreeing.
+    ///
+    /// The count recorded is how many actually *landed*, not how many were asked for — a
+    /// rectangle that is mostly wall has fewer free squares than a request may name, and a recipe
+    /// that says twelve because twelve fitted reopens as the slide you were looking at.
+    pub fn seed_inhabitant(
+        &mut self,
+        genome: &str,
+        bytes: &[u8],
+        count: u32,
+        place: crate::Placement,
+    ) -> u32 {
+        let placed = self.place_inhabitants(bytes, count, place);
+        self.note_inhabitant(genome, placed, place);
+        placed
+    }
+
+    /// Who the recipe says lives here.
+    #[must_use]
+    pub fn inhabitants(&self) -> &[crate::Inhabitant] {
+        &self.scenario.inhabitants
+    }
+
+    /// Take an entry out of the recipe.
+    ///
+    /// **The recipe only.** Cells already on the slide are not touched, for the same reason
+    /// [`World::remove_flux`] leaves behind the matter its source already delivered: this
+    /// changes what the world will be built from, not what it currently is. Undoing a placement
+    /// properly would mean unspawning a cell *through the ledger* — the exact inverse of
+    /// `spawn_cell`, matter and energy both — and `kill_cell` is not that: it returns the body
+    /// to the water, which is a death and not an undo.
+    ///
+    /// Out of range is `None` rather than a panic: the caller is a list drawn from a snapshot of
+    /// this vector a frame ago, and the world may have moved on.
+    pub fn remove_inhabitant(&mut self, index: usize) -> Option<crate::Inhabitant> {
+        (index < self.scenario.inhabitants.len())
+            .then(|| self.scenario.inhabitants.remove(index))
     }
 
     /// The sources and drains in force. See [`crate::Flux`].

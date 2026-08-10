@@ -11,7 +11,7 @@
 
 use mm_core::fixed::{q10, Q10_ONE};
 use mm_core::light::CurrentField;
-use mm_core::{Barrier, Flux, Inhabitant, LightRegime, Scenario, World};
+use mm_core::{Barrier, Flux, Inhabitant, LightRegime, Placement, Scenario, World};
 
 const SULPHIDE: usize = 10;
 const DETRITUS: usize = 12;
@@ -369,8 +369,7 @@ fn a_slide_built_by_hand_comes_back_the_way_it_was_left() {
         rate: Q10_ONE / 8,
     });
     // And somebody to live there, against the wall where a holdfast has something to grip.
-    let placed = built.place_founders_at(&genome, 2, Some((11, 8)));
-    built.note_inhabitant("sponge.mm", placed, (11, 8));
+    built.seed_inhabitant("sponge.mm", &genome, 2, Placement::At { x: 11, y: 8 });
 
     let text = built.scenario().to_ron().expect("render");
     let reopened = Scenario::from_ron(&text).expect("parse");
@@ -610,4 +609,103 @@ fn spread_is_unchanged_by_the_placement_rewrite() {
     assert_eq!(positions.len(), 16);
     assert_eq!(positions[0], (step, step));
     assert_eq!(positions[5], (mm_core::fixed::pos(24), mm_core::fixed::pos(24)));
+}
+
+#[test]
+fn seeding_records_the_arrangement_it_actually_used() {
+    // The gap this closes: the editor placed with one call and recorded with another, and the
+    // recording one only ever wrote `Placement::At`. So the four other arrangements were
+    // reachable from a hand-written file and from nothing else, and a rectangle of founders
+    // drawn in the front end saved as a single point.
+    let genome = vec![0x2E; 24];
+    for place in [
+        Placement::Spread,
+        Placement::At { x: 9, y: 9 },
+        Placement::Grid {
+            x: 4,
+            y: 4,
+            width: 16,
+            height: 16,
+        },
+        Placement::Hex {
+            x: 4,
+            y: 4,
+            width: 16,
+            height: 16,
+        },
+        Placement::Scatter {
+            x: 4,
+            y: 4,
+            width: 16,
+            height: 16,
+            spacing: 3,
+        },
+    ] {
+        let mut world = World::new(slide()).expect("world");
+        let placed = world.seed_inhabitant("ancestor.mm", &genome, 6, place);
+        assert!(placed > 0, "{place:?} placed nobody");
+        assert_eq!(
+            world.inhabitants(),
+            [Inhabitant {
+                genome: "ancestor.mm".to_string(),
+                count: placed,
+                place,
+            }],
+            "{place:?} was not the arrangement written down"
+        );
+
+        // And the count recorded is what landed, so reopening gives the slide that was drawn.
+        let text = world.scenario().to_ron().expect("render");
+        let back = World::new(Scenario::from_ron(&text).expect("parse")).expect("world");
+        assert_eq!(back.inhabitants(), world.inhabitants(), "{place:?} drifted");
+    }
+}
+
+#[test]
+fn seeding_the_same_spot_twice_adds_up_and_two_arrangements_do_not() {
+    // Leaning on the button reads as "twelve here" rather than twelve entries. Two *different*
+    // arrangements of the same genome are two different claims and stay apart.
+    let genome = vec![0x2E; 24];
+    let mut world = World::new(slide()).expect("world");
+    let at = Placement::At { x: 9, y: 9 };
+    world.seed_inhabitant("ancestor.mm", &genome, 2, at);
+    world.seed_inhabitant("ancestor.mm", &genome, 3, at);
+    assert_eq!(world.inhabitants().len(), 1, "one spot became two entries");
+    assert_eq!(world.inhabitants()[0].count, 5);
+
+    world.seed_inhabitant("ancestor.mm", &genome, 1, Placement::Spread);
+    assert_eq!(world.inhabitants().len(), 2, "two arrangements were merged");
+}
+
+#[test]
+fn an_inhabitant_can_be_taken_out_of_the_recipe_without_touching_the_slide() {
+    // The other half of the gap: the table listed founders and offered no way to remove one, so
+    // a dozen dropped in the wrong place stayed in the recipe for good — and deleting the
+    // *cells* left the entry behind, so reopening put them straight back.
+    //
+    // The recipe only, deliberately. Undoing a placement means unspawning a cell through the
+    // ledger, and `kill_cell` is not that: it returns the body to the water, which is a death.
+    let genome = vec![0x2E; 24];
+    let mut world = World::new(slide()).expect("world");
+    world.seed_inhabitant("a.mm", &genome, 2, Placement::At { x: 4, y: 4 });
+    world.seed_inhabitant("b.mm", &genome, 3, Placement::At { x: 20, y: 20 });
+    let alive = world.cells().len();
+
+    let gone = world.remove_inhabitant(0).expect("there were two");
+    assert_eq!(gone.genome, "a.mm");
+    assert_eq!(world.inhabitants().len(), 1);
+    assert_eq!(world.inhabitants()[0].genome, "b.mm");
+    assert_eq!(
+        world.cells().len(),
+        alive,
+        "removing a recipe entry killed something on the slide"
+    );
+    world
+        .check_matter()
+        .expect("taking an entry out of the recipe moved the books");
+
+    assert!(
+        world.remove_inhabitant(9).is_none(),
+        "removed one that is not there"
+    );
 }
