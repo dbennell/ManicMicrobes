@@ -1806,6 +1806,140 @@ impl Tool {
     fn is_rect(self) -> bool {
         matches!(self, Tool::Source | Tool::Drain)
     }
+
+    /// Which settings this tool actually reads.
+    ///
+    /// The settings row used to show all five at once, for every tool, in a `horizontal_wrapped`.
+    /// Two things were wrong with that and only one of them was cosmetic.
+    ///
+    /// The cosmetic one: wrapped, the labels came away from their values, so `128/1024` — which
+    /// belongs to `drain` — sat under `brush`, and at rail width the row read as a bag of numbers
+    /// in no order. The other: with `select` in hand it offered a dose, a drain rate and a
+    /// genome, none of which `select` does anything with, so five of the six controls on screen
+    /// were inert and nothing said which.
+    ///
+    /// It also has a measurable consequence, which is how this was found: the row could not wrap
+    /// below about 480 points, so in a 430-point work column it overflowed and pushed the context
+    /// column off the end of the panel. Three controls fit where six did not.
+    fn uses(self) -> Uses {
+        match self {
+            // Nothing to set. These act on the cell you point at.
+            Tool::Select | Tool::Move | Tool::Remove => Uses::NOTHING,
+            Tool::DrawBarrier | Tool::EraseBarrier => Uses {
+                brush: true,
+                ..Uses::NOTHING
+            },
+            Tool::Paint | Tool::Unpaint => Uses {
+                brush: true,
+                chemical: true,
+                dose: true,
+                ..Uses::NOTHING
+            },
+            // A rectangle, so no brush; the dose is what it supplies each step rather than what
+            // one stamp puts down.
+            Tool::Source => Uses {
+                chemical: true,
+                dose: true,
+                ..Uses::NOTHING
+            },
+            Tool::Drain => Uses {
+                chemical: true,
+                drain: true,
+                ..Uses::NOTHING
+            },
+            Tool::PlaceCell => Uses {
+                founder: true,
+                ..Uses::NOTHING
+            },
+        }
+    }
+
+    /// What it does, and what its settings mean — the context column, for the tool in hand.
+    ///
+    /// This replaced five fixed paragraphs that were shown whatever was selected. Of those, one
+    /// repeated the line already printed under the tool chips, one defended the decision to make
+    /// this a panel rather than a menu — which is an argument with `docs/UI.md` §4.3 and not
+    /// something anybody wants while holding a brush — and the three that were worth reading were
+    /// about tools you might not have picked. A context column that says the same thing whatever
+    /// the context is, is a wall of text you learn to skip.
+    fn help(self) -> &'static str {
+        match self {
+            Tool::Select => {
+                "Click a cell to inspect it: its genome, its organelles, what it is holding and \
+                 what it descends from. The only tool that cannot change the world, which is why \
+                 it is the one you start in."
+            }
+            Tool::Move => {
+                "Drag a cell somewhere else. It keeps everything it holds — position is not a \
+                 conserved quantity, so nothing is created or destroyed by carrying a cell across \
+                 the slide."
+            }
+            Tool::Remove => {
+                "Delete a cell outright. Its matter returns to the water rather than vanishing, \
+                 so the slide's books still balance afterwards."
+            }
+            Tool::DrawBarrier => {
+                "Draw wall. Neither water nor cells pass through it, so this is how you make a \
+                 channel, a basin, or two halves of a world that can only reach each other one \
+                 way. Each square goes into the scenario as well as onto the slide."
+            }
+            Tool::EraseBarrier => {
+                "Take wall away again. Same width as the pen, so it can always undo what the pen \
+                 just drew."
+            }
+            Tool::Paint => {
+                "Add the chosen chemical to the water, one dose a square. The matter comes from \
+                 outside the world and goes through the ledger, so it is counted rather than \
+                 conjured. To fill the whole slide rather than paint it on, use the world view."
+            }
+            Tool::Unpaint => {
+                "Take the chosen chemical back out, one dose a square. The matter leaves the \
+                 world through the ledger — it does not cease to exist."
+            }
+            Tool::Source => {
+                "Drag a rectangle that supplies the chosen chemical every step. A vent is a small \
+                 one; marine snow is one covering the slide. **A source with no drain only \
+                 answers how long the slide takes to fill** — pair it with one, or the population \
+                 is bounded by arithmetic rather than by a living."
+            }
+            Tool::Drain => {
+                "Drag a rectangle that lets the chosen chemical off the slide every step. A share \
+                 of what is in a square rather than an amount, so it settles into balance with \
+                 whatever reaches it instead of scouring the slide dry."
+            }
+            Tool::PlaceCell => {
+                "Drop founders of the chosen genome where you point. They go into the scenario, \
+                 so reopening the file puts them back — which is what makes a slide you built a \
+                 slide you can run again."
+            }
+        }
+    }
+}
+
+/// Which of the toolbox's settings a tool reads. See [`Tool::uses`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Uses {
+    brush: bool,
+    chemical: bool,
+    dose: bool,
+    drain: bool,
+    founder: bool,
+}
+
+impl Uses {
+    const NOTHING: Uses = Uses {
+        brush: false,
+        chemical: false,
+        dose: false,
+        drain: false,
+        founder: false,
+    };
+
+    /// Whether the tool reads any setting at all, so the row can be left out entirely rather
+    /// than drawn as an empty strip with a separator round it.
+    fn any(self) -> bool {
+        self.brush || self.chemical || self.dose || self.drain || self.founder
+    }
 }
 
 #[derive(Component)]
@@ -6158,52 +6292,47 @@ fn toolbox_body(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
     // narrow column in the widest space in the window, which is the exact failure
     // `ui::Panel::dock` has a test against. The prose is worth reading; it is not worth reading
     // between two settings you are comparing.
+    // Read before the split: the work area holds both mutably for the whole of its closure.
+    let (tool, authoring) = (
+        view.tool,
+        ui::authoring(sim.latest.frame.tick, sim.engine.rate().is_running()),
+    );
     skin::drawer_split(
         ui,
         "toolbox_notes",
         |ui| toolbox_work(ui, sim, view),
         |ui| {
-            // What to do, before why it was built this way. This column opened on "why this is
-            // a panel" — a defence of the decision not to use a menu — which is the answer to a
-            // question nobody has while looking at a blank slide with a brush in their hand.
-            // The argument is worth keeping and it is worth keeping *last*.
-            skin::section(ui, "these draw on one square at a time", false);
+            // The tool in hand, and nothing about the nine you are not holding. The five fixed
+            // paragraphs this replaced said the same thing whatever was selected — see
+            // `Tool::help` for what was in them and why two of the five were not worth reading
+            // at all.
+            skin::section(ui, tool.name(), false);
+            ui.label(skin::text(Role::Body, tool.help()));
+
+            // The one thing true of every tool that the work area cannot say for itself: these
+            // all write into the recipe, and there is a second view for the things that are not
+            // properties of a square.
+            skin::section(ui, "what these are for", true);
             ui.label(skin::text(
                 Role::Body,
-                "Right-click the slide; drag to pan. For what the whole slide is made of — the \
-                 light, the current, how much of each chemical is dissolved in the water — \
-                 there is the world view, next to this one.",
+                "Every one of these writes itself into the scenario as well as onto the slide, \
+                 so what you draw is what reopens. For what the whole slide is made of — the \
+                 light, the current, how much of each chemical is dissolved in the water — there \
+                 is the world view, next to this one.",
             ));
-            skin::section(ui, "one chemical, four tools", true);
-            ui.label(skin::text(
-                Role::Body,
-                "Paint, unpaint, source and drain all use the chemical above — they are four \
-                 things you do to one chemical, and four separate settings would be four places \
-                 to notice you had the wrong one.",
-            ));
-            skin::section(ui, "dose and drain", true);
-            ui.label(skin::text(
-                Role::Body,
-                "A dose is what one stamp puts in a square, and what a new source supplies per \
-                 step; 1024 is one unit. A drain takes a share of a square rather than an \
-                 amount, so it settles into balance with whatever reaches it instead of \
-                 scouring the slide dry.",
-            ));
-            skin::section(ui, "a brush is a disc", true);
-            ui.label(skin::text(
-                Role::Body,
-                "The eraser is the same width as the pen, so it can always take back what the \
-                 pen just drew. Three squares is the narrowest stroke that is solid on the \
-                 diagonal; at one, a diagonal run touches only at its corners and a cell fits \
-                 through the gap.",
-            ));
-            skin::section(ui, "why this is a panel", true);
-            ui.label(skin::text(
-                Role::Body,
-                "A menu shuts the moment you click the slide, so changing a dose between two \
-                 strokes was open, change, close, paint, and open again. Anything you adjust \
-                 while working has to stay on screen while you work.",
-            ));
+            if !authoring {
+                // The caption in the menu bar says the same thing (§9.1), but not here, where
+                // the hand is. Drawing on a world that has already run is the one way to build a
+                // slide that does not replay to what you are looking at.
+                skin::section(ui, "this world has already run", true);
+                ui.label(skin::moody(
+                    Role::Body,
+                    Mood::Warn,
+                    "Edits made while running are not recorded as interventions, so the scenario \
+                     you save will not replay to this. Stop at tick 0 to author something \
+                     reproducible.",
+                ));
+            }
         },
     );
 }
@@ -6223,59 +6352,102 @@ fn toolbox_work(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
         "right-click the slide to use the selected tool; drag to pan.",
     ));
 
-    // All three settings groups on one line, which is what the width is for.
-    ui.add_space(theme::SECTION_GAP);
-    ui.horizontal_wrapped(|ui| {
-        ui.label(skin::text(Role::Label, "brush"));
-        ui.add(egui::Slider::new(&mut view.brush, ui::BRUSH_MIN..=ui::BRUSH_MAX).show_value(false));
-        ui.label(skin::text(Role::Value, view.brush.to_string()));
-        ui.label(skin::text(Role::Small, "squares · a disc, not a box"));
-
-        ui.add_space(10.0);
-        ui.label(skin::text(Role::Label, "loaded"));
-        if let Some(rgb) = sim.chem_colours.get(view.load).copied() {
-            skin::swatch(ui, rgb, true);
-        }
-        egui::ComboBox::from_id_salt("tool chemical")
-            .selected_text(skin::text(
+    // Only what the tool in hand reads, one setting to a row. See `Tool::uses` for why this is
+    // not all of them on one wrapped line any more: a label that has wrapped away from its value
+    // is a number with nothing saying what it is, and a control the current tool ignores is worse
+    // than one that is not there.
+    let uses = view.tool.uses();
+    if uses.any() {
+        ui.add_space(theme::SECTION_GAP);
+    }
+    if uses.brush {
+        ui.horizontal(|ui| {
+            ui.label(skin::text(Role::Label, "brush"));
+            ui.add(
+                egui::Slider::new(&mut view.brush, ui::BRUSH_MIN..=ui::BRUSH_MAX)
+                    .show_value(false),
+            );
+            ui.label(skin::text(Role::Value, view.brush.to_string()));
+            // Three is the narrowest stroke that is solid on the diagonal: at one, a diagonal
+            // run touches only at its corners and a cell fits through the gap.
+            ui.label(skin::text(Role::Small, "squares wide · a disc"));
+        });
+    }
+    if uses.chemical {
+        ui.horizontal(|ui| {
+            ui.label(skin::text(Role::Label, "chemical"));
+            if let Some(rgb) = sim.chem_colours.get(view.load).copied() {
+                skin::swatch(ui, rgb, true);
+            }
+            egui::ComboBox::from_id_salt("tool chemical")
+                .selected_text(skin::text(
+                    Role::Value,
+                    sim.chem_names
+                        .get(view.load)
+                        .cloned()
+                        .unwrap_or_else(|| view.load.to_string()),
+                ))
+                .show_ui(ui, |ui| {
+                    for (i, name) in sim.chem_names.iter().enumerate() {
+                        ui.selectable_value(&mut view.load, i, name);
+                    }
+                });
+            // Shared by paint, unpaint, source and drain deliberately: they are four things you
+            // do to one chemical, and four separate settings would be four places to notice you
+            // had the wrong one.
+            ui.label(skin::text(Role::Small, "shared by paint, source and drain"));
+        });
+    }
+    if uses.dose {
+        ui.horizontal(|ui| {
+            ui.label(skin::text(
+                Role::Label,
+                if view.tool == Tool::Source {
+                    "per step"
+                } else {
+                    "dose"
+                },
+            ));
+            ui.add(
+                egui::DragValue::new(&mut view.dose)
+                    .speed(256.0)
+                    .range(0..=1_000_000),
+            );
+            ui.label(skin::text(
+                Role::Small,
+                format!("{:.0} units · 1024 is one", f64::from(view.dose) / 1024.0),
+            ));
+        });
+    }
+    if uses.drain {
+        ui.horizontal(|ui| {
+            ui.label(skin::text(Role::Label, "rate"));
+            ui.add(
+                egui::Slider::new(&mut view.drain_rate, 1..=mm_core::Q10_ONE)
+                    .logarithmic(true)
+                    .show_value(false),
+            );
+            // As a share, because that is what it is — an amount would scour a square dry.
+            ui.label(skin::text(
                 Role::Value,
-                sim.chem_names
-                    .get(view.load)
-                    .cloned()
-                    .unwrap_or_else(|| view.load.to_string()),
-            ))
-            .show_ui(ui, |ui| {
-                for (i, name) in sim.chem_names.iter().enumerate() {
-                    ui.selectable_value(&mut view.load, i, name);
-                }
-            });
-        ui.label(skin::text(Role::Label, "dose"));
-        ui.add(
-            egui::DragValue::new(&mut view.dose)
-                .speed(256.0)
-                .range(0..=1_000_000),
-        );
-        ui.label(skin::text(Role::Label, "drain"));
-        ui.add(
-            egui::Slider::new(&mut view.drain_rate, 1..=mm_core::Q10_ONE)
-                .logarithmic(true)
-                .show_value(false),
-        );
-        ui.label(skin::text(
-            Role::Value,
-            format!("{}/1024", view.drain_rate),
-        ));
-
-        ui.add_space(10.0);
-        ui.label(skin::text(Role::Label, "seed"));
-        genome_picker(ui, &mut view.place_genome);
-        ui.add(
-            egui::DragValue::new(&mut view.place_count)
-                .speed(0.2)
-                .range(1..=64)
-                .prefix("× "),
-        );
-    });
+                format!("{:.1}%", f64::from(view.drain_rate) * 100.0 / 1024.0),
+            ));
+            ui.label(skin::text(Role::Small, "of a square, per step"));
+        });
+    }
+    if uses.founder {
+        ui.horizontal(|ui| {
+            ui.label(skin::text(Role::Label, "genome"));
+            genome_picker(ui, &mut view.place_genome);
+            ui.add(
+                egui::DragValue::new(&mut view.place_count)
+                    .speed(0.2)
+                    .range(1..=64)
+                    .prefix("× "),
+            );
+            ui.label(skin::text(Role::Small, "founders a click"));
+        });
+    }
 
     // Everything the tools have put on the slide (UI.md §9.3), not only the flux.
     //

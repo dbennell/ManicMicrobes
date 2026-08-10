@@ -607,31 +607,51 @@ pub fn drawer_split(
     } else {
         total
     };
-    ui.horizontal_top(|ui| {
-        ui.allocate_ui_with_layout(
-            egui::vec2(work_width, height),
-            egui::Layout::top_down(egui::Align::Min),
-            |ui| {
-                // Both dimensions, not just the height. `allocate_ui_with_layout` reports the
-                // rect its content *used*, so a work area whose content is one short label —
-                // the debugger before a sandbox is taken — shrank to the width of that label
-                // and handed the rest of the drawer to the context column.
-                ui.set_min_size(egui::vec2(work_width, height));
-                work(ui);
-            },
-        );
-        if column <= 0.0 {
-            return;
-        }
-        ui.allocate_ui_with_layout(
+    // **Both columns at absolute offsets, neither able to move the other.**
+    //
+    // This was two `allocate_ui_with_layout` calls in a `horizontal_top`, which places the second
+    // wherever the first *finished* — and `allocate_ui_with_layout` reports the rect its content
+    // used, not the rect it was given. So a work area whose content would not fit in `work_width`
+    // pushed the context column right by the overflow, off the end of the panel, where it was
+    // clipped mid-word. Measured in the docked build rail: work wanted 430, used 482, and the
+    // notes lost fifty-two points off their right-hand edge.
+    //
+    // The same failure `param_cell` documents in the parameter table and solves the same way:
+    // laid out from the container's left edge rather than by following the previous child,
+    // because absolute offsets cannot drift. The work area is clipped to its own rectangle, so
+    // content too wide for it is cut off inside the column that owns it rather than painted over
+    // the one next door.
+    let outer = ui.available_rect_before_wrap();
+    let work_rect =
+        egui::Rect::from_min_size(outer.min, egui::vec2(work_width, height));
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(work_rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+        |ui| {
+            // Both dimensions, not just the height. Without it a work area whose content is one
+            // short label — the debugger before a sandbox is taken — shrank to the width of that
+            // label and handed the rest of the drawer to the context column.
+            ui.set_min_size(work_rect.size());
+            ui.shrink_clip_rect(work_rect);
+            work(ui);
+        },
+    );
+    if column > 0.0 {
+        let context_rect = egui::Rect::from_min_size(
+            egui::pos2(outer.min.x + work_width + gap, outer.min.y),
             egui::vec2(column, height),
-            egui::Layout::top_down(egui::Align::Min),
+        );
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(context_rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
             |ui| {
-                ui.set_min_size(egui::vec2(column, height));
-                let rect = ui.max_rect();
+                ui.set_min_size(context_rect.size());
+                ui.shrink_clip_rect(context_rect);
                 ui.painter().vline(
-                    rect.left(),
-                    rect.y_range(),
+                    context_rect.left(),
+                    context_rect.y_range(),
                     egui::Stroke::new(1.0, col(theme::HAIR)),
                 );
                 ui.add_space(2.0);
@@ -641,7 +661,13 @@ pub fn drawer_split(
                     .show(ui, context);
             },
         );
-    });
+    }
+    // Claim the space both columns were laid out in, so whatever follows this call starts below
+    // rather than on top of it. `scope_builder` paints where it is told and allocates nothing.
+    ui.allocate_rect(
+        egui::Rect::from_min_size(outer.min, egui::vec2(total, height)),
+        egui::Sense::hover(),
+    );
 }
 
 /// One segment of a [`segmented_bar`].
