@@ -162,8 +162,14 @@ scenarios/        .ron scenario configs — the *worlds*: size, light, current, 
                   barriers, and `inhabitants` (which genomes start where, via `mm_core::Placement`
                   — Spread, At, Grid, Hex or Scatter, all of them barrier-aware).
 rulesets/         .ron named parameter sets — the *rules*: what a cell may do, as dotted-path
-                  diffs. A scenario says `ruleset: "name"` to inherit one and may override it
-                  inline. Resolved at load, stored resolved, name kept only as provenance —
-                  see `mm_core::ruleset` for why that is what keeps hard rule 7 intact.
+                  diffs. A scenario says `ruleset: "name"` to inherit one, may override it
+                  inline, and may add its own dotted paths in a `set:` block. Resolved at load,
+                  name kept as provenance — see `mm_core::ruleset` for the four layers and for
+                  the distinction that matters: **a recipe inherits, a record does not.** A
+                  scenario file is a recipe and `Scenario::to_ron_sparse` writes it, so it stays
+                  the fifteen lines it changes; a snapshot is a record and `Scenario::to_ron`
+                  writes every field, which is what keeps hard rule 7 intact. The microscope's
+                  `rules` page says which layer put each number where, and writes the current
+                  parameters out as a new named set.
 genomes/          .mm assembly sources.
 ```

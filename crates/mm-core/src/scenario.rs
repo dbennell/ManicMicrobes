@@ -332,6 +332,37 @@ pub struct Scenario {
     /// reason [`crate::ruleset::Ruleset::of`] is one: RON spells a present option `Some("x")`,
     /// and these files are written by hand.
     pub ruleset: String,
+
+    /// Parameter changes by dotted path, applied last of all — the same vocabulary
+    /// [`crate::ruleset::Ruleset::set`] uses, in the scenario's own file.
+    ///
+    /// # Why a scenario needs this as well as its `biology` block
+    ///
+    /// A sparse `biology: (…)` block can reach any *struct* field, and that is what
+    /// `the_marbles.ron` uses. It cannot reach an array element: RON sequences are positional, so
+    /// naming the fourth organelle spec means writing all sixteen, and naming one chemical means
+    /// writing the whole four-hundred-line table. [`crate::ruleset`] met the same wall and chose
+    /// dotted paths for exactly this reason; this is that choice, available to a world as well as
+    /// to a named set of rules.
+    ///
+    /// It is also what [`Scenario::to_ron_sparse`] writes, so a scenario saved out of the
+    /// microscope is a short list of what it changed rather than four hundred lines of the
+    /// engine's own numbers restated.
+    ///
+    /// # Applied last, and applied by the parser
+    ///
+    /// Last, so it beats both the named ruleset and the inline block — it is the most specific
+    /// thing the file says. By the parser rather than by the resolver, because unlike `ruleset`
+    /// this names no file outside itself: a scenario carrying a `set` still means exactly what it
+    /// says, which is what lets [`Scenario::from_ron`] stay the honest way to read a snapshot's
+    /// embedded copy.
+    ///
+    /// Applying is idempotent — the values here are the values that end up in the config — so a
+    /// scenario keeps its `set` after resolution rather than being emptied, and re-resolving a
+    /// saved file is still a copy.
+    #[serde(default)]
+    pub set: std::collections::BTreeMap<String, ron::Value>,
+
     pub vm: VmConfig,
 
     /// Costs, rates, mutation, junctions, ecology and the organelle catalogue (M10.2).
@@ -368,6 +399,7 @@ impl Default for Scenario {
             inhabitants: Vec::new(),
             flux: Vec::new(),
             ruleset: String::new(),
+            set: std::collections::BTreeMap::new(),
             vm: VmConfig::DEFAULT,
             biology: crate::biology::BiologyConfig::default(),
         }
@@ -383,6 +415,12 @@ pub enum ScenarioError {
         engine: u16,
     },
     Substrate(crate::substrate::SubstrateError),
+    /// A `set` entry naming no parameter, or holding a value that will not fit one.
+    ///
+    /// Refused rather than ignored, for the reason [`crate::ruleset::RulesetError::BadPath`] is:
+    /// a typo in a block whose whole job is to change numbers would otherwise be a change that
+    /// silently did nothing, which is the worst failure such a block can have.
+    BadPath(String),
 }
 
 impl std::fmt::Display for ScenarioError {
@@ -396,6 +434,10 @@ impl std::fmt::Display for ScenarioError {
                  opcode table, so it will not be run"
             ),
             ScenarioError::Substrate(e) => write!(f, "{e}"),
+            ScenarioError::BadPath(path) => write!(
+                f,
+                "scenario sets `{path}`, which is not a parameter (or the value does not fit it)"
+            ),
         }
     }
 }
@@ -409,12 +451,57 @@ impl Scenario {
     ///
     /// A syntax error, or an ISA version this engine cannot honour.
     pub fn from_ron(text: &str) -> Result<Scenario, ScenarioError> {
-        let s: Scenario = ron::from_str(text).map_err(|e| ScenarioError::Parse(e.to_string()))?;
+        let mut s: Scenario =
+            ron::from_str(text).map_err(|e| ScenarioError::Parse(e.to_string()))?;
+        s.apply_set()?;
         s.check_isa()?;
         Ok(s)
     }
 
+    /// Fold [`Scenario::set`] into the three rules blocks.
+    ///
+    /// Called by [`Scenario::from_ron`], and again by
+    /// [`crate::ruleset::RulesetLibrary::load_scenario_as`] once the named ruleset and the inline
+    /// block have been merged underneath it — `set` is the last word, so it has to be applied
+    /// after anything it might have to beat.
+    ///
+    /// Idempotent: it writes the values it names, so applying it twice writes them twice.
+    ///
+    /// # Errors
+    ///
+    /// [`ScenarioError::BadPath`] for a path that names no parameter, or a value that will not
+    /// fit one.
+    pub fn apply_set(&mut self) -> Result<(), ScenarioError> {
+        if self.set.is_empty() {
+            return Ok(());
+        }
+        let mut rules = crate::ruleset::Rules::of(self);
+        let mut normalised = std::collections::BTreeMap::new();
+        for (path, value) in &self.set {
+            let value = crate::params::Value::from_ron(value)
+                .ok_or_else(|| ScenarioError::BadPath(path.clone()))?;
+            rules = crate::params::set(&rules, path, value)
+                .ok_or_else(|| ScenarioError::BadPath(path.clone()))?;
+            // Written back through the same conversion it came in by. `ron::Value::Number` is
+            // width-tagged — 4096 parses as a `U16` and is constructed as something else — so two
+            // scenarios that say the same thing would otherwise compare unequal depending on
+            // whether they came off a disk or out of a diff.
+            normalised.insert(path.clone(), value.to_ron());
+        }
+        self.set = normalised;
+        rules.apply_to(self);
+        Ok(())
+    }
+
     /// Render to `.ron`, pretty-printed for a human to edit.
+    ///
+    /// **Every field, always.** That is what makes this the archival form: [`crate::snapshot`]
+    /// embeds this string and reads it back with [`Scenario::from_ron`], which applies no
+    /// ruleset, so a saved slide must not depend on any file outside itself. It is also what
+    /// makes re-resolving a saved scenario a copy rather than a merge — see [`crate::ruleset`]
+    /// and `a_saved_scenario_does_not_move_when_its_ruleset_does`.
+    ///
+    /// For the form a person reads and edits, see [`Scenario::to_ron_sparse`].
     ///
     /// # Errors
     ///
@@ -422,6 +509,89 @@ impl Scenario {
     pub fn to_ron(&self) -> Result<String, ScenarioError> {
         ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default())
             .map_err(|e| ScenarioError::Parse(e.to_string()))
+    }
+
+    /// Render to `.ron`, writing only what `base` does not already say.
+    ///
+    /// # Why there are two of these
+    ///
+    /// [`Scenario::to_ron`] writes all eighteen fields, of which the chemical table alone is
+    /// four hundred lines. That is right for a snapshot and wrong for a file a person opens: a
+    /// scenario saved out of the microscope came back as four hundred and twenty lines of which
+    /// four hundred were the engine's own defaults restated, and from that moment on editing a
+    /// ruleset could no longer reach it. The hand-written files in `scenarios/` never had that
+    /// problem — `soup.ron` is fifteen lines — and the only thing standing between them and the
+    /// saved ones was this function.
+    ///
+    /// So: what a person writes by hand is what Save writes back.
+    ///
+    /// # What `base` should be
+    ///
+    /// [`crate::ruleset::RulesetLibrary::baseline`] — [`Scenario::default`] with whatever ruleset
+    /// this scenario names resolved into it. Then the output is exactly the three layers
+    /// `mm_core::ruleset` describes, written down: the engine's numbers are silence, the
+    /// ruleset's are its name, and this scenario's own are the only ones on the page.
+    ///
+    /// # What this costs, and it is worth saying plainly
+    ///
+    /// A file written this way **means what its ruleset says today**. Edit `rulesets/foo.ron`
+    /// and every scenario naming it moves with it — which is the point, and is also why the
+    /// archival form is the other one. `the_thicket.ron` has had exactly this property since
+    /// rulesets landed; this puts the app's output in the same category as the files it ships
+    /// beside, no more and no less.
+    ///
+    /// # The rules half is written as dotted paths
+    ///
+    /// Into [`Scenario::set`], not as a nested `biology: (…)` block, and for two reasons. The
+    /// small one is that `"biology.metabolism.rates.rigidity_gain": 1024` greps and diffs better
+    /// than the same thing three levels down a tree. The load-bearing one is that a nested block
+    /// cannot name an array element — RON sequences are positional, so one changed chemical would
+    /// mean writing all sixteen, which is the four hundred lines this whole function exists to
+    /// avoid. It is also the vocabulary `rulesets/*.ron` already speaks, so the two file formats
+    /// say a parameter change the same way.
+    ///
+    /// # Errors
+    ///
+    /// Serialisation failure, which should not happen for a well-formed scenario.
+    pub fn to_ron_sparse(&self, base: &Scenario) -> Result<String, ScenarioError> {
+        let mut w = Sparse::new();
+        // The stamp, then who and where. Written whatever the baseline says, because a scenario
+        // file with no name and no size is a puzzle rather than a short file.
+        w.changed("isa_version", &self.isa_version, &base.isa_version)?;
+        w.always("name", &self.name)?;
+        w.always("seed", &self.seed)?;
+        w.always("width", &self.width)?;
+        w.always("height", &self.height)?;
+
+        // Light and current are written whatever they are. `docs/UI.md` §9.6 calls them the two
+        // settings that decide the most about a world, and a file that leaves the reader to know
+        // that silence means full daylight and still water is a file that has to be checked
+        // against the engine to be read.
+        w.gap();
+        w.always("light", &self.light)?;
+        w.always("current", &self.current)?;
+        w.changed("fluid_interval", &self.fluid_interval, &base.fluid_interval)?;
+        w.changed("impulse_retain", &self.impulse_retain, &base.impulse_retain)?;
+        w.changed("jitter", &self.jitter, &base.jitter)?;
+        w.changed("gravity", &self.gravity, &base.gravity)?;
+
+        w.gap();
+        w.changed("seeding", &self.seeding, &base.seeding)?;
+        w.changed("barriers", &self.barriers, &base.barriers)?;
+        w.changed("inhabitants", &self.inhabitants, &base.inhabitants)?;
+        w.changed("flux", &self.flux, &base.flux)?;
+
+        // The rules half last, which is the order every hand-written file already reads in: what
+        // kind of world this is, then what a cell may do in it.
+        w.gap();
+        if !self.ruleset.is_empty() {
+            w.always("ruleset", &self.ruleset)?;
+        }
+        w.set(&crate::params::diff(
+            &crate::ruleset::Rules::of(base),
+            &crate::ruleset::Rules::of(self),
+        ));
+        Ok(w.finish())
     }
 
     /// # Errors
@@ -503,6 +673,108 @@ impl Scenario {
             ],
             ..Scenario::default()
         }
+    }
+}
+
+/// How the world half of a sparse scenario is printed.
+///
+/// `compact_structs` is what makes `Uniform(chemical: 11, per_square: 409600)` one line instead
+/// of four, which is how every file in `scenarios/` already spells it. `compact_arrays` stays
+/// off: a seeding list one entry to a line is the form that diffs.
+fn pretty() -> ron::ser::PrettyConfig {
+    ron::ser::PrettyConfig::default()
+        .compact_structs(true)
+        .compact_arrays(false)
+}
+
+/// Builds the text of a sparse scenario, one field at a time.
+///
+/// Two kinds of field, written by different machinery for a reason.
+///
+/// * The **world** half holds enums — `Uniform(intensity: 1024)`, `Still`, `Spread` — and only
+///   the derived serialiser knows their variant names. It also holds fixed-size arrays, which
+///   RON spells `(1, 2, 3)` where a `Vec` is `[1, 2, 3]` and which it will not read the other
+///   way round. `ron::Value` carries neither distinction, so anything printed from one would be
+///   guessing; these go through `serde` and come out right by construction.
+/// * The **rules** half is written as dotted paths, where there is no shape to get wrong and an
+///   array element can be named on its own.
+struct Sparse {
+    out: String,
+    gap: bool,
+}
+
+impl Sparse {
+    fn new() -> Sparse {
+        Sparse {
+            out: String::new(),
+            gap: false,
+        }
+    }
+
+    /// A blank line before the next field that is written — and none at all if none is, so a
+    /// scenario that says nothing about its weather does not save with a hole where it would
+    /// have gone.
+    fn gap(&mut self) {
+        self.gap = !self.out.is_empty();
+    }
+
+    fn field(&mut self, key: &str, rendered: &str) {
+        if self.gap {
+            self.out.push('\n');
+            self.gap = false;
+        }
+        self.out.push_str("    ");
+        self.out.push_str(key);
+        self.out.push_str(": ");
+        // A multi-line value is printed at depth zero and moved under its key here, so neither
+        // printer has to know how deep it ended up.
+        for (i, line) in rendered.lines().enumerate() {
+            if i > 0 {
+                self.out.push_str("\n    ");
+            }
+            self.out.push_str(line);
+        }
+        self.out.push_str(",\n");
+    }
+
+    fn always<T: Serialize>(&mut self, key: &str, value: &T) -> Result<(), ScenarioError> {
+        let text = ron::ser::to_string_pretty(value, pretty())
+            .map_err(|e| ScenarioError::Parse(e.to_string()))?;
+        self.field(key, &text);
+        Ok(())
+    }
+
+    fn changed<T: Serialize + PartialEq>(
+        &mut self,
+        key: &str,
+        now: &T,
+        was: &T,
+    ) -> Result<(), ScenarioError> {
+        if now == was {
+            return Ok(());
+        }
+        self.always(key, now)
+    }
+
+    /// The rules half: every parameter this world moves, one to a line.
+    ///
+    /// Written by hand rather than through the serialiser because a `BTreeMap` prints as a RON
+    /// map — `{"a": 1}` — which is what the format wants here, but the pretty-printer spreads a
+    /// nested map over three lines a key and this reads as a table.
+    fn set(&mut self, changes: &std::collections::BTreeMap<String, crate::params::Value>) {
+        if changes.is_empty() {
+            return;
+        }
+        let mut text = String::from("{\n");
+        for (path, value) in changes {
+            text.push_str(&format!("    {path:?}: {value},\n"));
+        }
+        text.push('}');
+        self.field("set", &text);
+    }
+
+    fn finish(self) -> String {
+        format!("(\n{})\n", self.out)
     }
 }
 
@@ -697,5 +969,200 @@ mod tests {
     fn a_syntax_error_is_reported_rather_than_panicking() {
         let e = Scenario::from_ron("(this is not ron").unwrap_err();
         assert!(matches!(e, ScenarioError::Parse(_)));
+    }
+
+    /// A world like `soup.ron`: a size, a light, some chemistry, and no opinion at all about
+    /// what a cell costs to run.
+    fn a_world() -> Scenario {
+        Scenario {
+            name: "primordial soup".to_string(),
+            seed: 20_250_728,
+            width: 64,
+            height: 64,
+            seeding: vec![Seeding::Uniform {
+                chemical: 4,
+                per_square: 409_600,
+            }],
+            ..Scenario::default()
+        }
+    }
+
+    #[test]
+    fn a_sparse_scenario_says_what_it_changes_and_stays_silent_about_the_rest() {
+        let text = a_world()
+            .to_ron_sparse(&Scenario::default())
+            .expect("to_ron_sparse");
+
+        // The point of the whole exercise. The archival form is four hundred and thirty-six
+        // lines, of which four hundred are the chemical table restated.
+        assert!(
+            text.lines().count() < 20,
+            "a world that changes nothing about the rules should be short:\n{text}"
+        );
+        // By line rather than by substring: `ruleset:` ends in `set:`, and the trap is worth
+        // avoiding in a test whose whole job is to notice what is on the page.
+        for block in ["biology", "chemicals", "vm", "set"] {
+            assert!(
+                !text
+                    .lines()
+                    .any(|l| l.trim_start().starts_with(&format!("{block}:"))),
+                "`{block}` was written out unchanged:\n{text}"
+            );
+        }
+        // And it still says who and where, whatever the baseline holds.
+        for said in ["name:", "seed:", "width:", "height:", "light:", "current:"] {
+            assert!(text.contains(said), "`{said}` is missing:\n{text}");
+        }
+    }
+
+    #[test]
+    fn a_sparse_scenario_reloads_to_the_scenario_it_came_from() {
+        // The load-bearing one for this form. Everything left off the page has to come back from
+        // `#[serde(default)]` exactly as it went in, or a save is a quiet edit.
+        let mut s = a_world();
+        s.biology.division_energy = 4_096;
+        s.fluid_interval = 8;
+        s.gravity = 12;
+        s.inhabitants = vec![Inhabitant {
+            genome: "ancestor.mm".to_string(),
+            count: 16,
+            place: Placement::At { x: 3, y: 4 },
+        }];
+
+        let text = s.to_ron_sparse(&Scenario::default()).expect("to_ron_sparse");
+        let mut back = Scenario::from_ron(&text).expect("a sparse scenario should parse");
+
+        // `set` is what the file said, kept the way `ruleset` is kept: provenance, already
+        // applied. The scenario that was saved never had one, so it is cleared before the
+        // comparison and checked on its own.
+        assert_eq!(
+            back.set.keys().collect::<Vec<_>>(),
+            ["biology.division_energy"],
+            "the rules delta is not what changed:\n{text}"
+        );
+        back.set.clear();
+        assert_eq!(back, s, "sparse save changed the scenario:\n{text}");
+
+        // And the archival form of what came back is stable, so a sparse file opened and
+        // re-saved as a snapshot does not drift.
+        let archived = Scenario::from_ron(&back.to_ron().expect("to_ron")).expect("re-read");
+        assert_eq!(archived, back);
+    }
+
+    #[test]
+    fn one_changed_chemical_is_one_line_and_not_the_whole_table() {
+        // The case that decided the format. A nested `chemicals: (…)` block cannot name entry
+        // eight — RON sequences are positional — so a document override would have had to write
+        // all sixteen, which is the four hundred lines this whole function exists to avoid.
+        let mut s = a_world();
+        let mut defs: Vec<crate::chem::ChemicalDef> = s.chemicals.clone().into();
+        defs[8].energy_yield = 2_048;
+        s.chemicals = ChemTable::new(defs);
+
+        let text = s.to_ron_sparse(&Scenario::default()).expect("to_ron_sparse");
+        assert!(
+            text.contains(r#""chemicals.8.energy_yield": 2048"#),
+            "the change did not reach the page as a path:\n{text}"
+        );
+        assert!(text.lines().count() < 25, "still writing the table:\n{text}");
+
+        let back = Scenario::from_ron(&text).expect("parses");
+        assert_eq!(back.chemicals.get(8).energy_yield, 2_048);
+        assert_eq!(
+            back.chemicals, s.chemicals,
+            "the fifteen chemicals it did not change came back different"
+        );
+    }
+
+    #[test]
+    fn every_rules_parameter_survives_a_sparse_save() {
+        // The guard that makes this format safe to leave alone. Move *every* parameter there is,
+        // save, reload and compare — so a field added to any config, of any shape, is either
+        // carried by this form or fails here, rather than silently reverting to its default the
+        // next time somebody saves. It is also the promise a shape-aware nested writer could not
+        // have made: `set` names leaves, and a leaf has no shape to get wrong.
+        let base = Scenario::default();
+        let mut rules = crate::ruleset::Rules::of(&base);
+        for (path, value) in crate::params::fields(&rules) {
+            let moved = match value {
+                crate::params::Value::Int(v) => crate::params::Value::Int(v + 1),
+                crate::params::Value::Bool(b) => crate::params::Value::Bool(!b),
+            };
+            // Not every field takes every neighbouring value — a diffusion rate is clamped on the
+            // way in, an index is bounded. Whatever it does take is what has to survive.
+            if let Some(next) = crate::params::set(&rules, &path, moved) {
+                rules = next;
+            }
+        }
+
+        let mut s = a_world();
+        rules.apply_to(&mut s);
+        assert_ne!(
+            crate::ruleset::Rules::of(&s),
+            crate::ruleset::Rules::of(&base),
+            "the probe moved nothing"
+        );
+
+        let text = s.to_ron_sparse(&base).expect("to_ron_sparse");
+        let back = Scenario::from_ron(&text).expect("a sparse scenario should parse");
+        assert_eq!(back.biology, s.biology, "biology drifted across a sparse save");
+        assert_eq!(back.vm, s.vm, "vm drifted across a sparse save");
+        assert_eq!(
+            back.chemicals, s.chemicals,
+            "chemistry drifted across a sparse save"
+        );
+    }
+
+    #[test]
+    fn a_set_entry_that_names_no_parameter_is_refused_rather_than_ignored() {
+        // The same call `mm_core::ruleset` makes, for the same reason: the worst failure for a
+        // block whose whole job is to change numbers is a typo that silently changes none.
+        let text = r#"(
+            name: "typo",
+            set: { "biology.metabolism.rates.light_occulsion": 128 },
+        )"#;
+        assert!(matches!(
+            Scenario::from_ron(text),
+            Err(ScenarioError::BadPath(_))
+        ));
+    }
+
+    #[test]
+    fn a_set_block_beats_the_inline_block_beside_it() {
+        // `set` is the last word, which is what lets a sparse save be trusted: whatever else the
+        // file says, what the microscope wrote is what comes back.
+        let text = r#"(
+            name: "both",
+            biology: ( division_energy: 111 ),
+            set: { "biology.division_energy": 222 },
+        )"#;
+        let s = Scenario::from_ron(text).expect("parses");
+        assert_eq!(s.biology.division_energy, 222);
+    }
+
+    #[test]
+    fn a_sparse_scenario_against_itself_is_almost_empty() {
+        // Not literally empty: name, seed, size, light and current are always written. Nothing
+        // else should be, and this is what says so if a field is ever added to the always list
+        // by accident.
+        let s = a_world();
+        let text = s.to_ron_sparse(&s).expect("to_ron_sparse");
+        let fields: Vec<&str> = text
+            .lines()
+            .filter_map(|l| l.trim().split_once(':'))
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(fields, ["name", "seed", "width", "height", "light", "current"]);
+    }
+
+    #[test]
+    fn the_archival_form_is_still_every_field() {
+        // `Snapshot` embeds `to_ron` and reads it back with `from_ron`, which applies no ruleset.
+        // If this ever starts writing a delta, every saved slide silently begins depending on
+        // files outside itself. The two forms are two forms on purpose.
+        let text = Scenario::default().to_ron().expect("to_ron");
+        for block in ["biology:", "chemicals:", "vm:", "isa_version:"] {
+            assert!(text.contains(block), "`{block}` is not in the archival form");
+        }
     }
 }

@@ -1071,6 +1071,20 @@ table, light regime, fluid rates, energy costs, mutation rates, `instr_per_tick`
 `promoter_bind_threshold`, `template_search_range`, junction costs and `join_forced_penalty`,
 `speciation_threshold`, seed, initial population and their genomes.
 
+**A scenario states what it changes, not what it is.** Every config struct is
+`#[serde(default)]`, so a file names the handful of parameters it moves and inherits the rest.
+It inherits them from four layers, each sparse and each beating the one above it: the engine's
+own numbers, a named ruleset (`ruleset: "rival_light"`, resolved from `rulesets/`), the
+scenario's own inline `biology`/`vm`/`chemicals` blocks, and its `set` block of dotted paths.
+The last exists because RON sequences are positional — a nested block cannot name one chemical
+without writing all sixteen — and it is what an editor writes when it saves. See
+`mm_core::ruleset`.
+
+Two serialised forms follow from that, and the distinction is load-bearing: **a recipe inherits,
+a record does not.** A scenario file names its ruleset and means what that ruleset says when it
+is opened. A snapshot embeds every field, so a saved run reproduces regardless of what any other
+file on disk has since become.
+
 The ISA version is stamped into every save file, scenario and archived genome. Changing the
 opcode table changes the meaning of every stored genome, so archived species must be
 replayed under the ISA version they evolved in.

@@ -13,6 +13,16 @@
 // The paths are the ones the in-app parameter editor lists, prefixed by which of the three
 // config blocks they live in: `biology.`, `vm.` or `chemicals.`. `mm-cli balance` and
 // `mm_core::params::fields` will both enumerate them.
+//
+// You do not have to write one of these by hand. The parameter editor's `rules` page shows which
+// set a world is running, what it changes against the engine's own numbers, and will write the
+// whole thing out here under a name you give it. A scenario then says `ruleset: "<that name>"`,
+// which the build window's save row also offers as a row of chips.
+//
+// A scenario saved from the microscope writes only what it changes — the world, the ruleset it
+// names, and a `set` block of dotted paths for anything it moves on top. Fifteen lines rather
+// than four hundred and thirty-six, and the reason editing this directory reaches anything at
+// all: a file that restates every parameter has nothing left to inherit.
 (
     name: "default",
     notes: "The engine's own numbers. See crates/mm-core for where each of them is set and why.",

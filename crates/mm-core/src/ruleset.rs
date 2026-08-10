@@ -14,15 +14,23 @@
 //! vary the rules, and `docs/ECONOMY.md` §9's counterfactual table had to be written as Rust
 //! literals rather than as a panel.
 //!
-//! # Three layers
+//! # Four layers
 //!
 //! ```text
 //!     Rules::default()          the engine's own numbers
 //!  →  the named ruleset          a diff, which may itself name a parent
 //!  →  the scenario's own block    whatever the .ron file says inline
+//!  →  the scenario's `set`        its own dotted paths, the last word
 //! ```
 //!
 //! Each layer is sparse and each wins over the one above it.
+//!
+//! The fourth is [`Scenario::set`], and it exists because the third cannot reach an array
+//! element — the same positional problem described below, met from the scenario's side rather
+//! than the ruleset's. It is also what [`Scenario::to_ron_sparse`] writes, which is what stopped
+//! a scenario saved out of the microscope from being four hundred lines of the engine's own
+//! numbers restated. Unlike `ruleset` it names no file outside itself, so `Scenario::from_ron`
+//! applies it and a file carrying one still means exactly what it says.
 //!
 //! # A ruleset is a diff, not a document
 //!
@@ -62,6 +70,22 @@
 //! explicitly. So re-resolving a saved scenario merges a complete block over the ruleset, the
 //! ruleset is masked entirely, and the operation is a copy. Resolution is idempotent, and
 //! `a_saved_scenario_does_not_move_when_its_ruleset_does` is the test that says so.
+//!
+//! # Two forms, and the trade between them
+//!
+//! The paragraph above is about `Scenario::to_ron`, and it is why that function still writes
+//! every field: a `.mmslide` embeds one and reads it back with `Scenario::from_ron`, which
+//! applies no ruleset, so a saved run must not depend on any file outside itself.
+//!
+//! [`Scenario::to_ron_sparse`] is the other form, and it makes the opposite trade deliberately.
+//! A file written that way names its ruleset and inherits from it, so **it means what that
+//! ruleset says today** — edit `rulesets/rival_light.ron` and every scenario naming it moves.
+//! That is the point: it is what makes one file's numbers reach a whole library. It is also
+//! exactly what `the_thicket.ron` has done since rulesets landed, so the sparse form is not a
+//! new hazard, it is the hand-written form with a writer behind it.
+//!
+//! The rule to keep the two straight: **a recipe inherits, a record does not.** Scenario files
+//! are recipes. Snapshots and archived runs are records.
 
 use std::collections::BTreeMap;
 
@@ -87,6 +111,28 @@ pub struct Rules {
     pub chemicals: ChemTable,
 }
 
+impl Rules {
+    /// The rules half of a scenario, lifted out.
+    ///
+    /// The inverse of what [`RulesetLibrary::load_scenario_as`] puts back, and the thing to
+    /// compare against a baseline when the question is "what does this world change".
+    #[must_use]
+    pub fn of(scenario: &Scenario) -> Rules {
+        Rules {
+            biology: scenario.biology.clone(),
+            vm: scenario.vm,
+            chemicals: scenario.chemicals.clone(),
+        }
+    }
+
+    /// Write these rules into a scenario, leaving its terrain alone.
+    pub fn apply_to(&self, scenario: &mut Scenario) {
+        scenario.biology = self.biology.clone();
+        scenario.vm = self.vm;
+        scenario.chemicals = self.chemicals.clone();
+    }
+}
+
 /// A named set of parameter changes.
 #[derive(Clone, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -107,6 +153,41 @@ pub struct Ruleset {
     pub set: BTreeMap<String, ron::Value>,
 }
 
+impl Ruleset {
+    /// A ruleset from a computed [`params::diff`], ready to be written to `rulesets/<name>.ron`.
+    ///
+    /// What the module header said this format was chosen to make possible: "save the current
+    /// parameters as a named ruleset is a diff of two field lists rather than a new serialisation
+    /// format".
+    #[must_use]
+    pub fn from_diff(
+        name: &str,
+        of: &str,
+        notes: &str,
+        set: &BTreeMap<String, params::Value>,
+    ) -> Ruleset {
+        Ruleset {
+            name: name.to_string(),
+            of: of.to_string(),
+            notes: notes.to_string(),
+            set: set
+                .iter()
+                .map(|(path, value)| (path.clone(), value.to_ron()))
+                .collect(),
+        }
+    }
+
+    /// Render to `.ron`.
+    ///
+    /// # Errors
+    ///
+    /// Serialisation failure, which should not happen for a well-formed ruleset.
+    pub fn to_ron(&self) -> Result<String, RulesetError> {
+        ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default())
+            .map_err(|e| RulesetError::Parse(e.to_string()))
+    }
+}
+
 /// What went wrong resolving a ruleset.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum RulesetError {
@@ -122,6 +203,13 @@ pub enum RulesetError {
     /// changes that silently did nothing, which is the worst possible failure for a file whose
     /// whole job is to change numbers.
     BadPath { ruleset: String, path: String },
+    /// A fault in the scenario itself, met while resolving it — its own `set` block naming no
+    /// parameter, most likely.
+    ///
+    /// Its own variant rather than a `Parse`, because the message that came out of that was
+    /// "ruleset does not parse: scenario sets `biology.divisian_energy`…", which sends whoever
+    /// made the typo to look at the wrong file.
+    Scenario(String),
 }
 
 impl std::fmt::Display for RulesetError {
@@ -135,6 +223,7 @@ impl std::fmt::Display for RulesetError {
                 "ruleset `{ruleset}` sets `{path}`, which is not a parameter (or the value does \
                  not fit it)"
             ),
+            RulesetError::Scenario(m) => write!(f, "{m}"),
         }
     }
 }
@@ -216,7 +305,7 @@ impl RulesetLibrary {
         let mut rules = Rules::default();
         for set in chain.iter().rev() {
             for (path, value) in &set.set {
-                let v = as_param(value).ok_or_else(|| RulesetError::BadPath {
+                let v = params::Value::from_ron(value).ok_or_else(|| RulesetError::BadPath {
                     ruleset: set.name.clone(),
                     path: path.clone(),
                 })?;
@@ -227,6 +316,25 @@ impl RulesetLibrary {
             }
         }
         Ok(rules)
+    }
+
+    /// The scenario a file naming `name` starts from: [`Scenario::default`] with that ruleset
+    /// resolved into it. An empty name means the engine's own numbers.
+    ///
+    /// **What [`Scenario::to_ron_sparse`] should be given.** Written against this, a saved file
+    /// says exactly what this scenario adds to the layers underneath it and nothing else — which
+    /// is the same file a person would have written by hand.
+    ///
+    /// # Errors
+    ///
+    /// An unknown name, a cycle, or a path that names no parameter.
+    pub fn baseline(&self, name: &str) -> Result<Scenario, RulesetError> {
+        let mut scenario = Scenario::default();
+        if !name.is_empty() {
+            self.rules(name)?.apply_to(&mut scenario);
+            scenario.ruleset = name.to_string();
+        }
+        Ok(scenario)
     }
 
     /// Load a scenario from `.ron`, resolving whatever ruleset it names.
@@ -256,15 +364,20 @@ impl RulesetLibrary {
         text: &str,
         override_with: Option<&str>,
     ) -> Result<Scenario, RulesetError> {
-        let mut scenario =
-            Scenario::from_ron(text).map_err(|e| RulesetError::Parse(e.to_string()))?;
+        // Only a genuine syntax error is a parse error. An ISA mismatch, a slide that cannot
+        // exist, or a `set` block with a typo in it are all faults in the scenario, and calling
+        // them "ruleset does not parse" sends whoever made one to look at the wrong file.
+        let mut scenario = Scenario::from_ron(text).map_err(|e| match e {
+            crate::scenario::ScenarioError::Parse(m) => RulesetError::Parse(m),
+            other => RulesetError::Scenario(other.to_string()),
+        })?;
         let named = match override_with {
             Some(n) => n.to_string(),
             None => scenario.ruleset.clone(),
         };
         if named.is_empty() {
             // No ruleset in play: the file means exactly what it says, which is what it has
-            // always meant.
+            // always meant. `from_ron` has already applied the scenario's own `set`.
             return Ok(scenario);
         }
 
@@ -295,19 +408,22 @@ impl RulesetLibrary {
         scenario.biology = rules.biology;
         scenario.vm = rules.vm;
         scenario.chemicals = rules.chemicals;
+
+        // Layer four, and the last word: the scenario's own dotted paths. `from_ron` has already
+        // applied these once, over the engine's defaults — and the merge above has just
+        // overwritten that with the ruleset's numbers, so they go on again here. Applying twice
+        // is harmless: `set` writes the values it names.
+        //
+        // Last because it is the most specific thing the file says, and because it is what
+        // `Scenario::to_ron_sparse` writes — a saved world must come back meaning what it meant.
+        scenario
+            .apply_set()
+            .map_err(|e| RulesetError::Scenario(e.to_string()))?;
+
         // Provenance, recorded now that it has been applied. Never read again — see the module
         // header, and `a_saved_scenario_does_not_move_when_its_ruleset_does`.
         scenario.ruleset = named;
         Ok(scenario)
-    }
-}
-
-/// A `ron::Value` as a parameter value. Numbers and flags only, which is all a config holds.
-fn as_param(v: &ron::Value) -> Option<params::Value> {
-    match v {
-        ron::Value::Number(n) => Some(params::Value::Int(n.into_f64() as i64)),
-        ron::Value::Bool(b) => Some(params::Value::Bool(*b)),
-        _ => None,
     }
 }
 
@@ -541,6 +657,129 @@ mod tests {
             "re-resolving a saved scenario picked up the edited ruleset"
         );
         assert_eq!(resolved.ruleset, "lean", "lost the label");
+    }
+
+    #[test]
+    fn a_world_saved_against_its_ruleset_does_not_restate_it() {
+        // The whole point of the sparse form, in the case that matters most: `the_thicket.ron`
+        // names `rival_light` and adds nothing of its own, so saving it should say the name and
+        // stop. Before this it came back as four hundred and thirty-six lines with those two
+        // rates written out — and from then on editing the ruleset could not reach it.
+        let lib = library();
+        let world = lib.load_scenario(WORLD).expect("scenario");
+        let text = world
+            .to_ron_sparse(&lib.baseline("lean").expect("baseline"))
+            .expect("to_ron_sparse");
+
+        assert!(text.contains(r#"ruleset: "lean""#), "lost the name:\n{text}");
+        assert!(
+            // By line rather than by substring, because `ruleset:` ends in `set:`.
+            !text.lines().any(|l| l.trim_start().starts_with("set:")),
+            "restated the ruleset it inherits:\n{text}"
+        );
+        assert!(text.lines().count() < 12, "not sparse:\n{text}");
+
+        // And it still runs the economy it asked for when it comes back.
+        let back = lib.load_scenario(&text).expect("reload");
+        assert_eq!(back.biology, world.biology);
+        assert_eq!(back.width, world.width);
+    }
+
+    #[test]
+    fn a_world_that_adds_to_its_ruleset_saves_only_what_it_added() {
+        let lib = library();
+        let mut world = lib.load_scenario(WORLD).expect("scenario");
+        world.biology.division_energy = 777;
+
+        let text = world
+            .to_ron_sparse(&lib.baseline("lean").expect("baseline"))
+            .expect("to_ron_sparse");
+        assert!(
+            text.contains(r#""biology.division_energy": 777"#),
+            "the addition did not reach the page:\n{text}"
+        );
+        assert!(
+            !text.contains("light_occlusion"),
+            "the ruleset's own numbers came along too:\n{text}"
+        );
+
+        let back = lib.load_scenario(&text).expect("reload");
+        assert_eq!(back.biology.division_energy, 777, "the scenario's own");
+        assert_eq!(
+            back.biology.metabolism.rates.light_occlusion, 128,
+            "the ruleset's, inherited rather than written down"
+        );
+    }
+
+    #[test]
+    fn a_sparse_world_follows_its_ruleset_when_that_ruleset_moves() {
+        // The cost of the sparse form, asserted rather than left implied — and the reason
+        // `to_ron` still writes everything. A file that inherits its numbers *means what its
+        // ruleset says today*: that is what makes editing one file change a library, and it is
+        // exactly what a snapshot must never do.
+        let text = library()
+            .load_scenario(WORLD)
+            .expect("scenario")
+            .to_ron_sparse(&library().baseline("lean").expect("baseline"))
+            .expect("to_ron_sparse");
+
+        let mut later = RulesetLibrary::new();
+        later
+            .insert(
+                "lean",
+                r#"( name: "lean light", set: {
+                    "biology.metabolism.rates.light_occlusion": 1,
+                } )"#,
+            )
+            .expect("lean");
+        let moved = later.load_scenario(&text).expect("reload");
+        assert_eq!(moved.biology.metabolism.rates.light_occlusion, 1);
+    }
+
+    #[test]
+    fn a_worlds_parameters_can_be_lifted_out_as_a_named_ruleset() {
+        // "Save these as a ruleset" — the operation the module header said this format was chosen
+        // to make possible, end to end: diff two field lists, write the file, read it back, and
+        // get the same rules.
+        let lib = library();
+        let mut world = lib.load_scenario(WORLD).expect("scenario");
+        world.biology.division_energy = 777;
+        world.chemicals = {
+            let mut defs: Vec<crate::chem::ChemicalDef> = world.chemicals.clone().into();
+            defs[8].energy_yield = 2_048;
+            crate::chem::ChemTable::new(defs)
+        };
+
+        let changes = params::diff(&Rules::default(), &Rules::of(&world));
+        let file = Ruleset::from_diff("thicket economy", "", "measured", &changes)
+            .to_ron()
+            .expect("to_ron");
+
+        let mut saved = RulesetLibrary::new();
+        saved.insert("thicket_economy", &file).expect("parses");
+        let rules = saved.rules("thicket_economy").expect("rules");
+        assert_eq!(
+            rules,
+            Rules::of(&world),
+            "a world's rules did not survive being written out as a named set"
+        );
+    }
+
+    #[test]
+    fn a_fault_in_the_scenario_is_not_reported_as_a_fault_in_the_ruleset() {
+        // A typo in a world's own `set` block came out as "ruleset does not parse: scenario sets
+        // `biology.divisian_energy`…", which names two files and blames the wrong one. Whoever
+        // made the typo has to be sent to the file they made it in.
+        let text = r#"(
+            name: "typo",
+            ruleset: "lean",
+            set: { "biology.divisian_energy": 4096 },
+        )"#;
+        let e = library().load_scenario(text).expect_err("should refuse");
+        assert!(matches!(e, RulesetError::Scenario(_)), "got {e:?}");
+        let said = e.to_string();
+        assert!(said.contains("biology.divisian_energy"), "unhelpful: {said}");
+        assert!(!said.contains("does not parse"), "blames the ruleset: {said}");
     }
 
     #[test]

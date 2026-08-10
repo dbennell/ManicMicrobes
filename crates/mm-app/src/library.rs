@@ -284,6 +284,8 @@ fn describe(path: &Path, e: &ScenarioError) -> FileError {
         ),
         ScenarioError::Parse(m) => format!("{name} is not a scenario: {m}"),
         ScenarioError::Substrate(m) => format!("{name} describes a slide that cannot exist: {m:?}"),
+        // Its own message already names the path, and the path is the whole diagnosis.
+        ScenarioError::BadPath(_) => format!("{name}: {e}"),
     })
 }
 

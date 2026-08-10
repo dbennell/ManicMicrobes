@@ -36,6 +36,48 @@ impl Value {
     pub fn is_bool(self) -> bool {
         matches!(self, Value::Bool(_))
     }
+
+    /// A `ron::Value` as a parameter value. Numbers and flags only, which is all a config holds.
+    ///
+    /// What a hand-written `set` block — in a [`crate::ruleset::Ruleset`] or in a scenario —
+    /// parses to before it is applied.
+    #[must_use]
+    pub fn from_ron(v: &ron::Value) -> Option<Value> {
+        match v {
+            ron::Value::Number(n) => Some(Value::Int(n.into_f64() as i64)),
+            ron::Value::Bool(b) => Some(Value::Bool(*b)),
+            _ => None,
+        }
+    }
+
+    /// The `ron::Value` that writes this one back out.
+    #[must_use]
+    pub fn to_ron(self) -> ron::Value {
+        match self {
+            Value::Int(v) => ron::Value::Number(ron::value::Number::new(v)),
+            Value::Bool(b) => ron::Value::Bool(b),
+        }
+    }
+}
+
+/// The dotted-path changes that turn `base` into `now`.
+///
+/// The diff of two field lists, which is all a set of parameter changes ever is — and the reason
+/// [`crate::ruleset`] chose dotted paths for its format in the first place. Used to save a world's
+/// parameters as a named ruleset, and to write the rules half of a sparse scenario.
+///
+/// A `BTreeMap` because iteration order must never reach a simulation outcome (hard rule 6), and
+/// because a sorted block diffs better in a file somebody is reading.
+///
+/// Paths present on one side and not the other are skipped: a path the setter could not write is
+/// not a change that can honestly be recorded.
+#[must_use]
+pub fn diff<T: Serialize>(base: &T, now: &T) -> std::collections::BTreeMap<String, Value> {
+    let was: std::collections::BTreeMap<String, Value> = fields(base).into_iter().collect();
+    fields(now)
+        .into_iter()
+        .filter(|(path, value)| was.get(path).is_some_and(|old| old != value))
+        .collect()
 }
 
 impl std::fmt::Display for Value {
