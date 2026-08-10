@@ -1323,20 +1323,24 @@ fn seed_into(slide: &mut Slide, founders: u32) -> u32 {
             None => 0,
         };
     }
-    let mut placed = 0;
+    // Resolved first, then placed in one act. **Not one at a time**: entries that share a
+    // placement are one cohort, and placing them separately puts them on the same squares — see
+    // `World::place_cohort`. That is what makes a slide seeded with two species reopen as the
+    // slide that was drawn rather than as a pile of pairs.
+    let mut resolved: Vec<(Vec<u8>, u32, mm_core::Placement)> = Vec::new();
     for who in &wanted {
         match genome_bytes(&who.genome) {
             // The arrangement the scenario asked for, not a spread over the whole slide. See
             // `mm_core::Placement` for what this field used to do, which was nothing.
-            Some(bytes) => {
-                placed += slide
-                    .world_mut()
-                    .place_inhabitants(&bytes, who.count, who.place)
-            }
+            Some(bytes) => resolved.push((bytes, who.count, who.place)),
             None => eprintln!("scenario asks for {}, which did not assemble", who.genome),
         }
     }
-    placed
+    let members: Vec<(&[u8], u32, mm_core::Placement)> = resolved
+        .iter()
+        .map(|(bytes, count, place)| (bytes.as_slice(), *count, *place))
+        .collect();
+    slide.world_mut().place_recipe(&members)
 }
 
 /// How wide and tall the default slide is, in substrate squares.
@@ -1566,6 +1570,21 @@ struct View {
     place_genome: String,
     /// How many it drops at once.
     place_count: u32,
+    /// The genomes seeded *alongside* the one above, and how many of each.
+    ///
+    /// A slide worth watching usually needs more than one kind of thing on it — a grazer and
+    /// something that eats it, two strategies over the same food — and seeding that meant
+    /// picking a genome, drawing, picking another, drawing again, and hoping the two rectangles
+    /// matched. `place_genome` and `place_count` are the first row of this list; these are the
+    /// rest. Empty is the single-founder case the tool has always had.
+    extra_founders: Vec<(String, u32)>,
+    /// Whether several genomes share one region or get a share of it each.
+    ///
+    /// The two things "seed three species here" can mean, and they are genuinely different
+    /// experiments: **mixed** puts them in contact from tick zero, so the first thing that
+    /// happens is whatever they do to each other; **apart** gives each its own clump, so what
+    /// you watch is which one reaches the other first.
+    mixed: bool,
     /// How they are arranged. See [`Arrange`].
     arrange: Arrange,
     /// The closest two scattered founders may be, in squares. Only [`Arrange::Scatter`]
@@ -1742,6 +1761,8 @@ impl Default for View {
             flux_from: None,
             place_genome: "ancestor.mm".to_string(),
             place_count: 1,
+            extra_founders: Vec::new(),
+            mixed: true,
             // A click that drops one founder where you point is what the tool has always
             // done, and changing what an existing gesture means is not a thing to do to
             // somebody as the price of adding four more.
@@ -6554,6 +6575,8 @@ fn toolbox_work(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
         });
     }
     if uses.founder {
+        // The first row is the tool's original single genome, so a session that never touches
+        // the list behaves exactly as it did. The rest are additions, each removable.
         ui.horizontal(|ui| {
             ui.label(skin::text(Role::Label, "genome"));
             genome_picker(ui, &mut view.place_genome);
@@ -6564,6 +6587,64 @@ fn toolbox_work(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
                     .prefix("× "),
             );
             ui.label(skin::text(Role::Small, "founders"));
+        });
+        let mut drop_row = None;
+        for (i, (genome, count)) in view.extra_founders.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(skin::text(Role::Label, "and"));
+                genome_picker(ui, genome);
+                ui.add(
+                    egui::DragValue::new(count)
+                        .speed(0.2)
+                        .range(1..=256)
+                        .prefix("× "),
+                );
+                if skin::chip(ui, "×", None, false)
+                    .on_hover_text("stop seeding this one")
+                    .clicked()
+                {
+                    drop_row = Some(i);
+                }
+            });
+        }
+        if let Some(i) = drop_row {
+            view.extra_founders.remove(i);
+        }
+        ui.horizontal(|ui| {
+            if skin::chip(ui, "+ another genome", None, false)
+                .on_hover_text("seed more than one kind of thing in the same act")
+                .clicked()
+            {
+                // The one already chosen, so the new row starts from something that exists and
+                // is changed rather than from an empty box that refuses to seed.
+                let start = view.place_genome.clone();
+                view.extra_founders.push((start, 1));
+            }
+            // Only a question when there is more than one of them.
+            if !view.extra_founders.is_empty() {
+                ui.add_space(8.0);
+                for (label, mixed, hint) in [
+                    (
+                        "mixed",
+                        true,
+                        "all of them through the same region, interleaved — in contact from the \
+                         first tick",
+                    ),
+                    (
+                        "apart",
+                        false,
+                        "the region shared out, each genome its own clump — what you watch is \
+                         which one reaches the other first",
+                    ),
+                ] {
+                    if skin::chip(ui, label, None, view.mixed == mixed)
+                        .on_hover_text(hint)
+                        .clicked()
+                    {
+                        view.mixed = mixed;
+                    }
+                }
+            }
         });
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
@@ -6744,40 +6825,153 @@ fn toolbox_work(ui: &mut egui::Ui, sim: &mut SlideRes, view: &mut View) {
 /// something other than what it placed. `World::seed_inhabitant` closes the last gap in that: the
 /// placement used and the placement written down are one value.
 fn seed_founders(sim: &mut SlideRes, view: &View, place: mm_core::Placement) {
-    // The genome is a *name* because that is what a scenario can write down — a cell dropped
+    // The genomes are *names* because that is what a scenario can write down — a cell dropped
     // from a file the scenario can also name is a cell the saved slide will have.
-    let Some(bytes) = genome_bytes(&view.place_genome) else {
+    let mut wanted: Vec<(String, u32)> = vec![(view.place_genome.clone(), view.place_count.max(1))];
+    wanted.extend(
+        view.extra_founders
+            .iter()
+            .map(|(g, n)| (g.clone(), (*n).max(1))),
+    );
+
+    let mut resolved: Vec<(String, Vec<u8>, u32)> = Vec::new();
+    let mut refused: Vec<String> = Vec::new();
+    for (genome, count) in wanted {
+        match genome_bytes(&genome) {
+            Some(bytes) => resolved.push((genome, bytes, count)),
+            // Named rather than counted: "one did not assemble" leaves you looking through four
+            // pickers for the one that is wrong.
+            None => refused.push(genome),
+        }
+    }
+    if resolved.is_empty() {
         sim.last_tool = Some(tools::ToolEvent::Refused(format!(
             "{} did not assemble",
-            view.place_genome
+            refused.join(", ")
         )));
         return;
-    };
-    let asked = view.place_count.max(1);
-    let placed = {
+    }
+
+    let asked: u32 = resolved.iter().map(|(_, _, n)| *n).sum();
+    let placed: u32 = {
         let held = sim.engine.handle();
         let mut slide = held.slide();
-        slide
-            .world_mut()
-            .seed_inhabitant(&view.place_genome, &bytes, asked, place)
+        let world = slide.world_mut();
+        if view.mixed || resolved.len() == 1 {
+            // One region, one arrangement, everybody in it. `seed_cohort` runs one slot
+            // sequence across the lot, so four of one and four of another are eight positions
+            // of one lattice rather than two lattices on top of each other.
+            let members: Vec<(&str, &[u8], u32)> = resolved
+                .iter()
+                .map(|(g, b, n)| (g.as_str(), b.as_slice(), *n))
+                .collect();
+            world.seed_cohort(&members, place).iter().sum()
+        } else {
+            // A share of the region each, so every genome starts as its own clump. Disjoint by
+            // construction, which is why these are seeded one at a time rather than as a cohort
+            // — there is nothing to interleave.
+            let n = resolved.len() as u32;
+            resolved
+                .iter()
+                .enumerate()
+                .map(|(i, (genome, bytes, count))| {
+                    let share = share_of(place, i as u32, n);
+                    world.seed_inhabitant(genome, bytes, *count, share)
+                })
+                .sum()
+        }
     };
+
     // The shortfall is said out loud rather than swallowed. A rectangle that is mostly wall has
     // fewer free squares than the count asked for, and "seeded 16" over a slide holding four is
     // the kind of quiet lie that gets read as a placement bug.
-    sim.last_tool = Some(tools::ToolEvent::Refused(if placed < asked {
+    let kinds = resolved.len();
+    let what = if kinds == 1 {
+        resolved[0].0.clone()
+    } else {
+        format!("{kinds} genomes, {}", if view.mixed { "mixed" } else { "apart" })
+    };
+    let mut said = if placed < asked {
         format!(
-            "seeded {placed} × {} — {} would not fit, {}",
-            view.place_genome,
+            "seeded {placed} of {what} — {} would not fit, {}",
             asked - placed,
             place.describe()
         )
     } else {
-        format!(
-            "seeded {placed} × {}, {}",
-            view.place_genome,
-            place.describe()
-        )
-    }));
+        format!("seeded {placed} of {what}, {}", place.describe())
+    };
+    if !refused.is_empty() {
+        said.push_str(&format!(" ({} did not assemble)", refused.join(", ")));
+    }
+    sim.last_tool = Some(tools::ToolEvent::Refused(said));
+}
+
+/// The `i`th of `n` equal shares of a placement's region, for seeding several genomes apart.
+///
+/// Split along the longer side, so four genomes over a channel two squares tall are four
+/// stretches of channel rather than four slivers stacked in it — the same reasoning
+/// `World::slot` uses to shape a grid to its rectangle instead of always squaring it.
+///
+/// `Spread` and `At` have no region to divide. `Spread` is the whole slide and becomes a `Grid`
+/// over its share, which is the same square lattice; `At` is one square, and founders asked to
+/// clump apart around a single point are asked for something that has no answer, so they stay
+/// where they were pointed.
+fn share_of(place: mm_core::Placement, i: u32, n: u32) -> mm_core::Placement {
+    let (x, y, w, h) = match place {
+        mm_core::Placement::At { .. } => return place,
+        mm_core::Placement::Spread => (0, 0, slide_size(), slide_size()),
+        mm_core::Placement::Grid {
+            x,
+            y,
+            width,
+            height,
+        }
+        | mm_core::Placement::Hex {
+            x,
+            y,
+            width,
+            height,
+        }
+        | mm_core::Placement::Scatter {
+            x,
+            y,
+            width,
+            height,
+            ..
+        } => (x, y, width, height),
+    };
+    let n = n.max(1);
+    let (sx, sy, sw, sh) = if w >= h {
+        let step = (w / n).max(1);
+        (x + i * step, y, if i + 1 == n { w - i * step } else { step }, h)
+    } else {
+        let step = (h / n).max(1);
+        (x, y + i * step, w, if i + 1 == n { h - i * step } else { step })
+    };
+    let (sw, sh) = (sw.max(1), sh.max(1));
+    match place {
+        mm_core::Placement::Hex { .. } => mm_core::Placement::Hex {
+            x: sx,
+            y: sy,
+            width: sw,
+            height: sh,
+        },
+        mm_core::Placement::Scatter { spacing, .. } => mm_core::Placement::Scatter {
+            x: sx,
+            y: sy,
+            width: sw,
+            height: sh,
+            spacing,
+        },
+        // `Spread` and `Grid` both become a grid over the share: the lattice is the same one,
+        // and a share of the slide is a rectangle whatever it was called before it was divided.
+        _ => mm_core::Placement::Grid {
+            x: sx,
+            y: sy,
+            width: sw,
+            height: sh,
+        },
+    }
 }
 
 /// Which genome to seed: the ones in `genomes/`, and a box for anything else.
