@@ -1771,6 +1771,30 @@ these were live in the build before the windows existed:
   is as wide as the window and simply clipped it; a window is as wide as its content, so the
   build window crept six points wider every frame.
 
+*It happened twice more, and neither was found by looking.* The parameter editor and the build
+window's `world` view both reserved their footer's height as a **constant** — `FOOTER_HEIGHT`,
+twenty-six points — and both were two points short, so the content came out two points taller
+than the window every frame against a window that had just grown by two. Measured at 2px a
+frame, which at 60fps is the editor filling the screen in about five seconds. A third arrived
+with the `dock left` chip of §12.2a: a bare right-to-left layout takes `available_size`, and in a
+`Ui` that has just been told it is the whole window that is the whole height, so the chip's row
+claimed all of it and pushed the body off the bottom edge.
+
+**None of the three is visible in a screenshot.** A window growing two points a frame does not
+look like a bug in a still, it looks like a big window — which is why two of them shipped. What
+finds it is a column of numbers, so `MM_WINDOW_PROBE=1` prints every open window's rect to stderr
+each frame:
+
+```text
+MM_WINDOW_PROBE=1 MM_SHOT_VIEW=params:metabolism MM_SHOT=/tmp/p.png \
+  MM_SHOT_AFTER=25 ./target/release/mm-app 2>&1 | grep PROBE
+```
+
+First line equal to last line is the whole test; anything monotonic is a body asking for more
+than the window it is in. The constant is gone — both bodies now lay their footer out bottom-up
+first and give the body the remainder, which is what `scenario_body` had always done and is the
+one shape with a fixed point. **Do not reserve a height you have not measured.**
+
 So: `default_size` for where a window starts, `set_min_size(available)` inside so the body's
 `available_height` is the window's rather than infinity, and `resizable` then means what it
 says. The defaults are also wide enough to clear each body's *own* width rule — the editor's

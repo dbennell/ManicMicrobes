@@ -5507,54 +5507,61 @@ fn world_body(ui: &mut egui::Ui, sim: &mut SlideRes) {
         ui,
         "world_notes",
         |ui| {
-            let height = ui.available_height() - FOOTER_HEIGHT;
-            ui.allocate_ui_with_layout(
-                egui::vec2(ui.available_width(), height),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| {
-                    ui.set_min_size(egui::vec2(ui.available_width(), height));
-                    egui::ScrollArea::vertical()
-                        .id_salt("world_scroll")
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            environment_editor(ui, &mut draft.env);
-                            ui.add_space(theme::SECTION_GAP);
-                            skin::hairline(ui);
-                            seeding_table(ui, &mut draft, &sim.chem_names, &sim.chem_colours);
-                        });
-                },
-            );
-
-            skin::hairline(ui);
-            ui.add_space(3.0);
-            ui.horizontal(|ui| {
-                let dirty = draft.dirty();
-                if dirty {
-                    ui.label(skin::moody(Role::Label, Mood::Warn, "not applied"));
-                } else {
-                    ui.label(skin::text(Role::Label, "in force"));
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .add_enabled(dirty, egui::Button::new(skin::text(Role::Label, "apply")))
-                        .on_hover_text(
-                            "change the light, the flow and what is dissolved in the water. NOT \
-                             recorded as an intervention — a slide file resumes correctly, but \
-                             replaying the original scenario will not reproduce this run.",
-                        )
-                        .clicked()
-                    {
-                        apply = true;
+            // Bottom-up, so the footer is laid out before the body that fills what is left.
+            // The same two-points-a-frame runaway `docs/UI.md` §12.4 records twice already, and
+            // from the same cause: a constant standing in for a height nobody measured. Measured
+            // here at 850x462 climbing 2px a frame, which is the build window eating the screen
+            // in about five seconds of looking at the world view.
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                skin::hairline(ui);
+                ui.add_space(3.0);
+                ui.horizontal(|ui| {
+                    let dirty = draft.dirty();
+                    if dirty {
+                        ui.label(skin::moody(Role::Label, Mood::Warn, "not applied"));
+                    } else {
+                        ui.label(skin::text(Role::Label, "in force"));
                     }
-                    if ui
-                        .add_enabled(dirty, egui::Button::new(skin::text(Role::Label, "discard")))
-                        .on_hover_text("back to what the world is running on")
-                        .clicked()
-                    {
-                        draft.env = draft.env_live.clone();
-                        draft.seeding = draft.seeding_live.clone();
-                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add_enabled(dirty, egui::Button::new(skin::text(Role::Label, "apply")))
+                            .on_hover_text(
+                                "change the light, the flow and what is dissolved in the water. NOT \
+                                 recorded as an intervention — a slide file resumes correctly, but \
+                                 replaying the original scenario will not reproduce this run.",
+                            )
+                            .clicked()
+                        {
+                            apply = true;
+                        }
+                        if ui
+                            .add_enabled(dirty, egui::Button::new(skin::text(Role::Label, "discard")))
+                            .on_hover_text("back to what the world is running on")
+                            .clicked()
+                        {
+                            draft.env = draft.env_live.clone();
+                            draft.seeding = draft.seeding_live.clone();
+                        }
+                    });
                 });
+
+                // What is left, read in the usual direction.
+                ui.allocate_ui_with_layout(
+                    ui.available_size(),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_min_size(ui.available_size());
+                            egui::ScrollArea::vertical()
+                                .id_salt("world_scroll")
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    environment_editor(ui, &mut draft.env);
+                                    ui.add_space(theme::SECTION_GAP);
+                                    skin::hairline(ui);
+                                    seeding_table(ui, &mut draft, &sim.chem_names, &sim.chem_colours);
+                                });
+                    },
+                );
             });
         },
         |ui| {
@@ -7327,10 +7334,13 @@ fn default_current(kind: &str) -> mm_core::light::CurrentField {
     }
 }
 
-/// One labelled parameter: its value, its reading, and whether it has been moved.
-/// How tall the parameter editor's footer is, reserved out of the table's height so that Apply
-/// does not scroll away from the thing it applies.
-const FOOTER_HEIGHT: f32 = 26.0;
+// `FOOTER_HEIGHT` was here: twenty-six points, reserved out of the body's height so that Apply
+// did not scroll away from the thing it applies. It was the right idea and two points short, and
+// two points short is not a cosmetic error — the content came out taller than the window every
+// frame, against a window that had just grown to fit it, at 2px a frame in both the parameter
+// editor and the build window's world view. Both now lay the footer out bottom-up first and give
+// the body the remainder, which is what `scenario_body` has always done and what `docs/UI.md`
+// §12.4 prescribes. There is no height left to guess, so there is no constant.
 
 /// The five columns a parameter is drawn in, and their widths.
 ///
