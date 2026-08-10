@@ -285,9 +285,9 @@ pub struct OrganelleSpec {
     pub build_energy: i32,
     /// Ticks of construction before it becomes active.
     pub build_ticks: u16,
-    /// Energy per tick to keep it, at `param == 0`, `Q10`.
+    /// Energy per tick to keep it, at `param == 0`, in [`UPKEEP_SCALE`]ths of `Q10`.
     pub upkeep: i32,
-    /// Extra upkeep per unit of `param`, `Q10`.
+    /// Extra upkeep per unit of `param`, in [`UPKEEP_SCALE`]ths of `Q10`.
     pub upkeep_per_param: i32,
     /// Fraction of its structural matter recovered by `TEAR`, `Q10`. The rest is lost to the
     /// fluid as waste — dismantling is not free, or a cell would rebuild itself every tick.
@@ -303,14 +303,32 @@ impl OrganelleSpec {
             .saturating_add(self.build_matter_per_param.saturating_mul(param as i32))
     }
 
-    /// Energy per tick to keep one at a given size.
+    /// Energy per tick to keep one at a given size, `Q10`.
     #[inline]
     #[must_use]
     pub fn upkeep_cost(&self, param: u8) -> i32 {
+        // Summed in the fine unit and divided once, so `upkeep_per_param` keeps its resolution
+        // all the way through: five of the catalogue's eight entries used to sit at 1 `Q10`,
+        // which is a rate that cannot be lowered without switching the mechanism off.
         self.upkeep
             .saturating_add(self.upkeep_per_param.saturating_mul(param as i32))
+            / UPKEEP_SCALE
     }
 }
+
+/// What [`OrganelleSpec::upkeep`] and [`OrganelleSpec::upkeep_per_param`] are denominated in.
+///
+/// The catalogue's upkeep is written as `q10(1) / N` for a smallish `N`, which put five of the
+/// eight entries' `upkeep_per_param` at exactly **1** — the integer floor. A bill that cannot be
+/// halved without reaching zero is not a bill that can be balanced, and `docs/ECONOMY.md` is
+/// largely an argument about that column.
+///
+/// Sixteenths, matching [`crate::sensing::THRUST_PER_PARAM`] and
+/// `MetabolicRates::throughput_per_param`. Multiplying every catalogue value by sixteen and
+/// dividing once at the end is exact for the values that were there — `(16a + 16bp)/16 == a + bp`
+/// — so this unit change on its own moves nothing. What it buys is four more halvings of headroom
+/// before the floor, which is what the tempo work in this commit spends one of.
+const UPKEEP_SCALE: i32 = 16;
 
 /// The costs and capabilities of every catalogue entry.
 #[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
@@ -535,8 +553,8 @@ impl OrganelleCatalogue {
             build_matter_per_param: q10(1) / 8,
             build_energy: q10(8),
             build_ticks: 8,
-            upkeep: q10(1) / 64,
-            upkeep_per_param: q10(1) / 1024,
+            upkeep: q10(8) / 64,
+            upkeep_per_param: q10(8) / 1024,
             teardown_recovery: Q10_ONE / 2,
         };
         let mut specs = [cheap; SLOT_COUNT];
@@ -563,8 +581,8 @@ impl OrganelleCatalogue {
             build_matter_per_param: q10(1) / 4,
             build_energy: q10(16),
             build_ticks: 0,
-            upkeep: q10(1) / 32,
-            upkeep_per_param: q10(1) / 512,
+            upkeep: q10(8) / 32,
+            upkeep_per_param: q10(8) / 512,
             teardown_recovery: 0,
         };
         // A nucleus is expensive to carry, which is what makes genome bloat cost something
@@ -574,8 +592,8 @@ impl OrganelleCatalogue {
             build_matter_per_param: q10(1) / 2,
             build_energy: q10(12),
             build_ticks: 12,
-            upkeep: q10(1) / 32,
-            upkeep_per_param: q10(1) / 256,
+            upkeep: q10(8) / 32,
+            upkeep_per_param: q10(8) / 256,
             teardown_recovery: Q10_ONE / 2,
         };
         specs[OrganelleType::Mitochondrion as usize] = OrganelleSpec {
@@ -583,8 +601,8 @@ impl OrganelleCatalogue {
             build_matter_per_param: q10(1) / 8,
             build_energy: q10(10),
             build_ticks: 10,
-            upkeep: q10(1) / 48,
-            upkeep_per_param: q10(1) / 768,
+            upkeep: q10(8) / 48,
+            upkeep_per_param: q10(8) / 768,
             teardown_recovery: Q10_ONE / 2,
         };
         specs[OrganelleType::Chloroplast as usize] = OrganelleSpec {
@@ -592,8 +610,8 @@ impl OrganelleCatalogue {
             build_matter_per_param: q10(1) / 6,
             build_energy: q10(14),
             build_ticks: 14,
-            upkeep: q10(1) / 40,
-            upkeep_per_param: q10(1) / 640,
+            upkeep: q10(8) / 40,
+            upkeep_per_param: q10(8) / 640,
             teardown_recovery: Q10_ONE / 2,
         };
 
@@ -608,8 +626,8 @@ impl OrganelleCatalogue {
             build_matter_per_param: q10(1) / 4,
             build_energy: q10(20),
             build_ticks: 20,
-            upkeep: q10(1) / 24,
-            upkeep_per_param: q10(1) / 384,
+            upkeep: q10(8) / 24,
+            upkeep_per_param: q10(8) / 384,
             teardown_recovery: Q10_ONE / 2,
         };
 
@@ -628,8 +646,8 @@ impl OrganelleCatalogue {
             build_matter_per_param: q10(1) / 6,
             build_energy: q10(14),
             build_ticks: 16,
-            upkeep: q10(1) / 48,
-            upkeep_per_param: q10(1) / 768,
+            upkeep: q10(8) / 48,
+            upkeep_per_param: q10(8) / 768,
             teardown_recovery: Q10_ONE / 4,
         };
 
@@ -640,8 +658,8 @@ impl OrganelleCatalogue {
             build_matter_per_param: q10(1) / 8,
             build_energy: q10(12),
             build_ticks: 12,
-            upkeep: q10(1) / 56,
-            upkeep_per_param: q10(1) / 896,
+            upkeep: q10(8) / 56,
+            upkeep_per_param: q10(8) / 896,
             teardown_recovery: Q10_ONE / 2,
         };
 

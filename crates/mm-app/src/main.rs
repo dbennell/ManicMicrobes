@@ -3039,11 +3039,21 @@ fn redraw(
         // does. It also shoves its neighbours' seams sideways in one frame, which reads as the
         // whole neighbourhood flinching.
         //
-        // Presentation only, and deliberately short: eight ticks, about an eighth of a second
-        // at 1x. Long enough to be a movement rather than a jump, short enough that a cell is
-        // never drawn much smaller than it really is — which would be lying about how crowded
-        // the slide is.
-        let newborn = (dot.age as f32 / 8.0).clamp(0.0, 1.0);
+        // Presentation only: sixteen ticks, about a quarter of a second at 1x. Long enough to be
+        // a movement rather than a jump, short enough that a cell is never drawn much smaller
+        // than it really is — which would be lying about how crowded the slide is.
+        //
+        // It was eight, which was set against a world where a division took ~250 ticks. Measured
+        // since: during colonisation the soup runs 211 births and deaths a second at 1x, and the
+        // eight-tick ease was over inside an eighth of a second — too brief to read as anything
+        // but a pop when two hundred of them are landing every second. The tempo pass that
+        // halved the metabolic rates roughly halves that count; doubling this covers the rest.
+        //
+        // Note what is *not* here: a dying cell still leaves the arena between two frames with no
+        // ease at all, and deaths run at very nearly the birth rate. That asymmetry is the larger
+        // remaining half of the problem and it needs the renderer to hold recently-dead ids for a
+        // few frames, which is more than a constant.
+        let newborn = (dot.age as f32 / 16.0).clamp(0.0, 1.0);
         // Eased, so it arrives rather than stops.
         let swell = 0.35 + 0.65 * newborn * (2.0 - newborn);
         // The cell at the size the simulation says, and *not* inflated by the blur.

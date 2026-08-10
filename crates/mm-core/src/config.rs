@@ -23,7 +23,15 @@ pub struct VmConfig {
 impl VmConfig {
     /// The spec defaults.
     pub const DEFAULT: VmConfig = VmConfig {
-        instr_per_tick: 16,
+        // Halved with the metabolic rates, so behaviour keeps step with the body. Leaving it at
+        // sixteen while growth halved would have doubled how many times a cell runs its genome
+        // per division: the copy loop is one byte per `COPYB`, so the 227-byte ancestor already
+        // spends about 28 ticks of a generation doing nothing but copying itself, and that ratio
+        // is worth holding still while the tempo moves.
+        //
+        // `template_search_range` and `promoter_bind_threshold` are not rates — one is a distance
+        // in bytes and the other a Hamming distance — so neither moves.
+        instr_per_tick: 8,
         template_search_range: 512,
         promoter_bind_threshold: 2,
     };

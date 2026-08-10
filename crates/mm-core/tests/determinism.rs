@@ -187,9 +187,29 @@ fn three_runs_agree_after_a_million_instructions() {
 fn state_after_a_million_instructions() {
     // Run under both profiles: a digest that differs between them is a determinism failure,
     // and this is how it surfaces.
+    //
+    // # Why this number moved once, and why it was not an ISA bump
+    //
+    // The tempo pass halved `VmConfig::DEFAULT::instr_per_tick` from 16 to 8. Randomness is
+    // `hash(seed, tick, cell_id, purpose)` (hard rule 5), so a smaller budget spreads the same
+    // million instructions over twice as many ticks and every `RAND` draw lands somewhere else.
+    // The digest below therefore had to move, and the assertion did its job: it is here to catch
+    // exactly this and make somebody say out loud whether they meant it.
+    //
+    // It is not an ISA event, on three counts. Rule 8 names the opcode table, template semantics
+    // and the organelle catalogue, and none of the three moved — the same bytes still decode to
+    // the same instructions and do the same things, only fewer of them per tick. The hash has
+    // always been config-dependent by design: a scenario may set `instr_per_tick` and a ruleset
+    // in this tree already sets it to 32, so a world's digest was never a property of the ISA
+    // alone. And a saved slide is unaffected, because `snapshot` writes its whole scenario into
+    // the file and reads it back on load — an old slide replays under the parameters it was
+    // saved with, not under today's defaults.
+    //
+    // What this pins is the digest for `VmConfig::DEFAULT` specifically. If it moves again,
+    // the same three questions are the ones to ask.
     let (_, hash) = run_once(&subject(), &VmConfig::DEFAULT, 0xA11CE, INSTRUCTIONS);
     assert_eq!(
-        hash, 0xB07E_21BD_D20D_C84F,
+        hash, 0x1C24_F085_022D_F02A,
         "state hash moved; if that was intended it is an ISA version bump"
     );
 }

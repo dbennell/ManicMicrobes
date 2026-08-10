@@ -50,8 +50,36 @@ use crate::substrate::Substrate;
 /// exists to make evolvable.
 pub const SENSOR_RANGE: i32 = 1;
 
-/// Thrust one unit of cilium `param` can produce, `Q10` of a square per tick, per unit power.
-pub const THRUST_PER_PARAM: i32 = 4;
+/// Thrust one unit of cilium `param` can produce, in [`THRUST_SCALE`]ths of `Q10` of a square
+/// per tick, per unit power.
+///
+/// # Why this is denominated in sixteenths, and why it is now a quarter of what it was
+///
+/// It was `4` — whole `Q10` per unit of `param` — and four is not a number a rate can be tuned
+/// with. Halving it once is the only reduction that unit can express; halving it twice reaches
+/// `1`, and a third time a cilium does nothing at all.
+///
+/// The measurement that made that matter: two `param 80` cilia at full power settle at
+/// `2 x 4 x 80 / (1 - DRAG_RETAIN)` = 853 `Q10`, which is 0.83 squares a tick — **fifty squares a
+/// second at 1x, so a cell crossed a 64-square slide in a second and a third.** That is not a
+/// swimmer, it is a projectile.
+///
+/// So the unit is a sixteenth and the number carries the sixteen. `64` would be exactly the old
+/// `4`, because 16 divides 64 and `64 * param / 16 == 4 * param` for every `param` with no
+/// rounding anywhere. `16` is a quarter of that: two `param 80` cilia now settle at 0.21 squares
+/// a tick, about twelve squares a second, and cross the same slide in five. Half of the quarter
+/// is the tempo change every other rate in this commit took; the other half is that swimming was
+/// independently too fast to watch, which `docs/ECONOMY.md` §14 measured from the other side.
+///
+/// The dial has sixty-four settings between here and stopped, where it had five.
+pub const THRUST_PER_PARAM: i32 = 16;
+
+/// What [`THRUST_PER_PARAM`] is denominated in.
+///
+/// Sixteenths, matching `MetabolicRates::throughput_per_param`, which is the same shape of
+/// quantity — a rate per unit of `param` — and already the finer unit. Making the two agree means
+/// a person reading either one is reading the same convention.
+const THRUST_SCALE: i32 = 16;
 
 /// Fraction of a cell's velocity that survives each tick, `Q10`.
 ///
@@ -380,7 +408,9 @@ pub fn cilium_thrust(o: &Organelle) -> i32 {
         return 0;
     }
     let power = (o.control[0] as i32).clamp(-Q10_ONE, Q10_ONE);
-    let capacity = THRUST_PER_PARAM.saturating_mul(o.param as i32);
+    // Multiply before dividing, so the sixteenths are spent on resolution rather than lost to
+    // truncation: `param 3` at the old unit was 12 and is 3 here, not 0.
+    let capacity = THRUST_PER_PARAM.saturating_mul(o.param as i32) / THRUST_SCALE;
     q10_scale(capacity, power)
 }
 

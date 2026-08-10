@@ -375,13 +375,25 @@ impl Default for MetabolicRates {
             photosynthesis_efficiency: Q10_ONE / 2,
             respiration_efficiency: Q10_ONE * 3 / 4,
             reactive_fraction: Q10_ONE / 24,
-            throughput_per_param: Q10_ONE / 16,
+            // Halved for tempo — see the module note on the k=2 pass. Efficiencies,
+            // `reactive_fraction` and `latent_per_substrate` are *fractions and conversions*
+            // rather than rates, so they are untouched: halving a fraction changes the economy,
+            // halving a rate changes only how many ticks it takes.
+            throughput_per_param: Q10_ONE / 32,
             latent_per_substrate: 64,
-            growth_rate: q10(1) / 4,
+            // Halved, and this is the one that sets the pace. Measured before the change: a cell
+            // sits at about 55 units of mass, division halves it, and regrowing at 0.25 a tick is
+            // ~110 of the ~250 ticks a generation takes. Energy is *not* the constraint — a cell
+            // earns roughly twenty times a division's cost over one generation and banks the
+            // rest, reaching 91% of `energy_reserve` at equilibrium.
+            growth_rate: q10(1) / 8,
             // The same threshold division uses, because it is the same question.
             growth_pressure: q10(1),
             toxicity_threshold: q10(8),
-            repair_per_tick: 100,
+            // Halved with `background_damage`, so the ratio between them — which is what decides
+            // whether a cell can out-mend its own poison — is exactly what it was, and only the
+            // number of ticks it takes changes.
+            repair_per_tick: 50,
             // Chosen by measurement, in a soup at 40,000 ticks. The first value tried was 64,
             // which cost half a unit of energy a tick against an idle cell's income of about
             // 240 — noise, and every cell mended itself completely forever.
@@ -399,12 +411,18 @@ impl Default for MetabolicRates {
             // cull wearing a nudge's clothes.
             repair_energy_per_unit: q10(8),
             // Slow. A membrane at `param 24` tolerates 24 units of damage, so an unrepaired
-            // cell fails after roughly 24 * 1024 / 8 = 3,000 ticks — thousands, as intended,
+            // cell fails after roughly 24 * 1024 / 4 = 6,000 ticks — thousands, as intended,
             // and far longer for anything that can pay to keep up.
-            background_damage: 8,
+            //
+            // Halved for tempo, and this is the rate with the least room left: four is two more
+            // halvings from doing nothing at all. Any further tempo pass has to raise the
+            // membrane's damage *tolerance* instead, which is a stock and has room to spare.
+            background_damage: 4,
             // About the same again as a bare membrane's own upkeep, so merely existing costs
             // roughly twice what it did and a working cell barely feels it.
-            metabolic_floor: Q10_ONE / 32,
+            //
+            // Halved, with the catalogue's upkeep column and the income that pays for both.
+            metabolic_floor: Q10_ONE / 64,
             // Set from `transport_probe::how_dark_does_the_core_have_to_be`. See the field.
             light_occlusion: 0,
             rigidity_gain: 0,
@@ -412,8 +430,9 @@ impl Default for MetabolicRates {
             // race carries and below where a converged pack sits.
             osmotic_threshold: 4 * crate::biology::BASE_INTERIOR_CAPACITY,
             // The same as the metabolic floor, so one capacity over the line costs about what
-            // being alive costs and four capacities over costs sixteen times that.
-            osmotic_upkeep: Q10_ONE / 32,
+            // being alive costs and four capacities over costs sixteen times that. Halved with
+            // it, which keeps that sentence true.
+            osmotic_upkeep: Q10_ONE / 64,
             // Measured: above everything the founding race banks, below where a pack converges.
             energy_reserve: q10(2000),
             // A time constant of sixty-four ticks: fast enough to bind, slow enough that it is
