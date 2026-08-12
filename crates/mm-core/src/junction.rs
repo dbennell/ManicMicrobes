@@ -171,10 +171,35 @@ impl Default for JunctionConfig {
             // Cheap enough that a clonal colony is not paying to exist, which is the whole
             // point of SPEC §8.2's first claim.
             join_base_cost: crate::Q10_ONE / 2,
-            // Against a membrane investment of ~24, a forced join costs about 48 energy where
-            // a consensual one costs half of one. Two orders of magnitude, which is what makes
-            // brute-forcing 128 keys a real decision rather than a formality.
-            join_forced_penalty: crate::Q10_ONE * 2,
+            // Against a membrane investment of ~24, a forced join costs about 768 energy where a
+            // consensual one costs half of one. That is what makes brute-forcing 128 keys a real
+            // decision rather than a formality.
+            //
+            // # Sixteen times what it was, because two orders of magnitude was not a deterrent
+            //
+            // This read `Q10_ONE * 2` — 48 energy against a membrane of 24 — and the comment
+            // above claimed the ratio made forcing a real decision. Measured, it did not. The
+            // shipped value and *zero* are indistinguishable:
+            //
+            //     forced penalty    0x     1x     4x    16x    64x
+            //     parasite share   953    958    950    578    482
+            //
+            // `parasite.mm` against `ancestor.mm` on `soup.ron`, three seeds, permille. A cell
+            // holding ~111 energy and earning 0.88 a tick could afford 48 about as often as its
+            // 87-tick expression cycle came round, so the penalty was priced under the budget of
+            // the only genome that pays it and bought exactly nothing. At 64x the parasite falls
+            // to 482, which is its books exactly — net 906 against the ancestor's 950 — because
+            // **its entire advantage was forced junctions**, and it has never once injected
+            // anything (`docs/ECONOMY.md` §16.4).
+            //
+            // Sixteen and not sixty-four deliberately. The gate is "a real decision", not "an
+            // impossibility": at 16x the parasite still leads at 578 and forcing is now something
+            // a genome has to save up for.
+            //
+            // It cannot hurt a colony. A clonal lineage shares its key, pays `join_base_cost`,
+            // and never touches this number — and a thick membrane still multiplies it, so
+            // `marble.mm` at `param 255` costs an attacker ten times what a default 24 does.
+            join_forced_penalty: crate::Q10_ONE * 32,
             soft_max_range: POS_ONE * 3,
             breaking_strain: POS_ONE * 2,
             // Well under one: over-correcting a Gauss-Seidel constraint makes a chain
