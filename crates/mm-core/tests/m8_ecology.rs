@@ -982,7 +982,7 @@ fn seed_one(world: &mut World, genome: &[u8], n: u32) {
 }
 
 /// Every scenario the library ships, so a new one cannot be added without being checked.
-const LIBRARY: [&str; 12] = [
+const LIBRARY: [&str; 16] = [
     "soup.ron",
     "photosynthesis_or_die.ron",
     "predator_introduction.ron",
@@ -995,6 +995,12 @@ const LIBRARY: [&str; 12] = [
     "the_black_smoker.ron",
     "the_thicket.ron",
     "the_marbles.ron",
+    // The economy benchmark set of `docs/ECONOMY.md` §16 — each names one scarcity and the
+    // mechanic it should pay for, and all four are in `balance::shipped_panel`.
+    "the_lean_water.ron",
+    "the_short_night.ron",
+    "the_shallows.ron",
+    "the_tide.ron",
 ];
 
 /// Scenarios that are deliberately not part of the curated library.

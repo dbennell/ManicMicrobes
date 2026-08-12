@@ -177,6 +177,7 @@ fn the_reference_slide_does_not_pick_a_winner() {
         layout: Layout::Vertical,
         ticks: 2_500,
         founders: 4,
+        lane: None,
     };
     let report = tournament(&[arena], &[], &me, &SEEDS[..3]).expect("tournament");
     let m = report.mirror[0];
@@ -708,6 +709,7 @@ fn whether_a_richer_body_pays_when_it_is_cheaper() {
             layout: Layout::Vertical,
             ticks: 12_000,
             founders: 8,
+            lane: None,
         };
         eprint!("{percent:>7}%");
         for c in &contenders {
@@ -818,6 +820,7 @@ fn what_specialising_is_worth() {
             layout: Layout::Vertical,
             ticks: 12_000,
             founders: 8,
+            lane: None,
         };
 
         // What it actually managed to build, and what became of it — **alone**, not in the

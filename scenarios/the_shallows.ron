@@ -1,0 +1,60 @@
+// The shallows — the first slide where where you are is worth something.
+//
+// A water column seen edge-on: bright at the surface, dark at the bottom, still water, nothing
+// else changed from `soup.ron`.
+//
+//   mm-cli run scenarios/the_shallows.ron --genome genomes/drifter.mm --ticks 50000 --check
+//
+// ---------------------------------------------------------------- why this slide exists
+//
+// `LightRegime::Directional`'s own documentation says what it is for — *"makes position worth
+// something, and is the scenario that phototaxis has a reason to evolve in"* — and **no shipped
+// scenario has ever used it.** `soup.ron`'s header says the same thing from the other side:
+// *"Uniform daylight: no gradient to climb, so nothing here rewards moving."* Every world in the
+// library is that world.
+//
+// The bill for it is in `docs/ECONOMY.md` §15.3, where the photosensor scores 288 of 1000, the
+// chemosensor 288 and the cilium 288 — all three paying nowhere, and failing *together*. They
+// have to: a sensor is worth what the information it returns is worth, and on a slide where every
+// square is the same the answer is always "you are where you were" and the honest value of that
+// is zero. The three are not separately broken. They are one missing world.
+//
+// It is worth being precise about what this does and does not test. Phototaxis needs a gradient
+// *and* a body that can climb it, and §14 established that until `14.7` nothing in this engine
+// could swim forward at all — a cilium's own wake outran its thrust. Every motility number
+// predating that fix was taken on a body that could not move. So this slide is the second half
+// of a pair whose first half only just landed, and a null result here means something different
+// now than it would have a month ago.
+//
+// ---------------------------------------------------------------- the gradient, and its floor
+//
+// `Edge::Top` bright, so the gradient runs down the slide and a cell that climbs is going the way
+// a reader expects. Full daylight at the surface.
+//
+// `dark: 96` rather than zero, and this is the choice worth arguing with. A floor of zero makes
+// the bottom third of the slide uninhabitable, so the world becomes "a small bright slide with a
+// dead margin" — a smaller `soup.ron`, measuring area again. A dim floor keeps the whole column
+// live and makes the gradient a matter of *how well* rather than *whether*, which is the shape
+// that rewards a cell for climbing rather than merely for not being unlucky.
+//
+// 96 of 1024 is under a tenth of full daylight. `docs/ECONOMY.md` §5 has the sweep this should be
+// checked against, and its warning applies here too: a population on these slides oscillates, so
+// one reading at one tick is a phase sample.
+(
+    name: "the shallows",
+    seed: 20260812,
+    width: 64,
+    height: 64,
+
+    light: Directional(bright: 1024, dark: 96, from: Top),
+    current: Still,
+    fluid_interval: 1,
+
+    // The soup's chemistry exactly: this slide varies light and only light.
+    seeding: [
+        Uniform(chemical: 11, per_square: 409600),
+        Uniform(chemical: 14, per_square: 409600),
+        Uniform(chemical: 4, per_square: 409600),
+    ],
+    barriers: [],
+)

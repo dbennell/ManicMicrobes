@@ -32,6 +32,26 @@
 //! lineages across the *vertical* midline there hands the upstream one the match before a tick is
 //! run. The mirror control catches that and the panel entry declares a horizontal mirror instead.
 //!
+//! # A control that fires can mean two different things, and they want opposite fixes
+//!
+//! A mirror lands away from `EVEN` either because the slide has a **better half** or because the
+//! bout is **too noisy to read**, and the two are not distinguishable from one number. `drift`
+//! taught this the expensive way: it returned 557 at 12,000 ticks on both three and five seeds
+//! and was called tilted, and it has no better half at all — over twelve seeds its median is 491.
+//! What it has is a standing population of about sixty cells, at which two identical lineages
+//! drift apart neutrally, with a spread that grows as the bout runs longer.
+//!
+//! Tell them apart by re-running the control at more seeds and a different bout length:
+//!
+//! * a **better half** holds its offset as seeds are added, and does not care how long the bout
+//!   is — whoever starts on the good side is still there;
+//! * **noise** has a median that wanders about `EVEN` across seeds and a spread that shrinks as
+//!   the bout shortens.
+//!
+//! The fix for the first is the `Layout` or the world. The fix for the second is a shorter bout
+//! — stop once the thing being measured has settled — or a world that holds more cells. It is
+//! never [`MIRROR_TOLERANCE`], which is why that constant says so.
+//!
 //! # Where the numbers are not neutral, said out loud
 //!
 //! Two choices could be argued with, so they are stated rather than buried.
@@ -73,6 +93,13 @@ pub const EVEN: u32 = PERMILLE / 2;
 /// fair slide do not finish exactly level — they interfere with each other, and which of two
 /// equally-matched cells gets the last free square is a coin toss the physics resolves. What they
 /// must not do is finish consistently apart, which is what a slide with a better half produces.
+///
+/// **A world that trips this because it is noisy is not an argument for raising it.** See the
+/// module header: a small population drifts neutrally, the spread grows with the bout, and the
+/// median of a few seeds then lands anywhere. Widening the tolerance to admit that world would
+/// blind the control to every *real* better half by the same amount, and the noisy column would
+/// go on being noise — it would merely stop saying so. Shorten the bout instead, which is what
+/// the `drift` entry of [`shipped_panel`] does and records.
 pub const MIRROR_TOLERANCE: u32 = 50;
 
 /// The share below which a strategy is judged to pay nowhere.
@@ -146,6 +173,27 @@ pub struct Arena {
     pub ticks: u64,
     /// Founders per side.
     pub founders: u32,
+    /// How far in from its edge each side's lane sits, in squares, measured across the mirror
+    /// axis. `None` is an eighth of the slide.
+    ///
+    /// # Why a world has to be able to say this
+    ///
+    /// An eighth is right for an open slide and wrong for a channel. `the_drift.ron` is 96 square
+    /// with its walls at y=32..33 and y=62..63, so an eighth puts the two lanes at y=12 and y=83
+    /// — **both outside the channel**, in open water with no wall to grip and none of the
+    /// detritus, which only enters between y=34 and y=61. The world advertises "a current,
+    /// particulate food that lags it, and walls to hold on to" and the panel was placing its
+    /// contenders where none of the three exist.
+    ///
+    /// That is not only a wasted column. The slide outside the channel carries about **60 cells
+    /// against `soup.ron`'s 1072**, and two neutral lineages sharing sixty cells are a
+    /// Wright-Fisher population whose share is a random walk: measured over twelve seeds, the
+    /// mirror's spread is 213 parts in a thousand at 12,000 ticks and the median of any five
+    /// consecutive seeds lands up to 82 out — past [`MIRROR_TOLERANCE`], on a slide with no
+    /// better half at all. The fairness control was reporting drift as tilted because it *is*
+    /// noisy, not because it is unfair, and more founders does not help (the spread is 153 to 319
+    /// at every count from 8 to 128). Population does.
+    pub lane: Option<i32>,
 }
 
 /// One contender.
@@ -220,6 +268,9 @@ pub struct PanelEntry {
     pub layout: Layout,
     pub ticks: u64,
     pub founders: u32,
+    /// How deep each side's lane sits from its edge. `None` is an eighth of the slide; see
+    /// [`Arena::lane`] for the world that needed it and what it cost to leave at the default.
+    pub lane: Option<i32>,
     /// A light regime to substitute for the file's own.
     ///
     /// Two worlds in the panel are shaped right and calendared wrong for a bout: `the_long_dusk`
@@ -247,6 +298,7 @@ impl PanelEntry {
             layout: self.layout,
             ticks: (self.ticks * ticks_scale / 100).max(1_000),
             founders: self.founders,
+            lane: self.lane,
         }
     }
 }
@@ -268,6 +320,7 @@ pub fn shipped_panel() -> Vec<PanelEntry> {
             // again by a hundred thousand. Anything past the knee is time spent confirming it.
             ticks: 12_000,
             founders: 8,
+            lane: None,
             light: None,
             poses: "nothing. The control: light, food and room all free",
         },
@@ -277,8 +330,14 @@ pub fn shipped_panel() -> Vec<PanelEntry> {
             layout: Layout::Vertical,
             ticks: 12_000,
             founders: 8,
+            lane: None,
             light: None,
-            poses: "light is rival, and structural carbon sits near its knee",
+            // "Locally", precisely: the thicket seeds 40 units a square, which `CHEMISTRY.md` §6
+            // measures as still above the cliff, and pairs it with `fluid_interval: 8` so that a
+            // pack can deplete its own interior faster than the water refills it. That is a
+            // gradient across a crowd, not a ceiling on the slide — `the_lean_water` is the
+            // ceiling, and the two are different questions.
+            poses: "light is rival, and a crowd can deplete the carbon inside itself",
         },
         PanelEntry {
             label: "dusk",
@@ -287,6 +346,7 @@ pub fn shipped_panel() -> Vec<PanelEntry> {
             // Long enough to be well past the knee the decline crosses, and no longer.
             ticks: 30_000,
             founders: 8,
+            lane: None,
             light: Some(crate::LightRegime::SlowDecline {
                 start: crate::Q10_ONE * 3 / 2,
                 end: 0,
@@ -301,6 +361,7 @@ pub fn shipped_panel() -> Vec<PanelEntry> {
             // Two whole years, so a bout sees two winters rather than one.
             ticks: 40_000,
             founders: 8,
+            lane: None,
             light: Some(crate::LightRegime::Seasonal {
                 day_ticks: 240,
                 year_ticks: 20_000,
@@ -317,10 +378,100 @@ pub fn shipped_panel() -> Vec<PanelEntry> {
             label: "drift",
             file: "the_drift.ron",
             layout: Layout::Horizontal,
-            ticks: 12_000,
+            // **Three thousand, not twelve.** This world converges by about tick 1,500 and holds
+            // roughly sixty cells thereafter — the current washes cells off the slide, so the
+            // standing population is a division-against-washout balance rather than a carrying
+            // capacity. Sixty is small enough that two *identical* lineages sharing it are a
+            // Wright-Fisher population whose share is a random walk, and the walk's spread grows
+            // with the length of the bout: measured over twelve seeds, the mirror's range is 213
+            // parts in a thousand at 12,000 ticks, 141 at 6,000 and 117 at 3,000.
+            //
+            // At 12,000 that put the median of five consecutive seeds up to 82 out and the
+            // fairness control refused the whole panel — correctly by its own rule, and for the
+            // wrong reason: the world has no better half. Its median over twelve seeds is 491.
+            // What it has is neutral drift, and the only honest answer to neutral drift is to
+            // stop the bout once the thing being measured has settled. Everything past 1,500
+            // ticks here is sampling the walk, not the economy.
+            ticks: 3_000,
             founders: 8,
+            // Inside the channel, which is where this world's food and walls are. The default
+            // eighth put the two lanes at y=12 and y=83 while the channel runs y=34..61, so both
+            // sides were seeded in the open water *outside* the walls — no barrier to grip and
+            // none of the detritus, which only enters between y=34 and y=61. A panel entry whose
+            // `poses` promises "walls to hold on to" was placing every contender where there are
+            // none, and `docs/ECONOMY.md` §8a had already had to seed along the wall by hand to
+            // get a reading out of `sponge.mm`.
+            //
+            // 34 and its mirror 61 are the two rows immediately inside the upper and lower walls.
+            //
+            // This does **not** fix the mirror and was not what did: measured, it leaves the
+            // population where it was, at 57 to 66 cells, because the reference is a photo-
+            // autotroph that neither eats detritus nor grips anything. It costs a little scatter
+            // (range 117 -> 145 at 3,000 ticks) and buys a column that measures what it claims to.
+            lane: Some(34),
             light: None,
             poses: "a current, particulate food that lags it, and walls to hold on to",
+        },
+        PanelEntry {
+            // Matter, at last. Every other world in the panel is limited by *area* — `ECONOMY.md`
+            // §3 measured a saturated soup consuming 8% of its structural carbon and refusing
+            // thirty divisions a tick for want of room — and a contest over area is won by
+            // whoever carries least, which is why §9a can scale the whole catalogue fourfold and
+            // change nothing. This is the one slide where earning more can buy more.
+            label: "lean",
+            file: "the_lean_water.ron",
+            layout: Layout::Vertical,
+            ticks: 12_000,
+            founders: 8,
+            lane: None,
+            light: None,
+            poses: "structural matter binds before space does, so earning more buys more",
+        },
+        PanelEntry {
+            // `LightRegime::DayNight` had been in the engine since M1 with no scenario using it.
+            // The vacuole pays nowhere in this panel (§15.3) and has never been asked a question
+            // it could answer: `seasons` is a cull, `dusk` is a millennium, and everything else
+            // is uniform. A night is the smallest honest test of a battery.
+            label: "night",
+            file: "the_short_night.ron",
+            layout: Layout::Vertical,
+            ticks: 12_000,
+            founders: 8,
+            lane: None,
+            light: None,
+            poses: "income stops and starts, on the timescale a cell lives at",
+        },
+        PanelEntry {
+            // `LightRegime::Directional`'s own doc says it "makes position worth something, and
+            // is the scenario that phototaxis has a reason to evolve in", and no scenario had
+            // ever used it. The photosensor, chemosensor and cilium all pay nowhere and fail
+            // together, because on a uniform slide the honest value of any reading is zero.
+            label: "shallows",
+            file: "the_shallows.ron",
+            layout: Layout::Vertical,
+            ticks: 12_000,
+            founders: 8,
+            lane: None,
+            light: None,
+            poses: "light is a gradient in space, so where a cell is worth something",
+        },
+        PanelEntry {
+            // The only world in the library that is a function of time on the scale of a life.
+            // A spring tide is past what a cilium can swim against and a neap is not, so the
+            // right answer changes while a cell is alive — which is the pressure differentiation
+            // needs and nothing else here applies.
+            //
+            // Twenty thousand ticks: one full spring/neap cycle. A bout that saw only half of one
+            // would be a constant-current world with extra steps.
+            label: "tide",
+            file: "the_tide.ron",
+            layout: Layout::Horizontal,
+            ticks: 20_000,
+            founders: 8,
+            // The same channel geometry as the drift, and the same reason — see `Arena::lane`.
+            lane: Some(34),
+            light: None,
+            poses: "the flow reverses and varies, so no one answer is right for long",
         },
     ]
 }
@@ -373,7 +524,7 @@ pub fn setup(
                 .genomes()
                 .intern(who.genome.clone())
                 .map_err(|e| crate::arena::ArenaError::Genome(e.to_string()))?;
-            let (x, y) = start_position(arena.layout, w, h, side, k, arena.founders);
+            let (x, y) = start_position(arena.layout, w, h, side, k, arena.founders, arena.lane);
             let cell = CellSeed {
                 x: crate::fixed::pos(x) + crate::fixed::POS_ONE / 2,
                 y: crate::fixed::pos(y) + crate::fixed::POS_ONE / 2,
@@ -432,6 +583,11 @@ fn dress(cells: &mut crate::cell::CellArena, i: usize) {
 }
 
 /// Where a side's `k`th founder starts, mirrored across the chosen midline.
+///
+/// `lane` is how deep each side sits from its own edge; see [`Arena::lane`] for why a channel
+/// world has to be able to override the default eighth. Whatever it is, it is applied to both
+/// sides identically and is clamped so that the two lanes cannot cross the midline, which is what
+/// keeps the mirror a mirror.
 fn start_position(
     layout: Layout,
     w: i32,
@@ -439,12 +595,17 @@ fn start_position(
     side: Side,
     k: u32,
     founders: u32,
+    lane: Option<i32>,
 ) -> (i32, i32) {
     let (long, across) = match layout {
         Layout::Vertical => (h, w),
         Layout::Horizontal => (w, h),
     };
-    let margin = (across / 8).max(2);
+    // Never past the midline: at `across / 2` the two sides would land on the same row and the
+    // bout would start as one population rather than two.
+    let margin = lane
+        .unwrap_or(across / 8)
+        .clamp(2, (across / 2 - 1).max(2));
     let rows = founders.max(1) as i32;
     let spacing = (long - 2 * margin).max(1) / rows;
     let along = (margin + spacing * k as i32 + spacing / 2).clamp(0, long - 1);
@@ -834,6 +995,7 @@ mod tests {
             layout: Layout::Vertical,
             ticks: 3_000,
             founders: 4,
+            lane: None,
         }
     }
 

@@ -1,0 +1,68 @@
+// The lean water — the first slide where running out of matter is what stops you.
+//
+// `soup.ron` in every respect but one: the structural monomer is seeded at the cliff instead of
+// two orders of magnitude above it. Everything else — size, seed, light, still water, the other
+// two chemicals — is the control's, so a difference between the two slides is that one number.
+//
+//   mm-cli run scenarios/the_lean_water.ron --genome genomes/ancestor.mm --ticks 50000 --check
+//
+// ---------------------------------------------------------------- why this slide exists
+//
+// `docs/ECONOMY.md` §3 measured what a saturated soup actually runs out of, and it is none of the
+// things the design intended. 128,000 units of structural carbon sit in cells and 1,379,000 are
+// still dissolved: **the population consumes 8% of the one resource the design calls conserved
+// and limiting.** What stops it is `split_pressure` — thirty divisions a tick refused for want of
+// anywhere to put a daughter. The carrying capacity is a packing number.
+//
+// That is the single most consequential fact in the economy, because a contest over *area* is won
+// by whoever turns matter into daughters fastest, which is whoever carries least. It is why
+// §9a can scale the whole organelle catalogue fourfold and change the evolved loadout not at all:
+// when space is the limit, earning more buys nothing, so no organelle can pay for itself however
+// it is priced. Every "this mechanism pays nowhere" result in the panel rests on it.
+//
+// ---------------------------------------------------------------- and why 10, not 200 or 40
+//
+// `docs/CHEMISTRY.md` §6 swept the seeding and found the population **flat across the top
+// forty-fold and then a cliff** — so halving the soup changes nothing, and so does taking a tenth
+// of it. That much still holds. Its numbers do not: the sweep predates the tempo pass of
+// `616c445`, which halved growth and throughput, and **the cliff has moved up and got steeper.**
+// Re-measured here, eight founders, 20,000 ticks, mutation off:
+//
+//     units/square     20    12    10     8     6     4     3
+//     CHEMISTRY.md §6   —     —  1032   —     —    347    —
+//     measured now   1419  1004   559    30    16    15     7
+//
+// Ten. It is the only value on that curve that is a *constraint* rather than a cull: about half
+// the soup's carrying capacity, which is a population large enough to measure and small enough
+// that matter is visibly what set it. Eight is already a cliff face — thirty cells — and six is
+// sixteen, which is `the_drift.ron`'s problem in a different costume and unreadable for the same
+// reason (§15.2).
+//
+// The old table should not be trusted anywhere else either, and CHEMISTRY.md §6 wants re-taking.
+//
+// `the_thicket.ron` also seeds low, at 40, and is doing something different and complementary:
+// paired with `fluid_interval: 8` it makes carbon locally depletable inside a pack while the
+// global pool stays large. That is a gradient across a crowd. This is a ceiling on the whole
+// slide, and the two want keeping apart.
+(
+    name: "the lean water",
+    seed: 20260812,
+    width: 64,
+    height: 64,
+
+    // The control's light and water exactly: this slide is about matter and nothing else.
+    light: Uniform(intensity: 1024),
+    current: Still,
+    fluid_interval: 1,
+
+    seeding: [
+        // Carbon dioxide and oxidant as the soup has them — photosynthesis is not what is being
+        // limited here, and starving both at once would confound the two.
+        Uniform(chemical: 11, per_square: 409600),
+        Uniform(chemical: 14, per_square: 409600),
+
+        // Ten units a square. The soup's is 400.
+        Uniform(chemical: 4, per_square: 10240),
+    ],
+    barriers: [],
+)

@@ -1,0 +1,74 @@
+// The short night — the first slide where income stops and starts.
+//
+// `soup.ron` with the light on a triangular day/night cycle and nothing else changed.
+//
+//   mm-cli run scenarios/the_short_night.ron --genome genomes/hoarder.mm --ticks 50000 --check
+//
+// ---------------------------------------------------------------- why this slide exists
+//
+// `LightRegime::DayNight` has been in the engine since M1 and **no shipped scenario has ever
+// used it.** Eight of the thirteen worlds in `scenarios/` are `Uniform`, and the two that vary
+// light over time — `the_long_dusk` and `seasons` — both do it on a timescale far longer than a
+// cell lives: one declines over a million ticks, the other runs a 20,000-tick year against a
+// generation of about 489. Neither asks a cell to get through tonight.
+//
+// That matters because of what the vacuole is for. `docs/ECONOMY.md` §15.3 has it scoring 341 of
+// 1000 and paying nowhere in the panel, and §11 records the storage prediction failing outright —
+// but §11's own reading is that `seasons` is the wrong instrument, because its winter is below the
+// extinction knee and culls rather than thins. **A battery cannot pay in a world with no night,
+// and cannot be measured in a world whose night kills everything.** This is the middle case, and
+// it is the cheapest one to build: one enum variant that was already there.
+//
+// ---------------------------------------------------------------- the period, and what sets it
+//
+// A cell divides about every 489 ticks post-tempo (`616c445`). The cycle wants to be long enough
+// that the dark is a real fast, and short enough that the population is not culled to nothing
+// before it can matter — that is, a night measured in generations rather than in either
+// instructions or years.
+//
+// 2,000 ticks: about four generations to the cycle, so roughly two spent with the light under
+// half.
+//
+// `night: 128` and **not zero**, which was the first value and was wrong the way `seasons` is
+// wrong. Measured, eight founders, 12,000 ticks:
+//
+//     period  floor   ancestor   hoarder   sponge
+//       2000      0        975         0        0
+//       2000    128        954         0      788
+//       2000    256        955         0      781
+//       1000    128        978         0      835
+//
+// A floor of zero takes `sponge.mm` out along with everything else, which makes the slide a cull
+// rather than a fast — the exact fault `docs/ECONOMY.md` §11 records against `seasons`, whose
+// winter sits below the extinction knee. An eighth of full daylight thins instead: the ancestor
+// keeps 954 of its 1,082 and a body as dear as the sponge's still lives.
+//
+// ---------------------------------------------------------------- and what it found immediately
+//
+// **`hoarder.mm` reaches zero at every setting above** — every period, every floor, including
+// ones where a *more* expensive body with no battery survives comfortably. It is not the depth of
+// the night and it is not the cost of the cell: it is that the battery does not work. That
+// sharpens §11.3's "storing against the dark still does not pay" into something falsifiable —
+// the hoarder cannot survive a night at all, so nothing about its economics has ever been
+// measured. Fixing the genome comes before pricing the vacuole.
+(
+    name: "the short night",
+    seed: 20260812,
+    width: 64,
+    height: 64,
+
+    // Full daylight at noon, and a real night. The triangle is exact in integers, which is why
+    // the engine uses one instead of a sine.
+    light: DayNight(period_ticks: 2000, day: 1024, night: 128),
+    current: Still,
+    fluid_interval: 1,
+
+    // The soup's chemistry exactly, including its 400 units of carbon: this slide varies light
+    // and only light, so that a result here cannot be a matter result wearing a hat.
+    seeding: [
+        Uniform(chemical: 11, per_square: 409600),
+        Uniform(chemical: 14, per_square: 409600),
+        Uniform(chemical: 4, per_square: 409600),
+    ],
+    barriers: [],
+)

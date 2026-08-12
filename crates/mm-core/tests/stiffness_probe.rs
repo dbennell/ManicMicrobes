@@ -80,6 +80,7 @@ fn arena(gain: i32) -> Arena {
         layout: Layout::Vertical,
         ticks: 20_000,
         founders: 16,
+        lane: None,
     }
 }
 

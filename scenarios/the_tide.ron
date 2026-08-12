@@ -1,0 +1,92 @@
+// The tide — the first slide where the right answer changes while you are alive.
+//
+// A channel like `the_drift.ron`'s, with the flow reversing every half period under a slower
+// spring/neap envelope, so the water is sometimes slack, sometimes brisk and sometimes beyond
+// anything a cilium can swim against.
+//
+//   mm-cli run scenarios/the_tide.ron --ticks 50000 --check
+//
+// ---------------------------------------------------------------- why this slide exists
+//
+// Every world in the library holds still. Light is uniform in eight of them, the two that vary it
+// do so over a million ticks or a year, and every current is constant from the first tick to the
+// last — `Still`, `Uniform`, `Rotational`, `Shear`, `Convergent`, none of which is a function of
+// time. A constant world has one right answer, and a population that has found it has no reason
+// to carry the machinery for any other.
+//
+// That is the shape of `docs/ECONOMY.md` §15.3's finding: vacuole 341, cilium 288, chemosensor
+// 288, photosensor 288, all paying nowhere and all failing together. The panel's response to
+// "which strategy wins this world" is well defined and the answer is always the same one.
+//
+// A tide asks a different question, and it is the one an ecosystem asks: **what wins right now?**
+//
+//   * at slack water a holdfast is upkeep and a cilium is worth having;
+//   * at springs the flow is past what a cilium can produce, and only a holdfast keeps a cell
+//     where its food is;
+//   * at neaps neither is decisive.
+//
+// A cell that can *switch* beats a cell that cannot, and switching on internal state gated by an
+// external reading is exactly the differentiation CLAUDE.md says must emerge rather than be
+// declared. No shipped scenario applies that pressure.
+//
+// ---------------------------------------------------------------- the numbers, and one measured
+//
+// `peak_vx: 256` is `fluid::MAX_VELOCITY`, the CFL ceiling — a spring tide runs as fast as this
+// engine's water is allowed to. Against it, a cilium at `param 80` produces 80 `Q10` of thrust
+// and settles at about 107 with drag, so **a spring tide is genuinely unswimmable and a neap at
+// 32 is not.** That contrast is the whole design; if the two cross, the slide poses nothing.
+//
+// `period_ticks: 1000` is about two generations at the post-tempo division time of ~489 ticks
+// (`616c445`), so a cell meets both states of the water within its own life rather than
+// inheriting one. `cycle_ticks: 20000` is twenty tides to a spring/neap cycle — a wide enough
+// ratio to be a second timescale rather than a beat, which is the caveat `CurrentField::Tidal`
+// and `LightRegime::Seasonal` both carry.
+//
+// **And one thing this is expected to fix.** `the_drift.ron` carries about 60 cells against the
+// same slide's 2,249 in still water (§15.2) — its constant current washes the population off the
+// slide, which is why its mirror control random-walks and why its bout had to be shortened. A
+// tide reverses, so what it carries out it brings back. Whether that recovers the population is
+// the first thing to measure here and is not assumed.
+(
+    name: "the tide",
+    seed: 20260812,
+    width: 96,
+    height: 96,
+
+    light: Uniform(intensity: 1024),
+
+    // Slack at tick zero, full flood a quarter period in, slack again at the half, full ebb the
+    // other way. The envelope takes the weakest tides to an eighth of the strongest.
+    current: Tidal(
+        period_ticks: 1000,
+        peak_vx: 256,
+        peak_vy: 0,
+        cycle_ticks: 20000,
+        neap: 128,
+    ),
+    fluid_interval: 1,
+
+    seeding: [
+        Uniform(chemical: 11, per_square: 409600),
+        Uniform(chemical: 14, per_square: 409600),
+        Uniform(chemical: 4, per_square: 204800),
+
+        // The particulate, as `the_drift.ron` has it: worth catching rather than unavoidable.
+        Uniform(chemical: 12, per_square: 102400),
+    ],
+
+    // Detritus in and detritus out, so the standing stock finds a level. Both ends, unlike the
+    // drift's single upstream source — a tide runs both ways, so a source at one end only would
+    // be a source that spends half its time draining.
+    flux: [
+        Source(chemical: 12, x: 0, y: 34, width: 2, height: 28, per_tick: 3000),
+        Source(chemical: 12, x: 94, y: 34, width: 2, height: 28, per_tick: 3000),
+        Drain(chemical: 12, x: 46, y: 34, width: 4, height: 28, rate: 64),
+    ],
+
+    // The same channel the drift uses: two walls thirty squares apart, open at both ends.
+    barriers: [
+        Rect(x: 6, y: 32, width: 84, height: 2),
+        Rect(x: 6, y: 62, width: 84, height: 2),
+    ],
+)
