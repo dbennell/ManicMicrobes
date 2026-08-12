@@ -1107,7 +1107,7 @@ mod tests {
                     // velocity field. It is rebuilt from the cilia every tick rather than
                     // decayed, which is what lets the exemption be sized to the cell exactly.
                     if publish {
-                        crate::light::CurrentField::Still.apply(&mut substrate, &nil, &nil, &sx, &sy);
+                        crate::light::CurrentField::Still.apply(&mut substrate, &nil, &nil, &sx, &sy, 0);
                     }
                 }
                 cells.x[0] - before

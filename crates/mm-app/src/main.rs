@@ -6375,6 +6375,21 @@ fn outline_of(scenario: &Scenario) -> Vec<(String, String, Vec<(String, String)>
             "convergent".to_string(),
             vec![("strength".to_string(), strength.to_string())],
         ),
+        C::Tidal {
+            period_ticks,
+            peak_vx,
+            peak_vy,
+            cycle_ticks,
+            neap,
+        } => (
+            "tidal".to_string(),
+            vec![
+                ("tide".to_string(), format!("{period_ticks} ticks")),
+                ("peak".to_string(), format!("{peak_vx}, {peak_vy}")),
+                ("springs".to_string(), format!("{cycle_ticks} ticks")),
+                ("neap".to_string(), neap.to_string()),
+            ],
+        ),
     };
 
     let founders: u32 = scenario.inhabitants.iter().map(|i| i.count).sum();
@@ -7816,6 +7831,27 @@ fn environment_editor(ui: &mut egui::Ui, env: &mut Environment) {
         CurrentField::Rotational { strength }
         | CurrentField::Shear { strength }
         | CurrentField::Convergent { strength } => q10(strength, ui, "strength"),
+        CurrentField::Tidal {
+            period_ticks,
+            peak_vx,
+            peak_vy,
+            cycle_ticks,
+            neap,
+        } => {
+            ui.add(
+                egui::DragValue::new(period_ticks)
+                    .speed(16.0)
+                    .prefix("tide "),
+            );
+            q10(peak_vx, ui, "peak vx");
+            q10(peak_vy, ui, "peak vy");
+            ui.add(
+                egui::DragValue::new(cycle_ticks)
+                    .speed(1000.0)
+                    .prefix("springs "),
+            );
+            q10(neap, ui, "neap");
+        }
     });
     ui.label(skin::text(
         Role::Small,
@@ -7854,7 +7890,8 @@ const LIGHT_KINDS: [&str; 6] = [
     "seasonal",
 ];
 
-const CURRENT_KINDS: [&str; 5] = ["still", "uniform", "rotational", "shear", "convergent"];
+const CURRENT_KINDS: [&str; 6] =
+    ["still", "uniform", "rotational", "shear", "convergent", "tidal"];
 
 const EDGES: [(&str, mm_core::light::Edge); 4] = [
     ("left", mm_core::light::Edge::Left),
@@ -7887,6 +7924,7 @@ fn current_kind(c: &mm_core::light::CurrentField) -> &'static str {
         C::Rotational { .. } => CURRENT_KINDS[2],
         C::Shear { .. } => CURRENT_KINDS[3],
         C::Convergent { .. } => CURRENT_KINDS[4],
+        C::Tidal { .. } => CURRENT_KINDS[5],
     }
 }
 
@@ -7938,6 +7976,16 @@ fn default_current(kind: &str) -> mm_core::light::CurrentField {
         k if k == CURRENT_KINDS[2] => C::Rotational { strength: brisk },
         k if k == CURRENT_KINDS[3] => C::Shear { strength: brisk },
         k if k == CURRENT_KINDS[4] => C::Convergent { strength: brisk },
+        // A tide that turns often enough to watch, under an envelope slow enough to be a second
+        // timescale rather than a beat — the same relation `default_light`'s seasonal case keeps
+        // between its day and its year.
+        k if k == CURRENT_KINDS[5] => C::Tidal {
+            period_ticks: 4_000,
+            peak_vx: mm_core::fluid::MAX_VELOCITY,
+            peak_vy: 0,
+            cycle_ticks: 100_000,
+            neap: mm_core::fixed::Q10_ONE / 4,
+        },
         _ => C::Still,
     }
 }

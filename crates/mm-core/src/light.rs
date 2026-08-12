@@ -358,16 +358,98 @@ pub enum CurrentField {
     /// is what you want when the question is about what crowded cells *are* rather than about
     /// what they choose.
     Convergent { strength: i32 },
+
+    /// A tide: flow that reverses every half period, under a slower envelope that makes some
+    /// tides strong and others weak.
+    ///
+    /// # Why this is a variant and not two scenarios
+    ///
+    /// The same argument [`LightRegime::Seasonal`] makes: one triangle cannot modulate another,
+    /// so a scenario cannot compose this out of [`CurrentField::Uniform`] however many of them it
+    /// is allowed. What the second timescale buys is the thing a *constant* current cannot ask —
+    /// **no single strategy is right all the time.** At slack water a holdfast is upkeep and a
+    /// cilium is worth having; at springs the flow is beyond what a cilium can swim against and
+    /// only a holdfast keeps a cell where its food is; at neaps neither is decisive. A world that
+    /// alternates between those is one where a cell that can *switch* beats a cell that cannot,
+    /// which is the pressure differentiation needs and no shipped scenario applies.
+    ///
+    /// `docs/ECONOMY.md` §15.3: cilium, chemosensor, photosensor and vacuole all pay nowhere in
+    /// the panel, and they fail together because every world holds still. This is one of the two
+    /// dials that move.
+    Tidal {
+        /// One ebb and flood. The flow is zero at the start, runs one way, reverses at the half
+        /// period and returns.
+        period_ticks: u32,
+        /// Flow at the peak of a spring tide, `Q10` squares per fluid step, per axis. Both are
+        /// scaled by the same phase, so the tide runs along one line and reverses along it.
+        peak_vx: i32,
+        peak_vy: i32,
+        /// The spring/neap envelope: how long from one spring tide to the next.
+        ///
+        /// Should be a large multiple of `period_ticks`, for the same reason `Seasonal`'s year
+        /// should be a large multiple of its day — if the two are close the envelope is not a
+        /// second timescale, it is a beat.
+        cycle_ticks: u64,
+        /// What the weakest tide keeps, `Q10`. `Q10_ONE` is no envelope at all; zero means neaps
+        /// go fully slack.
+        neap: i32,
+    },
 }
 
 impl CurrentField {
+    /// Whether this field has to be rewritten every tick.
+    ///
+    /// The counterpart of [`LightRegime::is_time_varying`], and it exists for the same reason:
+    /// `World::refresh_velocity` writes the prescribed field once and then skips the work, which
+    /// was correct for every variant that is a function of position alone. A tide is not, and a
+    /// tide written once is a constant current with a misleading name.
+    #[must_use]
+    pub fn is_time_varying(&self) -> bool {
+        matches!(self, CurrentField::Tidal { .. })
+    }
+
     /// Velocity at one square, `Q10` squares per step, clamped to the CFL limit of one
     /// square per step in each axis.
+    ///
+    /// `tick` is read only by the time-varying variants; every field that was here before
+    /// [`CurrentField::Tidal`] ignores it and is still a function of position alone.
     #[must_use]
-    pub fn velocity_at(&self, x: u32, y: u32, w: u32, h: u32) -> (i32, i32) {
+    pub fn velocity_at(&self, x: u32, y: u32, w: u32, h: u32, tick: u64) -> (i32, i32) {
         let (vx, vy) = match self {
             CurrentField::Still => (0, 0),
             CurrentField::Uniform { vx, vy } => (*vx, *vy),
+
+            CurrentField::Tidal {
+                period_ticks,
+                peak_vx,
+                peak_vy,
+                cycle_ticks,
+                neap,
+            } => {
+                let period = u64::from((*period_ticks).max(1));
+                let half = (period / 2).max(1) as i64;
+                // A triangle running -half .. +half .. -half over one period, shifted a quarter
+                // period so that tick zero is slack water and the flow builds from nothing. A
+                // bout that opened at full flood would be measuring the founders' first hundred
+                // ticks against a wall of water none of them chose to be in.
+                let swing = 2 * triangle(tick.wrapping_add(period / 4), period) - half;
+                // The envelope, on its own much slower triangle: full strength at a spring tide,
+                // `neap` of it at the weakest.
+                let cycle = (*cycle_ticks).max(1);
+                let env = lerp(
+                    Q10_ONE,
+                    (*neap).clamp(0, Q10_ONE),
+                    triangle(tick, cycle),
+                    (cycle / 2).max(1) as i64,
+                );
+                // Multiply before dividing, and in `i64`, so neither the phase nor the envelope
+                // is truncated to nothing at small peaks.
+                let scaled = |peak: i32| -> i32 {
+                    let along = i64::from(peak) * swing / half;
+                    crate::fixed::sat_i32(along * i64::from(env) / i64::from(Q10_ONE))
+                };
+                (scaled(*peak_vx), scaled(*peak_vy))
+            }
 
             CurrentField::Rotational { strength } => {
                 // Offset from centre, in half-squares to keep the integer arithmetic exact
@@ -426,6 +508,7 @@ impl CurrentField {
         impulse_y: &[i32],
         stir_x: &[i32],
         stir_y: &[i32],
+        tick: u64,
     ) {
         let w = substrate.width();
         let h = substrate.height();
@@ -438,7 +521,7 @@ impl CurrentField {
                     vy[i] = 0;
                     continue;
                 }
-                let (bx, by) = self.velocity_at(x, y, w, h);
+                let (bx, by) = self.velocity_at(x, y, w, h, tick);
                 let ix = impulse_x.get(i).copied().unwrap_or(0);
                 let iy = impulse_y.get(i).copied().unwrap_or(0);
                 let sx = stir_x.get(i).copied().unwrap_or(0);
@@ -476,6 +559,22 @@ impl StateHash for CurrentField {
             CurrentField::Shear { strength } => {
                 h.u8(3);
                 h.i32(*strength);
+            }
+            CurrentField::Tidal {
+                period_ticks,
+                peak_vx,
+                peak_vy,
+                cycle_ticks,
+                neap,
+            } => {
+                // Tag 5, unused before. See the note on `Convergent`: a variant's tag is how a
+                // saved world proves it is the same world, so it is fixed for ever once shipped.
+                h.u8(5);
+                h.u32(*period_ticks);
+                h.i32(*peak_vx);
+                h.i32(*peak_vy);
+                h.u64(*cycle_ticks);
+                h.i32(*neap);
             }
         }
     }
@@ -701,14 +800,14 @@ mod tests {
     #[test]
     fn rotation_circulates_and_respects_the_cfl_limit() {
         let f = CurrentField::Rotational { strength: 600 };
-        let (vx, vy) = f.velocity_at(0, 0, 33, 33);
+        let (vx, vy) = f.velocity_at(0, 0, 33, 33, 0);
         // top-left corner of a counter-clockwise rotation: up and to the left
         assert!(vx > 0 && vy < 0, "({vx}, {vy})");
-        let centre = f.velocity_at(16, 16, 33, 33);
+        let centre = f.velocity_at(16, 16, 33, 33, 0);
         assert_eq!(centre, (0, 0), "the axis of rotation does not move");
         for x in 0..33u32 {
             for y in 0..33u32 {
-                let (u, v) = f.velocity_at(x, y, 33, 33);
+                let (u, v) = f.velocity_at(x, y, 33, 33, 0);
                 assert!(u.abs() <= MAX_VELOCITY && v.abs() <= MAX_VELOCITY);
             }
         }
@@ -717,9 +816,9 @@ mod tests {
     #[test]
     fn shear_opposes_across_the_slide() {
         let f = CurrentField::Shear { strength: 512 };
-        let (top, _) = f.velocity_at(0, 0, 16, 17);
-        let (bottom, _) = f.velocity_at(0, 16, 16, 17);
-        let (middle, _) = f.velocity_at(0, 8, 16, 17);
+        let (top, _) = f.velocity_at(0, 0, 16, 17, 0);
+        let (bottom, _) = f.velocity_at(0, 16, 16, 17, 0);
+        let (middle, _) = f.velocity_at(0, 8, 16, 17, 0);
         assert_eq!(top, -bottom);
         assert_eq!(middle, 0);
     }
@@ -731,12 +830,12 @@ mod tests {
         let mut iy = vec![0i32; s.len()];
         let none = vec![0i32; s.len()];
         ix[s.index(1, 1)] = 100;
-        CurrentField::Uniform { vx: 100, vy: 0 }.apply(&mut s, &ix, &iy, &none, &none);
+        CurrentField::Uniform { vx: 100, vy: 0 }.apply(&mut s, &ix, &iy, &none, &none, 0);
         assert_eq!(s.velocity_at(1, 1), (200, 0), "impulse adds to the current");
         assert_eq!(s.velocity_at(0, 0), (100, 0));
         // ...and the sum is still held to the CFL limit, however hard the cilium pushed.
         ix[s.index(2, 2)] = MAX_VELOCITY * 4;
-        CurrentField::Uniform { vx: 100, vy: 0 }.apply(&mut s, &ix, &iy, &none, &none);
+        CurrentField::Uniform { vx: 100, vy: 0 }.apply(&mut s, &ix, &iy, &none, &none, 0);
         assert_eq!(s.velocity_at(2, 2), (MAX_VELOCITY, 0));
 
         for _ in 0..64 {
@@ -755,7 +854,7 @@ mod tests {
             vx: i32::MAX,
             vy: i32::MIN,
         }
-        .apply(&mut s, &ix, &iy, &ix, &iy);
+        .apply(&mut s, &ix, &iy, &ix, &iy, 0);
         for i in 0..s.len() {
             let (vx, vy) = s.velocity();
             assert!(vx[i].abs() <= MAX_VELOCITY && vy[i].abs() <= MAX_VELOCITY);
@@ -788,5 +887,132 @@ mod tests {
         let f = CurrentField::Rotational { strength: 42 };
         let back: CurrentField = ron::from_str(&ron::to_string(&f).unwrap()).unwrap();
         assert_eq!(back, f);
+
+        let f = CurrentField::Tidal {
+            period_ticks: 4_000,
+            peak_vx: 256,
+            peak_vy: 0,
+            cycle_ticks: 60_000,
+            neap: Q10_ONE / 4,
+        };
+        let back: CurrentField = ron::from_str(&ron::to_string(&f).unwrap()).unwrap();
+        assert_eq!(back, f);
+    }
+
+    /// A tide reverses, and is slack twice a period.
+    ///
+    /// The property the whole variant exists for: there is no single answer to "should I hold on
+    /// or should I swim" on a slide where this runs.
+    #[test]
+    fn a_tide_floods_ebbs_and_goes_slack() {
+        let period = 4_000u32;
+        let f = CurrentField::Tidal {
+            period_ticks: period,
+            peak_vx: 256,
+            peak_vy: 0,
+            // No envelope, so this test is about the fast triangle alone.
+            cycle_ticks: 1,
+            neap: Q10_ONE,
+        };
+        let p = u64::from(period);
+        let at = |t: u64| f.velocity_at(3, 3, 16, 16, t).0;
+
+        assert_eq!(at(0), 0, "slack at the start of a period");
+        assert_eq!(at(p / 4), 256, "full flood a quarter in");
+        assert_eq!(at(p / 2), 0, "slack again at the half period");
+        assert_eq!(at(3 * p / 4), -256, "full ebb, the other way");
+        assert_eq!(at(p), at(0), "and it is periodic");
+
+        // Uniform in space: a tide is a prescribed drift, not a shear.
+        for (x, y) in [(0, 0), (7, 2), (15, 15)] {
+            assert_eq!(
+                f.velocity_at(x, y, 16, 16, p / 4),
+                (256, 0),
+                "a tide is the same everywhere"
+            );
+        }
+    }
+
+    /// The second timescale: springs run at full strength, neaps at `neap` of it.
+    ///
+    /// Read a quarter period in, where a tide is fastest, once near a spring and once near a
+    /// neap. The peak is `MAX_VELOCITY` because that is the CFL ceiling every current is clamped
+    /// to — a test that asked for more would be measuring the clamp.
+    ///
+    /// Not exact equalities: the envelope is itself a triangle, so a reading taken a quarter of a
+    /// *tide* away from the top of the *cycle* is a quarter-tide down the slow ramp too. The
+    /// assertions are the property — springs near the peak, neaps near a quarter of it — with
+    /// enough room for that offset and no more.
+    #[test]
+    fn the_spring_neap_envelope_modulates_the_tide() {
+        let period = 1_000u32;
+        let cycle = 100_000u64;
+        let f = CurrentField::Tidal {
+            period_ticks: period,
+            peak_vx: MAX_VELOCITY,
+            peak_vy: 0,
+            cycle_ticks: cycle,
+            neap: Q10_ONE / 4,
+        };
+        let p = u64::from(period);
+        let spring = f.velocity_at(1, 1, 8, 8, p / 4).0;
+        let neap = f.velocity_at(1, 1, 8, 8, cycle / 2 + p / 4).0;
+
+        assert!(
+            (MAX_VELOCITY - 4..=MAX_VELOCITY).contains(&spring),
+            "a spring tide should run at about the full peak of {MAX_VELOCITY}, got {spring}"
+        );
+        let quarter = MAX_VELOCITY / 4;
+        assert!(
+            (quarter - 4..=quarter + 4).contains(&neap),
+            "a neap should run at about a quarter of {MAX_VELOCITY}, got {neap}"
+        );
+        assert!(
+            neap * 3 < spring,
+            "the envelope has to bite or the second timescale buys nothing: \
+             spring {spring}, neap {neap}"
+        );
+    }
+
+    /// Every field of the variant reaches the state hash.
+    ///
+    /// Hard rule 7: a saved world proves it is the same world by its hash, and a parameter that
+    /// changes the simulation without changing the hash is a resumption that silently diverges.
+    #[test]
+    fn every_field_of_a_tide_reaches_the_state_hash() {
+        // Enums have no functional-record-update syntax, so the variant is built by hand and
+        // each case changes exactly one field.
+        let tide = |period_ticks, peak_vx, peak_vy, cycle_ticks, neap| CurrentField::Tidal {
+            period_ticks,
+            peak_vx,
+            peak_vy,
+            cycle_ticks,
+            neap,
+        };
+        let hash = |f: &CurrentField| {
+            let mut h = StateHasher::new();
+            f.hash_state(&mut h);
+            h.finish()
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        seen.insert(hash(&tide(4_000, 256, 32, 60_000, Q10_ONE / 4)));
+
+        for (label, v) in [
+            ("period_ticks", tide(4_001, 256, 32, 60_000, Q10_ONE / 4)),
+            ("peak_vx", tide(4_000, 257, 32, 60_000, Q10_ONE / 4)),
+            ("peak_vy", tide(4_000, 256, 33, 60_000, Q10_ONE / 4)),
+            ("cycle_ticks", tide(4_000, 256, 32, 60_001, Q10_ONE / 4)),
+            ("neap", tide(4_000, 256, 32, 60_000, Q10_ONE / 4 + 1)),
+        ] {
+            assert!(
+                seen.insert(hash(&v)),
+                "changing {label} did not change the state hash — it is missing from hash_state"
+            );
+        }
+        // And it does not collide with the variant whose tag is one below it.
+        assert!(
+            seen.insert(hash(&CurrentField::Convergent { strength: 4_000 })),
+            "a tide collides with a convergent field"
+        );
     }
 }

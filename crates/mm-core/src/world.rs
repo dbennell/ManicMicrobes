@@ -2020,10 +2020,12 @@ impl World {
 
     /// Rewrite the velocity field from the prescribed current plus the impulse layer.
     ///
-    /// Skipped entirely once written, unless a cilium has pushed on the water since. A
-    /// prescribed current does not depend on the tick.
+    /// Skipped entirely once written, unless a cilium has pushed on the water since — or the
+    /// current is one of the kinds that *does* depend on the tick, which
+    /// [`CurrentField::is_time_varying`] answers. Every variant but the tide is a function of
+    /// position alone and is written once.
     fn refresh_velocity(&mut self) {
-        if self.velocity_written {
+        if self.velocity_written && !self.scenario.current.is_time_varying() {
             return;
         }
         self.velocity_written = true;
@@ -2031,7 +2033,7 @@ impl World {
         // Take the impulse buffers out so the substrate can be borrowed mutably.
         let ix = std::mem::take(&mut self.impulse_x);
         let iy = std::mem::take(&mut self.impulse_y);
-        current.apply(&mut self.substrate, &ix, &iy, &self.stir_x, &self.stir_y);
+        current.apply(&mut self.substrate, &ix, &iy, &self.stir_x, &self.stir_y, self.tick);
         self.impulse_x = ix;
         self.impulse_y = iy;
     }
@@ -2390,6 +2392,56 @@ mod tests {
         .unwrap();
         still.run(100);
         assert_eq!(still.substrate().light_at(0, 0), 500);
+    }
+
+    /// The same property for the current, and it is the one a tide silently loses without.
+    ///
+    /// `refresh_velocity` wrote the prescribed field once and skipped it thereafter, on the
+    /// reasoning — true of every variant before `Tidal` — that a current does not depend on the
+    /// tick. A tide written once is a constant current, and nothing about the picture or the
+    /// matter ledger would have said so.
+    #[test]
+    fn a_tide_is_rewritten_every_tick_and_a_constant_current_is_not() {
+        let tide = |w: &World| w.substrate().velocity_at(4, 4).0;
+        let mut sea = World::new(Scenario {
+            width: 8,
+            height: 8,
+            current: crate::light::CurrentField::Tidal {
+                period_ticks: 64,
+                peak_vx: crate::fluid::MAX_VELOCITY,
+                peak_vy: 0,
+                cycle_ticks: 1,
+                neap: crate::fixed::Q10_ONE,
+            },
+            fluid_interval: 1,
+            ..Scenario::default()
+        })
+        .unwrap();
+        // Slack at tick zero, flooding a quarter period in, ebbing the other way at three
+        // quarters. Reading the substrate, not the regime, so this is the field cells actually
+        // swim in rather than the arithmetic that produced it.
+        assert_eq!(tide(&sea), 0, "a tide starts at slack water");
+        sea.run(16);
+        let flood = tide(&sea);
+        assert!(flood > 0, "the tide never came in: {flood}");
+        sea.run(32);
+        let ebb = tide(&sea);
+        assert!(ebb < 0, "the tide never turned: {ebb}");
+
+        let mut river = World::new(Scenario {
+            width: 8,
+            height: 8,
+            current: crate::light::CurrentField::Uniform { vx: 100, vy: 0 },
+            fluid_interval: 1,
+            ..Scenario::default()
+        })
+        .unwrap();
+        river.run(100);
+        assert_eq!(
+            river.substrate().velocity_at(4, 4).0,
+            100,
+            "a constant current is still constant"
+        );
     }
 
     #[test]
