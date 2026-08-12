@@ -34,6 +34,10 @@ ones**. Read this page before trusting anything below it.
   dial that moves which strategy wins (§9).
 * **A fat prey is worth 240% of a division to its killer, by `EAT` alone** — `apply_deaths`
   returns the whole cytoplasm to the square before any of predation's lossy arithmetic applies.
+* **A current costs a slide almost all of its population** (§15.2). `the_drift.ron` carries 60
+  cells; the same slide in still water carries 2,249, and `soup.ron` carries 1,072 on less than
+  half the area. Whatever else that world measures, it measures it on a population two orders of
+  magnitude below the rest of the panel.
 
 ### What has been corrected, and where
 
@@ -46,6 +50,12 @@ ones**. Read this page before trusting anything below it.
 | §12.1, "the earning pair cannot be stacked" | fixed. A lysosome is now catalase; see below |
 | §4b, "not the cost of swimming — motility is nearly free and nearly useless" | §14 — the cost is right and the rest is not. Below 192 `Q10` of thrust a cell was driven *backwards* by its own wake, and every cilium in the library was under it. **Fixed in §14.7** |
 | §12.3, "the sensors and cilia work, and have been judged on the wrong slide" | §14.4 — half withdrawn. `drifter.mm`'s 927‰ in the drift was its cilia holding station against the current with their backwash, not swimming. Every motility number in this document predating §14.7 is about a body that could not move forward |
+| **any payoff or "best share" figure taken before §15** | §15.1 — a world that killed both lineages scored 500 and the gate counted it. Five of eleven contenders were passing payoff on a world that had wiped them out, and the organelle table inherited the same 500s |
+| **`parasite.mm` "wins by parasitism"** | §16.4 — it has never injected anything. Its advantage was forced junctions squatting other cells' slots, and the forced-join penalty was priced under the budget of the only genome that paid it |
+| **"the worlds are fine, it is the prices"** | §16 — four new kinds of scarcity moved exactly one organelle above the payoff floor, and the reference still wins 78 of 92 matchups. §1 cannot be routed around by scenario design |
+| **§11, read as "the hoarder loses the storage contest"** | §16.2 — it has never survived a night at any period or floor, while a dearer battery-less body survives all of them. There has been no contest |
+| **`CHEMISTRY.md` §6's carbon table** | §16 — the cliff moved with the tempo pass. 10 units a square was 1032 cells and is now 559; 4 was 347 and is now 15 |
+| **§2a's `drift` column, and any gate reading that used it** | §15.2 — that world carries sixty cells against its own still-water 2,249, so two identical lineages drift apart neutrally. Its bout is now 3,000 ticks, and its founders start inside the channel rather than outside it |
 
 ### What has landed in the code
 
@@ -62,24 +72,52 @@ ones**. Read this page before trusting anything below it.
   making, so a cilium is a pump and a propeller rather than one or the other.
 * **Six parameters reach the state hash** that did not, and a guard enumerates the config so it
   cannot happen again.
+* **The payoff gate stopped counting worlds that killed the contender** (§15.1). A bout both
+  lineages died in returns the "nobody won" sentinel, and `Row::best` was taking a plain maximum
+  over it. Six of eleven contenders fail payoff now where one did.
+* **A forced junction costs sixteen times what it did** (§16.4). The old penalty and *zero* gave
+  the same answer, so consent was economic only on paper. `parasite.mm` goes 958 to 578 and its
+  entire advantage turns out to have been junction-squatting — it has never injected anything.
+* **Four worlds that ask something the library never asked** (§16): matter binding before space,
+  a night on the scale of a life, light as a gradient in space, and a tide. Two needed no engine
+  work — `DayNight` and `Directional` had been in the code since M1 with no scenario using either.
+* **`CurrentField::Tidal`** (§16), the first current that is a function of time. `refresh_velocity`
+  had to learn that a current can vary: it wrote the prescribed field once on the reasoning that a
+  current does not depend on the tick, which was true of every variant before this one.
+* **`drift`'s bout is 3,000 ticks and its lanes are inside the channel** (§15.2). The first is
+  what lets the fairness control pass at full length — the world is a sixty-cell population whose
+  mirror random-walks, not a slide with a better half. The second is so that the column measures
+  the walls and the detritus it advertises.
 
 ### The open questions, in the order they matter
 
-1. **Does specialising lose because the world is packed?** With catalase, a metabolic specialist
+1. **A second income source, and it now outranks everything else** (§16.3). Nine worlds, four of
+   them built to reward machinery the autotroph does not carry, and the reference still wins 78 of
+   92 matchups. Scenario design cannot route around §1: until an organelle other than the
+   mitochondrion appears in the income expression, the cheapest sufficient body wins wherever it is
+   put. Lysis on the spike's free `control[1]`, and a wound that leaks.
+2. **`hoarder.mm` cannot survive a night** (§16.2), at any period or floor, while a dearer
+   battery-less body survives all of them. The vacuole's economics are unmeasured rather than
+   measured-and-bad, and the genome is what to fix.
+3. **Does specialising lose because the world is packed?** With catalase, a metabolic specialist
    survives at depth 3, 4 and 6 — and its share *falls* with depth: 365, 294, 230, 221. The
    hypothesis is §3 returning: `radius` goes as the square root of mass, a fifteen-organelle cell
-   takes more area, and a share counted in cells falls by construction. **This is unmeasured.** It
-   wants the specialist's mass and radius against the ancestor's, and it is the single most
-   valuable hour left in this document — if it holds, a space-bound world always rewards "small
-   and numerous", no amount of earning beats it, and §10.4 stops being an also-ran.
-2. **Give the acquisition routes something to deliver** (§10.2, §12.2). Lysis on the spike's free
-   `control[1]`, and a wound that leaks. Unchanged and still the largest piece of work.
-3. **Price the vacuole on what it holds rather than how large it is** (§11.4). It is the one
-   catalogue entry whose function is economic and the one where the price decides the outcome.
-4. **Measure on worlds that vary.** Free, and already paying: `drifter.mm` is 19‰ in the still
-   soup and 927‰ in the drift. The sensors and cilia are not broken; they have been judged on the
-   one slide where nothing they report is worth knowing. — **The cilia are broken; see §14.** The
-   worlds still want varying and the 927‰ is not evidence for it.
+   takes more area, and a share counted in cells falls by construction. **This is unmeasured**, and
+   `the_lean_water` (§16) is now the slide to measure it on, because it is the one world where the
+   limit is not area. If it holds, a space-bound world always rewards "small and numerous".
+4. **`read_sensor` has no junction-port arm** (§16.4), so no genome can tell whether it is joined,
+   `parasite.mm`'s infection half is dead code and SPEC §8.2's conjugation channel is unreachable
+   from the ISA. One match arm, and it unblocks a whole strategy class.
+5. **The sensor trio, on bodies that can move** (§16.1). Cilium 280, chemosensor 176, photosensor
+   280, unchanged by a world with a gradient in it. §14.7 repaired the engine after every motility
+   number in this document was taken, and the genomes have not been rewritten against the fix.
+   `the_shallows` is built and waiting for them.
+6. **Price the vacuole on what it holds rather than how large it is** (§11.4). Below the two items
+   above now: §16.2 says its economics have never been measured, so pricing it would be tuning
+   against a genome that cannot survive the test.
+7. **Why does a current cost `the_drift.ron` 97% of its population?** (§15.4) Sixty cells against
+   the same slide's 2,249 in still water. `the_tide.ron` carries 2,222 with a reversing flow, which
+   narrows it: whatever it is, it is one-way transport rather than moving water as such.
 
 ### What §14 adds, and it is the largest thing outstanding
 
@@ -1502,3 +1540,390 @@ Still open, and cheap:
 * **What a lysosome should cost now that it does two jobs.** It digests carrion and decomposes
   peroxide on one capacity and one upkeep. That is defensible — one machine, two substrates — but
   it was priced when it did one of them.
+
+---
+
+## 15. Two faults in the harness, and what the panel says once they are out
+
+Everything above §14 was measured through `mm_core::balance`, and two of its numbers were not
+measuring what they said. Neither is an economic finding; both changed what the economic findings
+looked like, so they belong here rather than in a commit message.
+
+### 15.1 The payoff gate was crediting worlds that had killed the contender
+
+`Bout::share` returns `EVEN` — a dead heat — when *both* lineages are extinct at the end, and its
+own field documentation says why: "nobody won, and reporting it as a draw at zero would drag a
+genome's average down for a world that killed everyone." That is right. What was wrong is that the
+500 it returns is a **sentinel for "no result"**, and every statistic downstream read it as a
+result.
+
+`Row::best` was a plain maximum over the row. So a contender that died outright in a world scored
+500 there, 500 clears `PAYOFF_FLOOR` of 400, and the payoff gate — whose whole question is *"is
+there any world in which this machinery is roughly competitive?"* — answered yes on the strength of
+a world that had wiped the cell out. The same sentinel reached `spread`, `wins` and
+`distinct_winners`, and the per-arena median was taken over dead seeds as well as live ones, which
+matters more than it sounds: a median of three seeds is decided by any two of them, so two
+wipe-outs and one real bout reported the wipe-out.
+
+Fixed by asking, per arena and per seed, whether the bout was a contest at all — `Bout::contested`,
+`Row::contested` — and excluding the ones that were not from every aggregate. On the shipped
+library at a quarter-length panel, the gate went from naming one contender to naming six:
+
+```text
+                 best, as gated     best where it lived
+     hoarder                500                     363
+      hunter                500                      20
+      marble                500                     288
+    predator                500                     195
+     stalker                500                     339
+     drifter                281                     281   (already failing)
+```
+
+Every one of those false passes came from the `seasons` column, which kills the reference too. The
+organelle table moved with it, since it reads the same function: **vacuole 500 → 363, cilium
+500 → 339, photosensor 500 → 339**, all three of which now read "pays nowhere" and did not before.
+`spike` fell 500 → 483 and still clears the floor.
+
+None of this made the library worse. It was already this bad; the gate was not saying so.
+
+### 15.2 `drift` had no better half. It had sixty cells
+
+The fairness control refused the full-length panel outright: `the_drift.ron` mirrored 557 against a
+tolerance of 50, at three seeds and again at five. Read as designed, that says the slide has a
+better half and every number taken from it is measuring the terrain.
+
+It does not, and this is the more useful of the two faults. **Over twelve seeds the world's median
+is 491.** It is not biased in either direction. What it has is scatter — a range of 213 parts in a
+thousand — and a median of five consecutive seeds out of that distribution lands up to 82 away from
+even. The control fired on variance and reported it as bias, because one number cannot tell them
+apart.
+
+Where the variance comes from, measured on the same slide:
+
+```text
+  the_drift.ron, two identical lineages, population at tick 12000
+
+    as shipped (current vx=128)          60 cells    share walks: 514 -> 383 over one bout
+    same slide, still water            2249 cells    share pinned at 495
+    soup.ron, for scale (64x64)        1072 cells    share pinned at 497 from tick 4500
+```
+
+The drift world is 96 squares square — **more than twice `soup.ron`'s area and it carries a
+eighteenth of the population**, and the current is the whole of the difference. Sixty cells split
+between two lineages is thirty each, and thirty is small enough that two *identical* lineages drift
+apart neutrally: the share is a random walk, and a random walk's spread grows with the length of
+the walk. That is the entire phenomenon. It is not an economy result, it is Wright and Fisher.
+
+Which immediately says what does and does not fix it. More founders does not — the spread is 153 to
+319 at every count from 8 to 128, because the population converges to the same sixty whatever it
+starts from. Shortening the bout does, because the walk has less time to wander, and the world
+converges by about tick 1,500 so nothing is lost:
+
+```text
+    ticks    range over 12 seeds    worst median-of-5
+    12000                    213               82   <-- refused the panel
+     6000                    141               25
+     3000                    117               21
+```
+
+The `drift` entry is now 3,000 ticks. **Not a widened tolerance** — widening it to admit this world
+would blind the control to every real better half by the same amount, and the column would still be
+noise, it would merely stop saying so.
+
+A second thing fell out of reading that code and is worth recording separately, because it is not
+what fixed the mirror. `Layout::Horizontal` sets each side's lane an eighth of the slide in from its
+edge, which on a 96-square slide is y=12 and y=83 — and `the_drift.ron`'s channel runs y=34..61
+between walls at y=32..33 and y=62..63. **Both lineages were being seeded outside the channel**, in
+open water, with no barrier to grip and none of the detritus, which only enters between y=34 and
+y=61. The panel entry promises "a current, particulate food that lags it, and walls to hold on to"
+and was placing every contender where none of the three exist — the same correction §8a had already
+had to make by hand to get a reading out of `sponge.mm`. Arenas now carry a `lane`, and drift's is
+34, the row immediately inside the upper wall, mirroring to 61 inside the lower one.
+
+That does **not** fix the mirror and was measured not to: the population stays at 57 to 66, because
+the reference is a photo-autotroph that neither eats detritus nor holds on to anything. What it
+buys is the column. On two runs of the same 3,000-tick bout differing only in where the founders
+start, **`sponge.mm` goes from 500 to 666 in the drift and `holdfast`'s best in the organelle table
+goes with it** — the one shipped genome built to hold on to a wall could not reach a wall, and the
+panel had been scoring it on that.
+
+### 15.3 The panel, at full length, with both faults out
+
+Five seeds, every world at its own length, and the fairness control level on all five for the first
+time — `drift` at 530 where it was 557 and refusing.
+
+```text
+                  soup   thicket      dusk   seasons     drift     best  spread  wins
+     drifter        2        89         0         0*      288       288     288     0
+     hoarder      196       182         0       n/c-      326       326     326     0
+      hunter        0*        0         0*      n/c-        0*        0       0     0
+      marble      259       283         0*        0*      341       341     341     0
+  oscillator      439       454       468       983       461       983     544     1
+    parasite      960       551       618       n/c-      867       960     409     4
+    predator       43         0         0*      n/c-      166       166     166     0
+   scavenger      410       446       497         0       433       497     497     0
+   sentinel       400        76       564       n/c-      522       564     488     2
+      sponge      401       412       379       n/c-      666       666     287     1
+     stalker        0*        0*        0*      n/c-      288       288     288     0
+
+  viability      pass
+  payoff         FAIL   ["drifter", "hoarder", "hunter", "marble", "predator", "stalker"]
+  discrimination pass   median spread 326 (floor 100), distinct winners 2
+  no sweep       pass
+```
+
+Six of eleven pay nowhere — the same six the quarter-length panel names, so the verdict is not an
+artefact of bout length. Read the organelle table under it and the shape is one finding rather than
+four: **vacuole 341, cilium 288, chemosensor 288, photosensor 288.** Storing, swimming, smelling
+and seeing all fail together, and §1 says why they must — none of them appears in the income
+expression, so each can only add upkeep. `the_drift.ron`'s own header says the other half of it:
+
+> *"What makes this different from every other scenario is that food goes past. Everywhere else a
+> cell's next meal is in the square it is standing in, so position is worth nothing and nothing has
+> ever evolved to hold one."*
+
+Food everywhere and always is what makes sensing, swimming, holding station and storing pure cost.
+That is a property of the *worlds*, not of the prices, and it is why §9a's result — that scaling the
+whole catalogue fourfold changes nothing — is the one to believe over any argument about upkeep.
+
+The last line worth reading off this matrix is the one nothing gates: **the reference is ahead in 44
+of the 49 matchups that were a contest.** The only contender winning more than one world is
+`parasite`, which is the ancestor plus a touch sensor and a junction port — and whose junction
+mechanism has never once fired (§8). The best non-autotroph in the library is the autotroph with a
+cheaper body, winning on upkeep rather than by earning anything.
+
+### 15.4 What is still wrong with `drift`, and it is not the harness
+
+Nothing above rescues the world itself. A slide running at **3% of its own still-water capacity**
+is one where almost nothing can make a living, filter feeders included, and the panel's most
+discriminating column is also its least populated. The obvious question — whether the current is
+carrying cells off the slide, or merely stopping them settling long enough to divide — is one probe
+and has not been run.
+
+
+---
+
+## 16. Four worlds, because the prices were never the problem
+
+§15.3 left the organelle table reading vacuole 341, cilium 288, chemosensor 288, photosensor 288 —
+storing, swimming, smelling and seeing all paying nowhere and all failing *together*. §9a says why
+that cannot be a pricing fault: scaling the whole catalogue from a quarter to double changes the
+evolved loadout not at all. Four capabilities fail together because they are worth what the
+information or the position they buy is worth, and **every world in the library held still.**
+
+`the_drift.ron`'s own header had already said it, and it is the sentence this section exists to
+act on:
+
+> *"What makes this different from every other scenario is that food goes past. Everywhere else a
+> cell's next meal is in the square it is standing in, so position is worth nothing and nothing has
+> ever evolved to hold one."*
+
+So: four new worlds, each naming one scarcity and the mechanic it should pay for. Two of them
+needed no engine work at all — `LightRegime::DayNight` and `LightRegime::Directional` had been in
+the code since M1 with **no shipped scenario using either**, and `Directional`'s own doc says it
+"is the scenario that phototaxis has a reason to evolve in".
+
+| world | scarcity | for |
+| --- | --- | --- |
+| `the_lean_water` | structural matter binds before space | anything that earns more per cell |
+| `the_short_night` | income stops and starts within a life | the vacuole |
+| `the_shallows` | light is a gradient in space | photosensor, cilium |
+| `the_tide` | the flow reverses and varies | holdfast against cilium, alternately |
+
+`CurrentField::Tidal` is the one piece of engine work: flow that reverses each half period under a
+slower spring/neap envelope, on `LightRegime::Seasonal`'s two-timescale argument that one triangle
+cannot modulate another. A spring runs at `MAX_VELOCITY`, past what a cilium at `param 80` can
+produce; a neap at an eighth of it is not. **That contrast is the whole design** — if the two
+cross, the slide poses nothing.
+
+### 16.1 What the numbers said, including where they said no
+
+All nine worlds pass the fairness control. Three seeds, each world at its own length:
+
+```text
+                  soup   thicket      dusk   seasons     drift      lean     night  shallows      tide     best  spread  wins
+     drifter        2        95         0         0*      176         0        29         0*        9       176     176     0
+     hoarder      213       187         0*      n/c-      326       407         0*        0       112       407     407     0
+      hunter        0*        0         0*      n/c-        0*        0*        0*        9         0*        9       9     0
+      marble      246       283         0*        0*      341        43       190       236       174       341     341     0
+  oscillator      439       452       455       983       461       290       482       460       473       983     693     1
+    parasite      958       551       624       n/c-      884       552       752       872       869       958     407     8
+    predator       39         0         0*      n/c-      166       144         0*       23         2       166     166     0
+   scavenger      410       446       495         0       433       337       432       420       493       495     495     0
+    sentinel      403        76       578       n/c-      522       440       197       250       379       578     502     2
+      sponge      395       412       379       n/c-      666       646       376       352       671       671     319     3
+     stalker        0*        0*        0*      n/c-      280        29         0*        0*        0*      280     280     0
+
+  viability      pass
+  payoff         FAIL   ["drifter", "hunter", "marble", "predator", "stalker"]
+  discrimination pass   median spread 341, distinct winners 3
+  no sweep       pass
+```
+
+**`the_lean_water` did what it was built to do.** `hoarder` reaches 407 there — its only score above
+the payoff floor anywhere, ever — and the vacuole's best in the organelle table goes 341 → 407.
+Payoff failures fall from six to five. This is §3 confirmed from the other side: when space is the
+limit nothing can pay, and the moment matter binds instead, an organelle starts to.
+
+**`the_tide` carries 2,222 cells against `the_drift.ron`'s 60**, which is the drift's central defect
+(§15.2) fixed by the mechanic rather than by tuning: a reversing current brings back what a constant
+one washes off the slide. It gives the holdfast its best score, 671.
+
+**The drift is not redundant**, which was worth measuring rather than assuming. It is still the best
+world for `drifter` (176), `stalker` (280), `predator` (166) and `marble` (341) — the weakest bodies
+in the library do least badly on the emptiest slide, which is its own finding and not a flattering
+one.
+
+**`the_shallows` did not work.** Cilium 280, chemosensor 176, photosensor 280: unchanged, all three
+still paying nowhere. A gradient in space was the obvious missing ingredient and it was not
+sufficient. That moves the sensor trio to the front of the queue rather than settling it, and §14 is
+the reason to expect more from a second attempt than from this one — nothing in this engine could
+swim forward until `14.7`, so every motility number older than that fix was taken on a body that
+could not move, and the genomes have not been revisited since.
+
+### 16.2 The hoarder has never survived a night, so its economics have never been measured
+
+`the_short_night` failed at its stated job and returned something better than success.
+
+Swept across every period and floor tried — and the ancestor lives through all of them:
+
+```text
+    period  floor   ancestor   hoarder   sponge
+      2000      0        975         0        0
+      2000    128        954         0      788
+      2000    256        955         0      781
+      1000    128        978         0      835
+      4000    256        944         0      805
+```
+
+**`hoarder.mm` reaches zero at every setting**, while `sponge.mm` — a *dearer* body carrying no
+battery at all — survives every one of them. It is therefore neither the depth of the night nor the
+cost of the cell. The battery does not work.
+
+That sharpens §11.3's "storing against the dark still does not pay" into something falsifiable, and
+corrects how §11 has been read: the hoarder was never losing a contest about storage economics,
+because it has never lived long enough to hold one. **Fixing the genome comes before pricing the
+vacuole**, and it means `lean`'s 407 is the vacuole earning its osmotic exemption rather than
+earning anything by storing.
+
+A floor of zero also culls `sponge`, which is `seasons`' fault exactly — a dark phase below the
+extinction knee. The shipped world uses 128, an eighth of full daylight, where the ancestor keeps
+954 of its 1,082 and a body as dear as the sponge's still lives.
+
+### 16.3 What has not moved, and it is the thing that matters
+
+**The reference is ahead in 78 of the 92 matchups that were a contest.** Nine worlds instead of
+five, four of them built specifically to reward machinery the autotroph does not carry, and the
+ancestor still wins 85% of the matrix. `parasite` — the ancestor plus a touch sensor and a junction
+port, whose junction mechanism has never once fired — now wins eight of the nine worlds.
+
+That is §1 refusing to be routed around, and it should be read as the decisive argument for what to
+do next. Worlds change *what* is scarce. They cannot change the fact that **respiration is the only
+income and one organelle sets its rate**, so every other entry in the catalogue competes on upkeep
+alone and the cheapest sufficient body wins wherever it is put. Four new kinds of scarcity bought
+one organelle a payoff, and it was the one whose function is osmotic rather than metabolic.
+
+The order the panel now argues for:
+
+1. **A second income source.** Lysis on the spike's free `control[1]`, and a wound that leaks
+   (§10.2, §12.2). Until something other than the mitochondrion appears in the income expression,
+   no world can make a specialist pay and no price can either.
+2. **Fix `hoarder.mm`**, then re-cut nothing — `the_short_night` is already the instrument.
+3. **The sensor trio, on bodies that can move.** §14.7 repaired the engine and the genomes have not
+   been rewritten against it; `the_shallows` is now waiting for them.
+
+### 16.4 The parasite was never a parasite, and the deterrent was never deterring
+
+`parasite.mm` wins eight of the nine worlds and should not win any. Its books are worse than the
+reference's — net 906 `Q10` a tick against 950 — and its genome is 346 bytes against 227, so it
+earns less and copies slower. It scores 958 of 1000 in the soup. Something outside the ledger was
+paying for it, and finding out what took three measurements, two of which killed an obvious answer.
+
+**It has never injected anything, and that is still true.** §8 recorded this and it holds on the
+current tree: the `#infect` gene branches on `OGET` of the junction port, `sensing::read_sensor` has
+no arm for `OrganelleType::JunctionPort`, so it falls through to `_ => None` and `.unwrap_or(0)`
+hands the genome a zero for ever. The `connected` label is unreachable and the `INJECT` loop behind
+it has never executed. Confirmed by event log rather than by reading: `first foreign injection` is
+`None` after 12,000 ticks of a mixed slide.
+
+**The receptor key is not a lock. It is a price tag.** This is the part worth internalising, because
+it makes an obvious fix a non-fix. In `CellHost::join`, `matched` has exactly one use:
+
+```rust
+let matched = key == cells.key[j];
+let cost = junction::join_cost(&config.junctions, matched, target_membrane);
+```
+
+The junction is then written regardless. A mismatched `JOIN` **succeeds**; it merely costs more. So
+widening the key from its 7 bits to 8 would halve the odds of the cheap path and leave the forced
+path untouched — it would make a brute-forcer pay *more often*, not stop it. Any argument that the
+key protects a colony has to go through the price, because there is nothing else there.
+
+**What it actually does is force junctions.** `first forced junction` at tick 500, and 2,636 live
+junction ends across 1,512 cells at the end of the run. A junction takes a slot at *both* ends and
+tethers the pair, so a cell that spends its life joining strangers with wrong keys is filling their
+slots and dragging them about. That is a parasitism — squatting and entanglement rather than writing
+to a nucleus — and it is the one the engine actually produced, as against the one its author wrote.
+
+**And the deterrent that was supposed to price it was doing nothing.** `JunctionConfig`'s own
+comment claimed two orders of magnitude between a consensual join and a forced one made
+"brute-forcing 128 keys a real decision rather than a formality". Swept:
+
+```text
+    forced penalty     0x     1x     4x    16x    64x
+    parasite share    953    958    950    578    482
+```
+
+**Zero and the shipped value are indistinguishable.** A forced join cost 48 energy against a cell
+holding about 111 and earning 0.88 a tick, so it could afford one roughly as often as its 87-tick
+expression cycle came round: the penalty sat under the budget of the only genome that ever paid it.
+At 64x — where it can never afford one at all — the parasite falls to 482, which is its ledger
+exactly. **Its entire advantage was the junctions.**
+
+`join_forced_penalty` is now `Q10_ONE * 32`, sixteen times what it was. Sixteen and not sixty-four
+because the stated gate is "a real decision", not "an impossibility": the parasite still leads, and
+forcing is now something a genome saves up for. The change cannot touch a colony — a clonal lineage
+shares its key and pays `join_base_cost`, which is untouched — and a thick membrane still multiplies
+it, so `marble.mm` at `param 255` costs an attacker ten times what a default 24 does.
+
+### 16.5 What the sixteenfold actually bought, which is not what it was aimed at
+
+Re-run, nine worlds, three seeds. `parasite` before and after:
+
+```text
+             soup  thicket   dusk  seasons  drift   lean  night  shallows   tide    best  wins
+    before    958      551    624     n/c-    884    552    752       872    869     958     8
+     after    578      625    521      277    715    519    662       672    492     715     7
+```
+
+The target was hit. Its best falls 958 to 715, the soup 958 to 578, the tide 869 to 492 — and the
+touch sensor and junction port fall with it in the organelle table, from 958 to 715, because
+`parasite` was the only carrier of either. **`distinct_winners` goes 3 to 4**: the panel now names
+four different genomes best-in-some-world (`parasite`, `sponge`, `sentinel`, `oscillator`) where it
+named three.
+
+Two things it did that were not aimed at, and both are worth more than the intended effect.
+
+**The parasite got hardier where the world is lean.** It now survives `seasons` at 277 where it was
+`n/c` — extinct at every seed — and its spread widens from 407 to 438. Not spending its budget
+forcing junctions is worth more in a world that kills than the junctions ever were. A deterrent that
+bites hardest where energy is scarcest makes the genome that pays it *better* at scarcity, which is
+not a thing the price list can express and is worth remembering before pricing anything else.
+
+**And the space it vacated went to the reference, not to the other strategies.** The ancestor is
+ahead in 80 of 93 contested matchups, against 78 of 92 before — 84% to 86%. Knocking down the
+second-best promoted the *first*, not the third.
+
+That last line is §1 arriving again and it is the argument for what to do next. While respiration is
+the only income and one organelle sets its rate, every intervention that costs a challenger
+something hands the difference to whoever carries least, which is always the reference. Pricing can
+redistribute among the losers. It cannot make a second way of earning a living, and until there is
+one the shape of this matrix is fixed.
+
+Two things this leaves open, and the first is not a balance question:
+
+* **`read_sensor` has no junction-port arm.** Until it does, no genome can tell whether it is
+  joined, `parasite.mm`'s infection half is dead code, and the whole of SPEC §8.2's conjugation
+  channel is unreachable from the ISA. This is the single cheapest unblocking in the document.
+* **Whether forcing should be able to fail at all**, rather than always succeeding at a price. That
+  is a §8.2 question and not one to settle by tuning a constant.
