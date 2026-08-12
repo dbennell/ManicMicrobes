@@ -52,6 +52,42 @@ jobs:
           rustup default stable
           rustc --version
 
+      # First, because it costs a second and everything below it costs twenty minutes.
+      #
+      # The archive names, the macOS `Info.plist` and the release title all take their number
+      # from the *tag*; the binary's own version is `CARGO_PKG_VERSION`, which comes from
+      # `Cargo.toml` and is what `mm-app` puts on screen. Ship those apart and the download is
+      # called one thing and calls itself another.
+      #
+      # `v0.1.0`'s tag message — "a tag that disagrees with Cargo.toml ships the wrong number"
+      # — has been the rule since the first release and was enforced by remembering. This is
+      # the rule with teeth.
+      #
+      # Exact equality, including any prerelease suffix: a `v0.3.0-rc.1` tag wants
+      # `version = "0.3.0-rc.1"` in the workspace, because that is the number the binary in
+      # that archive will report.
+      - name: The tag agrees with Cargo.toml
+        if: github.ref_type == 'tag'
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          # Ask cargo rather than reading the file, so that a crate overriding the inherited
+          # `[workspace.package] version` cannot hide here.
+          mapfile -t crates < <(
+            cargo metadata --no-deps --format-version 1 | jq -r '.packages[].version' | sort -u
+          )
+          if [[ ${#crates[@]} -ne 1 ]]; then
+            echo "::error::the workspace crates disagree on their version: ${crates[*]}"
+            exit 1
+          fi
+          if [[ "$tag" != "${crates[0]}" ]]; then
+            echo "::error::tag is v${tag} but Cargo.toml says ${crates[0]}"
+            echo "Bump [workspace.package] version to ${tag}, commit, and put the tag on that"
+            echo "commit — the bump comes first and the tag goes on it. Never move a tag that"
+            echo "has already been pushed."
+            exit 1
+          fi
+          echo "v${tag} matches Cargo.toml"
+
       - name: cargo fast
         run: cargo fast --locked
 
