@@ -383,9 +383,34 @@ jobs:
       - name: Release notes
         run: |
           version="${GITHUB_REF_NAME#v}"
+
+          # The instruction set version, which is the compatibility fact a downloader
+          # actually needs and is not derivable from the release number. It is deliberately
+          # *not* tied to the semver major: it versions the artefacts — genomes, scenarios,
+          # snapshots — rather than the software, the way a file format version does, and
+          # tying the two would announce a rewrite every time an opcode moved. See hard rule
+          # 8 in CLAUDE.md.
+          #
+          # Read from the source rather than from a binary, because this job only unpacks
+          # artefacts and never builds. Blank would be worse than absent, so it fails loudly.
+          isa=$(grep -oP 'pub const ISA_VERSION: u16 = \K[0-9]+' crates/mm-core/src/isa.rs)
+          if [[ -z "$isa" ]]; then
+            echo "::error::could not read ISA_VERSION from crates/mm-core/src/isa.rs"
+            exit 1
+          fi
+          echo "ISA version $isa"
+
           cat > notes.md <<NOTES
           Pre-release. There is no stable save format yet, and a slide written by
           one version may not open in the next.
+
+          **Instruction set version ${isa}.** Every genome, scenario and snapshot
+          carries this number, and one carrying a different number is refused
+          rather than misread — under another instruction set the same bytes are a
+          different program. So archives written by an earlier release will not
+          open here, and this is the number to quote when reporting what a genome
+          did. It is versioned separately from the release on purpose: it says
+          what can be *read*, not what has changed.
 
           Each archive holds the microscope and \`mm-cli\`, the headless runner,
           along with the scenarios, the genomes and both licences. Nothing to
