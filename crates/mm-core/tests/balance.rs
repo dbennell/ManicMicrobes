@@ -126,11 +126,18 @@ fn show(report: &Report) {
     for row in &report.rows {
         eprint!("{:>12}", row.name);
         for (a, s) in row.share.iter().enumerate() {
+            // No contest: both lineages were extinct at every seed, so there is no share to
+            // report and the world is excluded from best, spread and wins. Printing the
+            // sentinel here as though it were a 500 draw is exactly how it was missed.
+            if !row.contested.get(a).copied().unwrap_or(true) {
+                eprint!(" {:>8}-", "n/c");
+                continue;
+            }
             let mark = if row.alive.get(a).copied().unwrap_or(false) {
                 ' '
             } else {
-                // Died everywhere in this world at every seed. The share is still reported,
-                // because "extinct against a lineage that also died" is not the same as "lost".
+                // Died everywhere in this world at every seed, against a reference that did
+                // not. That is a real reading — it lost — and it is kept.
                 '\u{2020}'
             };
             eprint!(" {s:>8}{mark}");
@@ -142,9 +149,10 @@ fn show(report: &Report) {
             row.wins()
         );
     }
-    eprintln!("\n(permille of the two-lineage population, median of {} seeds. 500 is a dead heat.\n \
-               \u{2020} = the lineage was extinct at the end of every seed.)",
-        3);
+    eprintln!("\n(permille of the two-lineage population, median of the seeds that were a \
+               contest. 500 is a dead heat.\n \
+               \u{2020} = the lineage was extinct at the end of every seed.\n \
+               n/c = no contest: both lineages died, so that world is no reading at all.)");
 
     eprintln!("\nbest share reached by any contender carrying each organelle:");
     for (kind, best) in report.by_organelle() {

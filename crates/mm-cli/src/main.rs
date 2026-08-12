@@ -625,6 +625,13 @@ fn cmd_balance(args: &[String]) -> Result<(), String> {
     for row in &report.rows {
         print!("{:>12}", row.name);
         for (a, share) in row.share.iter().enumerate() {
+            // A world that killed both lineages has no share to report — the number the bout
+            // carries there is the "nobody won" sentinel, and printing it as 500 next to a gate
+            // that (rightly) ignores it is how it went unnoticed. Say there is no reading.
+            if !row.contested.get(a).copied().unwrap_or(true) {
+                print!(" {:>8}-", "n/c");
+                continue;
+            }
             let mark = if row.alive.get(a).copied().unwrap_or(false) {
                 ' '
             } else {
@@ -640,8 +647,12 @@ fn cmd_balance(args: &[String]) -> Result<(), String> {
         );
     }
     println!(
-        "\npermille of the two-lineage population, median of {} seeds. 500 is a dead heat.\n\
-         * = the lineage was extinct at the end of every seed in that world.",
+        "\npermille of the two-lineage population, median of the seeds that were a contest. \
+         500 is a dead heat.\n\
+         * = the lineage was extinct at the end of every seed in that world.\n\
+         n/c = no contest: both lineages were extinct at every seed, so that world is excluded \
+         from best, spread and wins.\n\
+         (of {} seeds run.)",
         seeds.len()
     );
 
@@ -695,10 +706,12 @@ fn cmd_balance(args: &[String]) -> Result<(), String> {
         for row in &report.rows {
             for (a, share) in row.share.iter().enumerate() {
                 out.push_str(&format!(
-                    "{{\"genome\":\"{}\",\"world\":\"{}\",\"share\":{share},\"alive\":{}}}\n",
+                    "{{\"genome\":\"{}\",\"world\":\"{}\",\"share\":{share},\"alive\":{},\
+                     \"contested\":{}}}\n",
                     row.name,
                     report.arenas[a],
-                    row.alive.get(a).copied().unwrap_or(false)
+                    row.alive.get(a).copied().unwrap_or(false),
+                    row.contested.get(a).copied().unwrap_or(true)
                 ));
             }
         }

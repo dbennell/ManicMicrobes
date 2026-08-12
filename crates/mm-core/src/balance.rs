@@ -83,6 +83,11 @@ pub const MIRROR_TOLERANCE: u32 = 50;
 /// a spike *should* be a worse deal than a chloroplast in a well-lit pond. Four hundred says the
 /// machinery costs something and is not a death sentence; below it, a feature is decoration that
 /// a cell pays upkeep for.
+///
+/// **The world it clears the floor in has to be one it survived.** A bout both lineages died in
+/// scores `EVEN` — the sentinel for "nobody won" — and while that was counted as a reading, a
+/// contender could clear this floor on the strength of a world that wiped it out. See
+/// [`Row::best`], which is where that is now refused.
 pub const PAYOFF_FLOOR: u32 = 400;
 
 /// How many of one organelle a specialist should be able to carry and still live.
@@ -175,6 +180,23 @@ pub struct Bout {
     /// Cells no longer running the genome their side entered. See `arena::copy_damaged` — with
     /// mutation off a genome still drifts, because `COPYB` skips bytes a cell cannot pay for.
     pub copy_damaged: u32,
+}
+
+impl Bout {
+    /// Whether this bout was a contest at all: did *either* lineage survive to be counted.
+    ///
+    /// The `EVEN` that [`Bout::share`] carries when both sides died is a **sentinel for "nobody
+    /// won"**, not a measurement — there was no population to take a share of, and the field's
+    /// own documentation says so. Every consumer that treats it as a number is reading a dead
+    /// heat between two corpses as a creditable draw, which is how a world that killed a
+    /// contender outright came to be the world its payoff was credited to.
+    ///
+    /// So the sentinel is filtered out here rather than interpreted downstream, and a world in
+    /// which no seed was a contest yields no reading instead of a flattering one.
+    #[must_use]
+    pub fn contested(&self) -> bool {
+        self.challenger > 0 || self.reference > 0
+    }
 }
 
 /// The seeds a panel is run at, recorded here because a stochastic result is only a result if it
@@ -514,19 +536,49 @@ pub struct Row {
     pub share: Vec<u32>,
     /// Whether the lineage survived at least one seed, per arena.
     pub alive: Vec<bool>,
+    /// Whether the arena was a contest at all, per arena: `false` where *both* lineages were
+    /// extinct at the end of every seed, so there was no population to take a share of.
+    ///
+    /// See [`Bout::contested`]. Such an arena carries `EVEN` in [`Row::share`] because that is
+    /// the sentinel a bout returns when nobody is left, and **every statistic below skips it** —
+    /// a world that killed both lineages has not told us anything about either.
+    pub contested: Vec<bool>,
     /// The organelle types this contender was found to be carrying, once grown.
     pub carries: Vec<OrganelleType>,
 }
 
 impl Row {
+    /// The shares that are actually readings: one per arena that was a contest.
+    ///
+    /// An arena missing from `contested` counts as a reading, so that a `Row` assembled by hand
+    /// without the flag behaves as it reads. [`tournament`] always fills it.
+    fn readings(&self) -> impl Iterator<Item = u32> + '_ {
+        self.share
+            .iter()
+            .enumerate()
+            .filter(|(a, _)| self.contested.get(*a).copied().unwrap_or(true))
+            .map(|(_, s)| *s)
+    }
+
+    /// The highest share this contender reached in any world that was a contest.
+    ///
+    /// **Not the maximum over the row.** A world in which both lineages died returns `EVEN` by
+    /// convention, and taking a plain maximum let that 500 clear [`PAYOFF_FLOOR`] — so a
+    /// contender could be credited with "there exists a world where its machinery pays" on the
+    /// strength of a world that killed it. Five of eleven shipped contenders passed the payoff
+    /// gate that way. Zero if no world in the panel was a contest, which [`Report::extinct`]
+    /// reports separately and more directly.
     #[must_use]
     pub fn best(&self) -> u32 {
-        self.share.iter().copied().max().unwrap_or(0)
+        self.readings().max().unwrap_or(0)
     }
     #[must_use]
     pub fn worst(&self) -> u32 {
-        self.share.iter().copied().min().unwrap_or(0)
+        self.readings().min().unwrap_or(0)
     }
+    /// The distance between this contender's best world and its worst, over the worlds that were
+    /// a contest. The panel's leverage on this strategy, and what [`Report::discrimination`]
+    /// takes the median of.
     #[must_use]
     pub fn spread(&self) -> u32 {
         self.best().saturating_sub(self.worst())
@@ -534,7 +586,7 @@ impl Row {
     /// Arenas in which this contender beat the reference.
     #[must_use]
     pub fn wins(&self) -> usize {
-        self.share.iter().filter(|s| **s > EVEN).count()
+        self.readings().filter(|s| *s > EVEN).count()
     }
     #[must_use]
     pub fn viable_anywhere(&self) -> bool {
@@ -607,12 +659,19 @@ impl Report {
     ///
     /// The direct measure of whether the environment picks different winners. One means the panel
     /// has a favourite and the worlds are decoration.
+    ///
+    /// Only rows the arena was a contest for are eligible. A world that killed both lineages
+    /// scores every contender `EVEN`, so without the filter its "winner" is whichever row the
+    /// panel happens to list first — an alphabetical accident counted as a distinct winner.
     #[must_use]
     pub fn distinct_winners(&self) -> usize {
         let mut winners = std::collections::BTreeSet::new();
         for a in 0..self.arenas.len() {
             let mut best: Option<(u32, &str)> = None;
             for row in &self.rows {
+                if !row.contested.get(a).copied().unwrap_or(true) {
+                    continue;
+                }
                 let s = row.share.get(a).copied().unwrap_or(0);
                 if best.is_none_or(|(b, _)| s > b) {
                     best = Some((s, row.name.as_str()));
@@ -687,12 +746,27 @@ pub fn tournament(
     for c in contenders {
         let mut share = Vec::with_capacity(panel.len());
         let mut alive = Vec::with_capacity(panel.len());
+        let mut contested = Vec::with_capacity(panel.len());
         let mut carries: Vec<OrganelleType> = Vec::new();
         for arena in panel {
             let results = bouts(arena, c, reference, seeds)?;
-            let mut shares: Vec<u32> = results.iter().map(|b| b.share).collect();
-            share.push(median(&mut shares));
+            // Only the seeds that were a contest. A seed both lineages died in scores `EVEN`,
+            // which is the sentinel for "nobody won" rather than a draw (see [`Bout::contested`]),
+            // and letting it into the median hands the contender a dead heat for a slide that
+            // wiped it out — the more so because a median of three is decided by any two of them.
+            let mut shares: Vec<u32> = results
+                .iter()
+                .filter(|b| b.contested())
+                .map(|b| b.share)
+                .collect();
+            let was_contested = !shares.is_empty();
+            share.push(if was_contested {
+                median(&mut shares)
+            } else {
+                EVEN
+            });
             alive.push(results.iter().any(|b| b.alive));
+            contested.push(was_contested);
         }
         // What it actually built, read off a grown cell rather than parsed out of the source —
         // a `BUILD` the cell could never afford is not a loadout.
@@ -710,6 +784,7 @@ pub fn tournament(
             name: c.name.clone(),
             share,
             alive,
+            contested,
             carries,
         });
     }
@@ -833,12 +908,14 @@ mod tests {
                     name: "sweeper".into(),
                     share: vec![900, 800],
                     alive: vec![true, true],
+                    contested: vec![true, true],
                     carries: vec![OrganelleType::Spike],
                 },
                 Row {
                     name: "stranded".into(),
                     share: vec![100, 120],
                     alive: vec![true, false],
+                    contested: vec![true, true],
                     carries: vec![OrganelleType::Holdfast],
                 },
             ],
@@ -852,6 +929,57 @@ mod tests {
         let by_type = report.by_organelle();
         assert!(by_type.contains(&(OrganelleType::Spike, 900)));
         assert!(by_type.contains(&(OrganelleType::Holdfast, 120)));
+    }
+
+    /// A world that killed both lineages is not a world the loser is competitive in.
+    ///
+    /// The shape of a real regression: `hunter` scored 20 and 5 in the two worlds it lived in,
+    /// died outright in the third, and was credited with a payoff of 500 — the `EVEN` a bout
+    /// returns when there is nobody left to take a share of. Five of the eleven shipped
+    /// contenders passed the payoff gate on a world that had wiped them out.
+    #[test]
+    fn a_dead_heat_between_two_corpses_is_not_a_payoff() {
+        let corpses = |contested| Report {
+            arenas: vec!["lived".into(), "killed everyone".into()],
+            mirror: vec![EVEN, EVEN],
+            rows: vec![Row {
+                name: "hunter".into(),
+                // 20permille where it lived, and the both-died sentinel where it did not.
+                share: vec![20, EVEN],
+                alive: vec![true, false],
+                contested: vec![true, contested],
+                carries: vec![OrganelleType::Spike],
+            }],
+        };
+
+        let report = corpses(false);
+        assert_eq!(
+            report.rows[0].best(),
+            20,
+            "the only reading is the world it survived"
+        );
+        assert_eq!(
+            report.stranded(),
+            vec!["hunter"],
+            "a contender whose every live world is under the floor is stranded, and a world \
+             that killed it does not rescue it"
+        );
+        assert_eq!(
+            report.discrimination(),
+            0,
+            "one reading cannot be a spread"
+        );
+        assert!(
+            report.extinct().is_empty(),
+            "extinct-everywhere is a different finding and is reported separately"
+        );
+
+        // The control: if that same arena *had* been a contest, the 500 is a real draw and the
+        // contender is not stranded. The filter must key on the corpses and nothing else.
+        assert!(
+            corpses(true).stranded().is_empty(),
+            "a genuine dead heat at 500 clears the floor and always did"
+        );
     }
 
     #[test]
