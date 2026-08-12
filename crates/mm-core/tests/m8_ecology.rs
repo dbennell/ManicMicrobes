@@ -343,6 +343,30 @@ fn the_shipped_organisms_reproduce() {
     // Length is a real cost and it is measured where it belongs — in the population counts of
     // `predator_probe` and `hunting_probe`, where a long genome genuinely breeds slower. What
     // this test asks is only whether a lineage happens at all.
+    //
+    // # Ten seeds, not one, and this is the correction that matters
+    //
+    // This ran on `soup.ron`'s own seed alone and asserted pass or fail on it. That is the shape
+    // CLAUDE.md forbids: *"acceptance tests that assert an evolutionary outcome are specified as
+    // 'in at least N of 10 seeds', with fixed seeds recorded in the test."* A single seed makes a
+    // stochastic result into a coin toss with a fixed coin, and the coin came up tails.
+    //
+    // It was found the expensive way. `drifter.mm` began failing here after the tempo pass of
+    // `616c445`, which read as a regression and was recorded as one. Measured across ten seeds it
+    // is not: the drifter ends at 0, 9, 10, 11, 12, 13, 14, 16, 16 and 17 cells, and it does the
+    // same before the tempo change as after. It is simply a lineage that lives at ten-odd cells
+    // where the ancestor lives at four hundred, and a threshold of four sits *inside* its noise.
+    // The tempo pass did not break it. One seed did.
+    //
+    // Measured over these ten, every organism here reproduces on nine or ten of them — the
+    // thinnest are `drifter` and `hoarder` at nine, each failing on one different seed. Seven is
+    // therefore two seeds of margin below anything observed, and still catches what this test is
+    // for: `reflex.mm` returns exactly one cell on all ten and has never divided at all.
+    const SEEDS: [u64; 10] = [
+        0x0BA1, 0x1CE5, 0x2D07, 0x3E19, 0x4F2B, 0x5A17, 0x6B29, 0x7C3B, 0x8D4D, 0x9E5F,
+    ];
+    const NEEDED: usize = 7;
+
     let cycles = if cfg!(debug_assertions) { 21 } else { 71 };
     for name in ORGANISMS {
         if name == "ancestor_sloppy.mm" {
@@ -365,14 +389,25 @@ fn the_shipped_organisms_reproduce() {
         let per_cycle =
             (2 * bytes.len() as u64 + 64) / u64::from(VmConfig::DEFAULT.instr_per_tick.max(1));
         let ticks = cycles * per_cycle.max(1);
-        let mut world = World::new(scenario("soup.ron")).expect("world");
-        seed(&mut world, &bytes, 1, MutationRates::none());
-        world.run(ticks);
+        let reached: Vec<usize> = SEEDS
+            .iter()
+            .map(|&slide| {
+                let mut world = World::new(Scenario {
+                    seed: slide,
+                    ..scenario("soup.ron")
+                })
+                .expect("world");
+                seed(&mut world, &bytes, 1, MutationRates::none());
+                world.run(ticks);
+                world.cells().len()
+            })
+            .collect();
+        let bred = reached.iter().filter(|c| **c >= 4).count();
         assert!(
-            world.cells().len() >= 4,
-            "{name} reached {} cells in {ticks} ticks ({cycles} of its own cycles) from one \
-             founder; it is not reproducing",
-            world.cells().len()
+            bred >= NEEDED,
+            "{name} reached four cells on only {bred} of {} seeds ({ticks} ticks, {cycles} of \
+             its own cycles, from one founder); it is not reproducing. Cells per seed: {reached:?}",
+            SEEDS.len()
         );
     }
 }

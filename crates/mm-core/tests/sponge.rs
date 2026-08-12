@@ -118,52 +118,92 @@ fn seed_detritus(world: &mut World, per_square: i32) {
     world.adopt_current_contents_as_baseline();
 }
 
-/// Every unit of structural matter the cell is holding, in the cytoplasm *and* in its body.
+/// Every unit of structural matter on the slide, in cytoplasm and in bodies.
 ///
-/// Not the cytoplasm alone. A cell spends structural matter on growing as fast as it arrives,
-/// so measuring the interior at the end of a run reads zero for a cell that filtered a great
-/// deal and spent it all — which it did, and which cost a wrong conclusion before this counted
-/// the mass as well.
-fn structural_held(world: &World, id: CellId) -> i32 {
+/// The *lineage*, not the founder, and that distinction is the whole of why this test reads the
+/// way it does now. See the note on the test below.
+fn structural_on_slide(world: &World) -> i64 {
     let sc = world.biology().structural_chemical;
-    world.cells().index(id).map_or(0, |i| {
-        world.cells().interior(i)[sc].saturating_add(world.cells().mass[i])
-    })
+    world
+        .cells()
+        .iter()
+        .map(|i| {
+            i64::from(world.cells().interior(i)[sc]) + i64::from(world.cells().mass[i])
+        })
+        .sum()
 }
 
 #[test]
 fn a_filter_takes_detritus_out_of_a_current_and_a_bare_cell_does_not() {
-    // The whole trade in one comparison: same slide, same current, same square, one cell with
-    // a holdfast and one without.
+    // The whole trade: same slide, same current, same square, same seed — one cell with a
+    // holdfast and one without, run as two separate slides.
+    //
+    // # Why two slides and a lineage, when it used to be two cells and a founder
+    //
+    // It ran both cells on one slide and compared what each *founder* was still holding at tick
+    // 600, and it broke — the filter read 88,544 against the bare cell's 105,216, which says
+    // filtering is a net loss. It is not, and three things were wrong with the measurement.
+    //
+    // **Both founders had stopped growing.** From about tick 750 they sit at exactly 90,112 and
+    // 114,960 and never move again, through another twenty-eight births on the slide. The
+    // comparison was of two ceilings, not of two rates. At tick 300, before either reaches one,
+    // the filter is ahead 80,199 to 39,680 — the trade was always paying and the window had
+    // simply been left running past the point where anything could be read from it.
+    //
+    // **And the ceilings are not a property of the cells.** The filtering one is anchored, so it
+    // is walled in by its own daughters; the bare one lets go and drifts into open water where
+    // nothing crowds it. The better-fed cell had the *lower* cap, for reasons that are about
+    // where it is standing rather than about what it eats.
+    //
+    // **A founder is the wrong unit anyway.** Matter a cell spends on a daughter leaves the
+    // founder's books entirely, so the lineage that breeds fastest reads poorest. That is the
+    // same trap one level up from the one this test was caught by before, when it counted the
+    // cytoplasm and not the body and read zero for a cell that had filtered a great deal and
+    // spent it all.
+    //
+    // So: two slides rather than two cells, which also removes them competing for the same
+    // water; and the whole population's matter rather than one cell's, which no ceiling and no
+    // division can hide. The claim being made is unchanged and slightly stronger — a filter is
+    // materially better off than a cell without one — and it is now measured on something that
+    // keeps counting.
     let genome = assemble("sponge.mm");
-    let mut world = World::new(channel(CurrentField::Uniform {
-        vx: Q10_ONE / 8,
-        vy: 0,
-    }))
-    .expect("world");
-    seed_detritus(&mut world, q10(40));
+    let run = |holdfast: Option<u8>| -> (i64, i64) {
+        let mut world = World::new(channel(CurrentField::Uniform {
+            vx: Q10_ONE / 8,
+            vy: 0,
+        }))
+        .expect("world");
+        seed_detritus(&mut world, q10(40));
+        // Against the top wall of the channel, because a holdfast grips a barrier and mid-channel
+        // there is nothing within reach — an early version put them at y=24 and measured two
+        // cells drifting side by side, which is a fair reading of nothing at all.
+        put(&mut world, &genome, 10, 21, holdfast);
+        let before = world.ledger().chem_totals()[DETRITUS];
+        for _ in 0..600 {
+            world.step();
+        }
+        (
+            before - world.ledger().chem_totals()[DETRITUS],
+            structural_on_slide(&world),
+        )
+    };
 
-    // Both against the top wall of the channel, because a holdfast grips a barrier and mid-
-    // channel there is nothing within reach — the first version of this put them at y=24 and
-    // measured two cells drifting side by side, which is a fair reading of nothing at all.
-    let filtering = put(&mut world, &genome, 10, 21, Some(200));
-    let bare = put(&mut world, &genome, 30, 21, None);
+    let (filter_took, filter_has) = run(Some(200));
+    let (bare_took, bare_has) = run(None);
+    eprintln!("filter: took {filter_took} detritus, holds {filter_has} structural");
+    eprintln!("bare:   took {bare_took} detritus, holds {bare_has} structural");
 
-    let before = world.ledger().chem_totals()[DETRITUS];
-    for _ in 0..600 {
-        world.step();
-    }
-    let after = world.ledger().chem_totals()[DETRITUS];
+    // The title of this test, asserted directly rather than through a proxy.
     assert!(
-        after < before,
-        "no detritus left the water at all: {before} -> {after}"
+        filter_took > bare_took,
+        "the filter took no more detritus out of the water than a cell without one: \
+         {filter_took} against {bare_took}"
     );
-
-    let with = structural_held(&world, filtering);
-    let without = structural_held(&world, bare);
+    // And that it is worth having, which is the claim the proxy was standing in for.
     assert!(
-        with > without,
-        "the filter gained no structural matter over a cell without one: {with} against {without}"
+        filter_has > bare_has,
+        "the filter's lineage gained no structural matter over one without: \
+         {filter_has} against {bare_has}"
     );
 }
 
