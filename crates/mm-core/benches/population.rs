@@ -1346,7 +1346,15 @@ fn ecology_gate(_c: &mut Criterion) {
     armed.set_biology(biology);
     for i in &slots {
         let cells = armed.cells_mut();
-        cells.slots_mut(*i)[12] = mm_core::Organelle::finished(mm_core::OrganelleType::Spike, 200);
+        // **Extended, said out loud.** This gate is "every cell scanning at full spike reach",
+        // and a spike's control word starts at zero — an organelle a genome has not wired up is
+        // a cost it carries, not an action it takes. Installing one and leaving the word alone
+        // therefore armed nothing, and the gate went on reporting a number for a workload it had
+        // stopped running: 55.4% of a tick before the default changed, 6.4% after, which reads
+        // as an eightfold optimisation and is a retracted spike.
+        let mut spike = mm_core::Organelle::finished(mm_core::OrganelleType::Spike, 200);
+        spike.control[0] = mm_core::Q10_ONE as i16;
+        cells.slots_mut(*i)[12] = spike;
         let mut lysosome = mm_core::Organelle::finished(mm_core::OrganelleType::Lysosome, 1);
         lysosome.control[0] = (mm_core::Q10_ONE / 64) as i16;
         cells.slots_mut(*i)[11] = lysosome;
