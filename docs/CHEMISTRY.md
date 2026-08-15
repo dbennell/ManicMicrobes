@@ -321,10 +321,44 @@ curve consistent with it and no measurement behind it. The measurement it wants 
 total over time, which `mm_core::metrics::Sample` does not carry; that is the job this leaves
 behind, and it is now the second time this section has needed a number it cannot see.
 
-The caveat this time, stated so it can be held against the next revision: **40 is one seed, flat
-across the last 20,000 ticks of 120,000 — which is exactly what 100 looked like at 60,000.** It
-should be run to 200,000 on three seeds before anyone calls it settled. The honest claim today is
-that 40 rings on a period longer than any yet measured, not that it does not ring.
+### The caveat, discharged
+
+The first version of this section ended by saying that forty was one seed, flat across the last
+20,000 ticks of 120,000 — *which is exactly what 100 looked like at 60,000* — and that it wanted
+200,000 ticks on three seeds before anyone called it settled. That has now been run, on
+`petri_of` **as it ships**, silicon included, so this is the product's world rather than the
+retired three-chemical one the table above was measured on:
+
+| seed | peak | at tick | final | from peak | drift, last 25,000 | drift, last 50,000 | genomes |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 23,347 | 150,000 | 23,342 | 0.0% | +0.01% | −0.02% | 1,573 |
+| 2 | 22,956 | 130,000 | 22,888 | 0.3% | −0.14% | −0.24% | 1,483 |
+| 3 | 23,728 | 135,000 | 23,711 | 0.1% | −0.02% | −0.03% | 1,555 |
+
+`--check` clean throughout all three. **It is settled**, and on the evidence that distinguishes a
+plateau from a phase sample rather than on a flat-looking window: the peak lands at 130,000 to
+150,000, which is *at* the plateau rather than thousands of ticks before the end, so there are
+about 110,000 ticks of flat behind the final reading. The 100 world had none behind its apparent
+one — it peaked at 64,000, four thousand ticks after the measurement stopped. Seed spread is 3.5%,
+and each slide holds around 1,500 lineages against the 100 world's 664.
+
+### Why it is settled, which is not what was expected
+
+**Forty never overshoots.** It rises monotonically and comes to its capacity from below. Every
+higher level shoots past what the slide can support at around tick 15,000 and then starves back.
+
+So the ringing is not a property of how large the population is, it is a property of
+*overshooting*: a slide that never exceeds its capacity never generates the death pulse, so no
+unusual quantity of matter is ever in transit through the decay chain at once, so there is no
+trough to climb out of. That is the first evidence which actually discriminates the hypothesis
+above rather than merely being consistent with it — but it is still not a measurement of where
+the matter is, and the per-chemical total over time that `mm_core::metrics::Sample` does not carry
+remains the job this section leaves behind.
+
+One honesty note on the table at the top of this section: those arms were measured on the
+three-chemical world, before the fresh slide seeded silicon (§8). The ranking is unaffected —
+silicon is inert until something evolves a shell — but the two tables are not one experiment, and
+the 200,000-tick figures are the ones taken on what actually ships.
 
 ## 8. The three minerals, and what a seventeenth chemical would cost
 

@@ -74,10 +74,34 @@ impl Default for NewWorld {
         NewWorld {
             size: 256,
             light: mm_core::Q10_ONE,
-            // The fresh slide's levels, so that the sheet and the `New slide` command open the
-            // same world and the number being changed has something to be a change *from*. See
-            // `petri_of` in `main.rs` for why it is forty and not the four hundred
-            // `scenarios/soup.ron` still records.
+            // The fresh slide's levels, and — since `petri_of` is written in terms of this — the
+            // only definition of them. The number being changed in the sheet therefore has
+            // something to be a change *from*.
+            //
+            // **Forty a square, not the four hundred `scenarios/soup.ron` still records.** That
+            // number was never measured, it was picked; `docs/CHEMISTRY.md` §6 puts the knee at
+            // roughly four to ten a square, two orders of magnitude below it. Four hundred was
+            // not a well-fed world so much as one with most of its matter parked in the water
+            // where nothing competed for it.
+            //
+            // Every level above forty **rings** — 400, 100, 60 and 50 all overshoot at about tick
+            // 15,000 and starve back, differing only in period, and 100's period is long enough
+            // that at 60,000 ticks it reads as perfectly flat and is not. Forty is settled and
+            // earned: 200,000 ticks on three seeds, `--check` clean, 23,342 / 22,888 / 23,711,
+            // drifting under a quarter of a percent across the last fifty thousand ticks of each.
+            // What makes that a plateau rather than another phase sample is where the peak sits —
+            // 130,000 to 150,000, so a hundred thousand ticks of flat lie behind the final
+            // reading, where the 100 world had none behind its apparent one.
+            //
+            // The reason is not the expected one. **Forty never overshoots**: it reaches capacity
+            // from below, so it never makes the death pulse that puts an unusual amount of matter
+            // into the decay chain at once, and so has no trough to climb out of. It also carries
+            // about 1,500 lineages where the 100 world carried 664, because a slide that troughs
+            // loses lineages in every trough. §7 has both tables.
+            //
+            // `soup.ron` and the rest of `scenarios/` stay at four hundred: the soup is the
+            // control condition every other world is a variation on, and moving it would move
+            // every comparison made against it.
             //
             // **Silicon is here because without it a shell cannot be built at all.** ISA 7 gave
             // the shell a recipe — `build_trace[7]`, the only non-zero entry in the catalogue —
