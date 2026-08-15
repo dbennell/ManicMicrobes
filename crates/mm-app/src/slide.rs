@@ -722,6 +722,16 @@ pub struct Frame {
     /// particulate rather than dissolved — so specks drawn at the water's speed would be a
     /// picture of the wrong thing, and would say the current carries food faster than it does.
     pub detritus_drift: f32,
+    /// Carrion on the same lattice as `flow`, as a fraction of the busiest block.
+    ///
+    /// Drawn as slow brown flakes rather than as a stipple of specks, because it is not the same
+    /// stuff: detritus is what a body has already broken down into and carrion is the body, and
+    /// a picture that drew them alike would be saying the decay chain has one stage. See
+    /// `art::fleck`.
+    pub carrion: Vec<f32>,
+    /// How much of the water's speed carrion travels at, `0..1`. Lower than the particulate's —
+    /// a corpse is the least mobile thing in the chemical table.
+    pub carrion_drift: f32,
     /// The sources and drains in force, so the view can show where they are.
     ///
     /// A source is an area of water that behaves differently and has nothing to see until it has
@@ -1259,10 +1269,19 @@ impl Slide {
         // this free on every slide that has no particulate on it: without it the gather is a
         // full pass over a quarter of a million squares each published frame, paid by everyone,
         // to discover that the answer is nothing.
-        let detritus: Vec<f32> = if !substrate.present()[mm_core::ecology::DETRITUS] {
-            Vec::new()
-        } else {
-            let plane = substrate.chem_plane(mm_core::ecology::DETRITUS);
+        // One chemical gathered onto the flow lattice, normalised against its own busiest
+        // block. Written once and called twice: the particulate and the dead are drawn the same
+        // way and differ only in what they are drawn *as*, and a second copy of this loop would
+        // be a second place for the `present` short-circuit to be forgotten.
+        let gather = |chemical: usize| -> Vec<f32> {
+            // `present` is the fluid solver's own per-plane emptiness flag, and it is what keeps
+            // this free on every slide that has none of the chemical: without it the gather is a
+            // full pass over a quarter of a million squares each published frame, paid by
+            // everyone, to discover that the answer is nothing.
+            if !substrate.present()[chemical] {
+                return Vec::new();
+            }
+            let plane = substrate.chem_plane(chemical);
             let mut out = Vec::with_capacity((cols * rows) as usize);
             let mut peak = 0i64;
             for by in 0..rows {
@@ -1278,16 +1297,18 @@ impl Slide {
                 }
             }
             if peak == 0 {
-                Vec::new()
-            } else {
-                for v in &mut out {
-                    *v /= peak as f32;
-                }
-                out
+                return Vec::new();
             }
+            for v in &mut out {
+                *v /= peak as f32;
+            }
+            out
         };
+        let detritus: Vec<f32> = gather(mm_core::ecology::DETRITUS);
+        let carrion: Vec<f32> = gather(mm_core::ecology::CARRION);
 
-        let (flow, flow_cols) = if self.show_flow || !detritus.is_empty() {
+        let (flow, flow_cols) = if self.show_flow || !detritus.is_empty() || !carrion.is_empty()
+        {
             let (svx, svy) = substrate.velocity();
             let mut out = Vec::with_capacity((cols * rows) as usize);
             for by in 0..rows {
@@ -1556,6 +1577,9 @@ impl Slide {
             flow_cols,
             flow_shown: self.show_flow,
             detritus,
+            carrion,
+            carrion_drift: table.advection_rates()[mm_core::ecology::CARRION] as f32
+                / mm_core::Q10_ONE as f32,
             detritus_drift: table.advection_rates()[mm_core::ecology::DETRITUS] as f32
                 / Q10_ONE as f32,
             flux: self.world.scenario().flux.clone(),

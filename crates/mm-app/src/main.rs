@@ -618,6 +618,23 @@ const SPECK_RGB: [f32; 3] = [0.745, 0.667, 0.510];
 /// water, which only happens at magnifications where a block fills a good part of the window.
 const SPECK_MAX_SIDE: u64 = 8;
 
+/// How far apart the flakes of carrion are drawn, in pixels.
+///
+/// Wider than [`SPECK_PITCH`], because a flake is bigger and a field of them at the specks'
+/// spacing reads as a floor rather than as things lying on one. Carrion is also the rarer sight:
+/// detritus drifts through a slide continuously, and a drift of corpses means something died.
+const FLECK_PITCH: f32 = 46.0;
+
+/// The flakes' colour, matching `carrion` in the chemical table — a dark, browned red.
+///
+/// A constant for the same reason [`SPECK_RGB`] is: the flakes are drawn whether or not the
+/// chemical overlay that would show that colour is switched on.
+const FLECK_RGB: [f32; 3] = [0.588, 0.353, 0.353];
+
+/// Most flakes per lattice block along one axis. Lower than [`SPECK_MAX_SIDE`] because they are
+/// larger: four a side already fills a block at the magnifications where a block is wide.
+const FLECK_MAX_SIDE: u64 = 4;
+
 fn main() {
     // Before Bevy, because this one does not want a window — it writes files and stops. The
     // release workflow calls it on the macOS runner to build the `.icns` that goes in the bundle,
@@ -2081,6 +2098,7 @@ struct JunctionSprite(usize);
 #[derive(Component)]
 struct Suspended(usize);
 
+
 #[derive(Component)]
 struct FlowArrow(usize);
 
@@ -2112,6 +2130,8 @@ struct DotMesh;
 #[derive(Resource)]
 struct CellArt {
     image: Handle<Image>,
+    /// The carrion flake's hexagon, white for tinting. See [`art::hex_tile`].
+    hex: Handle<Image>,
     layout: Handle<TextureAtlasLayout>,
     /// The chemical field and the light, as one texture rewritten each frame (M10.5).
     ///
@@ -2270,7 +2290,23 @@ fn setup(
         },
     ));
 
+    // The carrion flake, baked once. See `art::hex_tile` for why it is a tile and not a mesh.
+    let mut hex = Image::new(
+        Extent3d {
+            width: art::HEX_TILE as u32,
+            height: art::HEX_TILE as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        art::hex_tile(),
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    // Linear, for the same reason the cell tiles are: the edge is the whole point.
+    hex.sampler = ImageSampler::linear();
+
     commands.insert_resource(CellArt {
+        hex: images.add(hex),
         image: images.add(image),
         layout: layouts.add(TextureAtlasLayout::from_grid(
             UVec2::splat(side),
@@ -3239,7 +3275,11 @@ fn redraw(
     // looked empty would be lying about what is on it. The switchable thing is the chemical
     // overlay that washes each square in colour — that one is a reading, and it answers "how
     // much", which is a question a stipple should not be asked.
-    let mut speck_slots: Vec<(Vec3, f32)> = Vec::new();
+    // `(where, alpha, is a flake of carrion rather than a speck of particulate)`. One list
+    // and one pool of sprites for both, because Bevy caps a system's parameters and a second
+    // query for a second kind of dot is not what that budget is for — the two differ in texture,
+    // size and colour, all of which are per-entity and set below.
+    let mut speck_slots: Vec<(Vec3, f32, bool)> = Vec::new();
     if !frame.detritus.is_empty() && frame.flow_cols > 0 {
         let cols = frame.flow_cols as usize;
         let rows = frame.detritus.len() / cols.max(1);
@@ -3290,11 +3330,65 @@ fn redraw(
                     {
                         continue;
                     }
-                    speck_slots.push((at, sp.alpha * optics.vignette(field_radius(at))));
+                    speck_slots.push((at, sp.alpha * optics.vignette(field_radius(at)), false));
                 }
             }
         }
     }
+    // The dead, as slow brown flakes.
+    //
+    // The same lattice and the same pure-function-of-(index, tick) drift the specks use, and for
+    // the same reasons — see `art::fleck`. What differs is what it is a picture *of*: detritus is
+    // suspended particulate, the stuff a body has already broken down into, and carrion is the
+    // body. Drawing them alike would say the decay chain has one stage, when the whole of
+    // `docs/CHEMISTRY.md` §7's corpse → carrion → detritus → carbon is that it has three.
+    //
+    // So: larger, hexagonal, dark red, and slower. The slowness is two things multiplying —
+    // carrion's own `advection` in the chemical table, which is the lowest there is, and
+    // `FLECK_LIFE`, which carries a flake five times as long before it restarts.
+    if !frame.carrion.is_empty() && frame.flow_cols > 0 {
+        let cols = frame.flow_cols as usize;
+        let rows = frame.carrion.len() / cols.max(1);
+        let stride = slide::FLOW_STRIDE as f32;
+        let square_px = scale.max(0.0001);
+        let block_px = square_px * stride;
+        let skip = ((FLECK_PITCH / block_px).ceil() as usize).max(1);
+        let per_side = ((block_px / FLECK_PITCH).round() as u64).clamp(1, FLECK_MAX_SIDE);
+        let mid = stride / 2.0;
+        for row in (0..rows).step_by(skip) {
+            for col in (0..cols).step_by(skip) {
+                let i = row * cols + col;
+                // Square-rooted, and the specks are not. Carrion is *patchy* where particulate
+                // is diffuse: one block holding a cell that just died sets the peak, everything
+                // normalises against it, and the rest of a slide with corpses all over it comes
+                // out at a concentration no flake's threshold passes. The picture then says
+                // there are no dead, which is false. The root lifts the low end without
+                // reordering anything, so a thick patch is still thicker than a thin one.
+                let conc = frame.carrion.get(i).copied().unwrap_or(0.0).sqrt();
+                let water = frame.flow.get(i).copied().unwrap_or([0.0, 0.0]);
+                let vel = [water[0] * frame.carrion_drift, water[1] * frame.carrion_drift];
+                for k in 0..per_side * per_side {
+                    let index = i as u64 * FLECK_MAX_SIDE * FLECK_MAX_SIDE + k;
+                    let Some(fl) = art::fleck(index, frame.tick, vel, stride, conc) else {
+                        continue;
+                    };
+                    let at = to_screen(
+                        col as f32 * stride + mid + fl.dx,
+                        row as f32 * stride + mid + fl.dy,
+                    );
+                    if at.x < cull.min_x
+                        || at.x > cull.max_x
+                        || at.y < cull.min_y
+                        || at.y > cull.max_y
+                    {
+                        continue;
+                    }
+                    speck_slots.push((at, fl.alpha * optics.vignette(field_radius(at)), true));
+                }
+            }
+        }
+    }
+
     for i in specks.iter().count()..speck_slots.len() {
         commands.spawn((
             Suspended(i),
@@ -3305,21 +3399,37 @@ fn redraw(
             },
         ));
     }
-    // Grains grow with magnification, because unlike an arrow a speck is meant to read as
-    // something in the water rather than as a mark on the picture of it.
+    // Both grow with magnification, because unlike an arrow these are meant to read as things
+    // in the water rather than as marks on the picture of it.
     let speck_px = (scale * 0.5).clamp(1.5, 5.0);
+    let fleck_px = (scale * 1.8).clamp(5.0, 22.0);
     for (marker, mut sprite, mut transform) in &mut specks {
-        let Some((at, alpha)) = speck_slots.get(marker.0).copied() else {
+        let Some((at, alpha, flake)) = speck_slots.get(marker.0).copied() else {
             // Surplus from a busier frame, hidden rather than despawned, like the arrows.
             sprite.color = Color::NONE;
             continue;
         };
-        sprite.color = Color::srgba(SPECK_RGB[0], SPECK_RGB[1], SPECK_RGB[2], alpha * 0.85);
-        sprite.custom_size = Some(Vec2::splat(speck_px));
-        // Above the field and below the walls at 0.25: the particulate is in the water, and
-        // the water is under everything solid.
-        transform.translation = at.with_z(0.2);
+        let (rgb, px, fade, z) = if flake {
+            (FLECK_RGB, fleck_px, 0.92, 0.19)
+        } else {
+            (SPECK_RGB, speck_px, 0.85, 0.20)
+        };
+        // The texture is what makes one a hexagon and the other a grain, and it is set every
+        // frame because a sprite outlives the slot it was drawn for: a pool entity that was a
+        // flake last frame may be a speck this one.
+        sprite.image = if flake {
+            art_handles.hex.clone()
+        } else {
+            Handle::default()
+        };
+        sprite.color = Color::srgba(rgb[0], rgb[1], rgb[2], alpha * fade);
+        sprite.custom_size = Some(Vec2::splat(px));
+        // Above the field and below the walls at 0.25: both are in the water, and the water is
+        // under everything solid. The flakes sit a hair under the specks — a lump of corpse is
+        // the heavier of the two, so particulate drifting over it is the right way round.
+        transform.translation = at.with_z(z);
     }
+
 
     // Sources and drains, outlined where they are.
     //

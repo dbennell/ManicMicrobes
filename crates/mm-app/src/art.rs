@@ -337,6 +337,50 @@ pub struct Speck {
 /// fades up rather than appearing, so a gradient reads as a gradient and not as a set of rings.
 #[must_use]
 pub fn speck(index: u64, tick: u64, vel: [f32; 2], stride: f32, conc: f32) -> Option<Speck> {
+    drift(index, tick, vel, stride, conc, SPECK_LIFE, 0.0)
+}
+
+/// How long a fleck of carrion takes to restart, against a speck's [`SPECK_LIFE`].
+///
+/// Five times as long, and it is the drift rate that this is really setting. A fleck is carried
+/// for its whole life and then begins again, so a longer life at the same velocity means a
+/// slower, longer sweep — which is what a lump of dead cell does against a grain of particulate.
+/// The other half of the difference is `carrion`'s own `advection` in the chemical table, which
+/// is lower again.
+pub const FLECK_LIFE: u64 = SPECK_LIFE * 8;
+
+/// The fraction of a fleck's life spent at full strength, before the fade at either end.
+///
+/// A speck uses a parabola — zero at both ends, a peak in the middle, never flat — which suits
+/// something meant to twinkle. A flake of corpse should not twinkle: it should lie there. So most
+/// of its life is a plateau and only the ends are a fade, which is what "stays around" means when
+/// the thing has no persistent identity to stay around *with*.
+pub const FLECK_HOLD: f32 = 0.72;
+
+/// Where one fleck of carrion is at `tick`, on the same terms as [`speck`].
+///
+/// **The same caveat applies and applies harder.** A fleck is not a corpse. Carrion is a chemical
+/// field like any other and there is no particle in the simulation behind any of this — what the
+/// picture says is *density*, and a fleck that could be clicked or counted would be claiming
+/// otherwise. The reason it is drawn at all, rather than left to the overlay, is the same reason
+/// the specks are: the dead are *there*, and a slide thick with them that looked clear would be
+/// lying about what is on it.
+#[must_use]
+pub fn fleck(index: u64, tick: u64, vel: [f32; 2], stride: f32, conc: f32) -> Option<Speck> {
+    drift(index, tick, vel, stride, conc, FLECK_LIFE, FLECK_HOLD)
+}
+
+/// The shared body of [`speck`] and [`fleck`]: a mote that starts at its lattice point, is
+/// carried for `life` ticks, and begins again, fading in and out so the restart is not a jump.
+fn drift(
+    index: u64,
+    tick: u64,
+    vel: [f32; 2],
+    stride: f32,
+    conc: f32,
+    life: u64,
+    hold: f32,
+) -> Option<Speck> {
     let h = mix(index);
     // Fixed per speck: which of them are visible at a given concentration never shuffles, so
     // rising concentration adds specks to the ones already there instead of redrawing the lot.
@@ -345,13 +389,30 @@ pub fn speck(index: u64, tick: u64, vel: [f32; 2], stride: f32, conc: f32) -> Op
     if over <= 0.0 {
         return None;
     }
-    let life = SPECK_LIFE.max(1);
+    let life = life.max(1);
     // Staggered, or every speck on the slide would restart on the same tick.
     let t = (tick.wrapping_add(h % life) % life) as f32;
     let u = t / life as f32;
-    // A parabola rather than a triangle: zero at both ends with no kink in the middle, so a
-    // speck neither appears nor snaps.
-    let fade = 1.0 - (u * 2.0 - 1.0) * (u * 2.0 - 1.0);
+    // `hold` of the life at full strength, the rest split between the two ends.
+    //
+    // At `hold == 0` this is a parabola — zero at both ends with no kink in the middle, so a
+    // speck neither appears nor snaps, which is the shape the particulate has always had. Above
+    // zero it becomes a plateau with smoothstepped shoulders, so a flake is simply *there* for
+    // most of its life instead of pulsing through it.
+    let fade = if hold <= 0.0 {
+        1.0 - (u * 2.0 - 1.0) * (u * 2.0 - 1.0)
+    } else {
+        let edge = ((1.0 - hold) / 2.0).max(f32::EPSILON);
+        let t = if u < edge {
+            u / edge
+        } else if u > 1.0 - edge {
+            (1.0 - u) / edge
+        } else {
+            1.0
+        };
+        // Smoothstep, so the shoulders have no kink where they meet the plateau.
+        t * t * (3.0 - 2.0 * t)
+    };
     // Somewhere in its block rather than exactly on the lattice point, or the specks are a grid.
     let jx = ((h >> 8) & 0xFFFF) as f32 / 65_536.0 - 0.5;
     let jy = ((h >> 24) & 0xFFFF) as f32 / 65_536.0 - 0.5;
@@ -949,5 +1010,112 @@ mod tests {
         // id — so if the atlas were not stable, the same cell would look different between
         // sessions.
         assert_eq!(atlas(), atlas());
+    }
+}
+
+/// Side of the carrion hexagon tile, in pixels.
+///
+/// Small, because it is never drawn large: a fleck is a lump of dead cell a few pixels across at
+/// ordinary magnification, and the tile only has to survive being scaled up at high zoom without
+/// showing its own pixels. Linear sampling does the rest, the way it does for the cell sprites.
+pub const HEX_TILE: usize = 32;
+
+/// A hexagon, white with a soft edge, for tinting at draw time.
+///
+/// # Why a baked tile rather than a mesh or a shader
+///
+/// The same argument the cell sprites are baked under. A hexagon is a fixed shape that never
+/// deforms — unlike a cell, it has no turgor and no contacts — so there is nothing per-frame for
+/// a shader to decide, and a mesh would mean a second pipeline and a second vertex layout for a
+/// shape with six sides. A tinted quad against a baked mask is one draw path the renderer already
+/// has, and `docs/OVERLAPS.md` is the standing argument for not adding a second one casually.
+///
+/// White, so the tint at draw time is the whole of the colour: carrion's own entry in the
+/// chemical table is the honest source for it, and a colour baked in here would quietly disagree
+/// with the overlay the moment a scenario renamed or recoloured the chemical.
+///
+/// Pointy-topped, and slightly darker towards the rim, so a fleck reads as a solid flake with a
+/// lit face rather than as a flat token. The grain is the same trick and the same hash the cell
+/// tiles use.
+#[must_use]
+pub fn hex_tile() -> Vec<u8> {
+    let mut pixels = vec![0u8; HEX_TILE * HEX_TILE * 4];
+    let half = HEX_TILE as f32 / 2.0;
+    for py in 0..HEX_TILE {
+        for px in 0..HEX_TILE {
+            // Centred, in units where the tile spans -1..1.
+            let x = ((px as f32 + 0.5) - half) / half;
+            let y = ((py as f32 + 0.5) - half) / half;
+            // Signed distance to a regular hexagon of radius `r`, pointy-topped: `ay` carries
+            // the 0.866 so the points fall at top and bottom and the flats at left and right.
+            // With the two swapped it is the same hexagon turned thirty degrees, which is a
+            // flat-topped one — worth saying because the first version of this had them that way
+            // round while the doc comment above claimed otherwise, and only the test noticed.
+            let (ax, ay) = (x.abs(), y.abs());
+            let r = 0.86;
+            let d = (ay * 0.866_025 + ax * 0.5).max(ax) - r;
+            // A soft edge about a pixel and a half wide, so the flake has no staircase on it at
+            // any magnification the microscope offers.
+            let edge = 2.4 / HEX_TILE as f32;
+            let alpha = (1.0 - (d / edge + 0.5)).clamp(0.0, 1.0);
+            if alpha <= 0.0 {
+                continue;
+            }
+            // Lit from the same quarter the cells are, so a flake sits in the same light as
+            // everything else on the slide rather than looking pasted on.
+            let lit = 0.80 + 0.20 * (-x * 0.5 - y * 0.5).clamp(-1.0, 1.0);
+            let grain = hash01((py * HEX_TILE + px) as u64 * 2_654_435_761) - 0.5;
+            let lum = (lit + 0.10 * grain).clamp(0.0, 1.0);
+            let at = (py * HEX_TILE + px) * 4;
+            let v = (lum * 255.0) as u8;
+            pixels[at] = v;
+            pixels[at + 1] = v;
+            pixels[at + 2] = v;
+            pixels[at + 3] = (alpha * 255.0) as u8;
+        }
+    }
+    pixels
+}
+
+#[cfg(test)]
+mod carrion_tests {
+    use super::*;
+
+    /// The tile has to be a hexagon rather than a blob: opaque in the middle, clear at the
+    /// corners, and clear at the *flats* too, which is what tells a hexagon from a circle.
+    #[test]
+    fn the_hex_tile_is_a_hexagon() {
+        let px = hex_tile();
+        assert_eq!(px.len(), HEX_TILE * HEX_TILE * 4);
+        let alpha = |x: usize, y: usize| px[(y * HEX_TILE + x) * 4 + 3];
+        let mid = HEX_TILE / 2;
+        assert_eq!(alpha(mid, mid), 255, "the middle is not solid");
+        for (x, y) in [(0, 0), (HEX_TILE - 1, 0), (0, HEX_TILE - 1), (HEX_TILE - 1, HEX_TILE - 1)] {
+            assert_eq!(alpha(x, y), 0, "the corner at ({x},{y}) is not clear");
+        }
+        // A pointy top: solid at the top edge's middle, where a corner of the hexagon is.
+        assert!(alpha(mid, 1) > 0, "the point of the hexagon is missing");
+        // And clear at the middle of the left edge, where a circle of the same radius would
+        // still be solid. This is the assertion that would fail for a disc.
+        assert_eq!(alpha(0, mid), 0, "the flat side is not flat; this is a disc");
+    }
+
+    /// A fleck drifts for five times as long as a speck before it restarts, which at the same
+    /// velocity is the whole of "slower".
+    #[test]
+    fn a_fleck_outlasts_a_speck() {
+        assert_eq!(FLECK_LIFE, SPECK_LIFE * 8);
+        let vel = [0.02, 0.0];
+        // At the tick a speck has restarted and a fleck has not, the fleck is further along.
+        let s = speck(7, SPECK_LIFE + 2, vel, 4.0, 1.0);
+        let f = fleck(7, SPECK_LIFE + 2, vel, 4.0, 1.0);
+        if let (Some(s), Some(f)) = (s, f) {
+            assert!(
+                f.dx.abs() > s.dx.abs(),
+                "the fleck restarted with the speck: {} against {}",
+                f.dx,
+                s.dx
+            );
+        }
     }
 }
