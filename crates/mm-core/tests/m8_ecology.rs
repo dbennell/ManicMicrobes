@@ -469,7 +469,13 @@ fn a_spike_and_a_lysosome_can_be_read_as_well_as_written() {
     let i = world.cells_mut().index(armed).expect("alive");
     {
         let cells = world.cells_mut();
-        cells.slots_mut(i)[5] = Organelle::finished(OrganelleType::Spike, 120);
+        // Extended, asked for. A spike's control word starts at zero like every control that
+        // acts on the world — an organelle a genome has not wired up is a cost it carries, not
+        // a free action it takes — so a test about a *fully extended* spike has to say so.
+        let mut sp = Organelle::finished(OrganelleType::Spike, 120);
+        sp.control[0] = mm_core::Q10_ONE as i16;
+        cells.slots_mut(i)[5] = sp;
+        // The lysosome keeps the open throttle it has always had: it is a rate, not an action.
         cells.slots_mut(i)[6] = Organelle::finished(OrganelleType::Lysosome, 120);
     }
     world.substrate_mut().add_chem(CARRION, 32, 32, q10(300));
@@ -1018,7 +1024,7 @@ fn seed_one(world: &mut World, genome: &[u8], n: u32) {
 }
 
 /// Every scenario the library ships, so a new one cannot be added without being checked.
-const LIBRARY: [&str; 16] = [
+const LIBRARY: [&str; 17] = [
     "soup.ron",
     "photosynthesis_or_die.ron",
     "predator_introduction.ron",
@@ -1037,6 +1043,11 @@ const LIBRARY: [&str; 16] = [
     "the_short_night.ron",
     "the_shallows.ron",
     "the_tide.ron",
+    // Deliberately sparse: at 232 lux an ancestor settles near 190 cells on 65,536 squares, so
+    // food has to be *found*. It is in the library rather than excluded because that scarcity is
+    // the point of it — a world where a sense finally pays is exactly the kind acceptance 4
+    // should be watching for a collapse.
+    "the_scattering.ron",
 ];
 
 /// Scenarios that are deliberately not part of the curated library.
