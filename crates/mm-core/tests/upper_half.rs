@@ -223,3 +223,65 @@ fn a_diazosome_fixes_nitrogen_unless_there_is_oxidant() {
          the mitochondrion is the whole reason this pairs with it"
     );
 }
+
+/// **A genome can actually build one.**
+///
+/// Every other test in this file installs its organelles with `slots_mut`, which asks what the
+/// upper half *does* and never asks whether a cell can get there. That is the wrong way round for
+/// this particular catalogue, because the entire argument for the `n + 16` layout is about the
+/// path a *mutation* takes: bit 4 of a type operand is one copy error away, so `BUILD 6` and
+/// `BUILD 22` are supposed to be one flip apart and to give a cilium and a flagellum.
+///
+/// So this is the claim `docs/FEEDING.md` §6 actually makes, tested through `BUILD`: the operand
+/// reaches the type. Both halves are checked from one genome shape, because the fault this catches
+/// is a wrap — and a wrap that squashes 22 to 6 makes the upper half unreachable while leaving
+/// every lower-half test green.
+#[test]
+fn a_genome_can_build_the_upper_half() {
+    for (operand, want) in [
+        (6i32, OrganelleType::Cilium),
+        (22, OrganelleType::Flagellum),
+        (19, OrganelleType::Chemosynth),
+        (28, OrganelleType::Exoenzyme),
+        // Past the catalogue, so it wraps at thirty-two rather than at sixteen: 32 is the
+        // membrane again and 54 is the flagellum, because 54 − 32 = 22. Out-of-range operands
+        // are what mutation produces constantly, so where they land is not a curiosity — and
+        // *which* modulus they wrap by is the whole of the bug this test was written for.
+        (32, OrganelleType::Membrane),
+        (54, OrganelleType::Flagellum),
+    ] {
+        let src = format!("IMM 100\nIMM {operand}\nIMM 5\nBUILD\nHALT\n");
+        let mut world = World::new(slide(Q10_ONE)).expect("world");
+        let genome = world
+            .genomes()
+            .intern(mm_asm::assemble(&src).expect("assembles").bytes)
+            .expect("interned");
+        let id = world.spawn_cell(CellSeed {
+            x: pos(16),
+            y: pos(16),
+            mass: q10(40),
+            energy: q10(100_000),
+            membrane: 48,
+            key: 11,
+            badge: 0,
+            species: 0,
+            parent: CellId::NONE,
+            birth_tick: 0,
+            genome,
+        });
+        let i = world.cells_mut().index(id).expect("spawned");
+        // Plenty to build out of, so nothing here is about affording it.
+        world.cells_mut().interior_mut(i)[4] = q10(400);
+        world.run(4);
+
+        let got = world.cells().slots(i)[5].kind;
+        assert_eq!(
+            got, want,
+            "`BUILD {operand}` made a {} where the catalogue says {}: the type operand is not \
+             reaching the catalogue intact, and if it wraps at sixteen then no genome can ever \
+             build anything in the upper half — which is the whole of ISA 7",
+            got.name(),
+            want.name()
+        );
+    }
+}

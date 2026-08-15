@@ -410,7 +410,18 @@ impl Host for CellHost<'_> {
     fn build(&mut self, param: i16, ty: i16, slot: i16) {
         self.intents.push(Intent::Build {
             slot: slot_index(slot) as u8,
-            kind: (ty as u16 % SLOT_COUNT as u16) as u8,
+            // `CATALOGUE_SIZE`, not `SLOT_COUNT`. They were the same number until ISA 7 split
+            // them, and this line kept the wrong one — so the type operand was squashed into
+            // 0..=15 here, *before* `OrganelleType::from_operand` reduced it again, and the
+            // entire upper half of the catalogue was unreachable from a genome. `BUILD 22`
+            // built a cilium.
+            //
+            // Which defeated exactly the thing the layout is for. `docs/FEEDING.md` §6 argues
+            // the `n + 16` pairing on the grounds that bit 4 of a type operand is one copy
+            // error away, so a cilium is one mutation from a flagellum; masking bit 4 off makes
+            // that flip a no-op instead. Nothing caught it because `tests/upper_half.rs`
+            // installed its organelles with `slots_mut` and never asked a genome to build one.
+            kind: (ty as u16 % crate::organelle::CATALOGUE_SIZE as u16) as u8,
             param: (param as u16 & 0xFF) as u8,
         });
     }

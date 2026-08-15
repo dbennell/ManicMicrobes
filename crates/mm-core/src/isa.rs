@@ -5,7 +5,8 @@
 //! (M10.3); version 3 filled the `RESERVED_A` catalogue slot with the holdfast (SPEC §17.1);
 //! version 6 filled the last one, `RESERVED_B`, with the shell; version 7 widened the catalogue
 //! from sixteen types to thirty-two on the `n + 16` pairing `docs/FEEDING.md` §6 designs; version
-//! 8 appended a crowding reading to the membrane.
+//! 8 appended a crowding reading to the membrane; version 9 made the widening at 7 actually
+//! reach `BUILD`.
 //!
 //! A genome archived under 5 or earlier that built a type-15 organelle was paying for a no-op.
 //! Under 6 the same byte builds armour that shades it, so those genomes have to be replayed
@@ -14,11 +15,25 @@
 //! Widening at 7 renumbers nothing — 0..=15 keep their meanings exactly — but it **changes what
 //! an out-of-range operand means**, because the wrap changes. `BUILD 19` reduced to the
 //! chloroplast under ISA ≤ 6 and names the chemosynthetic granule under 7. Mutation produces such
-//! operands constantly, so this is the widest-reaching of the three bumps even though it takes
+//! operands constantly, so this is the widest-reaching of these bumps even though it takes
 //! nothing away.
+//!
+//! # 9, which is 7 finished
+//!
+//! 7 widened the catalogue and `OrganelleType::from_operand` with it, and missed the one line
+//! where a genome's operand actually enters: `CellHost::build` reduced the type modulo
+//! `SLOT_COUNT` rather than `CATALOGUE_SIZE`. Those had been the same number until 7 split them.
+//! So under 7 and 8 the upper half existed, worked, could be installed by a test and read by the
+//! wiki — and **no genome could build any of it**. `BUILD 22` made a cilium.
+//!
+//! That is a bump rather than a bug fix because it changes what a byte means: under 7 and 8
+//! `BUILD 22` built a cilium and now it builds a flagellum, and there is no reading of the stamp
+//! under which both are true. It also restores the property the whole `n + 16` layout exists for
+//! — bit 4 of a type operand is one copy error away, so a cilium is one mutation from a
+//! flagellum (`docs/FEEDING.md` §6) — which masking that bit off had quietly made a no-op.
 
 /// ISA version stamped into save files, scenarios and archived genomes (SPEC §16).
-pub const ISA_VERSION: u16 = 8;
+pub const ISA_VERSION: u16 = 9;
 
 /// Number of opcodes. The opcode of a byte is `byte % OPCODE_COUNT` (SPEC §4.2), so four
 /// distinct byte values map to each opcode and most point mutations are synonymous.
