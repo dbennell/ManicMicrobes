@@ -594,6 +594,16 @@ impl World {
         &self.scenario
     }
 
+    /// How hard each cell is being pressed on by its neighbours, `Q10`.
+    ///
+    /// Exposed so a caller can ask what a cell would read without running one — the same reason
+    /// `biology::read_organelle` exists.
+    #[inline]
+    #[must_use]
+    pub fn crowding(&self) -> &[i32] {
+        &self.crowding
+    }
+
     /// How wedged each cell is, `Q10`. See [`crate::neighbours::resolve_collisions`].
     ///
     /// Snapshot state rather than scratch, and the distinction cost a failed round-trip test to
@@ -674,6 +684,7 @@ impl World {
                 self.biology.ecology.spike_damage,
                 self.biology.ecology.em_range,
                 self.biology.metabolism.catalogue.metabolism,
+                &self.crowding,
             );
 
             // 2b. Last tick's spending has been read by everything that was going to read it,

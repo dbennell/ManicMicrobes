@@ -4,7 +4,8 @@
 //! organelle catalogue or to template semantics. Version 2 made metabolism a set of pathways
 //! (M10.3); version 3 filled the `RESERVED_A` catalogue slot with the holdfast (SPEC §17.1);
 //! version 6 filled the last one, `RESERVED_B`, with the shell; version 7 widened the catalogue
-//! from sixteen types to thirty-two on the `n + 16` pairing `docs/FEEDING.md` §6 designs.
+//! from sixteen types to thirty-two on the `n + 16` pairing `docs/FEEDING.md` §6 designs; version
+//! 8 appended a crowding reading to the membrane.
 //!
 //! A genome archived under 5 or earlier that built a type-15 organelle was paying for a no-op.
 //! Under 6 the same byte builds armour that shades it, so those genomes have to be replayed
@@ -13,11 +14,11 @@
 //! Widening at 7 renumbers nothing — 0..=15 keep their meanings exactly — but it **changes what
 //! an out-of-range operand means**, because the wrap changes. `BUILD 19` reduced to the
 //! chloroplast under ISA ≤ 6 and names the chemosynthetic granule under 7. Mutation produces such
-//! operands constantly, so this is the widest-reaching of these two bumps even though it takes
+//! operands constantly, so this is the widest-reaching of the three bumps even though it takes
 //! nothing away.
 
 /// ISA version stamped into save files, scenarios and archived genomes (SPEC §16).
-pub const ISA_VERSION: u16 = 7;
+pub const ISA_VERSION: u16 = 8;
 
 /// Number of opcodes. The opcode of a byte is `byte % OPCODE_COUNT` (SPEC §4.2), so four
 /// distinct byte values map to each opcode and most point mutations are synonymous.

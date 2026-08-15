@@ -120,6 +120,9 @@ pub struct CellHost<'a> {
     /// Which reactions this world offers, so a mitochondrion's reading can be about the
     /// substrate *it* burns rather than about chemical 8 (M10.3).
     chemistry: crate::organelle::MetabolicChemistry,
+    /// How hard this cell is being pressed on by its neighbours, `Q10`. Copied in for the same
+    /// reason `spike_damage` is: a host holds only what one cell may read.
+    crowding: i32,
 }
 
 /// Read an organelle's output the way `OGET` does, from outside the VM.
@@ -140,6 +143,7 @@ pub fn read_organelle(
     spike_damage: i32,
     em_range: i32,
     chemistry: crate::organelle::MetabolicChemistry,
+    crowding: i32,
 ) -> i16 {
     // A throwaway intent buffer: reading an organelle pushes nothing, but the host holds a
     // slot's worth either way.
@@ -158,6 +162,7 @@ pub fn read_organelle(
         spike_damage,
         em_range,
         chemistry,
+        crowding,
     );
     Host::oget(&mut host, idx, slot as i16)
 }
@@ -175,6 +180,7 @@ impl<'a> CellHost<'a> {
         spike_damage: i32,
         em_range: i32,
         chemistry: crate::organelle::MetabolicChemistry,
+        crowding: i32,
     ) -> CellHost<'a> {
         let square = substrate.index(pos_to_square(cells.x[slot]), pos_to_square(cells.y[slot]));
         CellHost {
@@ -189,6 +195,7 @@ impl<'a> CellHost<'a> {
             spike_damage,
             em_range,
             chemistry,
+            crowding,
             glow: [None; crate::organelle::OrganelleType::EM_BANDS],
         }
     }
@@ -204,6 +211,7 @@ impl<'a> CellHost<'a> {
     fn membrane_reading(&self, idx: i16) -> i16 {
         let i = self.slot;
         match MembraneReading::decode(idx) {
+            MembraneReading::Crowding => sat_i16(self.crowding),
             MembraneReading::Mass => q10_to_visible(self.cells.mass[i]),
             MembraneReading::Energy => q10_to_visible(self.cells.energy[i]),
             MembraneReading::Age => sat_i16(self.cells.age[i].min(i32::MAX as u32) as i32),
@@ -1988,6 +1996,9 @@ pub fn execute(
     spike_damage: i32,
     em_range: i32,
     chemistry: crate::organelle::MetabolicChemistry,
+    // How hard each cell is being pressed on, from the previous tick's collision pass. Read-only
+    // and per cell, like everything else the execute phase sees.
+    crowding: &[i32],
 ) {
     let mut vms = std::mem::take(&mut cells.vm);
     let arena: &CellArena = cells;
@@ -2007,6 +2018,7 @@ pub fn execute(
             spike_damage,
             em_range,
             chemistry,
+            crowding.get(i).copied().unwrap_or(0),
         );
         vm.tick(&genome, cfg, &ctx, &mut host);
         host.intents.dropped()
@@ -2799,6 +2811,8 @@ mod tests {
             f.config.ecology.spike_damage,
             f.config.ecology.em_range,
             f.config.metabolism.catalogue.metabolism,
+            // Nothing is pressed on in this fixture.
+            &[],
         );
         assert_eq!(
             f.substrate.chem_at(5, 8, 8),
@@ -2834,6 +2848,7 @@ mod tests {
             f.config.ecology.spike_damage,
             f.config.ecology.em_range,
             f.config.metabolism.catalogue.metabolism,
+            0,
         );
         assert_eq!(host.oget(1, 0), 1234, "energy");
         assert_eq!(host.oget(0, 0), 20, "mass");
@@ -2860,6 +2875,7 @@ mod tests {
             f.config.ecology.spike_damage,
             f.config.ecology.em_range,
             f.config.metabolism.catalogue.metabolism,
+            0,
         );
         assert_eq!(host.eat(10, 5), 10);
         assert_eq!(host.eat(10, 5), 0, "the square was already spoken for");

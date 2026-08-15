@@ -1076,6 +1076,21 @@ pub enum MembraneReading {
     /// Comparing *neighbour to self* means a lineage that changes its badge changes what it
     /// answers to in the same stroke, and diverges from its cousins as it goes.
     Badge = 21,
+    /// How hard this cell is being pressed on by its neighbours, `Q10` of a radius.
+    ///
+    /// Appended after the badge for the same reason the badge was appended after the chemicals:
+    /// it renumbers nothing, and only the indices that used to wrap change meaning.
+    ///
+    /// The number was already there. `neighbours::resolve_collisions` computes crowding every
+    /// tick and it drives real consequences — `split_pressure` refuses a division to a cell with
+    /// nowhere to put the daughter, and `crowding_damage` charges for being squeezed — but until
+    /// now nothing could *read* it. SPEC §17.8 says being buried is the best place to be, and no
+    /// cell on the slide could tell whether it was buried.
+    ///
+    /// That asymmetry is the whole reason this is worth a reading. A pressure a cell suffers and
+    /// cannot sense is weather; one it can sense is a reason to move, to stop dividing, to grow a
+    /// holdfast, or to stay exactly where it is.
+    Crowding = 22,
 }
 
 impl MembraneReading {
@@ -1086,13 +1101,14 @@ impl MembraneReading {
     #[inline]
     #[must_use]
     pub fn decode(idx: i16) -> MembraneReading {
-        match (idx as u16 as usize) % (6 + CHEM_COUNT) {
+        match (idx as u16 as usize) % (7 + CHEM_COUNT) {
             0 => MembraneReading::Mass,
             1 => MembraneReading::Energy,
             2 => MembraneReading::Age,
             3 => MembraneReading::Radius,
             4 => MembraneReading::Damage,
             n if n == 5 + CHEM_COUNT => MembraneReading::Badge,
+            n if n == 6 + CHEM_COUNT => MembraneReading::Crowding,
             _ => MembraneReading::Chemical,
         }
     }

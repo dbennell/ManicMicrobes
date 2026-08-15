@@ -182,6 +182,8 @@ fn a_shell_reports_its_coverage_and_what_light_gets_through() {
             world.biology().ecology.spike_damage,
             world.biology().ecology.em_range,
             world.biology().metabolism.catalogue.metabolism,
+            // Not crowded; this test is about the shell's own readings.
+            0,
         )
     };
     let cover = read(0);

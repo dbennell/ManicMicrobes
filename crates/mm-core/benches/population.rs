@@ -568,6 +568,7 @@ fn breakdown_of(label: &str, mut world: World) {
             spike_damage,
             em_range,
             chemistry,
+            &crowding,
         );
     }
     let execute = t.elapsed() / n;
@@ -1041,6 +1042,7 @@ fn phase_bench(c: &mut Criterion) {
         spike_damage,
         em_range,
         chemistry,
+            &crowding,
     );
     let pool = world.genomes().clone();
     let config = world.biology().clone();
