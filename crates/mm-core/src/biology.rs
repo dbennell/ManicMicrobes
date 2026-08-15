@@ -110,6 +110,13 @@ pub struct CellHost<'a> {
     /// How far a photosensor looks for other cells' glow, in squares. Copied in for the same
     /// reason `spike_damage` is.
     em_range: i32,
+    /// The glow readings this cell has already taken this tick, one per band.
+    ///
+    /// `None` until something asks. Each entry costs one walk of the cell's whole
+    /// neighbourhood, so a genome reading a photosensor's concentration and both gradients used
+    /// to pay for six of them; it now pays for one. See the note at the read site for why a memo
+    /// here is legal where a shared one would not be.
+    glow: [Option<crate::sensing::ChemReading>; crate::organelle::OrganelleType::EM_BANDS],
     /// Which reactions this world offers, so a mitochondrion's reading can be about the
     /// substrate *it* burns rather than about chemical 8 (M10.3).
     chemistry: crate::organelle::MetabolicChemistry,
@@ -182,6 +189,7 @@ impl<'a> CellHost<'a> {
             spike_damage,
             em_range,
             chemistry,
+            glow: [None; crate::organelle::OrganelleType::EM_BANDS],
         }
     }
 
@@ -492,24 +500,37 @@ impl Host for CellHost<'_> {
                 // Same argument as `touch`: only a photosensor reads it, so only a photosensor
                 // pays for the scan. And only when it is asked for something past the ambient
                 // light readings, which is what the index says.
+                //
+                // One band, and once. `read_sensor` uses exactly one of the two — indices 3..6
+                // are band 0 and 6..9 are band 1 — and both were being walked on every read, so
+                // half of every scan was discarded before it was looked at. And the walk itself
+                // was repeated per *read*: a genome asking a photosensor for concentration and
+                // both gradients crossed its whole neighbourhood six times in one tick.
+                //
+                // Memoised on the host, which is what makes this legal. `gather_touch`'s note
+                // rules out a cache "filled on demand" because the execute phase runs cells in
+                // parallel and a *shared* one would depend on which thread arrived first. A host
+                // belongs to one cell for the length of its own turn, so a memo on it is
+                // private by construction — the same argument `claimed` already stands on.
                 let glow = if o.kind == OrganelleType::Photosensor && (idx as u16) % 9 >= 3 {
-                    let range = self.em_range;
-                    [
-                        crate::neighbours::glow_reading(
-                            self.cells,
-                            self.neighbours,
-                            self.slot,
-                            range,
-                            0,
-                        ),
-                        crate::neighbours::glow_reading(
-                            self.cells,
-                            self.neighbours,
-                            self.slot,
-                            range,
-                            1,
-                        ),
-                    ]
+                    let band = usize::from((idx as u16) % 9 >= 6);
+                    let reading = match self.glow[band] {
+                        Some(cached) => cached,
+                        None => {
+                            let r = crate::neighbours::glow_reading(
+                                self.cells,
+                                self.neighbours,
+                                self.slot,
+                                self.em_range,
+                                band,
+                            );
+                            self.glow[band] = Some(r);
+                            r
+                        }
+                    };
+                    let mut both = <[crate::sensing::ChemReading; 2]>::default();
+                    both[band] = reading;
+                    both
                 } else {
                     Default::default()
                 };
