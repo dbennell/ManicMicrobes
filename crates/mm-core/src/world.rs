@@ -69,6 +69,13 @@ pub struct World {
     /// a million squares, each a couple of divisions — cost more than the fluid solver it was
     /// feeding.
     velocity_written: bool,
+    /// Whether anything stirred the water on the *previous* tick.
+    ///
+    /// Not simulation state and deliberately not serialised: it is one bit of history that says
+    /// whether `velocity_written` can be trusted, and `restore` sets it conservatively. See the
+    /// invalidation in [`World::step`] for what it is for, and `restore` for why `true` there is
+    /// both safe and enough to keep hard rule 7.
+    stir_active: bool,
     /// How many squares carry a non-zero impulse. Zero means the velocity field cannot have
     /// moved since it was last written.
     active_impulses: u32,
@@ -345,6 +352,7 @@ impl World {
             stir_y: vec![0; n],
             light_written: false,
             velocity_written: false,
+            stir_active: false,
             active_impulses: 0,
             fluid_rates,
             archive: crate::phylogeny::Phylogeny::new(),
@@ -702,11 +710,25 @@ impl World {
                 tick,
                 seed,
             );
-            if report.physics.moved != 0
-                || report.physics.energy_spent != 0
-                || report.physics.stirred != 0
-            {
-                // A cilium that pushed on the water changed the velocity field.
+            // A cilium that pushed on the water changed the velocity field. Nothing else here
+            // did.
+            //
+            // `report.physics.moved` used to be in this condition and is not a reason to
+            // rewrite the field: it is the population's *total travel*, so Brownian jitter
+            // alone made it non-zero every tick on every populated slide. The whole velocity
+            // field was therefore rebuilt every fluid step on worlds with no cilia at all —
+            // 0.59ms a tick at fifty thousand cells, spent writing back the numbers that were
+            // already there. `PhysicsReport::stirred` is the flag meant for this and says so in
+            // its own doc comment.
+            //
+            // It needs one bit of history beside it. `step_physics` refills the stir layer from
+            // scratch every tick (`stir_x.fill(0)`), so the tick *after* the last cilium stops
+            // beating is the one that zeroes the layer — a real change to the field, with
+            // `stirred` already back at zero. Without `stir_active` the last thing that swam
+            // would leave its current behind it forever, which is the same fault the empty-slide
+            // branch below exists to prevent.
+            let stirring = report.physics.energy_spent != 0 || report.physics.stirred != 0;
+            if stirring || self.stir_active {
                 self.velocity_written = false;
                 self.active_impulses = self
                     .impulse_x
@@ -715,6 +737,7 @@ impl World {
                     .filter(|(x, y)| **x != 0 || **y != 0)
                     .count() as u32;
             }
+            self.stir_active = stirring;
             if report.physics.energy_spent > 0 {
                 self.ledger.dissipate(report.physics.energy_spent);
             }
@@ -2078,6 +2101,18 @@ impl World {
         // by a fresh evaluation on the next step.
         self.light_written = true;
         self.velocity_written = true;
+        // But the *stir* layer did not: it is rebuilt from the cilia every tick and so is not
+        // in the file, while the velocity field that came out of the file may still carry the
+        // contribution it had when the snapshot was taken. `true` forces exactly one refresh on
+        // the next fluid step, which reconverges the restored world onto the uninterrupted one.
+        //
+        // This is why the flag can stay out of the snapshot without breaking hard rule 7. The
+        // forced refresh is idempotent: `CurrentField::apply` writes base + impulse + stir from
+        // the layers as they now are, so on a world where nothing had stirred it recomputes the
+        // identical field, and on one where something had it writes the field the uninterrupted
+        // world would have had. Either way the two agree from the first step, which is what
+        // `resuming_matches_running_straight_through` checks.
+        self.stir_active = true;
         self.active_impulses = self
             .impulse_x
             .iter()
