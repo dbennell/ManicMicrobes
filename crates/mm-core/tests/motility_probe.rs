@@ -475,8 +475,14 @@ fn what_a_stirring_cell_reads_as_slip() {
         let id = swimmer(&mut world, 16, 29, cilia, 80, 1024);
         if anchored {
             if let Some(i) = world.cells_mut().index(id) {
-                world.cells_mut().slots_mut(i)[8] =
-                    Organelle::finished(OrganelleType::Holdfast, 200);
+                // Gripping, said out loud. `HOUSEKEEPER` only eats — it never `OSET`s anything —
+                // so nothing else was going to set this word, and a holdfast at rest grips with
+                // exactly the force a genome asked it to, which is none. Every "anchored" row of
+                // this table was a free cell with an inert organelle on it, printed beside the
+                // free rows it was supposed to differ from.
+                let mut hold = Organelle::finished(OrganelleType::Holdfast, 200);
+                hold.control[0] = Q10_ONE as i16;
+                world.cells_mut().slots_mut(i)[8] = hold;
             }
         }
         let start = at(&world, id).unwrap_or((0, 0));
