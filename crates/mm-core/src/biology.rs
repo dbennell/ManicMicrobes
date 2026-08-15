@@ -843,6 +843,13 @@ impl crate::state_hash::StateHash for BiologyConfig {
         h.i32(e.spike_damage);
         h.i32(e.spike_upkeep);
         h.i32(e.carrion_fraction);
+        h.i32(e.engulf_ratio);
+        h.i32(e.engulf_energy);
+        h.i32(e.engulf_efficiency);
+        h.i32(e.permeability_rate);
+        h.i32(e.bleed_rate);
+        h.i32(e.bleed_threshold);
+        h.i32(e.dissolve_rate);
         h.i32(e.digestion_rate);
         h.i32(e.digestion_efficiency);
         h.i32(e.crowding_damage);

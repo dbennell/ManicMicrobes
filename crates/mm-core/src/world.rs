@@ -130,6 +130,10 @@ pub struct World {
     /// by filtering a phase later. Scratch like `crowding` and `pressure`: derived every tick,
     /// so excluded from equality, hashing and snapshots.
     slip: Vec<i32>,
+    /// Cells swallowed whole this tick, handed straight to `apply_deaths`. Scratch on the same
+    /// terms as `slip`: cleared and refilled by every ecology phase, never carried between ticks,
+    /// so excluded from equality, hashing and snapshots.
+    eaten: Vec<crate::cell::CellId>,
     /// What each cell's cilia and holdfasts add up to, gathered in parallel just before the
     /// physics phase reads it. Scratch on the same terms as `slip`: derived every tick from the
     /// organelle loadout, so excluded from equality, hashing and snapshots.
@@ -372,6 +376,7 @@ impl World {
             crowding: Vec::new(),
             pressure: Vec::new(),
             slip: Vec::new(),
+            eaten: Vec::new(),
             body_scan: Vec::new(),
             ecology_scan: Vec::new(),
             cells: CellArena::new(),
@@ -857,7 +862,12 @@ impl World {
                 &self.biology.metabolism.catalogue.metabolism,
                 &mut self.ledger,
                 &self.ecology_scan,
+                &mut self.eaten,
             );
+            // Swallowed whole, so they die on the same path starvation uses. Their mass and
+            // interior have already moved, so `apply_deaths` finds a corpse with nothing left in
+            // it and deposits nothing — which is what keeps I4 exact across a kill.
+            self.pending.deaths.append(&mut self.eaten);
 
             let dead = biology::apply_deaths(
                 &mut self.cells,

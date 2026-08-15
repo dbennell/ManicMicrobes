@@ -589,6 +589,7 @@ fn breakdown_of(label: &str, mut world: World) {
     let gather = t.elapsed() / n;
 
     let mut ledger = mm_core::ledger::Ledger::new();
+    let mut eaten: Vec<mm_core::CellId> = Vec::new();
     let mut starving = Vec::new();
     let mut capacities = Vec::new();
     // Cloned, because `step` wants the cells mutably and both of these live in the same `World`.
@@ -615,6 +616,7 @@ fn breakdown_of(label: &str, mut world: World) {
     let mut eco_substrate = substrate.clone();
     // Inside the timed loop, because `World::step` pays for it every tick.
     let mut eco_scan = Vec::new();
+    let mut eco_eaten: Vec<mm_core::CellId> = Vec::new();
     let t = Instant::now();
     for _ in 0..n {
         mm_core::ecology::scan_into(world.cells(), &mut eco_scan);
@@ -628,6 +630,7 @@ fn breakdown_of(label: &str, mut world: World) {
             &chemistry,
             &mut ledger,
             &eco_scan,
+            &mut eco_eaten,
         ));
     }
     let ecology = t.elapsed() / n;
@@ -948,6 +951,7 @@ fn phase_bench(c: &mut Criterion) {
     let slip = vec![0i32; capacity];
     let mut eco_substrate = substrate.clone();
     let mut eco_scan = Vec::new();
+    let mut eco_eaten: Vec<mm_core::CellId> = Vec::new();
     let mut world = pristine.clone();
     group.bench_function("ecology", |b| {
         b.iter(|| {
@@ -962,6 +966,7 @@ fn phase_bench(c: &mut Criterion) {
                 &chemistry,
                 &mut ledger,
                 &eco_scan,
+                &mut eco_eaten,
             ))
         })
     });

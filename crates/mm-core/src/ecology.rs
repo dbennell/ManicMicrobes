@@ -66,6 +66,97 @@ pub struct EcologyConfig {
     /// entirely into carrion would make starvation and predation indistinguishable to whatever
     /// comes along afterwards.
     pub carrion_fraction: i32,
+    /// How many times a victim's own bulk a cell must be before it can swallow it whole, `Q10`.
+    ///
+    /// The gate is a *size comparison*, not a type — there is no predator flag anywhere in this,
+    /// and there must not be (CLAUDE.md). What it makes true is that being large finally earns
+    /// something. Everywhere else in this engine size is a bill — more upkeep, more neighbours,
+    /// more matter tied up — and the only income it had was the filter's frontal area.
+    ///
+    /// A victim's shell counts towards its bulk, so armour is what a cell grows when it does not
+    /// intend to be swallowed. That is the arms race the shell was put in the catalogue for; up
+    /// to now it only blunted *damage*, which is the weaker of the two channels.
+    pub engulf_ratio: i32,
+    /// Energy to swallow one `Q10` of another cell's mass.
+    pub engulf_energy: i32,
+    /// Fraction of a swallowed cell's mass that lands as usable structural matter, `Q10`.
+    ///
+    /// High on purpose, and that is the point of the whole mechanism rather than a generosity.
+    /// `docs/FEEDING.md` §4 measured why predation does not pay: a corpse yields half its mass as
+    /// carrion, digestion recovers two thirds of that, and the deposit lands where the *victim*
+    /// died and diffuses from there — perhaps a sixth reaches the killer, and only if it is
+    /// standing on it. Worse, what does arrive is a burnable substrate, and "food it cannot burn
+    /// is not food" because the mitochondrion's capacity was already the binding term.
+    ///
+    /// Engulfment answers both halves at once: the matter arrives **inside** the predator, and it
+    /// arrives as *structural* matter, which is built with rather than burnt and so steps around
+    /// the conversion cap entirely.
+    pub engulf_efficiency: i32,
+    /// Fraction of its interior a wounded cell leaks each tick, per unit of damage, `Q10`.
+    ///
+    /// `docs/FEEDING.md` §8 ranks this first of everything on its list, and the reason is that it
+    /// costs nothing new: "No new type, no new opcode, no new accounting — the chemosensor
+    /// already reads gradients and the substrate already conserves."
+    ///
+    /// What it buys is the thing §3 says is missing outright:
+    ///
+    /// > **Damage is private.** `cells.damage[i]` is read by its owner and by nothing else. A
+    /// > wounded cell looks exactly like a healthy one to every sensor in the catalogue. So there
+    /// > is no blood in the water, and histophagy — the film's most vivid mechanism, the Coleps
+    /// > arriving from a distance like piranhas — has nothing to arrive towards.
+    ///
+    /// Now there is something to arrive towards, and it is found with a sensor that already
+    /// exists. It also fixes predation the right way round: what leaks is a cell's *interior*,
+    /// which is structural matter and monomers rather than a corpse's burnable substrate, so it
+    /// steps around the conversion cap §4 measured. And it is a *pack* mechanism — the leak is
+    /// public, so the second attacker profits from the first one's work, which is the one thing
+    /// on the whole list that rewards more than one predator at a time.
+    pub bleed_rate: i32,
+    /// How fast chemistry crosses a fully-open membrane, `Q10` of the gradient per tick.
+    ///
+    /// **The membrane's own control word, implemented at last.** SPEC §8 gives the membrane two
+    /// controls and M2 lists passive transport as a deliverable; only `investment` was ever read.
+    /// Until now a membrane was a perfect barrier, which is the one thing a membrane is not.
+    ///
+    /// What it changes is not one mechanism but five. A cell that leaks down its gradient is one
+    /// that can be *starved* by dilute water, which is what gives the pump something to beat; one
+    /// that can be *poisoned* from outside, which turns a toxin from a private housekeeping
+    /// problem into a weapon; and one for which a vacuole is the only way to hold something
+    /// without losing it, which is the job slot 4 has never had.
+    ///
+    /// # Why open is the right default for a membrane, and shut is right for everything else
+    ///
+    /// `default_control` starts a throttle open and an action shut, and permeability is a
+    /// throttle: a newly built membrane is *leaky*, and closing it is what a lineage evolves.
+    /// That way round because a sealed membrane is a derived state, not a starting one. If inside
+    /// may differ from outside for free, the membrane has already done its work before the first
+    /// division — and a simulation that begins at the answer cannot show you the question. It also
+    /// makes closing a genuine trade rather than a free upgrade, since a shut membrane cannot
+    /// take anything in either.
+    ///
+    /// # Zero for now
+    ///
+    /// The *rate* ships at zero, so the mechanism is present and inert until a scenario turns it
+    /// up. Every archetype in `genomes/` was written against a perfect barrier and none of them
+    /// closes its membrane, so switching this on globally is a question about whether the
+    /// hand-written cells are viable at all — which is a thing to measure with the balance panel
+    /// and `selection_guard` watching, not a default to change on the way past.
+    pub permeability_rate: i32,
+    /// How deep a wound has to be before it leaks, as a fraction of what the membrane tolerates.
+    ///
+    /// **A wound, not wear.** Without this, "leak in proportion to damage" means *every cell
+    /// bleeds always*: peroxide is a byproduct of respiring at all, its toxicity charges membrane
+    /// damage every tick, and repair only holds that at an asymptote rather than at zero. So a
+    /// perfectly healthy cell carries a little damage forever.
+    ///
+    /// `m2_life::selection_guard` is what caught it. Bleeding from any damage at all took the
+    /// tidy strain from winning outright to 57% — barely above a coin toss — because a universal
+    /// drain uncorrelated with copy fidelity drowns out the thing that test measures. A quarter
+    /// of the membrane's tolerance puts routine wear below the line and leaves a real wound
+    /// above it.
+    pub bleed_threshold: i32,
+    /// Mass an exoenzyme dissolves per tick per unit of effort, `Q10`.
+    pub dissolve_rate: i32,
     /// Carrion a lysosome digests per tick per unit of `param`, `Q10`.
     pub digestion_rate: i32,
     /// Fraction of digested carrion that becomes usable substrate, `Q10`. The rest is waste:
@@ -157,6 +248,34 @@ impl Default for EcologyConfig {
             // rather than something every cell does because it might as well.
             spike_upkeep: Q10_ONE / 64,
             carrion_fraction: Q10_ONE / 2,
+            // Twice its bulk. Enough that swallowing is a real commitment to being big rather
+            // than a thing any cell does to its neighbour, and low enough that the ordinary
+            // spread of sizes on a grown slide puts some pairs within reach of it.
+            engulf_ratio: Q10_ONE * 2,
+            engulf_energy: Q10_ONE / 32,
+            // Three quarters. Against the sixth or so a spike-and-scavenge kill returns, and
+            // as *structure* rather than substrate — see the field's own note.
+            engulf_efficiency: Q10_ONE * 3 / 4,
+            // **Zero by default, on the evidence.** The same call `crowding_damage` makes, for
+            // the same kind of reason.
+            //
+            // The mechanism works and `tests/senses.rs` holds it to working. What it also does,
+            // switched on, is take `m2_life::selection_guard` from the tidy strain winning
+            // outright to 53–61% — a coin toss. Peroxide is a byproduct of respiring at all and
+            // repair holds damage at an asymptote rather than at zero, so *every* cell carries a
+            // wound; bleeding from it is a universal drain uncorrelated with copy fidelity, and
+            // that is precisely the signal the guard exists to detect. Raising `bleed_threshold`
+            // to a quarter of the membrane's tolerance was not enough — routine wear still
+            // crosses it.
+            //
+            // So this wants its own pass at the economy rather than a number chosen to make a
+            // test go green: either damage has to stop being universal, or bleeding has to key
+            // off something other than damage. Until then a scenario can switch it on and see
+            // what happens, which is what a parameter is for.
+            permeability_rate: 0,
+            bleed_rate: 0,
+            bleed_threshold: Q10_ONE / 4,
+            dissolve_rate: Q10_ONE / 64,
             digestion_rate: Q10_ONE / 8,
             digestion_efficiency: (Q10_ONE * 2) / 3,
             // Off by default, on the evidence. See the field's own note: measured against a run
@@ -192,6 +311,16 @@ pub struct EcologyReport {
     pub crushed: i64,
     /// Detritus taken out of the water by filters, `Q10`. The size of the sessile trade.
     pub filtered: i64,
+    /// Cells swallowed whole this tick.
+    pub engulfed: u32,
+    /// Structural mass taken by swallowing, `Q10`.
+    pub swallowed: i64,
+    /// Structural mass dissolved out of living cells into the water, `Q10`.
+    pub dissolved: i64,
+    /// Matter leaked into the water by wounded cells, `Q10`. The size of the trail.
+    pub bled: i64,
+    /// Matter crossing membranes passively in either direction, `Q10`.
+    pub crossed: i64,
 }
 
 /// A cell's total spike extension, `0..` — zero if it has none.
@@ -375,8 +504,13 @@ pub fn step(
     ledger: &mut Ledger,
     // What each cell's spikes, holdfasts and lysosomes add up to, from `scan_into`.
     scan: &[EcologyScan],
+    // Whatever was swallowed whole this tick, for the caller to bury. Same channel starvation
+    // uses — `ecology` has no business despawning anything, and a victim whose mass has already
+    // moved must go through `apply_deaths` like any other corpse so the books close in one place.
+    eaten: &mut Vec<crate::cell::CellId>,
 ) -> EcologyReport {
     let mut report = EcologyReport::default();
+    eaten.clear();
 
     for i in 0..cells.capacity() {
         if !cells.occupied(i) {
@@ -470,6 +604,270 @@ pub fn step(
                     cells.damage[j] = cells.damage[j].saturating_add(damage);
                     report.damage_dealt += damage as i64;
                     report.wounded = report.wounded.saturating_add(1);
+                }
+            }
+        }
+
+        // --- engulfment ---
+        //
+        // Swallowing another cell whole, which is the one way of eating that satisfies both of
+        // `docs/FEEDING.md` §4's conclusions at once: it delivers *structural* matter, and the
+        // deposit lands in the predator rather than in the water where the victim happened to
+        // die. Nothing else on that list does both.
+        //
+        // On the vacuole, whose two control words were free, and gated on a size comparison
+        // rather than on any kind of predator flag. Appetite is a behaviour a genome chooses tick
+        // by tick, not a property of having grown an organ.
+        //
+        // **`control[1]`, and that is not arbitrary.** `Organelle::finished` starts an organelle
+        // at `[Q10_ONE, 0]` — the first word wide open, the second shut. Appetite on `control[0]`
+        // therefore made every vacuole ever built a mouth: ten genomes in `genomes/` grow one,
+        // and all ten quietly became predators. `m2_life::selection_guard` caught it — the tidy
+        // strain's advantage fell from over 90% to 57%, because cells were now dying of being
+        // eaten rather than of copying badly, and mortality uncorrelated with fidelity is exactly
+        // what a selection test measures the absence of.
+        //
+        // The membrane's own note has been warning about this the whole time: it is why
+        // `permeability` was left unimplemented rather than done quickly, because a permeability
+        // control at full throttle means *wide open*.
+        let appetite = cells
+            .slots(i)
+            .iter()
+            .filter(|o| o.kind == OrganelleType::Vacuole && o.is_active())
+            .map(|o| (o.control[1] as i32).clamp(0, Q10_ONE))
+            .max()
+            .unwrap_or(0);
+        if appetite > 0 {
+            let (sx, sy) = (
+                crate::fixed::pos_to_square(cells.x[i]),
+                crate::fixed::pos_to_square(cells.y[i]),
+            );
+            let reach = crate::junction::reach(cells, i);
+            let mine = cells.mass[i];
+            // In neighbour order and stopping at the first that goes down, so a cell swallows at
+            // most one thing a tick and two predators reaching for the same prey are settled by
+            // slot order — this loop is sequential for exactly that reason.
+            let candidates: Vec<usize> = neighbours
+                .around(sx, sy)
+                .filter(|j| *j != i)
+                .filter(|j| cells.occupied(*j))
+                .filter(|j| crate::junction::distance(cells, i, *j) <= reach)
+                .collect();
+            for j in candidates {
+                // A shell counts towards the bulk that has to be got round. Armour is not a
+                // damage reduction here — it is simply more of the victim to swallow.
+                let cover = crate::organelle::shell_cover(cells, j);
+                let bulk = cells.mass[j].saturating_add(q10_scale(cells.mass[j], cover));
+                if bulk <= 0 {
+                    continue;
+                }
+                let needed = q10_scale(bulk, config.engulf_ratio);
+                if mine < needed {
+                    continue;
+                }
+                let cost = q10_scale(cells.mass[j], config.engulf_energy);
+                if cells.energy[i] < cost {
+                    continue;
+                }
+                cells.energy[i] = cells.energy[i].saturating_sub(cost);
+                ledger.dissipate(cost as i64);
+
+                // The body, as structural matter, into the predator's interior — bounded by what
+                // it can hold, with the remainder going to the water rather than nowhere.
+                let structural = chemistry.structural % crate::chem::CHEM_COUNT;
+                let taken = cells.mass[j];
+                cells.mass[j] = 0;
+                let usable = q10_scale(taken, config.engulf_efficiency);
+                let lost = taken.saturating_sub(usable);
+                let room = crate::biology::interior_capacity(cells, i)
+                    .saturating_sub(cells.interior(i)[structural])
+                    .max(0);
+                let into_cell = usable.min(room);
+                if into_cell > 0 {
+                    cells.interior_mut(i)[structural] =
+                        cells.interior(i)[structural].saturating_add(into_cell);
+                }
+                // Whatever would not fit, plus the share the swallowing wasted, goes back to the
+                // square as itself. It is the same chemical either way, so no conversion is
+                // involved and nothing needs converting through the ledger.
+                let spill = usable.saturating_sub(into_cell).saturating_add(lost);
+                if spill > 0 {
+                    let (vx, vy) = (
+                        crate::fixed::pos_to_square(cells.x[j]),
+                        crate::fixed::pos_to_square(cells.y[j]),
+                    );
+                    let placed = substrate.add_chem(structural, vx, vy, spill);
+                    let stuck = spill.saturating_sub(placed);
+                    if stuck > 0 {
+                        cells.interior_mut(j)[structural] =
+                            cells.interior(j)[structural].saturating_add(stuck);
+                    }
+                }
+                report.engulfed = report.engulfed.saturating_add(1);
+                report.swallowed = report.swallowed.saturating_add(taken as i64);
+                eaten.push(cells.id_at(j));
+                break;
+            }
+        }
+
+        // --- passive transport: chemistry crossing the membrane on its own ---
+        //
+        // Down the gradient, at a rate set by the membrane's own `control[0]`. Both directions
+        // out of one subtraction: a cell richer than its square loses, a cell poorer gains, and a
+        // cell in equilibrium does neither without needing a case for it.
+        //
+        // Bounded on the way in by what the cell can hold and on the way out by what the square
+        // will take, and both use the amount actually moved rather than the amount intended —
+        // `add_chem` returns what it placed, and the difference between asking and achieving is
+        // where a conservation bug would live.
+        let permeability = cells
+            .slots(i)
+            .first()
+            .map_or(0, |m| (m.control[0] as i32).clamp(0, Q10_ONE));
+        let crossing = q10_scale(config.permeability_rate, permeability);
+        if crossing > 0 {
+            let (sx, sy) = (
+                crate::fixed::pos_to_square(cells.x[i]),
+                crate::fixed::pos_to_square(cells.y[i]),
+            );
+            // A vacuole's contents are sequestered and do not cross. That is what a vacuole is
+            // for, and until passive transport existed it was the one thing it could not offer:
+            // it held solute out of the *osmotic* reckoning and nothing else.
+            let room = crate::biology::interior_capacity(cells, i);
+            for c in 0..crate::chem::CHEM_COUNT {
+                let inside = cells.interior(i)[c];
+                let outside = substrate.chem_at(c, sx, sy);
+                let gradient = inside.saturating_sub(outside);
+                let want = q10_scale(gradient, crossing);
+                if want > 0 {
+                    // Out, down the gradient, bounded by what is actually held.
+                    let out = want.min(inside);
+                    let placed = substrate.add_chem(c, sx, sy, out);
+                    if placed > 0 {
+                        cells.interior_mut(i)[c] = cells.interior(i)[c].saturating_sub(placed);
+                        report.crossed = report.crossed.saturating_add(placed as i64);
+                    }
+                } else if want < 0 {
+                    // In, bounded by the room left and by what the square has.
+                    let headroom = room.saturating_sub(cells.interior(i)[c]).max(0);
+                    let take = (-want).min(outside).min(headroom);
+                    if take > 0 {
+                        let moved = -substrate.add_chem(c, sx, sy, -take);
+                        if moved > 0 {
+                            cells.interior_mut(i)[c] =
+                                cells.interior(i)[c].saturating_add(moved);
+                            report.crossed = report.crossed.saturating_add(moved as i64);
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- blood in the water ---
+        //
+        // A wounded cell leaks, in proportion to how wounded it is. Placed after everything that
+        // can hurt it this tick — crowding and spikes above — so a cell bleeds from the damage it
+        // actually carries rather than from last tick's.
+        //
+        // Out of the interior rather than off the mass: a cut leaks what a cell is *holding*, and
+        // what it is holding is monomers and stores. Losing them is a real cost to the victim on
+        // top of the wound, which is what makes fleeing worth more than standing.
+        // What the membrane tolerates before it is a wound rather than wear — see
+        // `bleed_threshold`. A thick wall resists leaking for the same reason it resists
+        // everything else.
+        let tolerance = crate::fixed::q10(
+            cells
+                .slots(i)
+                .first()
+                .map_or(0, |m| i32::from(m.param)),
+        );
+        let hurt = cells.damage[i].saturating_sub(q10_scale(tolerance, config.bleed_threshold));
+        if hurt > 0 && config.bleed_rate > 0 {
+            let share = q10_scale(config.bleed_rate, hurt).clamp(0, Q10_ONE);
+            if share > 0 {
+                let (sx, sy) = (
+                    crate::fixed::pos_to_square(cells.x[i]),
+                    crate::fixed::pos_to_square(cells.y[i]),
+                );
+                for c in 0..crate::chem::CHEM_COUNT {
+                    let held = cells.interior(i)[c];
+                    if held <= 0 {
+                        continue;
+                    }
+                    let out = q10_scale(held, share).min(held);
+                    if out <= 0 {
+                        continue;
+                    }
+                    // Whatever the square will not take stays in the cell. Nothing evaporates.
+                    let placed = substrate.add_chem(c, sx, sy, out);
+                    if placed > 0 {
+                        cells.interior_mut(i)[c] = cells.interior(i)[c].saturating_sub(placed);
+                        report.bled = report.bled.saturating_add(placed as i64);
+                    }
+                }
+            }
+        }
+
+        // --- exoenzymes ---
+        //
+        // The spike's pair: stab it, or dissolve it. Digests a neighbour from the outside and
+        // puts the result in the *square*, where anyone standing there can take it — a leaky
+        // public good, and the answer to prey too large to swallow.
+        //
+        // What makes it a different living from engulfment rather than a worse one is exactly
+        // that leak. A swallowed cell is yours; a dissolved one is everybody's, so an exoenzyme
+        // pays best where the digester is the only thing nearby and worst in a crowd. It also has
+        // no size gate at all — a small cell can dissolve a large one, slowly, which is the
+        // position on the board that engulfment cannot occupy.
+        let enzyme = cells
+            .slots(i)
+            .iter()
+            .filter(|o| o.kind == OrganelleType::Exoenzyme && o.is_active())
+            .map(|o| q10_scale(crate::fixed::q10(o.param as i32), (o.control[0] as i32).clamp(0, Q10_ONE)))
+            .fold(0i32, i32::saturating_add);
+        if enzyme > 0 {
+            let cost = q10_scale(enzyme, config.spike_upkeep);
+            let paid = cells.energy[i].min(cost);
+            cells.energy[i] = cells.energy[i].saturating_sub(paid);
+            ledger.dissipate(paid as i64);
+            if paid >= cost {
+                let (sx, sy) = (
+                    crate::fixed::pos_to_square(cells.x[i]),
+                    crate::fixed::pos_to_square(cells.y[i]),
+                );
+                let reach = crate::junction::reach(cells, i);
+                let victims: Vec<usize> = neighbours
+                    .around(sx, sy)
+                    .filter(|j| *j != i)
+                    .filter(|j| cells.occupied(*j))
+                    .filter(|j| crate::junction::distance(cells, i, *j) <= reach)
+                    .collect();
+                let structural = chemistry.structural % crate::chem::CHEM_COUNT;
+                for j in victims {
+                    // A shell is what an exoenzyme has to get through, the same as a spike —
+                    // mineral does not dissolve.
+                    let admits =
+                        crate::organelle::shell_admits(crate::organelle::shell_cover(cells, j));
+                    let bite = q10_scale(q10_scale(enzyme, config.dissolve_rate), admits)
+                        .min(cells.mass[j])
+                        .max(0);
+                    if bite <= 0 {
+                        continue;
+                    }
+                    cells.mass[j] = cells.mass[j].saturating_sub(bite);
+                    let (vx, vy) = (
+                        crate::fixed::pos_to_square(cells.x[j]),
+                        crate::fixed::pos_to_square(cells.y[j]),
+                    );
+                    // Into the water at the victim, not into the digester. That is the whole
+                    // design and the reason this is not simply a slower engulfment.
+                    let placed = substrate.add_chem(structural, vx, vy, bite);
+                    let stuck = bite.saturating_sub(placed);
+                    if stuck > 0 {
+                        cells.interior_mut(j)[structural] =
+                            cells.interior(j)[structural].saturating_add(stuck);
+                    }
+                    report.dissolved = report.dissolved.saturating_add(bite as i64);
                 }
             }
         }
@@ -701,8 +1099,13 @@ mod tests {
     ) -> EcologyReport {
         let mut scan = Vec::new();
         super::scan_into(cells, &mut scan);
+        // These tests are about spikes, filters and digestion; nothing here swallows, so the
+        // list is discarded. A test that wants engulfment has `tests/engulf.rs`, which drives a
+        // whole `World` and therefore gets the deaths buried for it.
+        let mut eaten = Vec::new();
         super::step(
             cells, substrate, neighbours, crowding, slip, config, chemistry, ledger, &scan,
+            &mut eaten,
         )
     }
 

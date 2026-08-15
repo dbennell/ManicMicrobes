@@ -523,6 +523,76 @@ pub const FIELDS: &[Field] = &[
                past it. The one number that decides whether staying still is a living",
     },
     Field {
+        path: "ecology.engulf_ratio",
+        label: "mouthful",
+        group: Group::Ecology,
+        unit: Unit::Q10,
+        note: "how many times a victim's own bulk a cell must be before it can swallow it whole. \
+               The one number that decides whether being large is a strategy: everywhere else in \
+               this engine size is a bill, and this is where it becomes a weapon. A victim's \
+               shell counts towards its bulk, so lowering this makes armour matter more, not less",
+    },
+    Field {
+        path: "ecology.engulf_energy",
+        label: "swallowing cost",
+        group: Group::Ecology,
+        unit: Unit::Q10,
+        note: "energy to swallow one unit of another cell's mass. Cheap enough and eating each \
+               other is free; dear enough and nobody bothers, and the slide goes back to being a \
+               mat of producers",
+    },
+    Field {
+        path: "ecology.engulf_efficiency",
+        label: "swallowing yield",
+        group: Group::Ecology,
+        unit: Unit::Fraction,
+        note: "how much of a swallowed cell lands as usable structural matter. High on purpose: \
+               a spike-and-scavenge kill returns perhaps a sixth of a corpse, and returns it as \
+               something to burn rather than something to build with. This is the number that \
+               makes eating other cells a living rather than a gesture",
+    },
+    Field {
+        path: "ecology.bleed_rate",
+        label: "bleeding",
+        group: Group::Ecology,
+        unit: Unit::Q10,
+        note: "how fast a wounded cell leaks its interior into the water, per unit of damage it \
+               carries. Damage used to be entirely private — a hurt cell looked exactly like a \
+               healthy one to every sensor there is — and this is what puts blood in the water \
+               for a chemosensor to find. It is also the only mechanism here that rewards a \
+               second attacker for the first one's work",
+    },
+    Field {
+        path: "ecology.permeability_rate",
+        label: "leakiness",
+        group: Group::Ecology,
+        unit: Unit::Q10,
+        note: "how fast chemistry crosses a fully-open membrane, as a fraction of the difference \
+               between inside and out. Zero is the perfect barrier every archetype was written \
+               against; turn it up and dilute water starts to starve, a toxin in the square \
+               becomes a weapon, and a vacuole becomes the only way to hold something without \
+               losing it. The membrane's own control word decides how open any given cell is",
+    },
+    Field {
+        path: "ecology.bleed_threshold",
+        label: "wound depth",
+        group: Group::Ecology,
+        unit: Unit::Fraction,
+        note: "how deep a wound has to be before it leaks, as a fraction of what the membrane \
+               tolerates. A wound rather than wear: respiring at all makes peroxide, peroxide \
+               damages the membrane, and repair holds that at an asymptote rather than at zero — \
+               so without a threshold every cell on the slide bleeds all the time",
+    },
+    Field {
+        path: "ecology.dissolve_rate",
+        label: "dissolving",
+        group: Group::Ecology,
+        unit: Unit::Q10,
+        note: "mass an exoenzyme dissolves off a neighbour per tick. What it takes goes into the \
+               *water*, not into the digester, so this is the number that decides whether \
+               dissolving your neighbour is a living or a gift to whoever is standing nearby",
+    },
+    Field {
         path: "ecology.em_range",
         label: "sight range",
         group: Group::Ecology,

@@ -1,0 +1,186 @@
+//! Swallowing another cell whole.
+//!
+//! # Why this and not another way of stabbing something
+//!
+//! `docs/FEEDING.md` §4 measured why predation does not pay, and drew two conclusions that
+//! together rule out most of the obvious fixes:
+//!
+//! > A new acquisition route that delivers a burnable substrate delivers nothing, because
+//! > conversion and not supply is the limit. A route pays only if it delivers *structural matter*
+//! > … **Ownership of the kill matters more than the yield of the kill.** The largest term in the
+//! > loss is spatial: the food lands somewhere else.
+//!
+//! A spike-and-scavenge kill fails both. Half the corpse becomes carrion, digestion recovers two
+//! thirds of that, the deposit lands where the *victim* died and diffuses from there — and what
+//! does arrive is a substrate the mitochondrion's capacity was already the binding term on.
+//!
+//! Engulfment satisfies both by construction: the matter arrives **inside** the predator, and it
+//! arrives as **structure**, which is built with rather than burnt.
+//!
+//! # And why it is a size comparison
+//!
+//! There is no predator flag here and there must not be. What decides a kill is bulk — and a
+//! victim's shell counts towards its bulk, so armour is what a cell grows when it does not intend
+//! to be swallowed. That is the arms race slot 15 was filled for; until now the shell only
+//! blunted damage, which is the weaker of the two channels.
+//!
+//! It also makes size a *weapon*. Everywhere else in this engine being large is a bill — more
+//! upkeep, more neighbours, more matter tied up — and its only income was the filter's frontal
+//! area. This is the second.
+
+use mm_core::cell::{CellId, CellSeed};
+use mm_core::fixed::{pos, q10};
+use mm_core::{LightRegime, Organelle, OrganelleType, Scenario, Seeding, World, Q10_ONE};
+
+const STRUCTURAL: usize = 4;
+
+fn slide() -> Scenario {
+    Scenario {
+        name: "engulf".to_string(),
+        seed: 12,
+        width: 32,
+        height: 32,
+        light: LightRegime::Uniform {
+            intensity: Q10_ONE,
+        },
+        seeding: vec![Seeding::Uniform {
+            chemical: 11,
+            per_square: q10(200),
+        }],
+        ..Scenario::default()
+    }
+}
+
+/// A cell at `(x, y)` of a given mass, with `appetite` on a vacuole and `shells` shells.
+fn cell(world: &mut World, x: i32, y: i32, mass: i32, appetite: i16, shells: usize) -> CellId {
+    let genome = world
+        .genomes()
+        .intern(mm_asm::assemble("HALT\n").expect("assembles").bytes)
+        .expect("interned");
+    let id = world.spawn_cell(CellSeed {
+        x: pos(x),
+        y: pos(y),
+        mass,
+        energy: q10(100_000),
+        membrane: 48,
+        key: 11,
+        badge: 0,
+        species: 0,
+        parent: CellId::NONE,
+        birth_tick: 0,
+        genome,
+    });
+    let i = world.cells_mut().index(id).expect("spawned");
+    let cells = world.cells_mut();
+    if appetite > 0 {
+        let mut v = Organelle::finished(OrganelleType::Vacuole, 200);
+        // `control[1]`: the word that starts shut. See the note at the engulfment site — appetite
+        // on `control[0]` made every vacuole in the library a mouth.
+        v.control[1] = appetite;
+        cells.slots_mut(i)[1] = v;
+    }
+    for k in 0..shells {
+        let mut sh = Organelle::finished(OrganelleType::Shell, 255);
+        sh.control[0] = Q10_ONE as i16;
+        cells.slots_mut(i)[8 + k] = sh;
+    }
+    id
+}
+
+/// A big hungry cell swallows a small one, and the small one is gone.
+#[test]
+fn a_larger_cell_swallows_a_smaller_one() {
+    let mut world = World::new(slide()).expect("world");
+    let predator = cell(&mut world, 16, 16, q10(400), Q10_ONE as i16, 0);
+    let prey = cell(&mut world, 16, 16, q10(40), 0, 0);
+    let before = world.cells().len();
+
+    world.run(3);
+
+    assert_eq!(world.cells().len(), before - 1, "nothing was swallowed");
+    assert!(
+        world.cells_mut().index(prey).is_none(),
+        "the prey survived being eaten"
+    );
+    let i = world.cells_mut().index(predator).expect("the predator lived");
+    assert!(
+        world.cells().interior(i)[STRUCTURAL] > 0,
+        "the predator swallowed something and got no structural matter out of it, which is the \\
+         entire reason to prefer this to a spike"
+    );
+}
+
+/// Not if it is not big enough. The gate is bulk, and nothing else.
+#[test]
+fn a_cell_cannot_swallow_something_its_own_size() {
+    let mut world = World::new(slide()).expect("world");
+    cell(&mut world, 16, 16, q10(200), Q10_ONE as i16, 0);
+    let peer = cell(&mut world, 16, 16, q10(200), 0, 0);
+
+    world.run(3);
+
+    assert!(
+        world.cells_mut().index(peer).is_some(),
+        "a cell swallowed something its own size; the ratio is not being applied"
+    );
+}
+
+/// A shell is bulk. Armour is what a cell grows when it does not intend to be swallowed.
+#[test]
+fn a_shell_makes_a_cell_too_much_of_a_mouthful() {
+    let bare_eaten = {
+        let mut world = World::new(slide()).expect("world");
+        cell(&mut world, 16, 16, q10(400), Q10_ONE as i16, 0);
+        let prey = cell(&mut world, 16, 16, q10(180), 0, 0);
+        world.run(3);
+        world.cells_mut().index(prey).is_none()
+    };
+    let armoured_eaten = {
+        let mut world = World::new(slide()).expect("world");
+        cell(&mut world, 16, 16, q10(400), Q10_ONE as i16, 0);
+        // The same prey, at the same mass, wearing shells.
+        let prey = cell(&mut world, 16, 16, q10(180), 0, 6);
+        world.run(3);
+        world.cells_mut().index(prey).is_none()
+    };
+    assert!(bare_eaten, "the bare prey was not eaten, so there is no contrast to draw");
+    assert!(
+        !armoured_eaten,
+        "armour made no difference to being swallowed, which is the channel the shell is for"
+    );
+}
+
+/// Appetite is a behaviour, not an organ. A vacuole that is not asking does not swallow.
+#[test]
+fn a_cell_that_is_not_asking_does_not_swallow() {
+    let mut world = World::new(slide()).expect("world");
+    cell(&mut world, 16, 16, q10(400), 0, 0);
+    let prey = cell(&mut world, 16, 16, q10(40), 0, 0);
+    world.run(3);
+    assert!(
+        world.cells_mut().index(prey).is_some(),
+        "a cell with its appetite at zero ate something anyway"
+    );
+}
+
+/// And the books close. A swallowed cell's matter moves; none of it is created or destroyed.
+#[test]
+fn swallowing_moves_matter_and_creates_none() {
+    let mut world = World::new(slide()).expect("world");
+    cell(&mut world, 16, 16, q10(400), Q10_ONE as i16, 0);
+    let prey = cell(&mut world, 16, 16, q10(40), 0, 0);
+    world.adopt_current_contents_as_baseline();
+    let before = world.total_matter();
+
+    world.run(4);
+    assert!(
+        world.cells_mut().index(prey).is_none(),
+        "nothing was swallowed, so this test is measuring nothing"
+    );
+    assert_eq!(
+        world.total_matter(),
+        before,
+        "matter changed over a swallowing"
+    );
+    world.check_matter().expect("I4 broke over an engulfment");
+}
