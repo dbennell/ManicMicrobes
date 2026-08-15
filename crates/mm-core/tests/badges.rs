@@ -141,7 +141,9 @@ fn a_cell_can_read_its_own_badge_back() {
         EXPRESS #look
         HALT
         GENE    #look
-        IMM     21              ; membrane reading 21: my own badge
+        IMM     22              ; membrane reading 22: my own badge — 21 until the chemical
+                                ; table gained dinitrogen at ISA 11, since the membrane scalars
+                                ; sit after the chemicals and widening the table moves them
         ZERO                    ; slot 0, the membrane
         OGET
         ZERO
@@ -212,6 +214,16 @@ fn a_daughter_is_born_already_wearing_her_mothers_colours() {
             mm_core::Seeding::Uniform {
                 chemical: 4,
                 per_square: q10(400),
+            },
+            // The minerals every recipe in the catalogue is costed in, at the
+            // Redfield proportion of the carbon above. Nothing produces them.
+            mm_core::Seeding::Uniform {
+                chemical: 5,
+                per_square: (q10(400)) * 16 / 106,
+            },
+            mm_core::Seeding::Uniform {
+                chemical: 6,
+                per_square: (q10(400)) / 53,
             },
         ],
         ..slide()
@@ -287,6 +299,16 @@ fn nothing_in_the_engine_reads_a_badge() {
                     mm_core::Seeding::Uniform {
                         chemical: 4,
                         per_square: q10(400),
+                    },
+                    // The minerals every recipe in the catalogue is costed in, at the
+                    // Redfield proportion of the carbon above. Nothing produces them.
+                    mm_core::Seeding::Uniform {
+                        chemical: 5,
+                        per_square: (q10(400)) * 16 / 106,
+                    },
+                    mm_core::Seeding::Uniform {
+                        chemical: 6,
+                        per_square: (q10(400)) / 53,
                     },
                 ],
                 ..slide()

@@ -168,8 +168,10 @@
         IMM     3
         IMM     7               ; reading 3: the nearest one's badge
         OGET
-        IMM     21
-        ZERO                    ; my own badge
+        IMM     22
+        ZERO                    ; my own badge. 21 until ISA 11 put dinitrogen in the chemical
+                                ; table: the membrane's scalars are laid out after the chemicals,
+                                ; so widening the table shifts everything past them.
         OGET
         CMP
         JMPZ    kin

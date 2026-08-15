@@ -70,6 +70,16 @@ fn patchy(seed: u64) -> Scenario {
             chemical: 4,
             per_square: q10(300),
         },
+        // The minerals every recipe in the catalogue is costed in, at the
+        // Redfield proportion of the carbon above. Nothing produces them.
+        Seeding::Uniform {
+            chemical: 5,
+            per_square: (q10(300)) * 16 / 106,
+        },
+        Seeding::Uniform {
+            chemical: 6,
+            per_square: (q10(300)) / 53,
+        },
     ];
     for (x, y) in PATCHES {
         seeding.push(Seeding::Patch {

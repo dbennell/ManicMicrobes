@@ -510,15 +510,51 @@ steps/second against M1's 500 — so it is a real charge against an overspent bu
 rounding error. It is affordable because the gate's workload is 512² with all sixteen planes
 carrying matter, and the product runs 256² with about seven.
 
-### Not yet built
+### Built
 
-Everything in this section is measurement and design. What follows from it — the chemical split,
-the diazosome reversed from *spending* nitrogen into *making it available*, nitrogen and
-phosphorus costs in `build_trace` on the protein-heavy organelles and the nucleus respectively,
-the mobilities, and an oxidant-gated reversion as the slow leak back — is unimplemented. One
-correction to note before it is: an oxidant-gated reversion is **not** expressible as `decay_to`
-plus `decay_rate`. `World::decay_fluid` applies one unconditional rate per chemical and cannot see
-the oxidant field, so gating it is a mechanism rather than a table edit.
+All of it, at ISA 10 and 11, and the design above survived contact with one correction and two
+surprises.
+
+**ISA 10 — the recipes.** `build_trace` filled on the Redfield ratio: nitrogen at 16/106 of a
+type's carbon on the enzymatic machinery and the sensors, phosphorus at 1/106 on the nucleus,
+silicon already on the shell. The mobilities with them — nitrogen diffusing above the monomer
+default and carried by the flow, phosphorus at **zero on both axes** so the only thing that moves
+it is a cell that ate it, silicon settling like detritus.
+
+**ISA 11 — the atmosphere and the reversal.** `chem::DINITROGEN` at index 16, and the diazosome
+turned round: it converts the inert pool into the bioavailable one at an energy price, where
+before it *spent* nitrogen to make carbon. `World::denitrify` is the leak back, gated on anoxic
+water, and it ships at zero because the leak is the term to tune last.
+
+**The correction.** An oxidant-gated reversion is not `decay_to` plus `decay_rate`, as this
+section originally suggested. Those are one unconditional rate per chemical; denitrification is a
+function of *two* chemicals at a square, so it is a mechanism and not a table edit.
+
+**The first surprise: a recipe is charged against the cell's interior.** So an organelle costed in
+nitrogen can only be built by a lineage that *eats* nitrogen — and no genome written before ISA 10
+did, because there was nothing to eat it for. On `soup.ron` the ancestor went to 144 cells with no
+nucleus out of 160 and the population stalled at a tenth of what it should be. Every shipped
+genome gained two `EAT`s and every world in `scenarios/` gained the three minerals. That is not a
+wrinkle; it is the honest price of making a requirement irreducible, and it is what the version
+stamp is for.
+
+**The second: seeding silicon did not make shells buildable.** §8's own fix, from earlier the same
+day, put silicon on the fresh slide and the mm-app guard held it there — but no genome ate silicon
+either, so armour stayed unreachable in practice. A world test cannot catch a gate and a gate
+cannot catch an empty world; it turns out neither can catch *a cell that never goes shopping*.
+
+`tests/nitrogen.rs` is the acceptance set: total nitrogen across both pools and every body is
+constant to the unit over 200 ticks, fixation unlocks rather than transmutes and carbon does not
+move while it does, a death returns what a body was built from, and reversion happens in anoxic
+water and not in oxygenated water.
+
+### Still open
+
+The sweeps. Every level here is a *requirement* written from stoichiometry, and none of them has
+been swept for where it *binds* — which is the distinction §6 exists to make, and the one that
+cost the soup two orders of magnitude. In particular the sensors' nitrogen entry wants its own
+line: at 618 against the mitochondrion's 773 it is not a rounding difference, and taxing
+perception is a distinct pressure from taxing metabolism.
 
 ## 9. Mineral-bearing walls: where phosphorus and silicon come from
 
@@ -590,6 +626,6 @@ mineral that is not merely the safer option, it is the more accurate one.
 
 ### Not built
 
-Design only, as §8 is. The immediate consequence of §8's bug — that a shell could not be built on
-any slide but one — was fixed by seeding silicon uniformly on the fresh slide, which is a
-stopgap standing in for this.
+Design only. §8's minerals are built and this is the source that would keep them coming; without
+it a world has exactly the phosphorus and silicon it was seeded with, forever, and an outcrop is
+the mechanism that would make that a geography rather than a budget.

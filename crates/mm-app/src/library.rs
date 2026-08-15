@@ -46,13 +46,14 @@ pub struct NewWorld {
     pub size: u32,
     /// Uniform daylight, `Q10`. 1024 is full.
     pub light: i32,
-    /// `(chemical, per square)` for carbon, carbon dioxide, the oxidant and silicon — what a
-    /// body is built out of, what a chloroplast runs on, and what a shell is made of.
+    /// `(chemical, per square)` for the six a slide cannot do without: carbon, carbon dioxide
+    /// and the oxidant — a body and what a chloroplast runs on — plus the three minerals nothing
+    /// in the engine produces.
     ///
     /// Silicon is here for a different reason from the other three, and the reason is a bug it
     /// is fixing: it is not something every cell needs, it is something *no* cell could obtain.
     /// See [`NewWorld::default`].
-    pub chemistry: [(usize, i32); 4],
+    pub chemistry: [(usize, i32); 7],
     /// Who lives here, as a name the scenario can write down and [`mm_asm::locate`] can find.
     pub genome: String,
     /// Zero is a legal answer, and is the one you want when the point is to draw the world
@@ -66,8 +67,14 @@ pub const CARBON: usize = 4;
 pub const CARBON_DIOXIDE: usize = 11;
 /// The oxidant.
 pub const OXIDANT: usize = 14;
-/// Silicon: what a shell is made of, and the only recipe ingredient in the catalogue.
+/// Silicon: what a shell is made of.
 pub const SILICON: usize = 7;
+/// Nitrogen: what protein is made of, so what the enzymatic machinery costs.
+pub const NITROGEN: usize = 5;
+/// Phosphorus: what a nucleus costs, and the one chemical that does not move.
+pub const PHOSPHORUS: usize = 6;
+/// Dinitrogen: the inert pool, and the only thing a diazosome is for.
+pub const DINITROGEN: usize = mm_core::chem::DINITROGEN;
 
 impl Default for NewWorld {
     fn default() -> Self {
@@ -123,6 +130,29 @@ impl Default for NewWorld {
                 (CARBON_DIOXIDE, mm_core::fixed::q10(40)),
                 (OXIDANT, mm_core::fixed::q10(40)),
                 (SILICON, mm_core::fixed::q10(20)),
+                // Nitrogen and phosphorus, at the Redfield proportion of the carbon above.
+                //
+                // Organisms hold C : N : P at roughly 106 : 16 : 1 because that is what the
+                // machinery is made of, and `organelle::nitrogen_trace` writes those proportions
+                // into the catalogue — so seeding them in the same proportion is the only figure
+                // that is not a guess. Against carbon's forty that is six of nitrogen and about
+                // four tenths of phosphorus.
+                //
+                // Phosphorus is rounded up to a whole unit rather than left at the strict 0.38,
+                // and deliberately so: it is the one chemical that **does not move**, so a cell
+                // can only ever use what is standing on its own square, and a first landing that
+                // made it binding before anybody had swept it would be §6's mistake told the
+                // other way round. Scarce enough to matter is a question for the sweep; this is
+                // the level that lets the mechanism exist.
+                (NITROGEN, mm_core::fixed::q10(6)),
+                (PHOSPHORUS, mm_core::fixed::q10(1)),
+                // The inert reservoir, four times the bioavailable pool. A young world is
+                // mostly locked up and a diazosome is the only key — but not so locked that a
+                // slide with no diazotroph on it cannot start, which is the bootstrapping trap
+                // this level exists to stay out of: nothing in `genomes/` grows one, so a first
+                // landing that made bioavailable nitrogen scarce would kill the library rather
+                // than reward fixing.
+                (DINITROGEN, mm_core::fixed::q10(24)),
             ],
             genome: "ancestor.mm".to_string(),
             founders: 0,
@@ -686,6 +716,9 @@ mod tests {
                 // Zero, so this test also covers a chemical being dropped from the recipe while
                 // the others are kept — the case the test below checks in isolation.
                 (SILICON, 0),
+                (NITROGEN, 0),
+                (PHOSPHORUS, 0),
+                (DINITROGEN, 0),
             ],
             genome: "predator.mm".to_string(),
             founders: 6,
@@ -789,7 +822,15 @@ mod tests {
     #[test]
     fn a_chemical_set_to_nothing_is_left_out_of_the_recipe() {
         let s = NewWorld {
-            chemistry: [(CARBON, 0), (CARBON_DIOXIDE, 0), (OXIDANT, 0), (SILICON, 0)],
+            chemistry: [
+                (CARBON, 0),
+                (CARBON_DIOXIDE, 0),
+                (OXIDANT, 0),
+                (SILICON, 0),
+                (NITROGEN, 0),
+                (PHOSPHORUS, 0),
+                (DINITROGEN, 0),
+            ],
             ..NewWorld::default()
         }
         .scenario();

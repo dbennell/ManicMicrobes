@@ -13,6 +13,16 @@
         Uniform(chemical: 11, per_square: 819200),
         Uniform(chemical: 14, per_square: 819200),
         Uniform(chemical: 4, per_square: 819200),
+        // The three minerals nothing in the engine produces (`docs/CHEMISTRY.md` §8): seeding is
+        // the only way in, and without them a nucleus, an enzyme or a shell cannot be built at
+        // all. At the Redfield proportion of this world's own carbon — 16/106 nitrogen, 1/106
+        // phosphorus rounded up — and half that again in silicon, matching the fresh slide.
+        Uniform(chemical: 5, per_square: 123904),
+        Uniform(chemical: 6, per_square: 8192),
+        // The inert pool a diazosome cracks. Four times the bioavailable nitrogen: a
+        // young world is mostly locked up, and unlocking it is what the organelle is for.
+        Uniform(chemical: 16, per_square: 495616),
+        Uniform(chemical: 7, per_square: 409600),
     ],
     barriers: [],
 )

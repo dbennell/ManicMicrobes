@@ -273,6 +273,10 @@ fn live(genome: &str, ticks: u64) -> World {
             mm_core::Seeding::Uniform { chemical: 11, per_square: q10(400) },
             mm_core::Seeding::Uniform { chemical: 14, per_square: q10(400) },
             mm_core::Seeding::Uniform { chemical: 4, per_square: q10(400) },
+            // The minerals every recipe is costed in, at the Redfield proportion of
+            // the carbon above. Nothing in the engine produces them.
+            mm_core::Seeding::Uniform { chemical: 5, per_square: (q10(400)) * 16 / 106 },
+            mm_core::Seeding::Uniform { chemical: 6, per_square: (q10(400)) / 53 },
         ],
         ..Scenario::default()
     };
@@ -363,6 +367,10 @@ fn what_makes_a_mat_of_marbles_rather_than_a_scatter() {
                 mm_core::Seeding::Uniform { chemical: 11, per_square: q10(400) },
                 mm_core::Seeding::Uniform { chemical: 14, per_square: q10(400) },
                 mm_core::Seeding::Uniform { chemical: 4, per_square: q10(400) },
+                // The minerals every recipe is costed in, at the Redfield proportion of
+                // the carbon above. Nothing in the engine produces them.
+                mm_core::Seeding::Uniform { chemical: 5, per_square: (q10(400)) * 16 / 106 },
+                mm_core::Seeding::Uniform { chemical: 6, per_square: (q10(400)) / 53 },
             ],
             ..Scenario::default()
         };
@@ -407,6 +415,10 @@ fn who_is_actually_on_the_marbles_slide() {
             mm_core::Seeding::Uniform { chemical: 11, per_square: q10(400) },
             mm_core::Seeding::Uniform { chemical: 14, per_square: q10(400) },
             mm_core::Seeding::Uniform { chemical: 4, per_square: q10(400) },
+            // The minerals every recipe is costed in, at the Redfield proportion of
+            // the carbon above. Nothing in the engine produces them.
+            mm_core::Seeding::Uniform { chemical: 5, per_square: (q10(400)) * 16 / 106 },
+            mm_core::Seeding::Uniform { chemical: 6, per_square: (q10(400)) / 53 },
         ],
         ..Scenario::default()
     };

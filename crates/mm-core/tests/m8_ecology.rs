@@ -145,12 +145,25 @@ fn carrion_stays_near_where_it_fell_and_decays_rather_than_accumulating() {
     // The design claim behind it, checked rather than trusted, since it is one number in a
     // table that anything could edit.
     let rates = soup.chemicals.diffusion_rates();
+    // Least mobile of the chemicals that are *meant* to drift.
+    //
+    // It used to be least mobile outright, and ISA 10 changed that on purpose: phosphorus has no
+    // gas phase and its cycle is sedimentary, so it is pinned at zero on both axes and only a
+    // cell that ate it can move it. Silicon settles too. Comparing against those would be asking
+    // carrion to out-sit a mineral that by design does not move at all, so they are excluded by
+    // name — and named rather than filtered by rate, because "everything slower than carrion is
+    // exempt" would make this assertion vacuous the moment anything else slowed down.
+    let immobile = [
+        mm_core::organelle::PHOSPHORUS,
+        mm_core::organelle::SILICON,
+        mm_core::chem::DINITROGEN,
+    ];
     assert!(
         rates
             .iter()
             .enumerate()
-            .all(|(i, r)| i == CARRION || *r > rates[CARRION]),
-        "carrion is no longer the least mobile chemical: {rates:?}"
+            .all(|(i, r)| i == CARRION || immobile.contains(&i) || *r > rates[CARRION]),
+        "carrion is no longer the least mobile chemical that drifts: {rates:?}"
     );
 
     let mut world = World::new(soup).expect("world");

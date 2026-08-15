@@ -8,9 +8,10 @@ use mm_core::cell::{CellId, CellSeed};
 use mm_core::fixed::{pos, q10};
 use mm_core::{LightRegime, Scenario, Seeding, World, Q10_ONE};
 
-/// The membrane index that reads crowding: after the five scalars, the sixteen chemicals and the
-/// badge. Appended, so nothing before it renumbers.
-const CROWDING: i16 = 22;
+/// The membrane index that reads crowding: after the five scalars, the *seventeen* chemicals and
+/// the badge. Appended, so nothing before it renumbers — but the chemicals are in front of it, so
+/// widening the table moves it, which is what ISA 11 did and why this is 23 and not 22.
+const CROWDING: i16 = 23;
 
 fn slide() -> Scenario {
     Scenario {
@@ -91,7 +92,14 @@ fn a_cell_can_feel_a_crowd() {
     assert_eq!(alone, 0, "a cell on its own read a crowd of {alone}");
 }
 
-/// And appending the reading renumbered nothing.
+/// Appending the reading renumbered nothing — but *widening the chemical table did*.
+///
+/// The membrane's scalars are laid out after the chemicals, so the badge and the crowding reading
+/// sit at `5 + CHEM_COUNT` and `6 + CHEM_COUNT`. Adding dinitrogen at ISA 11 therefore moved both
+/// by one, and two shipped genomes that read their own badge by literal — `sentinel.mm` and
+/// `stalker.mm` — silently started reading a chemical instead. That is the sharp edge of adding a
+/// chemical, and it is the reason this test is written against the constant rather than against
+/// the numbers: it should fail loudly the next time, not quietly.
 #[test]
 fn the_older_membrane_readings_still_mean_what_they_did() {
     use mm_core::MembraneReading;
@@ -101,11 +109,12 @@ fn the_older_membrane_readings_still_mean_what_they_did() {
     assert_eq!(MembraneReading::decode(3), MembraneReading::Radius);
     assert_eq!(MembraneReading::decode(4), MembraneReading::Damage);
     assert_eq!(MembraneReading::decode(5), MembraneReading::Chemical);
-    assert_eq!(MembraneReading::decode(20), MembraneReading::Chemical);
-    assert_eq!(MembraneReading::decode(21), MembraneReading::Badge);
-    assert_eq!(MembraneReading::decode(22), MembraneReading::Crowding);
+    let chems = mm_core::chem::CHEM_COUNT as i16;
+    assert_eq!(MembraneReading::decode(4 + chems), MembraneReading::Chemical);
+    assert_eq!(MembraneReading::decode(5 + chems), MembraneReading::Badge);
+    assert_eq!(MembraneReading::decode(6 + chems), MembraneReading::Crowding);
     // And it still wraps, so no operand is illegal (hard rule 3).
-    assert_eq!(MembraneReading::decode(23), MembraneReading::Mass);
+    assert_eq!(MembraneReading::decode(7 + chems), MembraneReading::Mass);
 }
 
 /// A wounded cell leaves a trail, and a healthy one does not.

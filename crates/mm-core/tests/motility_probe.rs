@@ -96,6 +96,16 @@ fn dish(w: u32, h: u32) -> Scenario {
                 chemical: 4,
                 per_square: q10(400),
             },
+            // The minerals every recipe in the catalogue is costed in, at the
+            // Redfield proportion of the carbon above. Nothing produces them.
+            mm_core::Seeding::Uniform {
+                chemical: 5,
+                per_square: (q10(400)) * 16 / 106,
+            },
+            mm_core::Seeding::Uniform {
+                chemical: 6,
+                per_square: (q10(400)) / 53,
+            },
         ],
         biology: mm_core::BiologyConfig {
             mutation: MutationRates::none(),

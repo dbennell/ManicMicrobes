@@ -14,7 +14,26 @@ use crate::state_hash::{StateHash, StateHasher};
 /// Number of chemical species. Fixed at 16: the index is a 4-bit operand so that a mutation
 /// to one is a small local perturbation rather than a 1-in-100 lottery, the same reasoning
 /// as the 16 organelle slots of SPEC §6.2.
-pub const CHEM_COUNT: usize = 16;
+pub const CHEM_COUNT: usize = 17;
+
+/// Dinitrogen: the inert reservoir a diazosome cracks, and the reason the table is seventeen.
+///
+/// # Why it has to be on the slide
+///
+/// Only energy enters and leaves this world — light in, heat out. Matter is neither created nor
+/// destroyed, only transferred and transformed, so a reservoir that is not on the slide cannot
+/// exist. Real fixation draws on an atmospheric pool, and the honest way to have that here is to
+/// *put the atmosphere in the table*, at the cost of a chemical. `Ledger::record_injected` would
+/// have been cheaper and is scenario-setup machinery: an organelle calling it every tick is a
+/// tap, and a closed system with a tap is a flow reactor.
+///
+/// What the slot buys is worth more than the slot. Under a tap, nitrogen availability is a number
+/// somebody chose; with two pools on the slide, total nitrogen is fixed at seeding and the
+/// **split between locked and available is a state variable that evolves**. A young world is
+/// nearly all inert and gated on diazotrophs; a mature one has pulled its nitrogen into
+/// circulation, and a 9,216-carbon diazosome becomes dead weight the lineage should drop.
+/// Scarcity becomes a historical property of that world rather than a parameter.
+pub const DINITROGEN: usize = 16;
 
 /// Reduce an arbitrary index to a chemical. Addressing wraps (SPEC §3).
 #[inline(always)]
@@ -197,9 +216,66 @@ impl ChemTable {
             signal("signal_c", [70, 130, 220]),
             signal("signal_d", [150, 190, 240]),
             monomer("carbon", [70, 70, 80]),
-            monomer("nitrogen", [110, 150, 110]),
-            monomer("phosphorus", [220, 180, 90]),
-            monomer("silicon", [180, 180, 200]),
+            // **The three minerals move in three different ways, and that is the whole of what
+            // makes them three niches rather than one scarcity three times over.**
+            //
+            // Nothing produces any of them (`docs/CHEMISTRY.md` §8): seeding, a `Flux` or a
+            // leaching wall is the only way in, and what a world has is what it was given. So the
+            // question each one poses to a cell is not "can I make this" but "can I get to it",
+            // and the answer is set here.
+            //
+            // Nitrogen drifts. Its reservoir is dissolved and well mixed, so a patch drawn down
+            // refills from its neighbourhood without anyone doing anything, and a current
+            // carries it. Diffusion above the monomer default for exactly that: it is the one of
+            // the three that comes to you.
+            ChemicalDef {
+                name: "nitrogen".to_string(),
+                diffusion: Q10_ONE / 8,
+                toxicity: 0,
+                energy_yield: 0,
+                structural: true,
+                colour: [110, 150, 110],
+                decay_to: None,
+                decay_rate: 0,
+                advection: Q10_ONE,
+            },
+            // Phosphorus does not move at all. Its cycle has no gas phase — the only primary
+            // source is rock — which is why it is so often the ultimate limiting nutrient, and
+            // here it means an outcrop is a *location* rather than a level. Zero on both axes, so
+            // the only thing that carries phosphate is a cell that ate it, and colonising away
+            // from a supply means taking it with you, in vacuoles, at the cost of slots.
+            //
+            // A patch stripped of it therefore does not heal by diffusion. It heals when
+            // something dies there, which is the phosphorus cycle doing what it does. That is a
+            // harsh mechanism on purpose and it is also the cheapest: `fluid.rs` skips both axes
+            // for a chemical with nothing to do, so being immobile costs nothing at all.
+            ChemicalDef {
+                name: "phosphorus".to_string(),
+                diffusion: 0,
+                toxicity: 0,
+                energy_yield: 0,
+                structural: true,
+                colour: [220, 180, 90],
+                decay_to: None,
+                decay_rate: 0,
+                advection: 0,
+            },
+            // Silicon settles. Dissolved silicate is middling mobile, but what matters here is
+            // where it *ends up*: a shell returns its silicon in full at the death of the cell
+            // that grew it, and a low coupling to the flow keeps it near where that happened. A
+            // bed of shells is what a slide of dead armoured cells should leave behind, and that
+            // is diatom ooze, which is a real thing made the same way.
+            ChemicalDef {
+                name: "silicon".to_string(),
+                diffusion: Q10_ONE / 32,
+                toxicity: 0,
+                energy_yield: 0,
+                structural: true,
+                colour: [180, 180, 200],
+                decay_to: None,
+                decay_rate: 0,
+                advection: Q10_ONE / 4,
+            },
             // Energy yields are `Q10` energy per `Q10` of matter oxidised, so 1024 is "one
             // unit of sugar is worth one unit of energy". They are set against the organelle
             // upkeep in `OrganelleCatalogue::balanced`: a cell carrying a membrane, a
@@ -346,6 +422,32 @@ impl ChemTable {
                 decay_rate: Q10_ONE / 512,
                 advection: Q10_ONE,
             },
+            // Dinitrogen: the inert pool, and the only chemical in the table that is inert on
+            // purpose rather than for want of a mechanism.
+            //
+            // **Diffusion on, advection off.** A dissolved gas ought to go where the water goes,
+            // so switching advection off is a deliberate departure and the exhaustible pool that
+            // follows is the point: a diazotroph mat draws its local supply down faster than the
+            // neighbourhood refills it, which makes the inert reservoir a fourth spatial scarcity
+            // rather than a flat background. Diffusion stays on so an exhausted patch recovers
+            // instead of scarring for the rest of the run.
+            //
+            // Measured before it was chosen (`docs/CHEMISTRY.md` §8): against a realistic
+            // seven-plane slide this costs about 8% of the fluid step, where full mobility costs
+            // 15% and immobility is free. `fluid.rs` gates each axis on being non-zero and then
+            // does identical work whatever the value, so there is no cheap-because-slow option —
+            // it is off, or it is most of the price.
+            ChemicalDef {
+                name: "dinitrogen".to_string(),
+                diffusion: Q10_ONE / 12,
+                toxicity: 0,
+                energy_yield: 0,
+                structural: false,
+                colour: [120, 130, 160],
+                decay_to: None,
+                decay_rate: 0,
+                advection: 0,
+            },
         ])
     }
 
@@ -421,11 +523,17 @@ mod tests {
 
     #[test]
     fn indices_wrap() {
+        // Seventeen since dinitrogen joined the table, and these are the assertions that
+        // change when it does: what an out-of-range chemical operand *means* is part of the ISA,
+        // exactly as `BUILD 19` naming a different organelle is.
         assert_eq!(chem_index(0), 0);
-        assert_eq!(chem_index(15), 15);
-        assert_eq!(chem_index(16), 0);
-        assert_eq!(chem_index(-1), 15);
-        assert_eq!(chem_index(i16::MIN), 0);
+        assert_eq!(chem_index(16), 16);
+        assert_eq!(chem_index(CHEM_COUNT as i16), 0);
+        // Not `CHEM_COUNT - 1`, which is what a table of sixteen trained the eye to expect:
+        // `-1` is 65,535 unsigned and 65,535 is 3,855 x 17 exactly, so it lands on 0. Worth an
+        // assertion of its own precisely because it is the kind of thing a widening changes
+        // silently.
+        assert_eq!(chem_index(-1), 0);
         for c in i16::MIN..=i16::MAX {
             assert!(chem_index(c) < CHEM_COUNT);
         }

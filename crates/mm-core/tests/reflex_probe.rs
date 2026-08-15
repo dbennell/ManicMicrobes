@@ -211,6 +211,16 @@ fn petri_with_diffusion(seed: u64, size: u32, diffusion: Option<i32>) -> Scenari
                 chemical: 4,
                 per_square: q10(400),
             },
+            // The minerals every recipe in the catalogue is costed in, at the
+            // Redfield proportion of the carbon above. Nothing produces them.
+            Seeding::Uniform {
+                chemical: 5,
+                per_square: (q10(400)) * 16 / 106,
+            },
+            Seeding::Uniform {
+                chemical: 6,
+                per_square: (q10(400)) / 53,
+            },
         ],
         ..Scenario::default()
     }
@@ -543,7 +553,21 @@ fn the_synapse_moves_matter_exactly() {
     // not work" produce identical tables when diffusion is doing all the delivery. Four
     // instructions, no promoters, no diffusion: whatever else is wrong, this says whether the
     // opcode is.
-    let bytes = mm_asm::assemble("IMM 4\nIMM 16\nZERO\nJXFER\nDROP\nHALT\n")
+    // **`IMM 17`, and the number matters.** `JXFER`'s `what` reserves 0 for *energy*, so a
+    // genome naming a chemical has to avoid landing on zero — and this was written as `IMM 16`
+    // because 16 wrapped to signal_a in a table of sixteen while not being 0. It was correct and
+    // it was correct *by way of the wrap*.
+    //
+    // ISA 11 added dinitrogen at index 16. The operand stopped wrapping, `IMM 16` began naming a
+    // chemical the cell holds none of, and the test reported "nothing crossed" — which was true
+    // and had nothing to do with the opcode it exists to check. The obvious repair, writing 0 for
+    // signal_a, is worse: it transfers *energy*, silently, and the chemical column stays empty in
+    // exactly the same way. 17 is the operand that reaches signal_a now.
+    //
+    // Which is the sharp edge of widening a chemical table, recorded here because it cost two
+    // wrong fixes to find: an out-of-range operand is not a mistake a genome makes, it is a thing
+    // genomes rely on, and what it means is part of the ISA.
+    let bytes = mm_asm::assemble("IMM 4\nIMM 17\nZERO\nJXFER\nDROP\nHALT\n")
         .expect("assembles")
         .bytes;
     let mut world = World::new(petri_with_diffusion(3, 32, Some(0))).expect("world");

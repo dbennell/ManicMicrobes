@@ -26,6 +26,10 @@ fn growth_world(size: u32) -> World {
             Seeding::Uniform { chemical: 11, per_square: q10(400) },
             Seeding::Uniform { chemical: 14, per_square: q10(400) },
             Seeding::Uniform { chemical: 4, per_square: q10(400) },
+            // The minerals every recipe is costed in, at the Redfield proportion of
+            // the carbon above. Nothing in the engine produces them.
+            Seeding::Uniform { chemical: 5, per_square: (q10(400)) * 16 / 106 },
+            Seeding::Uniform { chemical: 6, per_square: (q10(400)) / 53 },
         ],
         ..Scenario::default()
     };
@@ -857,6 +861,10 @@ fn does_the_vacuole_pay() {
                 Seeding::Uniform { chemical: 11, per_square: q10(400) },
                 Seeding::Uniform { chemical: 14, per_square: q10(400) },
                 Seeding::Uniform { chemical: 4, per_square: q10(400) },
+                // The minerals every recipe is costed in, at the Redfield proportion of
+                // the carbon above. Nothing in the engine produces them.
+                Seeding::Uniform { chemical: 5, per_square: (q10(400)) * 16 / 106 },
+                Seeding::Uniform { chemical: 6, per_square: (q10(400)) / 53 },
             ],
             ..Scenario::default()
         };

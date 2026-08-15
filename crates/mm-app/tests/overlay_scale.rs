@@ -36,6 +36,10 @@ fn living(size: u32) -> World {
         light: LightRegime::Uniform { intensity: Q10_ONE },
         seeding: vec![
             Seeding::Uniform { chemical: 4, per_square: q10(400) },
+            // The minerals every recipe is costed in, at the Redfield proportion of
+            // the carbon above. Nothing in the engine produces them.
+            Seeding::Uniform { chemical: 5, per_square: (q10(400)) * 16 / 106 },
+            Seeding::Uniform { chemical: 6, per_square: (q10(400)) / 53 },
             Seeding::Uniform { chemical: 11, per_square: q10(400) },
             Seeding::Uniform { chemical: 14, per_square: q10(400) },
         ],

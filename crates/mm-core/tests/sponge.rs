@@ -42,6 +42,16 @@ fn channel(current: CurrentField) -> Scenario {
                 chemical: 4,
                 per_square: q10(400),
             },
+            // The minerals every recipe in the catalogue is costed in, at the
+            // Redfield proportion of the carbon above. Nothing produces them.
+            Seeding::Uniform {
+                chemical: 5,
+                per_square: (q10(400)) * 16 / 106,
+            },
+            Seeding::Uniform {
+                chemical: 6,
+                per_square: (q10(400)) / 53,
+            },
             Seeding::Uniform {
                 chemical: 11,
                 per_square: q10(400),

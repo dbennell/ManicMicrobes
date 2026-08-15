@@ -201,26 +201,81 @@ fn an_exoenzyme_dissolves_into_the_square() {
 /// A diazosome turns nitrogen into body, and oxidant stops it.
 #[test]
 fn a_diazosome_fixes_nitrogen_unless_there_is_oxidant() {
-    let fixed = |oxidant: i32| {
+    // What it does now, and it used to do the opposite: this reads *dinitrogen* falling and
+    // *nitrogen* rising, where before ISA 11 it read nitrogen falling and carbon rising. That was
+    // a monomer transmutation — nitrogen as a second carbon source — and it meant nitrogen never
+    // entered a body as nitrogen at all. Fixation costs energy to make nitrogen available; it
+    // does not turn nitrogen into something else.
+    // One tick, and the cell has to survive it.
+    //
+    // Ten ticks was the first version and it measured the wrong thing twice: a cell that cannot
+    // afford the bond spends its last energy on it and **starves**, and a corpse's interior is
+    // empty for reasons that have nothing to do with fixation. Both the zero-energy case and the
+    // poor case therefore read the entire pool as "fixed". Over one tick nothing has time to die,
+    // and the aliveness check is there so that it cannot come back.
+    let run = |oxidant: i32, energy: i32| {
         let mut world = World::new(slide(Q10_ONE)).expect("world");
         let i = spawn(&mut world, 16, 16, q10(40));
         put(&mut world, i, 2, OrganelleType::Diazosome, 200, Q10_ONE as i16);
         {
             let cells = world.cells_mut();
-            cells.interior_mut(i)[5] = q10(200);
+            cells.interior_mut(i)[mm_core::chem::DINITROGEN] = q10(200);
+            cells.interior_mut(i)[5] = 0;
             cells.interior_mut(i)[14] = oxidant;
+            cells.energy[i] = energy;
         }
-        let before = world.cells().interior(i)[5];
-        world.run(10);
-        before - world.cells().interior(i)[5]
+        let id = world.cells().id_at(i);
+        let before = world.cells().interior(i)[mm_core::chem::DINITROGEN];
+        world.run(1);
+        let Some(i) = world.cells().index(id) else {
+            panic!("the cell died inside one tick; this measures starvation, not fixation");
+        };
+        let after = world.cells().interior(i)[mm_core::chem::DINITROGEN];
+        (before - after, world.cells().interior(i)[5])
     };
-    let clean = fixed(0);
-    let poisoned = fixed(q10(40));
-    assert!(clean > 0, "nothing was fixed in clean water");
+    let (cracked, made) = run(0, q10(100_000));
+    assert!(cracked > 0, "no dinitrogen was cracked in clean water");
+    assert_eq!(
+        made, cracked,
+        "the inert pool fell by {cracked} and the usable one rose by {made}: fixation is a \
+         conversion between two chemicals on the slide, and it has to balance to the unit"
+    );
+
+    let (poisoned, _) = run(q10(40), q10(100_000));
     assert!(
-        poisoned < clean,
-        "oxidant made no difference: fixed {poisoned} against {clean}, and the antagonism with \
-         the mitochondrion is the whole reason this pairs with it"
+        poisoned < cracked,
+        "oxidant made no difference: {poisoned} against {cracked}, and the antagonism with the          mitochondrion is the whole reason this pairs with it"
+    );
+
+    // And it is paid for, which is the difference between a port and a tap.
+    //
+    // Asserted as a *bill* rather than as "a poor cell fixes less", because a cell poor enough to
+    // be bounded by its energy is a cell that starves inside the tick, and then the interior
+    // empties for reasons that have nothing to do with fixation. Two identical rich cells, one
+    // with the organelle and one without: the difference in what they spend is the bond.
+    let spent = |diazosome: bool| {
+        let mut world = World::new(slide(Q10_ONE)).expect("world");
+        let i = spawn(&mut world, 16, 16, q10(40));
+        if diazosome {
+            put(&mut world, i, 2, OrganelleType::Diazosome, 200, Q10_ONE as i16);
+        }
+        {
+            let cells = world.cells_mut();
+            cells.interior_mut(i)[mm_core::chem::DINITROGEN] = q10(200);
+            cells.interior_mut(i)[5] = 0;
+            cells.energy[i] = q10(100_000);
+        }
+        let before = world.cells().energy[i];
+        world.run(1);
+        before - world.cells().energy[i]
+    };
+    let with = spent(true);
+    let without = spent(false);
+    assert!(
+        with > without,
+        "a diazotroph spent {with} against {without} for the same body without the organelle: \
+         cracking a triple bond is the dearest thing in the catalogue and this one is free, which \
+         makes it a tap rather than a port"
     );
 }
 
@@ -270,8 +325,13 @@ fn a_genome_can_build_the_upper_half() {
             genome,
         });
         let i = world.cells_mut().index(id).expect("spawned");
-        // Plenty to build out of, so nothing here is about affording it.
+        // Plenty to build out of, so nothing here is about affording it — including the
+        // recipe's ingredients, which since ISA 10 is most of the catalogue: an organelle costed
+        // in nitrogen cannot be built by a cell with none, and this test is about the *operand*
+        // reaching the type rather than about the shopping.
         world.cells_mut().interior_mut(i)[4] = q10(400);
+        world.cells_mut().interior_mut(i)[5] = q10(400);
+        world.cells_mut().interior_mut(i)[6] = q10(400);
         world.run(4);
 
         let got = world.cells().slots(i)[5].kind;

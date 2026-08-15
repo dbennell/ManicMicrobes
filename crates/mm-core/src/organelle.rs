@@ -493,6 +493,39 @@ pub const fn default_control(kind: OrganelleType) -> [i16; 2] {
 /// existed, and what all but the shell still say.
 pub const NO_TRACE: [i32; crate::chem::CHEM_COUNT] = [0; crate::chem::CHEM_COUNT];
 
+/// Nitrogen, as a recipe of `n` `Q10` units and nothing else.
+///
+/// # The stoichiometry is not an approximation of the biology, it *is* the biology
+///
+/// Organisms hold carbon, nitrogen and phosphorus at a fairly rigid ratio — roughly 106 : 16 : 1,
+/// the Redfield ratio — and they do so because that is the composition of the *machinery*, not
+/// because anything prefers it. Nitrogen sits in proteins; phosphorus sits in nucleic acids;
+/// carbon is the bulk and the energy store. [`OrganelleSpec::build_trace`] is a stoichiometry
+/// table, so writing those proportions into it is not a model of the ratio, it is the thing the
+/// ratio describes.
+///
+/// So the costs below are 16/106 of each type's carbon for nitrogen and 1/106 for phosphorus,
+/// and they are put where the biology puts them: nitrogen on the enzymatic machinery, phosphorus
+/// on the nucleus, silicon on the shell.
+///
+/// **What this does not settle is whether any of them binds.** A requirement is not a scarcity —
+/// real phosphorus limits ecosystems because the *supply* is minute, not because the requirement
+/// is large — and §6's lesson is that the level has to be swept rather than guessed. These
+/// numbers say what a body is made of; what a world holds is a separate question.
+#[must_use]
+pub const fn nitrogen_trace(n: i32) -> [i32; crate::chem::CHEM_COUNT] {
+    let mut r = NO_TRACE;
+    r[NITROGEN] = n;
+    r
+}
+
+/// Chemical 5, the monomer proteins are built from. See [`nitrogen_trace`].
+pub const NITROGEN: usize = 5;
+/// Chemical 6, the monomer a nucleus is built from.
+pub const PHOSPHORUS: usize = 6;
+/// Chemical 7, the mineral a shell is built from.
+pub const SILICON: usize = 7;
+
 impl OrganelleSpec {
     /// Structural matter to build one at a given size.
     #[inline]
@@ -817,7 +850,15 @@ impl OrganelleCatalogue {
             upkeep: q10(8) / 32,
             upkeep_per_param: q10(8) / 256,
             teardown_recovery: Q10_ONE / 2,
-            build_trace: NO_TRACE,
+            build_trace: {
+                // Phosphorus, and only the nucleus takes it: a genome is a nucleic acid and
+                // that is where the phosphate backbone is. One part in 106 of its carbon, which
+                // is a tiny requirement — the scarcity, when it comes, will come from the
+                // supply and from phosphorus being the one chemical that does not move.
+                let mut r = NO_TRACE;
+                r[PHOSPHORUS] = 58;
+                r
+            },
         };
         specs[OrganelleType::Mitochondrion as usize] = OrganelleSpec {
             build_matter: q10(5),
@@ -827,7 +868,7 @@ impl OrganelleCatalogue {
             upkeep: q10(8) / 48,
             upkeep_per_param: q10(8) / 768,
             teardown_recovery: Q10_ONE / 2,
-            build_trace: NO_TRACE,
+            build_trace: nitrogen_trace(773),
         };
         specs[OrganelleType::Chloroplast as usize] = OrganelleSpec {
             build_matter: q10(7),
@@ -837,7 +878,7 @@ impl OrganelleCatalogue {
             upkeep: q10(8) / 40,
             upkeep_per_param: q10(8) / 640,
             teardown_recovery: Q10_ONE / 2,
-            build_trace: NO_TRACE,
+            build_trace: nitrogen_trace(1082),
         };
 
         // A spike is the dearest thing in the catalogue to build and the dearest to carry —
@@ -925,7 +966,7 @@ impl OrganelleCatalogue {
             upkeep: q10(8) / 40,
             upkeep_per_param: q10(8) / 640,
             teardown_recovery: Q10_ONE / 3,
-            build_trace: NO_TRACE,
+            build_trace: nitrogen_trace(1391),
         };
 
         // A chloroplast's price, near enough. The two are alternatives and neither should win on
@@ -938,7 +979,7 @@ impl OrganelleCatalogue {
             upkeep: q10(8) / 44,
             upkeep_per_param: q10(8) / 700,
             teardown_recovery: Q10_ONE / 3,
-            build_trace: NO_TRACE,
+            build_trace: nitrogen_trace(1082),
         };
 
         // Cheap to keep, which is the whole of what a store is for.
@@ -976,7 +1017,7 @@ impl OrganelleCatalogue {
             upkeep: q10(8) / 48,
             upkeep_per_param: q10(8) / 768,
             teardown_recovery: Q10_ONE / 3,
-            build_trace: NO_TRACE,
+            build_trace: nitrogen_trace(927),
         };
 
         // Scavenging is the cheaper trade and the lower-yield one: a lysosome costs about what
@@ -989,8 +1030,30 @@ impl OrganelleCatalogue {
             upkeep: q10(8) / 56,
             upkeep_per_param: q10(8) / 896,
             teardown_recovery: Q10_ONE / 2,
-            build_trace: NO_TRACE,
+            build_trace: nitrogen_trace(927),
         };
+
+        // --- the sensors ---
+        //
+        // Protein, and costed as protein: they take the `cheap` default for everything else, so
+        // this is the one line that distinguishes them. At `q10(4)` of carbon the Redfield share
+        // is 618, which sits alongside the mitochondrion's 773 — not a rounding difference, and
+        // that is the point of noting it here rather than folding it in silently.
+        //
+        // **Sweep this entry on its own.** Everything else carrying nitrogen is metabolic
+        // machinery; the sensors are the cost of *perceiving at all*, and taxing them creates a
+        // pressure the rest do not: blind fast breeders against perceptive slow ones, contested
+        // inside the same sixteen slots. That is an axis worth having and it is also a confound —
+        // if behaviour changes when nitrogen arrives, this is the entry that has to be ruled in
+        // or out separately, because §6's lesson is that the one you did not measure alone is the
+        // one that was two orders out.
+        for kind in [
+            OrganelleType::Chemosensor,
+            OrganelleType::Photosensor,
+            OrganelleType::TouchSensor,
+        ] {
+            specs[kind as usize].build_trace = nitrogen_trace(618);
+        }
 
         OrganelleCatalogue {
             specs,

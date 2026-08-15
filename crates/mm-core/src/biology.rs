@@ -885,6 +885,9 @@ impl crate::state_hash::StateHash for BiologyConfig {
         h.i32(r.throughput_per_param);
         h.i32(r.latent_per_substrate);
         h.i32(r.fixation_inhibition);
+        h.i32(r.fixation_energy);
+        h.i32(r.denitrification_rate);
+        h.i32(r.denitrification_oxidant);
         h.i32(r.toxicity_threshold);
         h.i32(r.growth_rate);
         h.i32(r.growth_pressure);
@@ -1141,12 +1144,38 @@ pub fn resolve(
                     if cells.interior(i)[sc] < matter || cells.energy[i] < spec.build_energy {
                         continue;
                     }
-                    // And whatever else the recipe asks for. Checked before anything is spent,
-                    // so a cell that is short of one ingredient does not pay for the others and
-                    // then fail — a half-charged build would be matter destroyed (I4).
+                    // And whatever else the recipe asks for — **from the interior, or failing
+                    // that from the square the cell is standing on.**
+                    //
+                    // Checked before anything is spent, so a cell short of one ingredient does
+                    // not pay for the others and then fail: a half-charged build would be matter
+                    // destroyed (I4).
+                    //
+                    // # Why the square counts
+                    //
+                    // The first version charged the interior alone, which reads as the stricter
+                    // and more principled rule and is unaffordable. `instr_per_tick` is **8**, so
+                    // asking every genome to `EAT` two more chemicals costs eight instructions
+                    // against a budget of eight — it doubles what feeding costs, and measured on
+                    // the library it took `sentinel.mm` from reproducing to not. Put in `#build`
+                    // instead of `#feed` it fared worse, because a grown cell stops expressing
+                    // `#build` and so never acquires them at all.
+                    //
+                    // Interior *first* and the square only for the shortfall, so the thing the
+                    // strict rule was for survives: a cell that has stockpiled phosphorus can
+                    // build where the ground is bare, which is what makes carrying it worth a
+                    // vacuole slot. What it gives up is that carrying is no longer *compulsory* —
+                    // and compulsory was never the design, it was a side effect of where the
+                    // charge was read from. A square with no phosphorus in it still cannot raise
+                    // a nucleus, which is the whole of the geography.
                     if spec.has_trace() {
                         let short = (0..CHEM_COUNT).any(|c| {
-                            c != sc && cells.interior(i)[c] < spec.trace_cost(c, param)
+                            if c == sc {
+                                return false;
+                            }
+                            let need = spec.trace_cost(c, param);
+                            let held = cells.interior(i)[c];
+                            need > held.saturating_add(substrate.chem_at(c, sx, sy))
                         });
                         if short {
                             continue;
@@ -1214,9 +1243,25 @@ pub fn resolve(
                                 continue;
                             }
                             let take = spec.trace_cost(c, param);
-                            if take > 0 {
-                                cells.interior_mut(i)[c] =
-                                    cells.interior(i)[c].saturating_sub(take);
+                            if take <= 0 {
+                                continue;
+                            }
+                            // The cell's own first, then the square for what is left. The gate
+                            // above has already established that the two together cover it, so
+                            // this cannot come up short and cannot half-charge.
+                            let from_cell = take.min(cells.interior(i)[c]);
+                            cells.interior_mut(i)[c] =
+                                cells.interior(i)[c].saturating_sub(from_cell);
+                            let rest = take.saturating_sub(from_cell);
+                            if rest > 0 {
+                                // `add_chem` returns what it actually moved, which is what the
+                                // organelle is charged for — asking and achieving differ at a
+                                // boundary, and the difference is where a conservation bug lives.
+                                let got = -substrate.add_chem(c, sx, sy, -rest);
+                                if got < rest {
+                                    cells.interior_mut(i)[c] =
+                                        cells.interior(i)[c].saturating_add(rest - got);
+                                }
                             }
                         }
                     }
@@ -2149,6 +2194,29 @@ mod tests {
             let sc = self.config.structural_chemical % CHEM_COUNT;
             for i in self.cells.iter() {
                 out[sc] += self.cells.mass[i] as i64;
+                // And a recipe's other ingredients, which are held *in the slot* until the
+                // organelle is torn down or the cell dies — the fourth compartment matter can be
+                // in, and the one `World::total_matter` has counted since ISA 7.
+                //
+                // Without it these tests install an organelle with `slots_mut`, never pay its
+                // recipe, and then read the trace it gives back on `TEAR` as matter invented out
+                // of nothing. That is the install-not-drive shape in a conservation check: the
+                // fixture was not wrong about tearing, it was blind to a compartment.
+                for o in self.cells.slots(i) {
+                    if !o.is_present() {
+                        continue;
+                    }
+                    let spec = self.config.metabolism.catalogue.spec(o.kind);
+                    if !spec.has_trace() {
+                        continue;
+                    }
+                    for (c, slot) in out.iter_mut().enumerate() {
+                        if c == sc {
+                            continue;
+                        }
+                        *slot += i64::from(spec.trace_cost(c, o.param));
+                    }
+                }
             }
             out
         }
@@ -2504,6 +2572,11 @@ mod tests {
         let i = f.spawn(vec![0x2E]);
         let sc = f.config.structural_chemical;
         f.cells.interior_mut(i)[sc] = q10(200);
+        // And the recipe's other ingredients. Since ISA 10 a chloroplast is costed in nitrogen
+        // as well as carbon, and a cell with none cannot build one — which is the recipe working,
+        // not a fixture problem, but it does mean a test about *matter moving* has to supply
+        // everything the move consumes.
+        f.cells.interior_mut(i)[crate::organelle::NITROGEN] = q10(200);
         let before = f.total();
 
         f.intents.begin_tick(f.cells.capacity());

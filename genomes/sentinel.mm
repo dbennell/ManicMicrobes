@@ -165,8 +165,13 @@
         IMM     3
         IMM     7               ; reading 3: the nearest one's badge
         OGET
-        IMM     21
-        ZERO                    ; membrane reading 21: my own badge
+        IMM     22
+        ZERO                    ; membrane reading 22: my own badge.
+                                ; Was 21, and moved when the chemical table gained dinitrogen at
+                                ; ISA 11: the membrane's scalars are laid out *after* the
+                                ; chemicals, so widening the table shifts every reading past
+                                ; them. That is what the version stamp is for, and it is the one
+                                ; sharp edge of adding a chemical.
         OGET
         CMP
         JMPZ    kin

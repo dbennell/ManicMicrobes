@@ -828,6 +828,7 @@ impl World {
             self.step_flux();
             fluid::step(&mut self.substrate, &self.fluid_rates, &mut self.scratch);
             self.decay_fluid();
+        self.denitrify();
             if self.active_impulses > 0 {
                 decay_impulses(
                     &mut self.impulse_x,
@@ -946,6 +947,62 @@ impl World {
             if moved > 0 {
                 self.ledger.convert(c, into, moved);
             }
+        }
+    }
+
+    /// Bioavailable nitrogen reverting to the inert pool where the water has no oxidant in it.
+    ///
+    /// # Why this is not `decay_to`
+    ///
+    /// It looks like decay and cannot be written as decay. `ChemicalDef::decay_to` and
+    /// `decay_rate` are one unconditional rate per chemical, applied everywhere at once, and
+    /// `decay_fluid` has no way to consult a second plane. Denitrification is *anaerobic*: it
+    /// happens where the oxidant is not, which makes it a function of two chemicals at a square
+    /// rather than one. So it is a mechanism, and this is it.
+    ///
+    /// A balanced conversion between two species already on the table, through the ledger, so I4
+    /// stays exact — the same terms decay itself is on, and the reason the inert pool had to be a
+    /// chemical rather than an off-plane reservoir.
+    fn denitrify(&mut self) {
+        let rates = &self.biology.metabolism.rates;
+        let (rate, ceiling) = (rates.denitrification_rate, rates.denitrification_oxidant);
+        let usable = crate::organelle::NITROGEN % CHEM_COUNT;
+        let inert = crate::chem::DINITROGEN % CHEM_COUNT;
+        if rate <= 0 || ceiling <= 0 || usable == inert || !self.substrate.present()[usable] {
+            return;
+        }
+        let oxidant = self.biology.metabolism.catalogue.metabolism.primary().oxidant % CHEM_COUNT;
+        let mut moved = 0i64;
+        for i in 0..self.substrate.len() {
+            let held = self.substrate.chem_plane(usable).get(i).copied().unwrap_or(0);
+            if held <= 0 {
+                continue;
+            }
+            // How anoxic this square is, `Q10`: one in water with no oxidant at all, zero at the
+            // ceiling and above. A fraction rather than a threshold, so there is a gradient.
+            let air = self.substrate.chem_plane(oxidant).get(i).copied().unwrap_or(0);
+            if air >= ceiling {
+                continue;
+            }
+            let one = crate::fixed::Q10_ONE;
+            let anoxia = one - ((air as i64 * one as i64) / ceiling as i64) as i32;
+            let out = crate::fixed::q10_scale(crate::fixed::q10_scale(held, rate), anoxia);
+            if out <= 0 {
+                continue;
+            }
+            let out = out.min(held);
+            if let Some(v) = self.substrate.chem_plane_mut(usable).get_mut(i) {
+                *v -= out;
+            }
+            if let Some(v) = self.substrate.chem_plane_mut(inert).get_mut(i) {
+                *v += out;
+            }
+            moved += i64::from(out);
+        }
+        if moved > 0 {
+            // `chem_plane_mut` marks its chemical present on the way past, so the inert pool is
+            // already flagged and there is nothing to refresh.
+            self.ledger.convert(usable, inert, moved);
         }
     }
 

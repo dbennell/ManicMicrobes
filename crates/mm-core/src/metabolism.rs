@@ -133,6 +133,40 @@ use crate::substrate::Substrate;
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct MetabolicRates {
+    /// Fraction of a square's bioavailable nitrogen that reverts to the inert pool per fluid
+    /// step, in water with no oxidant at all, `Q10`.
+    ///
+    /// **Denitrification, and it is deliberately the small arrow.** In a mature ecosystem the
+    /// internal recycling of nitrogen runs one to two orders of magnitude larger than either
+    /// fixation or this: soil nitrogen turns over many times a season while fixation trickles in
+    /// and denitrification leaks out. Those two set the size of the bioavailable pool over long
+    /// timescales; ammonification — which here is `build_trace` coming back at a death — sets how
+    /// fast anything can grow within it.
+    ///
+    /// Gated on the water being *anoxic*, which is what makes it the counterpart of
+    /// [`MetabolicRates::fixation_inhibition`] rather than a second knob doing the same job.
+    /// Fixation is stopped by oxidant inside a cell; reversion is switched on by the absence of
+    /// oxidant outside one. So an anoxic pocket is simultaneously the best place to fix and the
+    /// place the pool leaks from, which is a balance point rather than a ratchet.
+    ///
+    /// # Zero for now, on the same argument `bleed_rate` ships at zero
+    ///
+    /// The leak is the term to tune *last*, once the internal loop's speed is known, and that
+    /// measurement has not been taken. The mechanism is here and `tests/nitrogen.rs` holds it to
+    /// working; what it should be set to is a question for a sweep rather than a number chosen
+    /// now.
+    pub denitrification_rate: i32,
+    /// Oxidant at which reversion has stopped completely, `Q10`. Below it the rate scales up as
+    /// the water gets more anoxic; at or above it, nothing reverts.
+    pub denitrification_oxidant: i32,
+    /// Energy to fix one `Q10` of dinitrogen into bioavailable nitrogen.
+    ///
+    /// **Deliberately brutal.** Real fixation costs about sixteen ATP per molecule, which is why
+    /// it is rare, confined to a specialist minority, and why everything else in the biosphere
+    /// lives off nitrogen some diazotroph already fixed. The price here has to be high enough
+    /// that a diazosome never pays as a cheap route to matter — it is a way to reach a pool
+    /// nothing else can touch, and that is the only thing it should ever be worth.
+    pub fixation_energy: i32,
     /// Interior oxidant at which a diazosome is completely shut down, `Q10`.
     ///
     /// Low enough that an ordinary respiring cell inhibits its own fixation, which is the trade:
@@ -399,6 +433,11 @@ impl Default for MetabolicRates {
             // The same threshold division uses, because it is the same question.
             growth_pressure: q10(1),
             fixation_inhibition: q10(4),
+            // Eight energy for one of nitrogen, against a mitochondrion recovering roughly one
+            // per unit of substrate. Fixing is the dearest thing a cell can do.
+            fixation_energy: q10(8),
+            denitrification_rate: 0,
+            denitrification_oxidant: q10(2),
             toxicity_threshold: q10(8),
             // Halved with `background_damage`, so the ratio between them — which is what decides
             // whether a cell can out-mend its own poison — is exactly what it was, and only the
@@ -934,33 +973,36 @@ impl Metabolism {
             }
         }
 
-        // --- nitrogen fixation: nitrogen -> structural matter, unless there is oxidant about ---
+        // --- nitrogen fixation: the inert pool -> the usable one, at a price ---
         //
         // The mitochondrion's pair, and the pairing is the point: one engine needs oxygen and the
-        // other is stopped by it. That single antagonism is what makes an anoxic corner a place
-        // worth being, gives the shell's impermeability a second job, and puts two ways of making
-        // a body in competition for the same slot.
+        // other is stopped by it. That antagonism is what makes an anoxic corner a place worth
+        // being, gives the shell's impermeability a second job, and puts two ways of making a
+        // living in competition for the same slot.
         //
-        // # The liberty taken, stated plainly
+        // # This used to run backwards
         //
-        // A heterocyst fixes *dinitrogen* — atmospheric N₂ — and there is no N₂ in this world.
-        // The table has sixteen chemicals, two of which already do nothing, and adding a
-        // seventeenth to model a gas phase is a larger change than this organelle deserves.
+        // Until ISA 11 it spent nitrogen to make *carbon* — a monomer transmutation, so nitrogen
+        // was a second carbon source that happened to be oxygen-inhibited, and it never entered a
+        // body as nitrogen at all. Real fixation costs energy to make nitrogen *available*; it
+        // does not turn nitrogen into something else. The shape was wrong in the one way that
+        // mattered, because a chemical that can be converted into the thing everything needs is a
+        // substrate with a bad exchange rate, not a requirement. Requirements have to be
+        // irreducible or they do not bind.
         //
-        // So it fixes *dissolved* nitrogen instead: chemical 5, a monomer the table has carried
-        // since the beginning and which nothing has ever been able to build from — see
-        // `docs/CHEMISTRY.md` §2 on the three structural chemicals that are not structural. What
-        // it buys is the thing that matters ecologically: **a second way to get building
-        // material**, which is `CHEMISTRY.md` §3's own first recommendation, and one that is worth
-        // having exactly where the first is scarce.
+        // So it is now a conversion between the two nitrogen pools, both on the slide: inert
+        // dinitrogen into the bioavailable monomer the catalogue's recipes are costed in. Matter
+        // is conserved to the unit and the ledger is told, because the alternative — an organelle
+        // calling `record_injected` against an off-plane reservoir — is a tap, and a closed world
+        // with a tap is a flow reactor. See `chem::DINITROGEN`.
         //
         // Inhibition is by the pathway's oxidant, read from the cell's own cytoplasm rather than
         // from the water, because it is the enzyme that is poisoned and the enzyme is inside.
         {
-            let nitrogen = 5usize % CHEM_COUNT;
-            let structural = m.structural % CHEM_COUNT;
+            let inert = crate::chem::DINITROGEN % CHEM_COUNT;
+            let usable = crate::organelle::NITROGEN % CHEM_COUNT;
             let oxidant = m.primary().oxidant % CHEM_COUNT;
-            if nitrogen != structural {
+            if inert != usable {
                 let capacity = crate::biology::fixation_capacity(slots);
                 if capacity > 0 {
                     // Full rate in clean water, nothing at all once the oxidant is thick. A
@@ -973,13 +1015,23 @@ impl Metabolism {
                                 .min(Q10_ONE as i64) as i32,
                         )
                         .max(0);
-                    let want = q10_scale(capacity, clear);
-                    let moved = want.min((&*cyto)[nitrogen]).max(0);
+                    let want = q10_scale(capacity, clear).min((&*cyto)[inert]).max(0);
+                    // And what it can pay for. Bounded by the energy on hand rather than allowed
+                    // to run the cell negative — a diazotroph that cannot afford the bond simply
+                    // fixes less of it, which is the gradient version of "fixing is expensive".
+                    let price = self.rates.fixation_energy.max(1);
+                    let affordable = (((*energy).max(0) as i64 * Q10_ONE as i64)
+                        / price as i64)
+                        .min(want as i64) as i32;
+                    let moved = affordable.max(0);
                     if moved > 0 {
+                        let cost = q10_scale(moved, price);
                         let interior = &mut *cyto;
-                        interior[nitrogen] = interior[nitrogen].saturating_sub(moved);
-                        interior[structural] = interior[structural].saturating_add(moved);
-                        ledger.convert(nitrogen, structural, moved as i64);
+                        interior[inert] = interior[inert].saturating_sub(moved);
+                        interior[usable] = interior[usable].saturating_add(moved);
+                        ledger.convert(inert, usable, moved as i64);
+                        *energy = energy.saturating_sub(cost);
+                        report.dissipated = report.dissipated.saturating_add(cost as i64);
                         report.fixed += moved as i64;
                     }
                 }

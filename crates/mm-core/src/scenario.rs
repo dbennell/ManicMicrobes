@@ -637,6 +637,18 @@ impl Scenario {
                     high: 0,
                     horizontal: false,
                 },
+                // The minerals every recipe in the catalogue is costed in. Uniform rather than
+                // graded, deliberately: this scenario exists to stress the *fluid*, and a cell
+                // that cannot build a nucleus because it stands on the wrong end of a gradient
+                // makes it a test of the chemistry instead.
+                Seeding::Uniform {
+                    chemical: crate::organelle::NITROGEN,
+                    per_square: q10(2_000),
+                },
+                Seeding::Uniform {
+                    chemical: crate::organelle::PHOSPHORUS,
+                    per_square: q10(200),
+                },
                 Seeding::Spike {
                     chemical: 8,
                     x: width / 3,

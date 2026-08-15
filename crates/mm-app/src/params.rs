@@ -272,6 +272,38 @@ pub const FIELDS: &[Field] = &[
                from a neighbour through a junction",
     },
     Field {
+        path: "metabolism.rates.fixation_energy",
+        label: "fixation cost",
+        group: Group::Metabolism,
+        unit: Unit::Q10,
+        note: "energy to unlock one unit of dinitrogen into the bioavailable pool. Deliberately \
+               brutal — real fixation costs about sixteen ATP a molecule, which is why it is rare \
+               and confined to specialists, and why everything else lives off nitrogen somebody \
+               else fixed. Cheap enough and a diazosome is free matter; dear enough and it is \
+               only worth carrying where nothing else can reach the pool",
+    },
+    Field {
+        path: "metabolism.rates.denitrification_rate",
+        label: "reversion",
+        group: Group::Metabolism,
+        unit: Unit::Q10,
+        note: "how fast bioavailable nitrogen falls back to the inert pool in water with no \
+               oxidant at all. The small arrow out, against fixation's small arrow in — both are \
+               dwarfed by what a death returns, which is the way round real ecosystems work. Off \
+               by default: the leak is the term to tune last, once the internal loop's speed has \
+               been measured",
+    },
+    Field {
+        path: "metabolism.rates.denitrification_oxidant",
+        label: "reversion cutoff",
+        group: Group::Metabolism,
+        unit: Unit::Q10,
+        note: "oxidant at which reversion has stopped completely. Denitrification is anaerobic, \
+               so this is the counterpart of the fixation cutoff rather than a second knob doing \
+               the same job: an anoxic pocket is both the best place to fix nitrogen and the place \
+               the pool leaks from, which is a balance point instead of a ratchet",
+    },
+    Field {
         path: "metabolism.rates.toxicity_threshold",
         label: "toxicity threshold",
         group: Group::Metabolism,
@@ -661,7 +693,7 @@ pub const PATHWAY_COLUMNS: [(&str, &str); 4] = [
 pub const CATALOGUE_PREFIX: &str = "metabolism.catalogue.specs.";
 
 /// The seven numbers each catalogue entry carries, as (suffix, column heading).
-pub const CATALOGUE_COLUMNS: [(&str, &str); 23] = [
+pub const CATALOGUE_COLUMNS: [(&str, &str); 24] = [
     ("build_matter", "matter"),
     ("build_matter_per_param", "matter/size"),
     ("build_energy", "energy"),
@@ -694,6 +726,7 @@ pub const CATALOGUE_COLUMNS: [(&str, &str); 23] = [
     ("build_trace.13", "peroxide"),
     ("build_trace.14", "oxygen"),
     ("build_trace.15", "carrion"),
+    ("build_trace.16", "dinitrogen"),
 ];
 
 /// The fields in one group, in table order.

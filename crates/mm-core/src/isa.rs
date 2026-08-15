@@ -6,7 +6,8 @@
 //! version 6 filled the last one, `RESERVED_B`, with the shell; version 7 widened the catalogue
 //! from sixteen types to thirty-two on the `n + 16` pairing `docs/FEEDING.md` §6 designs; version
 //! 8 appended a crowding reading to the membrane; version 9 made the widening at 7 actually
-//! reach `BUILD`.
+//! reach `BUILD`; version 10 gave the catalogue recipes in nitrogen and phosphorus; version 11
+//! put the atmosphere on the slide and turned the diazosome the right way round.
 //!
 //! A genome archived under 5 or earlier that built a type-15 organelle was paying for a no-op.
 //! Under 6 the same byte builds armour that shades it, so those genomes have to be replayed
@@ -31,9 +32,42 @@
 //! under which both are true. It also restores the property the whole `n + 16` layout exists for
 //! — bit 4 of a type operand is one copy error away, so a cilium is one mutation from a
 //! flagellum (`docs/FEEDING.md` §6) — which masking that bit off had quietly made a no-op.
+//!
+//! # 10, the stoichiometry
+//!
+//! ISA 7 gave `OrganelleSpec` a `build_trace` and one entry used it: the shell, in silicon. 10
+//! fills the rest of the table on the Redfield ratio — nitrogen at 16/106 of a type's carbon on
+//! the enzymatic machinery and the sensors, phosphorus at 1/106 on the nucleus — which is a
+//! catalogue change and so a bump by hard rule 8.
+//!
+//! **It is the widest-reaching bump so far in what it asks of a genome**, and the reason is worth
+//! stating: a recipe is charged against the cell's *interior*, so an organelle that costs
+//! nitrogen can only be built by a lineage that eats nitrogen. No genome written before this did,
+//! because there was nothing to eat it for. Under 10 an archived genome that never learned to
+//! feed on chemical 5 cannot build a mitochondrion, a chloroplast, a lysosome or a sensor, and
+//! one that never eats chemical 6 cannot build a nucleus and therefore cannot divide. That is not
+//! a compatibility wrinkle, it is a different world, and it is exactly what the stamp is for.
+//!
+//! # 11, the atmosphere
+//!
+//! A seventeenth chemical — inert dinitrogen — and the diazosome reversed to crack it. Both are
+//! bumps on their own: `CHEM_COUNT` decides what `EAT 20` means, exactly as `CATALOGUE_SIZE`
+//! decides what `BUILD 19` means, and mutation produces such operands constantly.
+//!
+//! The reversal is the substantive half. Until 10 the diazosome *spent* nitrogen to make carbon,
+//! which is a monomer transmutation and the wrong shape twice over: nitrogen never entered a body
+//! as nitrogen, and a requirement that can be manufactured out of something else is a price
+//! rather than a constraint. It now converts the inert pool into the bioavailable one at a steep
+//! energy price, which is what fixation is.
+//!
+//! The atmosphere is *on the slide* because only energy crosses the wall of this world. A
+//! reservoir off-plane would need an organelle calling `record_injected` every tick, and a closed
+//! system with a tap is a flow reactor. What the slot buys in exchange is that total nitrogen is
+//! fixed at seeding while the split between locked and available evolves — scarcity as a
+//! property a world arrives at rather than a number somebody set.
 
 /// ISA version stamped into save files, scenarios and archived genomes (SPEC §16).
-pub const ISA_VERSION: u16 = 9;
+pub const ISA_VERSION: u16 = 11;
 
 /// Number of opcodes. The opcode of a byte is `byte % OPCODE_COUNT` (SPEC §4.2), so four
 /// distinct byte values map to each opcode and most point mutations are synonymous.
