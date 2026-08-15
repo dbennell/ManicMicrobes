@@ -254,3 +254,61 @@ Two things follow, one of which is a job:
    and changing it invalidates every comparison made against it — but knowing that it sits a
    hundred times above the constraint means the soup has never been a test of matter
    conservation's ecological consequences, only of its arithmetic.
+
+## 7. The fresh slide moved to 40, and everything rings — the question is the period
+
+`petri_of` — what the microscope opens on, and what `New slide` builds — seeded the same 400 a
+square that §6 describes as sitting a hundred times above the constraint. Measuring where a
+settled slide actually sits puts the working level nearer forty. It is now **40**, in all three
+places the front end starts a world from: `petri_of`, the New scenario sheet's prefill, and the
+value the scenario editor puts in a chemical row you add by hand. `soup.ron` and the rest of
+`scenarios/` stay at 400 for item 2's reason.
+
+**This section was first written claiming 100, and that claim was wrong.** It is left recorded
+rather than quietly corrected, because the way it was wrong is the whole lesson and it is §6's
+own caveat biting the person who wrote it: *"a single reading at a single tick is a phase sample,
+and two of them can rank either way by luck."*
+
+The first run went to 60,000 ticks. At 60,000 the 100 world read 14,452 and had moved less than
+one percent in forty-eight thousand ticks, which is as flat as a population gets, and it was
+reported as the only stable arm of four. It was a phase sample of a slower ring. It peaked at
+tick **64,000** — a few thousand ticks after the measurement stopped — and had shed a quarter of
+itself by 120,000.
+
+256×256, `light: Uniform(1024)`, 16 founders of `ancestor.mm`, one seed, `--check` clean
+throughout, run to 120,000:
+
+| seeding | peak | at tick | at 120,000 | drift over the last 20,000 | distinct genomes |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| **40** | 23,898 | 120,000 | **23,898** | **+0.17%** | **1,739** |
+| 50 | 14,975 | 16,000 | 12,834 | +17.1%, rising | 1,101 |
+| 60 | 15,039 | 16,000 | 9,754 | +26.4%, rising | 865 |
+| 100 | 14,469 | 64,000 | 10,081 | −24.5%, falling | 664 |
+| 400 | 16,388 | 16,000 | — | — | 720 at 60,000 |
+
+**Every level above 40 rings. What the seeding sets is the period, not the presence.** 50 and 60
+are the same shape as 400 caught on the upswing; 100 is the same shape with a period longer than
+the window it was first measured in. Only 40 is flat, and it holds the most diversity of any arm
+by a factor of two and a half — which is the reading that most argues for it, since a slide that
+loses two thirds of its lineages to each trough is a worse place to watch evolution happen than
+one that does not trough.
+
+The settled population is also *higher* with a tenth of the carbon: 23,898 at 40 against 10,081
+at 100 and 9,944 at 400. So a slide seeded well above the knee is not a well-fed slide, it is a
+slide with most of its matter out of circulation and a population large enough to keep knocking
+itself over.
+
+**Where that matter is, is not established and should not be guessed at**, any more than §6's
+light column should have been. The candidate is the decay chain's time constant — corpse →
+carrion → detritus → carbon, half-life near seven hundred ticks at the detritus stage — so a big
+standing population means a big death flux with a lot of matter in transit, and an overshoot
+large enough locks up more carbon than the survivors can replace. That is a hypothesis with a
+curve consistent with it and no measurement behind it. The measurement it wants is a per-chemical
+total over time, which `mm_core::metrics::Sample` does not carry; that is the job this leaves
+behind, and it is now the second time this section has needed a number it cannot see.
+
+The caveat this time, stated so it can be held against the next revision: **40 is one seed, flat
+across the last 20,000 ticks of 120,000 — which is exactly what 100 looked like at 60,000.** It
+should be run to 200,000 on three seeds before anyone calls it settled. The honest claim today is
+that 40 rings on a period longer than any yet measured, not that it does not ring.
+

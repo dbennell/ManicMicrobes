@@ -1420,18 +1420,38 @@ fn petri_of(size: u32) -> Scenario {
             intensity: mm_core::Q10_ONE,
         },
         current: CurrentField::Still,
+        // Forty a square, not the four hundred this opened on for its first three releases.
+        //
+        // The number was never measured, it was picked. Measuring where a slide actually sits
+        // once it has settled puts the working level near forty, so four hundred was not a
+        // well-fed world so much as a world with most of its matter parked in the water where
+        // nothing was competing for it — and `docs/CHEMISTRY.md`'s carbon sweep says the same
+        // thing from the other end, putting the knee at roughly four to ten a square and the
+        // shipped figure two orders of magnitude above it.
+        //
+        // **Every level above this one rings**, and that is what picked it rather than any
+        // argument about headroom. Measured to 120,000 ticks on 256 squares: 400, 100, 60 and 50
+        // all overshoot and starve back, differing only in period — 100's is long enough that at
+        // 60,000 ticks it reads as perfectly flat and is not. Forty holds at about 23,900 with a
+        // drift of 0.17% across the last twenty thousand ticks, and carries two and a half times
+        // the distinct genomes of the 100 world, because a slide that troughs loses lineages in
+        // every trough. `docs/CHEMISTRY.md` §7 has the table and the caveat, which is that forty
+        // is one seed and the claim is only that its period is longer than anything yet measured.
+        //
+        // `scenarios/soup.ron` stays at four hundred — it is the recorded control that every
+        // other world in the library is a variation on, and moving it would move them all.
         seeding: vec![
             Seeding::Uniform {
                 chemical: 11,
-                per_square: q10(400),
+                per_square: q10(40),
             },
             Seeding::Uniform {
                 chemical: 14,
-                per_square: q10(400),
+                per_square: q10(40),
             },
             Seeding::Uniform {
                 chemical: 4,
-                per_square: q10(400),
+                per_square: q10(40),
             },
         ],
         ..Scenario::default()
@@ -5988,9 +6008,11 @@ fn seeding_table(
                     }
                     if ui.selectable_label(false, name).clicked() {
                         if let Some(slot) = draft.seeding.get_mut(c) {
-                            // The soup's level, because a row that appears at zero looks like it
-                            // did nothing and the number you want is almost never zero.
-                            *slot = Some(mm_core::fixed::q10(400));
+                            // The fresh slide's level, because a row that appears at zero looks
+                            // like it did nothing and the number you want is almost never zero.
+                            // The same hundred `petri_of` seeds, so that adding a chemical here
+                            // and starting a new slide agree about what "some" means.
+                            *slot = Some(mm_core::fixed::q10(40));
                         }
                     }
                 }

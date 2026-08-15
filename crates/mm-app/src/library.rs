@@ -68,12 +68,14 @@ impl Default for NewWorld {
         NewWorld {
             size: 256,
             light: mm_core::Q10_ONE,
-            // The soup's levels, which is the control condition every other scenario is a
-            // variation on — so the number being changed has something to be a change *from*.
+            // The fresh slide's levels, so that the sheet and the `New slide` command open the
+            // same world and the number being changed has something to be a change *from*. See
+            // `petri_of` in `main.rs` for why it is forty and not the four hundred
+            // `scenarios/soup.ron` still records.
             chemistry: [
-                (CARBON, mm_core::fixed::q10(400)),
-                (CARBON_DIOXIDE, mm_core::fixed::q10(400)),
-                (OXIDANT, mm_core::fixed::q10(400)),
+                (CARBON, mm_core::fixed::q10(40)),
+                (CARBON_DIOXIDE, mm_core::fixed::q10(40)),
+                (OXIDANT, mm_core::fixed::q10(40)),
             ],
             genome: "ancestor.mm".to_string(),
             founders: 0,
