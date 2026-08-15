@@ -124,10 +124,20 @@ fn a_source_added_by_hand_runs_like_one_from_a_file() {
     assert!(world.remove_flux(0).is_some());
     let held = world.total_matter()[DETRITUS];
     world.run(100);
-    assert_eq!(
-        world.total_matter()[DETRITUS],
-        held,
-        "it went on running after being removed"
+    // Not equality any more, and the reason is a fix rather than a tolerance. Detritus decays to
+    // structural carbon, which it did not when this was written: `decay_rate` read
+    // `Q10_ONE / 2048`, and `Q10_ONE` is 1024, so the rate was zero and the plane was inert.
+    // What this test is actually about is that a removed source stops *adding* — so the
+    // assertion is that the total does not rise, and separately that the decay it is now subject
+    // to is the only thing moving it.
+    let after = world.total_matter()[DETRITUS];
+    assert!(
+        after <= held,
+        "detritus rose from {held} to {after} after the source was removed: it went on running"
+    );
+    assert!(
+        after < held,
+        "detritus held at {held} exactly; it should be mineralising to carbon"
     );
     assert!(
         world.remove_flux(7).is_none(),

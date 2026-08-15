@@ -13,7 +13,6 @@
 //! These are the tests that would have caught getting either wrong.
 
 use mm_core::chem::CHEM_COUNT;
-use mm_core::ecology::DETRITUS;
 use mm_core::fixed::{q10, Q10_ONE};
 use mm_core::light::CurrentField;
 use mm_core::{Flux, LightRegime, Scenario, Seeding, World};
@@ -33,6 +32,20 @@ fn empty(flux: Vec<Flux>) -> Scenario {
     }
 }
 
+/// The chemical the accounting tests move.
+///
+/// Carbon — and what matters about it is that **only the flux moves it**. These tests were
+/// written on `DRIFT`, for the marine-snow picture in the note above, and that stopped being
+/// safe the moment detritus began mineralising: its `decay_rate` read `Q10_ONE / 2048`, which is
+/// zero in integer arithmetic, so the plane had been inert by accident rather than by nature.
+/// The moment the rate became real, "what the source put in" and "what is on the slide" stopped
+/// being the same number.
+///
+/// These tests are about what crosses the boundary and whether the ledger agrees. A chemical
+/// that also turns into a different one while they watch makes them measure two things at once,
+/// and the one they were written for is the harder to get right.
+const DRIFT: usize = 4;
+
 fn total(world: &World, c: usize) -> i64 {
     world.total_matter()[c]
 }
@@ -42,7 +55,7 @@ fn a_source_puts_matter_on_the_slide_and_the_ledger_knows_about_all_of_it() {
     // I4 with a mechanism that creates matter. The ledger's claim and an independent
     // recomputation of the world's contents must agree exactly, not nearly.
     let mut world = World::new(empty(vec![Flux::Source {
-        chemical: DETRITUS,
+        chemical: DRIFT,
         x: 0,
         y: 0,
         width: 4,
@@ -50,7 +63,7 @@ fn a_source_puts_matter_on_the_slide_and_the_ledger_knows_about_all_of_it() {
         per_tick: q10(10),
     }]))
     .expect("world");
-    assert_eq!(total(&world, DETRITUS), 0, "it starts with none");
+    assert_eq!(total(&world, DRIFT), 0, "it starts with none");
 
     for tick in 0..400 {
         world.step();
@@ -60,10 +73,10 @@ fn a_source_puts_matter_on_the_slide_and_the_ledger_knows_about_all_of_it() {
                 .unwrap_or_else(|e| panic!("matter drifted at tick {tick}: {e}"));
         }
     }
-    let held = total(&world, DETRITUS);
+    let held = total(&world, DRIFT);
     assert!(held > 0, "the source put nothing on the slide");
     assert_eq!(
-        world.ledger().injected()[DETRITUS],
+        world.ledger().injected()[DRIFT],
         held,
         "the world holds a different amount than the ledger says arrived"
     );
@@ -74,11 +87,11 @@ fn a_source_puts_matter_on_the_slide_and_the_ledger_knows_about_all_of_it() {
 fn a_drain_takes_it_away_again_and_says_so() {
     let mut world = World::new(Scenario {
         seeding: vec![Seeding::Uniform {
-            chemical: DETRITUS,
+            chemical: DRIFT,
             per_square: q10(100),
         }],
         ..empty(vec![Flux::Drain {
-            chemical: DETRITUS,
+            chemical: DRIFT,
             x: 0,
             y: 0,
             width: 32,
@@ -87,16 +100,16 @@ fn a_drain_takes_it_away_again_and_says_so() {
         }])
     })
     .expect("world");
-    let before = total(&world, DETRITUS);
+    let before = total(&world, DRIFT);
     world.run(200);
-    let after = total(&world, DETRITUS);
+    let after = total(&world, DRIFT);
 
     assert!(
         after < before,
         "the drain took nothing: {before} -> {after}"
     );
     assert_eq!(
-        world.ledger().drained()[DETRITUS],
+        world.ledger().drained()[DRIFT],
         before - after,
         "what left the slide and what the ledger says left disagree"
     );
@@ -108,7 +121,7 @@ fn a_drain_cannot_take_what_is_not_there() {
     // A fraction rather than an amount, so this can never go negative — and a slide it has
     // already emptied stays empty rather than going into debt.
     let mut world = World::new(empty(vec![Flux::Drain {
-        chemical: DETRITUS,
+        chemical: DRIFT,
         x: 0,
         y: 0,
         width: 32,
@@ -117,8 +130,8 @@ fn a_drain_cannot_take_what_is_not_there() {
     }]))
     .expect("world");
     world.run(50);
-    assert_eq!(total(&world, DETRITUS), 0);
-    assert_eq!(world.ledger().drained()[DETRITUS], 0, "it drained nothing");
+    assert_eq!(total(&world, DRIFT), 0);
+    assert_eq!(world.ledger().drained()[DRIFT], 0, "it drained nothing");
     world.check_matter().expect("matter drifted");
 }
 
@@ -194,7 +207,7 @@ fn a_chemical_nothing_eats_carries_no_energy() {
     // anything — so an inflow of it is matter and nothing else. The counterpart of the sulphide
     // case, and it is the one that catches weighing *every* chemical instead of the right ones.
     let mut world = World::new(empty(vec![Flux::Source {
-        chemical: DETRITUS,
+        chemical: DRIFT,
         x: 0,
         y: 0,
         width: 32,
@@ -204,7 +217,7 @@ fn a_chemical_nothing_eats_carries_no_energy() {
     .expect("world");
     let before = world.ledger().energy_in();
     world.run(200);
-    assert!(total(&world, DETRITUS) > 0, "no detritus arrived");
+    assert!(total(&world, DRIFT) > 0, "no detritus arrived");
     assert_eq!(
         world.ledger().energy_in(),
         before,
@@ -221,7 +234,7 @@ fn a_source_and_a_drain_together_settle_instead_of_filling_up() {
     // has a level, and the level is where inflow and outflow meet.
     let mut world = World::new(empty(vec![
         Flux::Source {
-            chemical: DETRITUS,
+            chemical: DRIFT,
             x: 0,
             y: 0,
             width: 2,
@@ -229,7 +242,7 @@ fn a_source_and_a_drain_together_settle_instead_of_filling_up() {
             per_tick: q10(40),
         },
         Flux::Drain {
-            chemical: DETRITUS,
+            chemical: DRIFT,
             x: 0,
             y: 0,
             width: 32,
@@ -240,11 +253,11 @@ fn a_source_and_a_drain_together_settle_instead_of_filling_up() {
     .expect("world");
 
     world.run(400);
-    let early = total(&world, DETRITUS);
+    let early = total(&world, DRIFT);
     world.run(400);
-    let mid = total(&world, DETRITUS);
+    let mid = total(&world, DRIFT);
     world.run(400);
-    let late = total(&world, DETRITUS);
+    let late = total(&world, DRIFT);
 
     eprintln!("standing stock: {early} -> {mid} -> {late}");
     assert!(mid > early / 2, "it emptied rather than settling");
@@ -264,7 +277,7 @@ fn a_source_aimed_off_the_slide_records_what_it_managed() {
     // edge would reappear on the left and put an inlet at the outflow. Clamped instead — and
     // whatever is clamped away must not be recorded as having arrived.
     let mut world = World::new(empty(vec![Flux::Source {
-        chemical: DETRITUS,
+        chemical: DRIFT,
         x: 28,
         y: 28,
         width: 64,
@@ -274,8 +287,8 @@ fn a_source_aimed_off_the_slide_records_what_it_managed() {
     .expect("world");
     world.run(10);
 
-    let held = total(&world, DETRITUS);
-    assert_eq!(world.ledger().injected()[DETRITUS], held);
+    let held = total(&world, DRIFT);
+    assert_eq!(world.ledger().injected()[DRIFT], held);
     // Four squares by four, ten ticks, not sixty-four by sixty-four.
     assert_eq!(held, i64::from(q10(10)) * 16 * 10);
     world.check_matter().expect("matter drifted");

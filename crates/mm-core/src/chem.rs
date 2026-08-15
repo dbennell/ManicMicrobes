@@ -240,7 +240,23 @@ impl ChemTable {
                 structural: false,
                 colour: [190, 170, 130],
                 decay_to: Some(4),
-                decay_rate: Q10_ONE / 2048,
+                // One, and it has to be written as a literal.
+                //
+                // This was `Q10_ONE / 2048`, and `Q10_ONE` is 1024 — so the rate was **zero**,
+                // and `World::decay_fluid` skips any chemical whose rate is not positive.
+                // Detritus has never mineralised at all, in spite of the note above promising it
+                // does "a few hundred thousand ticks later". A silent integer truncation turned
+                // a documented mechanism into a no-op, and nothing noticed because until carrion
+                // was routed here in the same commit, nothing in the engine produced any
+                // detritus for the missing decay to act on.
+                //
+                // One is the floor a `Q10` rate can express: a 1024th of the plane per fluid
+                // step, which is a half-life near seven hundred ticks. That is faster than the
+                // comment's "hundreds of thousands" and cannot be made slower without changing
+                // the unit — and it is still half the speed carrion rots at (2/1024), so the
+                // chain keeps the order it should: a corpse breaks up faster than the particulate
+                // it breaks into turns back to building material.
+                decay_rate: 1,
                 advection: Q10_ONE / 3,
             },
             // Respiration's byproduct. Toxic, so a cell has to get rid of it or take
@@ -301,7 +317,32 @@ impl ChemTable {
                 // would let a cell skip the digestion and eat the dead directly.
                 structural: false,
                 colour: [150, 90, 90],
-                decay_to: Some(11),
+                // A corpse rots into *particulate*, not into breath.
+                //
+                // This was `Some(11)` — carbon dioxide — and that made structural matter a
+                // one-way sink. Bodies are built from index 4 alone; half of every corpse
+                // becomes carrion, and nothing anywhere in the default chemistry produces index
+                // 4 except a death returning the other half. So the buildable pool only ever
+                // shrank, and any world where carbon became the binding constraint was on a
+                // countdown rather than at a carrying capacity. Measured on a 256-square slide
+                // seeded lean: 16,591 cells at tick 6,000 and 373 at 30,000, with carbon down
+                // from 552M to 25M while *sugar* rose to 11.1 billion — a population starving
+                // for something to build with while sitting on four hundred times its remaining
+                // carbon in a form it cannot build with.
+                //
+                // Detritus is the return path and it always was: `ecology`'s filter converts it
+                // straight to structural matter, and it decays to index 4 on its own. It simply
+                // had no producer — the only detritus in the world was what `the_tide` and
+                // `the_drift` piped in abiotically through a `Flux`. Two halves of a
+                // decomposition chain that had never been joined.
+                //
+                // Joined, the chain is: corpse → carrion, which a lysosome digests for *energy*;
+                // carrion → detritus, which drifts and can be filtered; detritus → carbon, which
+                // is *structure* again. Three stages, each slower than the last (Q10/512 here
+                // against Q10/2048 there), each with its own consumer. It also gives the
+                // holdfast's filter an endogenous food supply for the first time, which is what
+                // makes sessile suspension feeding a living on every slide rather than on two.
+                decay_to: Some(12),
                 decay_rate: Q10_ONE / 512,
                 advection: Q10_ONE,
             },
