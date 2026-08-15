@@ -774,17 +774,39 @@ pub fn step_physics(
         // be exactly the discontinuity SPEC §3 works to keep out of the landscape: one point of
         // `param` would flip a cell from anchored to adrift, and evolution cannot climb that.
         // Under-gripping instead means being carried more slowly, which is a gradient.
+        // It resists what moves the cell, and that is not only the water.
+        //
+        // `drift` was reduced here and `cells.vx` was not, so a holdfast cancelled the current's
+        // pull and left the cell's own push untouched: a ciliate could beat its way off its own
+        // anchor for nothing. Measured by `tests/ciliary_probe.rs` before this changed — a
+        // gripping cell with two cilia at full power travelled twenty-four squares in four
+        // hundred ticks while an identical cell holding station against a quarter-speed current
+        // moved half a square. The asymmetry was not a decision; `step_physics` advances a body
+        // by `velocity + drift` and only one of the two was ever offered to the anchor.
+        //
+        // One surface holds one body, and it does not know whether the pull it is resisting came
+        // from the water or from the cell's own cilia. Resisting the *net* of the two is what
+        // makes that true — a cell swimming upstream at exactly the current's speed is not going
+        // anywhere and has nothing for its holdfast to do.
+        //
+        // What it buys is the trade FEEDING.md §7 is about. Thrust that no longer moves the body
+        // still goes into the water as impulse, and the water comes back as `slip` a few lines
+        // below, so gripping hard turns a beating cell into a *pump* — the sessile ciliary
+        // suspension feeder — while letting go turns the same cell into a swimmer. One organelle,
+        // one control word, two livings, and the dial between them is continuous.
         let grip = body.grip;
-        if grip > 0 && (drift_x != 0 || drift_y != 0) {
-            // Only now is the barrier scan worth doing. A cell with no holdfast, or one in
-            // still water, never pays for it — which matters because this runs over the whole
+        let net_x = drift_x.saturating_add(cells.vx[i]);
+        let net_y = drift_y.saturating_add(cells.vy[i]);
+        if grip > 0 && (net_x != 0 || net_y != 0) {
+            // Only now is the barrier scan worth doing. A cell with no holdfast, or one going
+            // nowhere, never pays for it — which matters because this runs over the whole
             // population every tick and most cells will never grow one.
             let radius = crate::biology::radius(cells, i);
             let ri = crate::fixed::q10_to_pos(radius).saturating_add(HOLDFAST_REACH);
             if crate::neighbours::touches_barrier(cells, blocked, w, h, i, ri) {
-                let speed = drift_x
+                let speed = net_x
                     .saturating_abs()
-                    .saturating_add(drift_y.saturating_abs());
+                    .saturating_add(net_y.saturating_abs());
                 let load = q10_scale(speed, radius).max(1);
                 let want =
                     ((grip as i64 * Q10_ONE as i64) / load as i64).min(Q10_ONE as i64) as i32;
@@ -806,6 +828,16 @@ pub fn step_physics(
                 };
                 drift_x = drift_x.saturating_sub(q10_scale(drift_x, held));
                 drift_y = drift_y.saturating_sub(q10_scale(drift_y, held));
+                // The same fraction off the cell's own motion, component by component as the
+                // drift is. Written back to the velocity rather than taken off the position
+                // step, because the anchor absorbs the momentum: a cell that has been held does
+                // not arrive next tick still carrying the speed it was held against.
+                //
+                // Before `slip` is read, deliberately. An anchored cell's velocity is now near
+                // zero, so what it reads as water going past is the stir its own cilia put into
+                // the square — which is the whole of how a pump feeds.
+                cells.vx[i] = cells.vx[i].saturating_sub(q10_scale(cells.vx[i], held));
+                cells.vy[i] = cells.vy[i].saturating_sub(q10_scale(cells.vy[i], held));
             }
         }
 

@@ -314,6 +314,46 @@ generates measurable slip and already filter-feeds on its own current. If it doe
 job shrinks to being the propulsive counterpart and the case for the slot is weaker. If it does
 not, the reason why is the design constraint. That is one probe, and it comes before any of this.
 
+### The probe ran, and the answer was "no, and here is why"
+
+`tests/ciliary_probe.rs`. Three arms, one cell each, gripping a floor with detritus in the water:
+a **pump** beating two cilia at full power in still water, an **idle** control with the cilia
+built and switched off, and a **current** benchmark holding station against a quarter-speed flow.
+
+The first run said a beating cell earned 0.86 of the current arm — and then the movement column
+said it had travelled **twenty-four squares in four hundred ticks**. `ecology::captured` reads
+`|v_water - v_cell|` and cannot tell a sessile pump from a swimmer ram-feeding; that symmetry is
+deliberate and it means a filtering number alone proves nothing about sessility. What had been
+measured was ram feeding.
+
+The reason was one asymmetry. `step_physics` advances a body by `velocity + drift`, and the
+holdfast was only ever offered the `drift`: it cancelled the water's pull and left the cell's own
+push untouched, so a ciliate could beat its way off its own anchor for nothing. Not a decision —
+`cells.vx` simply never appeared in the block.
+
+Grip now resists the net of the two, and the same probe reads:
+
+| arm | filtered | moved |
+| --- | --- | --- |
+| pump — anchored, cilia at full power, still water | 44,630,652 | **0.00 squares** |
+| current — anchored, cilia off, quarter-speed flow | 43,314,818 | 0.00 squares |
+| idle — anchored, cilia off, still water | **0** | 0.00 squares |
+
+**Pumping its own water is 1.03× holding station in a current.** So §7's first branch is the one
+that obtains, once the constraint is removed: the sessile ciliary suspension feeder of §17.6 is
+assembled from parts each built for something else, and **the flagellum's job does shrink to being
+the propulsive counterpart**. The impulse/motion split it is really about is a number, not a
+mechanism, and the cilium's two control words are both spoken for — so the honest home for it is
+`param`, where short beats stir and long beats propel, rather than a catalogue slot.
+
+The idle arm going to exactly zero is the sharper half of the result. Before, a held cell still
+caught a trickle, because Brownian jitter gave it a relative speed it had not earned. Capture is a
+flux; no motion, no flux.
+
+State-hash footprint, checked by A/B: three runs move — `sponge.mm` on `archipelago`, `the_drift`
+and `the_tide`, the only shipped combinations of a holdfast genome with something to grip. Every
+other scenario and genome is bit-identical.
+
 ---
 
 ## 8. The recommendation
