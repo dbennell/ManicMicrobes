@@ -114,6 +114,21 @@ impl LightRegime {
         let w = substrate.width();
         let h = substrate.height();
         let (field, blocked_snapshot) = substrate.light_and_blocked_mut();
+        // A regime that is the same everywhere is written as a fill, not as a quarter of a
+        // million evaluations of a function that ignores both its coordinates.
+        //
+        // This is not a micro-optimisation of a cold path. `refresh_light` skips the whole call
+        // for a regime that is not time-varying — and *every* time-varying regime is flat, so
+        // the only regimes that pay this cost every tick are exactly the ones the fast path
+        // covers. Measured on an empty 512×512 slide, net of startup: uniform light 0.470ms a
+        // tick, day/night 1.816ms. The cycle nearly quadrupled the cost of an empty tick to
+        // recompute one number 262,144 times.
+        if let Some(v) = self.flat_intensity(tick, w, h) {
+            for (slot, blocked) in field.iter_mut().zip(blocked_snapshot.iter()) {
+                *slot = if *blocked { 0 } else { v };
+            }
+            return;
+        }
         for y in 0..h {
             for x in 0..w {
                 let i = (y as usize) * (w as usize) + x as usize;
@@ -124,6 +139,26 @@ impl LightRegime {
                 };
                 field[i] = v;
             }
+        }
+    }
+
+    /// The single value this regime takes over the whole slide, when it takes only one.
+    ///
+    /// `None` for the two regimes that genuinely vary from square to square.
+    ///
+    /// Written as a match on the variant rather than as "evaluate at two corners and see if they
+    /// agree": a directional field whose bright and dark ends happened to be equal, or a point
+    /// source sampled at two points of the same radius, would take the fast path and be wrong
+    /// everywhere else. There is no wildcard arm, so a new regime is a compile error here until
+    /// somebody says which kind it is.
+    fn flat_intensity(&self, tick: u64, w: u32, h: u32) -> Option<i32> {
+        match self {
+            // None of these four reads `x` or `y` — see `intensity_at`.
+            LightRegime::Uniform { .. }
+            | LightRegime::DayNight { .. }
+            | LightRegime::SlowDecline { .. }
+            | LightRegime::Seasonal { .. } => Some(self.intensity_at(0, 0, w, h, tick)),
+            LightRegime::Directional { .. } | LightRegime::PointSource { .. } => None,
         }
     }
 
@@ -408,6 +443,23 @@ impl CurrentField {
         matches!(self, CurrentField::Tidal { .. })
     }
 
+    /// The single prescribed velocity this current has over the whole slide, when it has one.
+    ///
+    /// `None` for the fields that are a function of position. As with
+    /// [`LightRegime::flat_intensity`], this is a match on the variant and not a sample-and-
+    /// compare, and it has no wildcard arm so that a new current has to declare which kind it is.
+    fn flat_velocity(&self, tick: u64, w: u32, h: u32) -> Option<(i32, i32)> {
+        match self {
+            // None of these three reads `x` or `y` — see `velocity_at`.
+            CurrentField::Still | CurrentField::Uniform { .. } | CurrentField::Tidal { .. } => {
+                Some(self.velocity_at(0, 0, w, h, tick))
+            }
+            CurrentField::Rotational { .. }
+            | CurrentField::Convergent { .. }
+            | CurrentField::Shear { .. } => None,
+        }
+    }
+
     /// Velocity at one square, `Q10` squares per step, clamped to the CFL limit of one
     /// square per step in each axis.
     ///
@@ -513,6 +565,17 @@ impl CurrentField {
         let w = substrate.width();
         let h = substrate.height();
         let (vx, vy, blocked_snapshot) = substrate.velocity_and_blocked_mut();
+        // The prescribed part of the field, when it is the same over the whole slide — which is
+        // every current but the two that swirl. Hoisted out of the loop for the same reason the
+        // light is, and it matters more here: the two layers below are written by cells, so a
+        // slide with anything swimming on it rewrites this every fluid step however static the
+        // current itself is. `Tidal` is the only time-varying current and it is one of the flat
+        // ones, so nothing that has to be recomputed every tick misses the fast path.
+        //
+        // Still an `Option` checked per square rather than two separate loops: it is constant
+        // for the whole call, so the branch predicts perfectly, and what it removes is the enum
+        // dispatch and the 64-bit divides inside `velocity_at`.
+        let flat = self.flat_velocity(tick, w, h);
         for y in 0..h {
             for x in 0..w {
                 let i = (y as usize) * (w as usize) + x as usize;
@@ -521,7 +584,10 @@ impl CurrentField {
                     vy[i] = 0;
                     continue;
                 }
-                let (bx, by) = self.velocity_at(x, y, w, h, tick);
+                let (bx, by) = match flat {
+                    Some(base) => base,
+                    None => self.velocity_at(x, y, w, h, tick),
+                };
                 let ix = impulse_x.get(i).copied().unwrap_or(0);
                 let iy = impulse_y.get(i).copied().unwrap_or(0);
                 let sx = stir_x.get(i).copied().unwrap_or(0);
@@ -1014,5 +1080,119 @@ mod tests {
             seen.insert(hash(&CurrentField::Convergent { strength: 4_000 })),
             "a tide collides with a convergent field"
         );
+    }
+
+    /// The hoisted fast path in `apply` must write exactly what evaluating every square would.
+    ///
+    /// This is the whole safety argument for `flat_intensity` and `flat_velocity`. Both claim a
+    /// regime ignores its coordinates; if either ever claims it wrongly — because a variant grew
+    /// a spatial term, or a new one was added to the wrong arm — the field goes quietly uniform
+    /// and nothing else in the suite is looking. So the reference here is the per-square
+    /// evaluation itself, and it is run over every regime rather than only the flat ones, so the
+    /// slow path is covered by the same assertion.
+    ///
+    /// Barriers included, because `apply` zeroes blocked squares and the fast path has to as
+    /// well; a slide with none would not notice if it stopped.
+    #[test]
+    fn apply_writes_what_evaluating_every_square_would() {
+        let (w, h) = (23u32, 17u32);
+        // Odd dimensions and an off-centre barrier: the rotational and convergent fields divide
+        // by a radius taken from the extent, so an even square slide is the one case where a
+        // centring mistake cancels out.
+        let mut base = Substrate::new(w, h).expect("substrate");
+        for (x, y) in [(0u32, 0u32), (5, 3), (22, 16), (11, 8)] {
+            base.set_blocked(x as i32, y as i32, true);
+        }
+
+        let regimes = [
+            LightRegime::Uniform { intensity: 700 },
+            LightRegime::DayNight { period_ticks: 4096, day: Q10_ONE, night: 0 },
+            LightRegime::SlowDecline { start: Q10_ONE, end: 0, over_ticks: 9_000 },
+            LightRegime::Seasonal {
+                day_ticks: 512,
+                year_ticks: 20_000,
+                summer_day: Q10_ONE,
+                winter_day: 300,
+                night: 0,
+            },
+            LightRegime::Directional { bright: Q10_ONE, dark: 0, from: Edge::Left },
+            LightRegime::Directional { bright: Q10_ONE, dark: 0, from: Edge::Right },
+            LightRegime::Directional { bright: Q10_ONE, dark: 0, from: Edge::Top },
+            LightRegime::Directional { bright: Q10_ONE, dark: 0, from: Edge::Bottom },
+            LightRegime::PointSource { x: 7, y: 4, intensity: Q10_ONE, half_life_squares: 3 },
+        ];
+        // Ticks chosen to land on both ends and the middle of a triangular cycle, so a regime
+        // that is flat in value but not in time cannot pass by being sampled at one phase.
+        for tick in [0u64, 1, 255, 2048, 4095, 19_999, 50_000] {
+            for regime in &regimes {
+                let mut got = base.clone();
+                regime.apply(&mut got, tick);
+                for y in 0..h {
+                    for x in 0..w {
+                        let i = (y as usize) * (w as usize) + x as usize;
+                        let want = if base.blocked()[i] {
+                            0
+                        } else {
+                            regime.intensity_at(x, y, w, h, tick)
+                        };
+                        assert_eq!(
+                            got.light_at(x as i32, y as i32),
+                            want,
+                            "{regime:?} at ({x},{y}), tick {tick}"
+                        );
+                    }
+                }
+            }
+        }
+
+        let currents = [
+            CurrentField::Still,
+            CurrentField::Uniform { vx: 120, vy: -80 },
+            CurrentField::Tidal {
+                period_ticks: 600,
+                peak_vx: 400,
+                peak_vy: -200,
+                cycle_ticks: 9_000,
+                neap: 256,
+            },
+            CurrentField::Rotational { strength: 3_000 },
+            CurrentField::Convergent { strength: 2_500 },
+            CurrentField::Shear { strength: 1_800 },
+        ];
+        // Both cell-written layers non-empty and non-uniform, since `apply` adds them on top of
+        // the prescribed field and the fast path must not skip that.
+        let n = (w as usize) * (h as usize);
+        let ix: Vec<i32> = (0..n).map(|i| (i as i32 % 37) - 18).collect();
+        let iy: Vec<i32> = (0..n).map(|i| (i as i32 % 23) - 11).collect();
+        let sx: Vec<i32> = (0..n).map(|i| (i as i32 % 11) - 5).collect();
+        let sy: Vec<i32> = (0..n).map(|i| (i as i32 % 7) - 3).collect();
+        for tick in [0u64, 1, 149, 300, 599, 8_999, 50_000] {
+            for current in &currents {
+                let mut got = base.clone();
+                current.apply(&mut got, &ix, &iy, &sx, &sy, tick);
+                for y in 0..h {
+                    for x in 0..w {
+                        let i = (y as usize) * (w as usize) + x as usize;
+                        let want = if base.blocked()[i] {
+                            (0, 0)
+                        } else {
+                            let (bx, by) = current.velocity_at(x, y, w, h, tick);
+                            let lim = i64::from(MAX_VELOCITY);
+                            (
+                                (i64::from(bx) + i64::from(ix[i]) + i64::from(sx[i]))
+                                    .clamp(-lim, lim) as i32,
+                                (i64::from(by) + i64::from(iy[i]) + i64::from(sy[i]))
+                                    .clamp(-lim, lim) as i32,
+                            )
+                        };
+                        assert_eq!(
+                            got.velocity_at(x as i32, y as i32),
+                            want,
+                            "{current:?} at ({x},{y}), tick {tick}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
