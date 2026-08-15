@@ -384,6 +384,33 @@ other shipped slide — `soup.ron`, the fresh petri, all of them — **a cell th
 never build one.** The organelle works; there is nothing to make it out of. ISA 7 shipped armour
 into worlds with no mineral in them.
 
+### Correcting the record: which test was missing
+
+Commit `0875570`, which fixed the seeding, blamed `tests/shell.rs` — saying its tests install
+shells through `slots_mut`, that the recipe gate "has never been exercised end to end", and that
+the organelle's acceptance tests all pass on a slide where it cannot be built. **That was wrong,
+and it is recorded here rather than left in the history unqualified.**
+
+`shell.rs` has `a_shell_cannot_be_built_without_silicon`, which assembles a real genome —
+`IMM 100 / IMM 15 / IMM 5 / BUILD / HALT` — runs it on a cell starved of silicon and on one that
+is not, asserts the shell appears in exactly one case, and further asserts that the refused build
+spent *nothing*, because a half-charged build is matter destroyed. The gate was tested. It was
+tested well.
+
+The missing test was a different one, and the distinction matters for what to write next time.
+Nothing checked that **a world supplies what the catalogue asks for**. Adding a recipe and seeding
+the slide it needs are two edits in two crates, and no test spanned them — which is why
+`the_default_world_seeds_every_ingredient_the_catalogue_needs` is quantified over the catalogue in
+`mm-app` rather than being another assertion about silicon in `mm-core`. A mechanism test cannot
+catch an empty world, and a world test cannot catch a broken gate; this needed both and had one.
+
+Looking for the gap that was not there did find one next door. `tests/upper_half.rs` *does* only
+install its organelles with `slots_mut`, and behind that sat ISA 9: `CellHost::build` reduced the
+type operand modulo `SLOT_COUNT` rather than `CATALOGUE_SIZE`, so no genome could build anything
+in the upper half at all. `BUILD 22` made a cilium. The lesson generalises past both bugs — for a
+catalogue whose whole justification is the path a *mutation* takes, a test that installs an
+organelle is testing the wrong half.
+
 ### Why the atmosphere has to be on the slide
 
 The obvious way to make fixation real is to let a diazosome *import* nitrogen from off-plane, the
