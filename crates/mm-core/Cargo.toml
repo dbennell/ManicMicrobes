@@ -32,3 +32,9 @@ harness = false
 [[bench]]
 name = "population"
 harness = false
+
+# The route panel: what a tick costs down each path evolution might take, at the slide size the
+# product actually runs. See the module docs for why `population.rs` alone is not enough.
+[[bench]]
+name = "routes"
+harness = false
