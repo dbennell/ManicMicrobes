@@ -30,6 +30,7 @@
 //! Baked as **white with a luminance ramp**, so the sprite's own colour still supplies the
 //! species tint and everything the renderer already decides — depth of field, vignette,
 //! selection — keeps working by multiplication.
+use rayon::prelude::*;
 
 /// Side of one variant, in pixels.
 ///
@@ -141,13 +142,21 @@ pub fn paint_barriers(
     width: usize,
     height: usize,
     barriers: &[bool],
-    dim: &dyn Fn(f32, f32) -> f32,
+    dim: impl Fn(f32, f32) -> f32 + Sync,
 ) {
-    for y in 0..height {
+    // `par_chunks_mut` panics on a zero chunk size, where the plain loop this replaced simply
+    // did nothing. A slide with no width is not a thing to draw.
+    if width == 0 || height == 0 {
+        return;
+    }
+    // A row per task, for the reasons written out over `paint_field`.
+    into.par_chunks_mut(width * 4)
+        .take(height)
+        .enumerate()
+        .for_each(|(y, row)| {
         for x in 0..width {
             let i = y * width + x;
-            let at = i * 4;
-            let Some(px) = into.get_mut(at..at + 4) else {
+            let Some(px) = row.get_mut(x * 4..x * 4 + 4) else {
                 continue;
             };
             if barriers.get(i).copied().unwrap_or(false) {
@@ -165,7 +174,7 @@ pub fn paint_barriers(
                 px.copy_from_slice(&[0, 0, 0, 0]);
             }
         }
-    }
+        });
 }
 
 /// Paint the chemical overlays and the light into an RGBA buffer (M10.5).
@@ -199,16 +208,44 @@ pub fn paint_field(
     height: usize,
     light: &[f32],
     layers: &[(&[f32], [f32; 3])],
-    dim: &dyn Fn(f32, f32) -> f32,
+    dim: impl Fn(f32, f32) -> f32 + Sync,
 ) -> [f32; 3] {
     // Layers add rather than one winning, so two overlays on at once look like two overlays on
     // at once — divided by the count so the sum stays inside the channel.
     let share = (layers.len() as f32).max(1.0);
-    // `f64`, because this runs to a quarter of a million texels at 512×512 and an `f32`
-    // accumulator that has reached the tens of thousands cannot see a 0.1 added to it.
-    let mut sum = [0.0f64; 3];
-    for y in 0..height {
-        for x in 0..width {
+    // Same guard as `paint_barriers`: a zero chunk size is a panic, and an empty slide has no
+    // mean colour to report. The caller already treats this as "nothing to paint".
+    if width == 0 || height == 0 {
+        return [0.0; 3];
+    }
+    // A row per task.
+    //
+    // This is the largest single cost in a rendered frame and it was being paid on one thread:
+    // measured at 5.4ms against 0.26ms for building every cell's mesh, and — because it is one
+    // pass over the whole grid whatever is living on it — near enough the same 5ms on a slide
+    // with a thousand cells as on one with twenty thousand. It is a fixed toll the microscope
+    // pays before a single cell is drawn.
+    //
+    // `dim` is a generic `impl Fn` rather than the `&dyn Fn` it was, which matters more than the
+    // threading does on a per-texel basis: it was an indirect call that could not be inlined,
+    // made a quarter of a million times a frame, around arithmetic small enough that the call
+    // was a good share of the cost.
+    //
+    // The rows are collected in order and only then summed, rather than reduced as they finish.
+    // Floating-point addition is not associative, so a reduction in completion order would make
+    // the haze — and therefore every out-of-focus cell — depend on how rayon happened to split
+    // the frame, and two runs of the same scenario would not produce the same screenshot. This
+    // grouping is fixed, so they do.
+    let rows: Vec<[f64; 3]> = into
+        .par_chunks_mut(width * 4)
+        .take(height)
+        .enumerate()
+        .map(|(y, row)| {
+        // `f64`, because this runs to a quarter of a million texels at 512×512 and an `f32`
+        // accumulator that has reached the tens of thousands cannot see a 0.1 added to it.
+        let mut sum = [0.0f64; 3];
+        {
+            for x in 0..width {
             let i = y * width + x;
             // Light as a warm luminance under the chemical layers (SPEC §14).
             let warm = 0.10 * light.get(i).copied().unwrap_or(0.0);
@@ -234,14 +271,22 @@ pub fn paint_field(
                 sum[k] += f64::from(rgb[k]);
             }
             let d = dim(x as f32 + 0.5, y as f32 + 0.5);
-            let at = i * 4;
-            let Some(px) = into.get_mut(at..at + 4) else {
+            let Some(px) = row.get_mut(x * 4..x * 4 + 4) else {
                 continue;
             };
             for k in 0..3 {
                 px[k] = ((rgb[k] * d).clamp(0.0, 1.0) * 255.0) as u8;
             }
             px[3] = 255;
+            }
+        }
+        sum
+        })
+        .collect();
+    let mut sum = [0.0f64; 3];
+    for row in rows {
+        for k in 0..3 {
+            sum[k] += row[k];
         }
     }
     let texels = (width * height) as f64;
