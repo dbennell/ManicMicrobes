@@ -312,14 +312,56 @@ at 100 and 9,944 at 400. So a slide seeded well above the knee is not a well-fed
 slide with most of its matter out of circulation and a population large enough to keep knocking
 itself over.
 
-**Where that matter is, is not established and should not be guessed at**, any more than §6's
-light column should have been. The candidate is the decay chain's time constant — corpse →
-carrion → detritus → carbon, half-life near seven hundred ticks at the detritus stage — so a big
-standing population means a big death flux with a lot of matter in transit, and an overshoot
-large enough locks up more carbon than the survivors can replace. That is a hypothesis with a
-curve consistent with it and no measurement behind it. The measurement it wants is a per-chemical
-total over time, which `mm_core::metrics::Sample` does not carry; that is the job this leaves
-behind, and it is now the second time this section has needed a number it cannot see.
+### Where the matter is, measured — and it is not where this section guessed
+
+This section twice said the measurement it wanted was "a per-chemical total over time, which
+`mm_core::metrics::Sample` does not carry". **That was false.** `Sample::chemicals` is
+`[i64; CHEM_COUNT]`, filled from `World::total_matter` and written into every NDJSON line, and it
+had been in the metrics files these very runs produced. The instrument was never missing; it went
+unread, twice, while the thing it measures was described as unmeasurable.
+
+Read, it refutes the hypothesis this section had been offering. The guess was that a large
+overshoot locks matter in the decay chain — corpse to carrion to detritus to carbon — leaving the
+survivors short. Carrion and detritus together are **about one percent** of the 400 world's matter
+at every sample. Nothing is locked anywhere.
+
+What is actually happening, in millions of `Q10` units on the 256-square slide:
+
+| seeded 400 | carbon | CO₂ | oxygen | sugar |
+| ---: | ---: | ---: | ---: | ---: |
+| tick 0 | 26,847 | 26,844 | 26,844 | 0 |
+| tick 12,000 | 26,734 | **177** | 40,142 | 13,298 |
+| tick 60,000 | 26,578 | **60** | 40,219 | 13,375 |
+
+**The CO₂ is gone, and the carbon never moved.** Photosynthesis is `2 waste + light -> substrate
++ oxidant`, and the arithmetic closes exactly: 26,667 of CO₂ consumed against 13,333 of sugar and
+13,333 of oxygen produced. The population booms on an enormous CO₂ pool, converts essentially all
+of it into a sugar-and-oxygen pool, and then starves — with twenty-six *billion* units of
+structural carbon lying untouched around it. Bodies hold about 940 million of that carbon at the
+peak: **three and a half percent**.
+
+The 40 world does the same thing and then recovers:
+
+| seeded 40 | carbon | CO₂ | oxygen | sugar |
+| ---: | ---: | ---: | ---: | ---: |
+| tick 12,000 | 2,330 | 82 | 3,962 | 1,277 |
+| tick 60,000 | 2,560 | **114** | 3,926 | 1,241 |
+
+CO₂ bottoms out and then climbs, and the population climbs with it. Per square that is 1.7 units
+of CO₂ against the 400 world's 0.9 — **the smaller world ends up with twice as much of the thing
+that actually limits it**, which is why it carries 23,524 cells where the richer one carries
+9,944.
+
+So the ring is a carbon-cycle oscillation and the seeded amount sets its amplitude. The only route
+back from sugar to CO₂ is respiration, which is bounded by mitochondrial throughput, so a world
+that overshoots hard converts its CO₂ faster than it can be returned and has to wait. §6's
+conclusion stands and gains a mechanism: seeding far above the knee does not make a well-fed
+world, it makes a world that runs its own photosynthetic substrate down and rings while it comes
+back.
+
+**What this does not settle.** Why the 400 world's CO₂ settles *lower* than the 40 world's is not
+explained by anything measured here — both should relax to whatever respiration sustains, and the
+richer one does not. That is the next question, and the instrument for it exists.
 
 ### The caveat, discharged
 
@@ -348,12 +390,11 @@ and each slide holds around 1,500 lineages against the 100 world's 664.
 higher level shoots past what the slide can support at around tick 15,000 and then starves back.
 
 So the ringing is not a property of how large the population is, it is a property of
-*overshooting*: a slide that never exceeds its capacity never generates the death pulse, so no
-unusual quantity of matter is ever in transit through the decay chain at once, so there is no
-trough to climb out of. That is the first evidence which actually discriminates the hypothesis
-above rather than merely being consistent with it — but it is still not a measurement of where
-the matter is, and the per-chemical total over time that `mm_core::metrics::Sample` does not carry
-remains the job this section leaves behind.
+*overshooting* — and the sentence that stood here explained that by a death pulse putting matter
+into the decay chain, which the per-chemical totals above refute: carrion and detritus are about
+one percent of the world at every sample. The overshoot matters for a different reason. A
+population that exceeds its capacity converts CO₂ into sugar faster than respiration returns it,
+and then has to wait for the slow leg. Forty never overshoots, so it never opens that deficit.
 
 One honesty note on the table at the top of this section: those arms were measured on the
 three-chemical world, before the fresh slide seeded silicon (§8). The ranking is unaffected —
