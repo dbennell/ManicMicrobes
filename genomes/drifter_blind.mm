@@ -1,16 +1,26 @@
 ; drifter_blind.mm — the control: the same cell with nothing to see with.
 ;
-; It held `RESERVED_A` — catalogue slot 14 — until that slot was filled by the holdfast, at
-; which point the control quietly stopped being blind: it was building a working organelle,
-; paying a third more upkeep for it than the reserved slot cost, and would have gripped a wall
-; on any slide that had one. A control that acquires a capability is not a control. Moved to
-; slot 15, which is the reserved one now, and this is what an ISA bump costs when a genome was
-; using a slot *for* being empty.
+; It has been broken by the catalogue twice, and this is the version that cannot be broken a
+; third time.
 ;
-; The motile-but-blind control for M3's chemotaxis experiment. Identical to `drifter.mm` byte
-; for byte except that slot 7 holds a `RESERVED_B` organelle instead of a chemosensor: same
-; length, same instruction count, same build cost, same upkeep, same everything — and no
-; information about where the food is.
+; It held `RESERVED_A` — slot 14 — until that slot was filled by the holdfast, at which point the
+; control quietly stopped being blind: it was building a working organelle, paying a third more
+; upkeep for it, and would have gripped a wall on any slide that had one. It moved to slot 15,
+; the reserved one after that, and slot 15 is now the shell. A control whose blindness depends on
+; a slot staying empty is a control with an expiry date on it.
+;
+; So it does not use an empty slot at all. It builds **the same chemosensor `drifter.mm` builds**
+; and points it at chemical 3 — `signal_d`, which has no engine semantics and which nothing in
+; `genomes/` emits. Same organelle, same build cost, same upkeep, same instruction count, same
+; genome length — identical *by construction* rather than by two numbers being matched by hand,
+; which is what the reserved-slot version was doing and why filling a slot kept breaking it.
+;
+; What it reads is zero, and would still be uninformative if a mutant somewhere started emitting
+; `signal_d`: the experiment asks whether a lineage can find its *food*, and a signal nobody
+; excretes in proportion to food is not a map of food. That is a weaker guarantee than "the plane
+; is empty" and a much stronger one than "this slot will never be implemented".
+;
+; The motile-but-blind control for M3's chemotaxis experiment.
 ;
 ; That control is the whole experiment. A sighted population that ends up nearer its food than
 ; a blind one has evolved chemotaxis. A sighted population that ends up nearer its food than
@@ -21,7 +31,7 @@
 ;   1  nucleus
 ;   2  mitochondrion
 ;   3  chloroplast
-;   7  chemosensor, tuned to chemical 11 — the same carbon dioxide it eats
+;   7  chemosensor, tuned to chemical 3 — a signal nothing emits, so it reads nothing
 ;   6  cilium, mounted +x
 ;   8  cilium, mounted +y
 
@@ -48,7 +58,7 @@
         IMM     2
         BUILD
         IMM     60
-        IMM     15:4             ; RESERVED_B — built, paid for, and blind
+        IMM     7:4              ; chemosensor — the same one the sighted line builds
         IMM     7
         BUILD
         IMM     80
@@ -68,7 +78,10 @@
 ; something, and then ignored.
 
         GENE    #keep
-        IMM     11              ; watch carbon dioxide
+        IMM     3:4             ; watch signal_d, which nothing emits — this is the blindness
+                                ; width pinned to 4, as the build line is: a bare `IMM 3` needs
+                                ; two fewer template bits than `IMM 11` and the control would be
+                                ; two bytes cheaper to copy than the line it is a control for
         ZERO
         IMM     7
         OSET
