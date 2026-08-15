@@ -137,8 +137,27 @@ fn swapping_the_two_entries_mirrors_the_match_rather_than_changing_it() {
     // Neither side has the better half of the slide. If the same two genomes give a
     // systematically different answer depending on which is entered first, the arena is not
     // fair and no result from it means anything.
+    //
+    // # Why the tick limit is not a free parameter
+    //
+    // This test spent a long time red, and the arena was never the reason. The debug limit was
+    // **300**, and these two resolve at about tick 458 — so under `cargo test` the match was
+    // stopped a hundred and fifty ticks before it finished, and `winner()` returned whoever
+    // happened to be ahead in an unfinished fight. Measured over 24 seeds at 300 ticks: the
+    // seating changed the reported winner on **22 of them**, and eleven matches had no winner at
+    // all. At 500 ticks and beyond it changes it on **none**, and the right-hand seat wins
+    // exactly half — see `acceptance_seating_is_fair_across_seeds`.
+    //
+    // It flips because the two seatings are not mirror images and cannot be. `setup` spawns Left
+    // before Right, so the sides hold different cell ids, and randomness is
+    // `hash(seed, tick, cell_id, purpose)` — swapping the entries deals both sides a different
+    // stream. That is fine once a match has resolved, because a decisive result survives the
+    // noise; it is meaningless before, because there is nothing but noise to report.
+    //
+    // So the limit has to sit past the decision, and the assertion below has to check that it
+    // did rather than trusting the number to stay lucky.
     let (a, b) = contenders();
-    let rules = rules(if cfg!(debug_assertions) { 300 } else { 2_000 });
+    let rules = rules(if cfg!(debug_assertions) { 1_200 } else { 2_000 });
     let forward = play(&rules, &a, &b).expect("match");
     let reversed = play(&rules, &b, &a).expect("match");
 
@@ -153,6 +172,18 @@ fn swapping_the_two_entries_mirrors_the_match_rather_than_changing_it() {
         winner_name(&forward),
         winner_name(&reversed)
     );
+    // An undecided match has no winner to compare, and comparing `None` to `None` would pass
+    // while testing nothing at all. This is the guard that keeps the fault above from recurring
+    // silently if either genome gets slower to win.
+    for (label, report) in [("forward", &forward), ("reversed", &reversed)] {
+        assert!(
+            report.outcome.winner().is_some(),
+            "the {label} match had not resolved by tick {}: raise the limit. A match stopped \
+             mid-fight reports whoever is ahead, which is noise, and comparing two samples of \
+             noise is not a fairness test",
+            rules.tick_limit
+        );
+    }
     assert_eq!(
         winner_name(&forward),
         winner_name(&reversed),
@@ -312,4 +343,88 @@ fn bisect_the_snapshot_divergence() {
             break;
         }
     }
+}
+
+/// **Seat fairness, measured rather than sampled.**
+///
+/// `swapping_the_two_entries_mirrors_the_match_rather_than_changing_it` plays one pair of matches
+/// and asks whether the winners agree. That is the cheap check, and it is not the claim — two
+/// runs agreeing could be luck, and the two runs are not mirror images anyway, since Left and
+/// Right hold different cell ids and therefore different random streams.
+///
+/// The claim is that the *slide* does not favour a seat, and the only honest way to see it is
+/// over many matches: if the right-hand seat has an advantage it will win more than half of them
+/// regardless of who sits there. Twenty-four seeds, both seatings, forty-eight decided matches.
+///
+/// Ignored by default because it is forty-eight full-length matches; run with
+/// `--release --ignored`. What it found when written: the right seat wins exactly 24 of 48 at
+/// every tick limit past the resolution point, seating changes the winner on none of the seeds,
+/// and the tidy strain wins all 48 — which is the M2 selection result arriving through a second
+/// instrument.
+#[test]
+#[ignore = "48 full-length matches; run with --release --ignored"]
+fn acceptance_seating_is_fair_across_seeds() {
+    const SEEDS: u64 = 24;
+    let (mut right_wins, mut decided, mut flips, mut tidy_wins) = (0u64, 0u64, 0u64, 0u64);
+    for seed in 1..=SEEDS {
+        let (tidy, sloppy) = contenders();
+        let r = MatchRules {
+            seed,
+            ..rules(2_000)
+        };
+        let forward = play(&r, &tidy, &sloppy).expect("match");
+        let reversed = play(&r, &sloppy, &tidy).expect("match");
+        let name = |rep: &mm_core::arena::MatchReport| {
+            rep.outcome.winner().map(|s| match s {
+                Side::Left => rep.left.name.clone(),
+                Side::Right => rep.right.name.clone(),
+            })
+        };
+        for rep in [&forward, &reversed] {
+            if let Some(s) = rep.outcome.winner() {
+                decided += 1;
+                if s == Side::Right {
+                    right_wins += 1;
+                }
+            }
+        }
+        if name(&forward) != name(&reversed) {
+            flips += 1;
+            eprintln!(
+                "  seed {seed}: {:?} seated left, {:?} seated right",
+                name(&forward),
+                name(&reversed)
+            );
+        }
+        tidy_wins += [name(&forward), name(&reversed)]
+            .iter()
+            .filter(|n| n.as_deref() == Some("tidy"))
+            .count() as u64;
+    }
+    eprintln!(
+        "{decided} decided of {}: right seat won {right_wins}, tidy won {tidy_wins}, seating \
+         flipped the winner on {flips} seeds",
+        SEEDS * 2
+    );
+
+    assert_eq!(
+        decided,
+        SEEDS * 2,
+        "only {decided} of {} matches resolved; an undecided match reports whoever is ahead and \
+         cannot speak to fairness",
+        SEEDS * 2
+    );
+    assert_eq!(
+        flips, 0,
+        "seating changed the winner on {flips} of {SEEDS} seeds"
+    );
+    // The interesting assertion, and the loose one on purpose: a fair slide should split the
+    // seats near evenly, and demanding *exactly* half would be asserting a coincidence. A real
+    // geometric advantage shows up as a landslide, not as a lean.
+    let (lo, hi) = (decided / 4, decided * 3 / 4);
+    assert!(
+        (lo..=hi).contains(&right_wins),
+        "the right-hand seat won {right_wins} of {decided}, outside {lo}..={hi}: the slide \
+         favours a side and no result from this arena means anything"
+    );
 }
