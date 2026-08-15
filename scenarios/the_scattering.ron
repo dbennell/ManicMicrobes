@@ -1,0 +1,93 @@
+// The scattering — a slide where food has to be *found*.
+//
+// Every other world in the library ends the same way: the autotroph divides until the slide is
+// an even mat at carrying capacity, and from then on a cell that eats other cells is always
+// already touching one. There is no search problem, so there is nothing for a sense to be for,
+// and a photosensor is upkeep with no return. That is why `docs/ECONOMY.md` finds the autotroph
+// winning everything, and it is why no route in `benches/routes.rs` could hold a photosensor:
+// seeing costs, and on a mat it buys nothing.
+//
+// This world is sparse instead. At 232 lux an ancestor settles at about **190 cells on 65,536
+// squares** — one per 345 squares, a mean spacing near nineteen. A photosensor's default reach
+// is six squares, so a cell here can see essentially nothing, and a hunter that stands still
+// starves beside a slide that has food on it.
+//
+// # Why the limit is light, and not any of the obvious things
+//
+// Measured on this slide, each run 60,000 ticks with `ancestor.mm` from 64 founders:
+//
+//   space            `split_pressure` alone settles about 15,000 — a mat
+//   carbon 8,192     16,591 at tick 6,000, then **373** at 30,000 — a collapse, not a cap
+//   CO2 ÷32          15,497. Cutting it thirty-two-fold barely moves the population at all
+//   light 512        15,047 — still a mat
+//   light 232        **190, and flat at 20k, 40k and 60k**
+//   light 176        2
+//
+// The CO2 row explains the others. **A recycled resource cannot cap a population**: respiration
+// hands carbon dioxide straight back, so a smaller pool simply cycles faster and supports the
+// same crowd. Only something that does not come back can set a ceiling.
+//
+// Structural carbon is the one resource that does not come back — which is why leaning on it
+// produces a collapse rather than a cap. Bodies are built from chemical 4 alone; half of every
+// corpse becomes carrion, carrion decays to carbon dioxide, and a lysosome digests it to sugar.
+// Nothing in the default chemistry produces chemical 4. Over the carbon-lean run above, carbon
+// fell from 552M to 25M while sugar rose to 11.1 *billion*: the population starved for something
+// to build with while sitting on four hundred times its remaining carbon in a form it cannot
+// build with.
+//
+// Light is the only limit left that is neither recycled nor consumed. It is re-prescribed every
+// fluid step, so it caps the *rate* of production without a stock to draw down, and a population
+// held by it sits still for as long as you care to watch.
+//
+// The slide is 256 squares because that is what the microscope opens on, and because a search
+// problem needs somewhere to search. On the 64-square worlds most of the library uses, a
+// photosensor at the default six-square range already sees an eighth of the width.
+//
+// # Two things to know before trusting it
+//
+// **The band is narrow.** 320 lux gives 18,872 cells and 176 gives 2. The usable range is about
+// 224 to 240, and this world sits close enough to the cliff that adding predators may push it
+// over rather than establish an ecology. That is not a tuning failure to be dialled out; it is
+// what a world with no structural recycling has instead of a carrying capacity.
+//
+// **It is stable against the founder, not against evolution.** At 256 lux the population held at
+// 202 for twenty thousand ticks and then a mutant lineage escaped the light limit — seven
+// species and 8,999 cells by tick 60,000, the mat returning by another road. At 232 it stays one
+// species. Treat a long run here as an experiment with an outcome, not as a fixed stage.
+//
+//   mm-cli run scenarios/the_scattering.ron --genome genomes/evader.mm --ticks 60000
+(
+    name: "the scattering",
+    seed: 20260814,
+    width: 256,
+    height: 256,
+
+    // Dim, and uniform. Dim is the whole scenario; uniform is so that a cell cannot find the
+    // crowded places by phototaxis instead of by looking at other cells — ambient light is a
+    // field lookup with no range limit at all, and a gradient would be a cheaper cue than the
+    // one this world exists to make valuable.
+    light: Uniform(intensity: 232),
+    current: Still,
+    fluid_interval: 1,
+
+    // Everything else in full measure. Scarcity here is how fast the light lets a cell work,
+    // not anything running out — see the carbon row above for what running out looks like.
+    seeding: [
+        Uniform(chemical: 11, per_square: 409600),
+        Uniform(chemical: 14, per_square: 409600),
+        Uniform(chemical: 4, per_square: 409600),
+        // Silicon, which is what a shell is made of and which nothing produces.
+        //
+        // A world has only the silicon it is seeded with, so whether armour is *possible* is a
+        // property of the slide rather than of the catalogue — and most of the library has none,
+        // which means a mutant that builds a shell there simply cannot afford it. That is
+        // deliberate here and worth knowing about elsewhere: this is the world meant to have a
+        // predator in it, so it is the world that should let its prey answer.
+        //
+        // A twentieth of the carbon. Armour is contested only by whatever is armoured, so it does
+        // not need to be plentiful to be worth having — and being scarce is what makes it a
+        // second axis of competition rather than a second tax on everybody.
+        Uniform(chemical: 7, per_square: 20480),
+    ],
+    barriers: [],
+)
