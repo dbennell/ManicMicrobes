@@ -8,6 +8,13 @@ complexity, because the mechanism that would use them does not exist. What is sc
 *reactions*, not *species*. The rest of this document is the evidence, and the design of the
 change that follows from it.
 
+**That conclusion has since been acted on, which dates the sentence above.** §3's items 1 and 3
+were built — multiple metabolic pathways (§4) and per-organelle recipes in a second structural
+chemical — so the mechanism that would use them now does exist, and four of the ten have stopped
+being scenery. §2's table carries both readings side by side. The claim that survives unaltered
+is the middle one: it was reactions that were scarce, and supplying them is what made the
+existing species matter.
+
 ---
 
 ## 1. What the number costs
@@ -57,18 +64,25 @@ index*, and `OrganelleCatalogue::closes` actually requires them to be — `bypro
 vestigial name for the thing photosynthesis produces alongside the substrate, which is the
 oxidant.
 
-That leaves ten:
+That leaves ten. **This inventory is the one taken when the document was written, and three of
+its four rows have since stopped being true** — which is not an erratum but §3 being built. It is
+updated here rather than left standing, because a stale inventory of spare capacity is the thing
+somebody reads when deciding where a new chemical goes; the "then" column is what prompted §3 and
+§4 and is kept so the argument still reads.
 
-| | | |
-| --- | --- | --- |
-| `signal_a`–`signal_d` | 0–3 | **Genuinely useful.** `EMIT`, `EAT` and the chemosensor all work on them and the engine ascribes them no meaning, which is exactly right for a communication channel that evolution is supposed to invent a use for. |
-| `nitrogen`, `phosphorus`, `silicon` | 5–7 | Flagged `structural: true` in the table — but only index 4 is *the* structural chemical. Nothing can be built out of them. |
-| `lipid`, `sulphide` | 9–10 | Carry `energy_yield` of 1536 and 768. But a mitochondrion burns `chemistry.substrate`, which is one index. **Nothing burns them.** |
-| `ammonia` | 12 | Filler. |
+| | | then | now |
+| --- | --- | --- | --- |
+| `signal_a`–`signal_d` | 0–3 | **Genuinely useful.** `EMIT`, `EAT` and the chemosensor all work on them and the engine ascribes them no meaning, which is exactly right for a communication channel evolution is supposed to invent a use for. | Unchanged, and one of them is now load-bearing: `drifter_blind.mm` watches `signal_d` *because* nothing emits it, which is what makes it M3's blind control. Giving index 3 a meaning breaks that control. |
+| `nitrogen` | 5 | Flagged `structural: true`, but only index 4 is *the* structural chemical. Nothing can be built out of it. | Consumed by the diazosome (ISA 7), which converts it to carbon. Still built from by nothing, and — like phosphorus and silicon — **produced by nothing**: seeding or a `Flux` is the only way any of the three enters a world. |
+| `phosphorus` | 6 | As above. | **Unchanged: referenced by no mechanism anywhere.** The last entry in the table that is inert in both directions. |
+| `silicon` | 7 | As above. | **Built from.** `OrganelleSpec::build_trace` (ISA 7) gives the shell a recipe of `q10(6)` silicon — the first and so far only use of a second structural chemical, which is §3 item 3. |
+| `lipid`, `sulphide` | 9–10 | Carry `energy_yield` of 1536 and 768. But a mitochondrion burns `chemistry.substrate`, which is one index. **Nothing burns them.** | **Both are burnable.** `MetabolicChemistry::default` runs pathways on substrates 8, 9, 10 and 8 — §4 shipped, and it is what made the yields these two have always carried mean something. |
+| `ammonia` → `detritus` | 12 | Filler. | **The slot changed hands.** Ammonia is gone; index 12 is detritus, the particulate of SPEC §17.4. A filter converts it straight to structural matter and it decays to carbon, so it is the return leg of the decomposition chain rather than filler. |
 
-So the table already describes a richer world than the engine implements. Lipid is a food no
-organelle can eat; phosphorus is a building material nothing is built from. A seventeenth
-chemical would join them.
+So the sentence this section used to end on — *lipid is a food no organelle can eat; phosphorus
+is a building material nothing is built from* — is now half true. Lipid is eaten. Phosphorus is
+still built from by nothing, and is the only chemical of the sixteen about which the original
+complaint stands unaltered.
 
 ---
 
