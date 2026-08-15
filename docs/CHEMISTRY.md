@@ -326,3 +326,94 @@ across the last 20,000 ticks of 120,000 — which is exactly what 100 looked lik
 should be run to 200,000 on three seeds before anyone calls it settled. The honest claim today is
 that 40 rings on a period longer than any yet measured, not that it does not ring.
 
+## 8. The three minerals, and what a seventeenth chemical would cost
+
+§2's "now" column says nitrogen, phosphorus and silicon are **produced by nothing**. That was
+traced exhaustively rather than assumed, and the finding is stronger than "they need seeding":
+
+* **Nitrogen (5)** is consumed in exactly one place — `metabolism.rs`, the diazosome, which
+  converts it to structural carbon — and returned by nothing. A one-way sink.
+* **Phosphorus (6)** is touched by no mechanism at all, in either direction.
+* **Silicon (7)** is consumed by the shell's recipe and returned **in full** on death, 7/8 on
+  `TEAR`. It cycles; it is never made.
+
+Every other path that moves them — `EAT`, `EMIT`, junction transfer, division, bleeding, passive
+transport, diffusion — is transport between compartments, not production. So seeding or a `Flux`
+is the only way any of the three enters a world.
+
+### The consequence that is a bug
+
+`build_trace[7] = q10(6)` on the shell is the only non-zero recipe in the catalogue, and
+`biology.rs`'s affordability gate refuses a build whose ingredients are absent.
+`scenarios/the_scattering.ron` is the **only** file in the repo that seeds silicon. So on every
+other shipped slide — `soup.ron`, the fresh petri, all of them — **a cell that evolves a shell can
+never build one.** The organelle works; there is nothing to make it out of. ISA 7 shipped armour
+into worlds with no mineral in them.
+
+### Why the atmosphere has to be on the slide
+
+The obvious way to make fixation real is to let a diazosome *import* nitrogen from off-plane, the
+way a chloroplast imports energy from off-plane, and record it through `Ledger::record_injected`
+so the books stay exact. That was proposed here and it is wrong, for a reason worth writing down:
+
+> Only energy enters and leaves. Matter is neither created nor destroyed, only transferred and
+> transformed.
+
+Energy is the one wall the fishbowl is permitted — light in, heat out — so the sun is the
+exception rather than the precedent. `record_injected` is scenario-setup machinery; an organelle
+calling it every tick is a tap, and a closed system with a tap is a flow reactor. So if the inert
+dinitrogen pool is to exist, it must exist **on the slide**, as a chemical, with fixation as a
+conversion between two on-table species. That costs a seventeenth chemical, and it is the honest
+price of the invariant.
+
+What the slot buys is worth more than the slot: under an injecting port, nitrogen availability is
+a parameter somebody chooses. With two on-slide pools, total nitrogen is fixed at seeding and the
+*split* between locked and available is a state variable that evolves — a young slide is nearly
+all inert and gated on diazotrophs, a mature one has pulled its nitrogen into circulation and the
+diazosome goes vestigial on its own. Scarcity becomes a historical property of that world instead
+of a number.
+
+### What the seventeenth chemical costs
+
+§1 measured `CHEM_COUNT` at 32 and concluded: *declaring a chemical is nearly free, stirring one
+is exactly linear.* Dinitrogen is the case that conclusion does not cover, because it is present
+in every square of every slide and never goes away — it is guaranteed to be stirred. Measured
+against a realistic 7-plane baseline, flowing, as the marginal cost of one always-present plane:
+
+| its mobility | 256² | 512² |
+| --- | ---: | ---: |
+| diffusion 0, advection 0 | −0.1% | +0.0% |
+| diffusion `Q10/256`, advection 0 | +6.3% | +6.5% |
+| diffusion `Q10/16`, advection 0 | +8.0% | +8.2% |
+| diffusion `Q10/4`, advection full | +14.7% | +15.0% |
+
+Memory is negligible — 0.26 MB a plane at 256², 4.19 MB at 1024².
+
+The shape is what matters. `fluid.rs` gates diffusion on `rate > 0` and advection on
+`mobility > 0` and then does identical work whatever the value, so **the step from off to on is
+the expensive one** — roughly 6.4% — and the rate itself adds only about 1.7 points on top. There
+is no cheap-because-slow option: it is off, or it is most of the price.
+
+### The decision
+
+**Diffusion on, advection off**, at about +8% of the fluid step — and the locally exhaustible pool
+that follows is the point rather than a concession. A dissolved gas ought to go where the water
+goes, so advection off is a deliberate departure: it makes the inert pool something a diazotroph
+mat draws down faster than the neighbourhood refills, which is a fourth spatial scarcity rather
+than a flat background. Diffusion stays on so an exhausted patch recovers instead of scarring
+permanently.
+
+That cost lands on the phase already furthest from its gate — §1 records the fluid at 186
+steps/second against M1's 500 — so it is a real charge against an overspent budget, not a
+rounding error. It is affordable because the gate's workload is 512² with all sixteen planes
+carrying matter, and the product runs 256² with about seven.
+
+### Not yet built
+
+Everything in this section is measurement and design. What follows from it — the chemical split,
+the diazosome reversed from *spending* nitrogen into *making it available*, nitrogen and
+phosphorus costs in `build_trace` on the protein-heavy organelles and the nucleus respectively,
+the mobilities, and an oxidant-gated reversion as the slow leak back — is unimplemented. One
+correction to note before it is: an oxidant-gated reversion is **not** expressible as `decay_to`
+plus `decay_rate`. `World::decay_fluid` applies one unconditional rate per chemical and cannot see
+the oxidant field, so gating it is a mechanism rather than a table edit.
