@@ -262,6 +262,16 @@ pub const FIELDS: &[Field] = &[
         note: "energy per unit of substrate, when the chemical table says nothing",
     },
     Field {
+        path: "metabolism.rates.fixation_inhibition",
+        label: "fixation cutoff",
+        group: Group::Metabolism,
+        unit: Unit::Q10,
+        note: "interior oxidant at which a diazosome stops fixing nitrogen altogether. The one \
+               antagonism that makes an anoxic corner worth living in: a cell cannot both burn \
+               things and fix nitrogen, so it must choose, wall itself off, or get the matter \
+               from a neighbour through a junction",
+    },
+    Field {
         path: "metabolism.rates.toxicity_threshold",
         label: "toxicity threshold",
         group: Group::Metabolism,
@@ -581,7 +591,7 @@ pub const PATHWAY_COLUMNS: [(&str, &str); 4] = [
 pub const CATALOGUE_PREFIX: &str = "metabolism.catalogue.specs.";
 
 /// The seven numbers each catalogue entry carries, as (suffix, column heading).
-pub const CATALOGUE_COLUMNS: [(&str, &str); 7] = [
+pub const CATALOGUE_COLUMNS: [(&str, &str); 23] = [
     ("build_matter", "matter"),
     ("build_matter_per_param", "matter/size"),
     ("build_energy", "energy"),
@@ -589,6 +599,31 @@ pub const CATALOGUE_COLUMNS: [(&str, &str); 7] = [
     ("upkeep", "upkeep"),
     ("upkeep_per_param", "upkeep/size"),
     ("teardown_recovery", "recovered"),
+    // The recipe: what a type costs *beyond* structural matter, one column per chemical.
+    //
+    // Sixteen columns of which fifteen are zero on every shipped entry, which is an honest
+    // picture of a sparse table rather than a good one to look at. They are here because the
+    // test below holds the page to covering the whole catalogue — a number the engine reads and
+    // the rules page cannot show is a number that silently stops matching what is running.
+    //
+    // The labels are the default chemical table's names. A scenario that renames a chemical will
+    // disagree with the header, which is the same liberty the overlay legend takes.
+    ("build_trace.0", "signal a"),
+    ("build_trace.1", "signal b"),
+    ("build_trace.2", "signal c"),
+    ("build_trace.3", "signal d"),
+    ("build_trace.4", "carbon"),
+    ("build_trace.5", "nitrogen"),
+    ("build_trace.6", "phosphorus"),
+    ("build_trace.7", "silicon"),
+    ("build_trace.8", "sugar"),
+    ("build_trace.9", "lipid"),
+    ("build_trace.10", "sulphide"),
+    ("build_trace.11", "CO2"),
+    ("build_trace.12", "detritus"),
+    ("build_trace.13", "peroxide"),
+    ("build_trace.14", "oxygen"),
+    ("build_trace.15", "carrion"),
 ];
 
 /// The fields in one group, in table order.
@@ -664,7 +699,7 @@ mod tests {
             .collect();
         assert_eq!(
             catalogue.len(),
-            mm_core::organelle::SLOT_COUNT * CATALOGUE_COLUMNS.len(),
+            mm_core::organelle::CATALOGUE_SIZE * CATALOGUE_COLUMNS.len(),
             "the catalogue has fields no column covers"
         );
     }

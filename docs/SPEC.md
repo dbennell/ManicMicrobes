@@ -416,6 +416,21 @@ The catalogue is fixed at 16 entries; unimplemented entries are `RESERVED` and b
 no-ops. New organelle types are added by filling a `RESERVED` slot, which preserves the
 meaning of every previously defined type in archived genomes.
 
+**The catalogue is thirty-two entries as of ISA 7**, and the upper sixteen are not new organs.
+Type `n + 16` is *the same job done a different way*, so that bit 4 of a type operand means
+something: a copy error is a single bit flip, and a cilium is therefore one mutation from a
+flagellum. Laid out any other way, flipping that bit would turn a working organelle into a no-op —
+one flip in eight, on every type byte in every genome. `docs/FEEDING.md` §6 is the argument.
+
+A `RESERVED` entry in the upper half means "this organ has no variant yet", which is a meaningful
+reservation rather than filler. The pump at 5 is a different case again: it has a number, a name
+and a catalogue entry, and nothing reads it. Declared and unimplemented is not the same as
+reserved — and it stays that way until `EAT` is a passive uptake it can beat.
+
+The number of *slots a cell has* is a separate constant and remains sixteen. They were one number
+until they were split; they are independent, and measured occupancy is 25–35%, so the catalogue is
+what was exhausted and slots per cell are not.
+
 | # | Type | Control inputs (`OSET`) | Outputs (`OGET`) |
 |---|------|-------------------------|------------------|
 | 0 | `MEMBRANE` | permeability, investment | mass, energy, age, radius, internal chem[c], damage |
@@ -432,8 +447,17 @@ meaning of every previously defined type in archived genomes.
 | 11 | `LYSOSOME` | throttle | digestion rate |
 | 12 | `SPIKE` | signed extension | contact damage dealt |
 | 13 | `OSCILLATOR` | period | phase |
-| 14 | `RESERVED_A` | — | — |
-| 15 | `RESERVED_B` | — | — |
+| 14 | `HOLDFAST` | grip, and filter effort | grip exerted, flow past, wall near |
+| 15 | `SHELL` | closure | coverage, light admitted |
+| 16–17 | `RESERVED` | — | — |
+| 18 | `DIAZOSOME` | rate | — (pairs with 2: oxygen drives one, stops the other) |
+| 19 | `CHEMOSYNTH` | throttle, pathway | — (pairs with 3: a producer needing no light) |
+| 20 | `LIPID_DROPLET` | — | — (pairs with 4: the denser store) |
+| 21 | `RESERVED` | — | — |
+| 22 | `FLAGELLUM` | signed power, mount angle | (pairs with 6: propels where a cilium stirs) |
+| 23–27 | `RESERVED` | — | — |
+| 28 | `EXOENZYME` | effort | — (pairs with 12: dissolves where a spike stabs) |
+| 29–31 | `RESERVED` | — | — |
 
 Organelles have a `param` (0–255) set at `BUILD` time, scaling capability and cost. They
 take time to construct, consuming structural chemicals and energy across multiple ticks; a

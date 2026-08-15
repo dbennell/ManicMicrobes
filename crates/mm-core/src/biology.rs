@@ -251,8 +251,23 @@ pub fn radius(cells: &CellArena, i: usize) -> i32 {
 pub fn interior_capacity(cells: &CellArena, i: usize) -> i32 {
     let mut capacity = BASE_INTERIOR_CAPACITY;
     for o in cells.slots(i) {
-        if o.kind == OrganelleType::Vacuole && o.is_active() {
-            capacity = capacity.saturating_add(q10(o.param as i32));
+        if !o.is_active() {
+            continue;
+        }
+        match o.kind {
+            OrganelleType::Vacuole => capacity = capacity.saturating_add(q10(o.param as i32)),
+            // The vacuole's pair, and a denser store: half as much again per unit of `param`,
+            // for a slot that costs more to raise and next to nothing to keep.
+            //
+            // A note on what this is *not*. The list this came from asks for "energy above the
+            // normal ceiling", and there is no ceiling on energy in this engine to be above —
+            // `cells.energy` is unbounded. What is genuinely scarce is room in the cytoplasm, so
+            // that is what a store here buys. The other reading would need an energy cap first,
+            // and a cap is a much larger change than an organelle.
+            OrganelleType::LipidDroplet => {
+                capacity = capacity.saturating_add(q10(o.param as i32) * 3 / 2);
+            }
+            _ => {}
         }
     }
     capacity
@@ -335,6 +350,21 @@ pub fn sequestered(slots: &[Organelle]) -> i64 {
         .filter(|o| o.kind == OrganelleType::Vacuole && o.is_active())
         .map(|o| q10(o.param as i32) as i64)
         .sum()
+}
+
+/// How much nitrogen this cell's diazosomes can fix per tick, `Q10`.
+#[must_use]
+pub fn fixation_capacity(slots: &[Organelle]) -> i32 {
+    slots
+        .iter()
+        .filter(|o| o.kind == OrganelleType::Diazosome && o.is_active())
+        .map(|o| {
+            crate::fixed::q10_scale(
+                q10(o.param as i32) / 8,
+                (o.control[0] as i32).clamp(0, crate::Q10_ONE),
+            )
+        })
+        .fold(0i32, i32::saturating_add)
 }
 
 /// The osmotic load given a vacuole capacity already summed.
@@ -545,6 +575,13 @@ impl Host for CellHost<'_> {
                         cell_key: self.cells.id_at(self.slot).ordering_key(),
                         touch,
                         glow,
+                        // Only a shell reads it, so only a shell pays for the sum — the same
+                        // argument `touch` and `glow` are gated on just above.
+                        shell_cover: if o.kind == OrganelleType::Shell {
+                            crate::organelle::shell_cover(self.cells, self.slot)
+                        } else {
+                            0
+                        },
                     },
                 )
                 // Built, paid for, and not yet implemented. A `RESERVED` organelle reads as
@@ -821,6 +858,7 @@ impl crate::state_hash::StateHash for BiologyConfig {
         h.i32(r.reactive_fraction);
         h.i32(r.throughput_per_param);
         h.i32(r.latent_per_substrate);
+        h.i32(r.fixation_inhibition);
         h.i32(r.toxicity_threshold);
         h.i32(r.growth_rate);
         h.i32(r.growth_pressure);
@@ -863,6 +901,9 @@ impl crate::state_hash::StateHash for BiologyConfig {
             h.i32(spec.upkeep);
             h.i32(spec.upkeep_per_param);
             h.i32(spec.teardown_recovery);
+            for v in spec.build_trace {
+                h.i32(v);
+            }
         }
     }
 }
@@ -1074,6 +1115,17 @@ pub fn resolve(
                     if cells.interior(i)[sc] < matter || cells.energy[i] < spec.build_energy {
                         continue;
                     }
+                    // And whatever else the recipe asks for. Checked before anything is spent,
+                    // so a cell that is short of one ingredient does not pay for the others and
+                    // then fail — a half-charged build would be matter destroyed (I4).
+                    if spec.has_trace() {
+                        let short = (0..CHEM_COUNT).any(|c| {
+                            c != sc && cells.interior(i)[c] < spec.trace_cost(c, param)
+                        });
+                        if short {
+                            continue;
+                        }
+                    }
                     // And a ceiling on how big a body can get. Growth from the cytoplasm is
                     // already bounded — `metabolism` grows towards a target set by the membrane
                     // parameter — but building organelles adds structural mass with nothing
@@ -1096,6 +1148,52 @@ pub fn resolve(
                     // not left the world, only the pool the fluid can reach.
                     cells.interior_mut(i)[sc] = cells.interior(i)[sc].saturating_sub(matter);
                     cells.mass[i] = cells.mass[i].saturating_add(matter);
+                    // Whatever was in this slot gives its recipe back first.
+                    //
+                    // A genome that calls `BUILD` every tick — which is every genome in
+                    // `genomes/`, since `EXPRESS` runs each tick — re-charges an organelle that
+                    // is still under construction and resets its countdown. That is old
+                    // behaviour and load-bearing: it is *why* construction takes as long as it
+                    // does, because the thing only ticks down while the cell is too poor to pay
+                    // for it again. Changing it moves how fast every body in the library grows,
+                    // and the overlap detector notices.
+                    //
+                    // Harmless while a build cost only structural matter, which goes into `mass`
+                    // and stays there however many times it is charged. Not harmless with a
+                    // recipe, because the trace ingredients are held *in the slot*: paying five
+                    // times and holding one lot is four lots destroyed. Crediting the old
+                    // occupant back makes the recharge exactly neutral without touching timing.
+                    if existing.is_present() {
+                        let old_spec = *config.metabolism.catalogue.spec(existing.kind);
+                        if old_spec.has_trace() {
+                            for c in 0..CHEM_COUNT {
+                                if c == sc {
+                                    continue;
+                                }
+                                let back = old_spec.trace_cost(c, existing.param);
+                                if back > 0 {
+                                    cells.interior_mut(i)[c] =
+                                        cells.interior(i)[c].saturating_add(back);
+                                }
+                            }
+                        }
+                    }
+                    // The recipe's other ingredients leave the interior and are held *in the
+                    // organelle*. They are not added to `mass`: mass comes back out as the
+                    // structural chemical, and routing silicon through it would return carbon.
+                    // `World::total_matter` counts what the slots hold, so nothing has vanished.
+                    if spec.has_trace() {
+                        for c in 0..CHEM_COUNT {
+                            if c == sc {
+                                continue;
+                            }
+                            let take = spec.trace_cost(c, param);
+                            if take > 0 {
+                                cells.interior_mut(i)[c] =
+                                    cells.interior(i)[c].saturating_sub(take);
+                            }
+                        }
+                    }
                     cells.energy[i] = cells.energy[i].saturating_sub(spec.build_energy);
                     report.dissipate_build(ledger, spec.build_energy);
                     cells.slots_mut(i)[s] = Organelle::building(kind, param, spec.build_ticks);
@@ -1135,6 +1233,32 @@ pub fn resolve(
                         let stuck = lost.saturating_sub(placed);
                         if stuck > 0 {
                             cells.interior_mut(i)[sc] = cells.interior(i)[sc].saturating_add(stuck);
+                        }
+                    }
+                    // And the recipe's other ingredients, on the same terms: the recovered
+                    // share back into the interior, the rest to the fluid, and whatever will not
+                    // fit stays in the cell. They come back as *themselves* — the whole point of
+                    // holding them in the organelle rather than folding them into mass.
+                    if spec.has_trace() {
+                        for c in 0..CHEM_COUNT {
+                            if c == sc {
+                                continue;
+                            }
+                            let held = spec.trace_cost(c, o.param);
+                            if held <= 0 {
+                                continue;
+                            }
+                            let back = q10_scale(held, spec.teardown_recovery).min(held);
+                            cells.interior_mut(i)[c] = cells.interior(i)[c].saturating_add(back);
+                            let spilt = held.saturating_sub(back);
+                            if spilt > 0 {
+                                let placed = substrate.add_chem(c, sx, sy, spilt);
+                                let stuck = spilt.saturating_sub(placed);
+                                if stuck > 0 {
+                                    cells.interior_mut(i)[c] =
+                                        cells.interior(i)[c].saturating_add(stuck);
+                                }
+                            }
                         }
                     }
                     cells.slots_mut(i)[s] = Organelle::empty();
@@ -1649,7 +1773,7 @@ pub fn apply_births(
             .index(birth.parent)
             .map(|p| crate::names::Traits::of(cells.slots(p), genome.len()))
             .unwrap_or_else(|| crate::names::Traits {
-                counts: [0; crate::organelle::SLOT_COUNT],
+                counts: [0; crate::organelle::CATALOGUE_SIZE],
                 genome_len: genome.len().min(u16::MAX as usize) as u16,
             });
         let species = archive.on_birth(birth.species, &genome, traits, tick);
@@ -1737,6 +1861,30 @@ pub fn apply_deaths(
             died.to_carrion = died.to_carrion.saturating_add(placed as i64);
         }
         unplaced[sc] = as_chemical.saturating_sub(deposit(substrate, sc, sx, sy, as_chemical));
+
+        // What the organelles were made of, beyond structural matter. Returned as itself and in
+        // full: a corpse's minerals are not digested into anything, they are simply let go.
+        // `carrion_fraction` does not apply — that split is about *flesh*, and a shell is not
+        // flesh.
+        for s in 0..SLOT_COUNT {
+            let o = cells.slots(i)[s];
+            if !o.is_present() {
+                continue;
+            }
+            let spec = *config.metabolism.catalogue.spec(o.kind);
+            if !spec.has_trace() {
+                continue;
+            }
+            for c in 0..CHEM_COUNT {
+                if c == sc {
+                    continue;
+                }
+                let held = spec.trace_cost(c, o.param);
+                if held > 0 {
+                    cells.interior_mut(i)[c] = cells.interior(i)[c].saturating_add(held);
+                }
+            }
+        }
 
         for (c, slot) in unplaced.iter_mut().enumerate() {
             let held = cells.interior(i)[c];

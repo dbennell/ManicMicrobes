@@ -935,7 +935,7 @@ impl Snapshot {
                 .genomes()
                 .intern(genome_bytes)
                 .map_err(|e| SnapshotError::Scenario(e.to_string()))?;
-            let mut counts = [0u8; crate::organelle::SLOT_COUNT];
+            let mut counts = [0u8; crate::organelle::CATALOGUE_SIZE];
             for c in counts.iter_mut() {
                 *c = r.u8()?;
             }

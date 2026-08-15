@@ -54,6 +54,8 @@ use rayon::prelude::*;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Capacities {
     pub photosynthesis: [i32; crate::organelle::PATHWAY_COUNT],
+    /// The chloroplast's pair: fixation driven by a mineral instead of by the light field.
+    pub chemosynthesis: [i32; crate::organelle::PATHWAY_COUNT],
     pub respiration: [i32; crate::organelle::PATHWAY_COUNT],
     /// What this cell's organelles cost to maintain, before the floor and the cytoplasm terms.
     ///
@@ -131,6 +133,13 @@ use crate::substrate::Substrate;
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct MetabolicRates {
+    /// Interior oxidant at which a diazosome is completely shut down, `Q10`.
+    ///
+    /// Low enough that an ordinary respiring cell inhibits its own fixation, which is the trade:
+    /// a lineage that wants to fix nitrogen has to give up burning things, or wall itself off, or
+    /// hand the job to a neighbour and take the matter back through a junction. All three are
+    /// real answers and the engine already has the parts for each.
+    pub fixation_inhibition: i32,
     /// Fraction of absorbed light that ends up banked as substrate rather than heat.
     pub photosynthesis_efficiency: i32,
     /// Fraction of a substrate's latent energy a mitochondrion recovers.
@@ -389,6 +398,7 @@ impl Default for MetabolicRates {
             growth_rate: q10(1) / 8,
             // The same threshold division uses, because it is the same question.
             growth_pressure: q10(1),
+            fixation_inhibition: q10(4),
             toxicity_threshold: q10(8),
             // Halved with `background_damage`, so the ratio between them — which is what decides
             // whether a cell can out-mend its own poison — is exactly what it was, and only the
@@ -618,6 +628,7 @@ impl Metabolism {
                 return;
             }
             slot.photosynthesis = self.capacity_by_pathway(cells, i, OrganelleType::Chloroplast);
+            slot.chemosynthesis = self.capacity_by_pathway(cells, i, OrganelleType::Chemosynth);
             slot.respiration = self.capacity_by_pathway(cells, i, OrganelleType::Mitochondrion);
             slot.upkeep = self.catalogue.upkeep(cells.slots(i));
             slot.catalase = crate::ecology::digestive_capacity_by_pathway(cells, i);
@@ -746,7 +757,20 @@ impl Metabolism {
                             // `MetabolicRates::light_occlusion` for why this is the only form
                             // light rivalry can take on a slide lit from outside the plane, and
                             // why the measure is `pressure` rather than a count of neighbours.
-                            shaded(incident, pressure.get(i).copied().unwrap_or(0), &self.rates)
+                            let outside =
+                                shaded(incident, pressure.get(i).copied().unwrap_or(0), &self.rates);
+                            // And shaded again by the cell's own shell, which is opaque. The
+                            // fraction of the body behind mineral is the fraction of the light
+                            // that never reaches a chloroplast, so armour and photosynthesis are
+                            // rival on one control word — which is what stops a shell being an
+                            // upgrade every lineage grows and makes it a choice about what kind
+                            // of living this cell intends to make.
+                            crate::fixed::q10_scale(
+                                outside,
+                                crate::organelle::shell_admits(crate::organelle::shell_cover(
+                                    arena, i,
+                                )),
+                            )
                         };
                         let Some(caps) = capacities.get(i) else {
                             continue;
@@ -907,6 +931,113 @@ impl Metabolism {
                 fate.dissipate = fate.dissipate.saturating_add((waste_heat).max(0));
                 report.absorbed += absorbed;
                 report.fixed += pairs as i64;
+            }
+        }
+
+        // --- nitrogen fixation: nitrogen -> structural matter, unless there is oxidant about ---
+        //
+        // The mitochondrion's pair, and the pairing is the point: one engine needs oxygen and the
+        // other is stopped by it. That single antagonism is what makes an anoxic corner a place
+        // worth being, gives the shell's impermeability a second job, and puts two ways of making
+        // a body in competition for the same slot.
+        //
+        // # The liberty taken, stated plainly
+        //
+        // A heterocyst fixes *dinitrogen* — atmospheric N₂ — and there is no N₂ in this world.
+        // The table has sixteen chemicals, two of which already do nothing, and adding a
+        // seventeenth to model a gas phase is a larger change than this organelle deserves.
+        //
+        // So it fixes *dissolved* nitrogen instead: chemical 5, a monomer the table has carried
+        // since the beginning and which nothing has ever been able to build from — see
+        // `docs/CHEMISTRY.md` §2 on the three structural chemicals that are not structural. What
+        // it buys is the thing that matters ecologically: **a second way to get building
+        // material**, which is `CHEMISTRY.md` §3's own first recommendation, and one that is worth
+        // having exactly where the first is scarce.
+        //
+        // Inhibition is by the pathway's oxidant, read from the cell's own cytoplasm rather than
+        // from the water, because it is the enzyme that is poisoned and the enzyme is inside.
+        {
+            let nitrogen = 5usize % CHEM_COUNT;
+            let structural = m.structural % CHEM_COUNT;
+            let oxidant = m.primary().oxidant % CHEM_COUNT;
+            if nitrogen != structural {
+                let capacity = crate::biology::fixation_capacity(slots);
+                if capacity > 0 {
+                    // Full rate in clean water, nothing at all once the oxidant is thick. A
+                    // fraction rather than a threshold, so there is a gradient to climb.
+                    let poison = (&*cyto)[oxidant].max(0);
+                    let clear = Q10_ONE
+                        .saturating_sub(
+                            ((poison as i64 * Q10_ONE as i64)
+                                / self.rates.fixation_inhibition.max(1) as i64)
+                                .min(Q10_ONE as i64) as i32,
+                        )
+                        .max(0);
+                    let want = q10_scale(capacity, clear);
+                    let moved = want.min((&*cyto)[nitrogen]).max(0);
+                    if moved > 0 {
+                        let interior = &mut *cyto;
+                        interior[nitrogen] = interior[nitrogen].saturating_sub(moved);
+                        interior[structural] = interior[structural].saturating_add(moved);
+                        ledger.convert(nitrogen, structural, moved as i64);
+                        report.fixed += moved as i64;
+                    }
+                }
+            }
+        }
+
+        // --- chemosynthesis: 2 waste + reducer -> substrate + oxidant + waste ---
+        //
+        // The chloroplast's reaction with a mineral where the light was. It is the one way of
+        // making a living in this engine that does not need the light field at all, which is what
+        // `the_vent` and `the_black_smoker` were written for and had nothing to express.
+        //
+        // The reducer is *pathway 2's substrate* — sulphide in the default table — and it is
+        // consumed rather than merely enabling: light is free and a mineral is not, so where a
+        // chloroplast is bounded by how bright it is here, a granule is bounded by how much
+        // reduced chemistry is welling up. The reducer becomes waste, so the books balance
+        // exactly and the ledger is told; the *net* reaction is one waste and one reducer for one
+        // substrate and one oxidant.
+        //
+        // Which makes the pair a genuine choice rather than a ranking: a chloroplast is free to
+        // run and useless in the dark, a granule costs matter every tick and does not care.
+        {
+            let reducer = m.pathway(2).substrate % CHEM_COUNT;
+            let by_pathway = (*caps).chemosynthesis;
+            for (n, &capacity) in by_pathway.iter().enumerate() {
+                if capacity <= 0 {
+                    continue;
+                }
+                let Some(p) = m.pathways.get(n) else {
+                    continue;
+                };
+                if p.waste == reducer || p.substrate == reducer {
+                    // A granule cannot be its own supply.
+                    continue;
+                }
+                let latent_per_unit = self.latent_of(chem, p.substrate);
+                let waste_available = (&*cyto)[p.waste];
+                let reducer_available = (&*cyto)[reducer];
+                let pairs = capacity
+                    .min(waste_available / 2)
+                    .min(reducer_available)
+                    .max(0);
+                if pairs <= 0 {
+                    continue;
+                }
+                let gained_latent = (pairs as i64 * latent_per_unit as i64) / Q10_ONE as i64;
+                let interior = &mut *cyto;
+                interior[p.waste] = interior[p.waste].saturating_sub(pairs * 2);
+                interior[p.substrate] = interior[p.substrate].saturating_add(pairs);
+                interior[p.oxidant] = interior[p.oxidant].saturating_add(pairs);
+                // The reducer oxidises to waste, one for one. Both halves through the ledger:
+                // an unaccounted transmutation is indistinguishable from a conservation bug (I4).
+                interior[reducer] = interior[reducer].saturating_sub(pairs);
+                interior[p.waste] = interior[p.waste].saturating_add(pairs);
+                ledger.convert(p.waste, p.substrate, pairs as i64);
+                ledger.convert(p.waste, p.oxidant, pairs as i64);
+                ledger.convert(reducer, p.waste, pairs as i64);
+                report.fixed += gained_latent;
             }
         }
 

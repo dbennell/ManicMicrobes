@@ -22,7 +22,7 @@
 //! cilia. A name that described nothing would be worse than a number, because it would look
 //! like it described something.
 
-use crate::organelle::{OrganelleType, SLOT_COUNT};
+use crate::organelle::{OrganelleType, CATALOGUE_SIZE};
 
 /// Genus stems. Latin-ish, chosen to be pronounceable and distinguishable at a glance — a
 /// list where half the entries look like each other makes the tree unreadable.
@@ -77,7 +77,7 @@ impl std::fmt::Display for Binomial {
 /// and anything richer belongs in the wiki page's prose rather than in two words.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Traits {
-    pub counts: [u8; SLOT_COUNT],
+    pub counts: [u8; CATALOGUE_SIZE],
     /// Genome length, for the epithets about size.
     pub genome_len: u16,
 }
@@ -86,10 +86,10 @@ impl Traits {
     /// Read a loadout off a cell's organelle slots.
     #[must_use]
     pub fn of(slots: &[crate::organelle::Organelle], genome_len: usize) -> Traits {
-        let mut counts = [0u8; SLOT_COUNT];
+        let mut counts = [0u8; CATALOGUE_SIZE];
         for o in slots {
             if o.is_present() {
-                let k = o.kind as usize % SLOT_COUNT;
+                let k = o.kind as usize % CATALOGUE_SIZE;
                 counts[k] = counts[k].saturating_add(1);
             }
         }

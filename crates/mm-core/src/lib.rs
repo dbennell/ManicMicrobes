@@ -88,6 +88,7 @@ pub use metabolism::{MetabolicRates, Metabolism};
 pub use mutation::{MutationRates, Operator};
 pub use neighbours::NeighbourIndex;
 pub use organelle::{
+    CATALOGUE_SIZE,
     MembraneReading, Organelle, OrganelleCatalogue, OrganelleType, MEMBRANE_SLOT, SLOT_COUNT,
 };
 pub use rng::{mix64, Purpose, RandCtx};

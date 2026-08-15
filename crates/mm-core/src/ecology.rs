@@ -416,6 +416,16 @@ pub fn step(
                 / own.max(1) as i64)
                 .clamp(0, (Q10_ONE * 8) as i64) as i32;
             let hurt = q10_scale(q10_scale(config.crowding_damage, depth as i32), frail);
+            // What the shell lets through. A wall is a wall whatever is pressing on it, so this
+            // is the same reduction a spike meets — being crushed by neighbours and being stabbed
+            // by one are the same insult arriving from different directions.
+            let hurt = q10_scale(
+                hurt,
+                crate::organelle::shell_admits(crate::organelle::shell_cover(cells, i)),
+            );
+            if hurt <= 0 {
+                continue;
+            }
             cells.damage[i] = cells.damage[i].saturating_add(hurt);
             report.crushed = report.crushed.saturating_add(hurt as i64);
         }
@@ -447,6 +457,13 @@ pub fn step(
                     .collect();
                 for j in victims {
                     let damage = q10_scale(config.spike_damage, extension);
+                    // Charged against the *victim's* shell, which is the whole of what the slot
+                    // is for: until it existed a spike met bare membrane or nothing, and an arms
+                    // race needs both ends to have somewhere to go.
+                    let damage = q10_scale(
+                        damage,
+                        crate::organelle::shell_admits(crate::organelle::shell_cover(cells, j)),
+                    );
                     if damage <= 0 {
                         continue;
                     }

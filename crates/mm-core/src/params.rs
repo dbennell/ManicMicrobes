@@ -296,7 +296,7 @@ mod tests {
             .filter(|(p, _)| p.starts_with("metabolism.catalogue.specs."))
             .collect();
         assert!(
-            entries.len() >= crate::organelle::SLOT_COUNT,
+            entries.len() >= crate::organelle::CATALOGUE_SIZE,
             "only {} catalogue fields found",
             entries.len()
         );

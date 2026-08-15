@@ -31,8 +31,33 @@ use crate::chem::CHEM_COUNT;
 use crate::fixed::{q10, sat_i16, Q10_ONE};
 use crate::state_hash::{StateHash, StateHasher};
 
-/// Organelle slots per cell. Addressed `slot % 16` (SPEC §6.2).
+/// Organelle slots per cell. Addressed `slot % SLOT_COUNT` (SPEC §6.2).
+///
+/// How many organelles one cell may hold. Nothing to do with how many *kinds* there are — see
+/// [`CATALOGUE_SIZE`], which this was doing double duty for until they were separated.
+///
+/// Measured across every route in `benches/routes.rs`, cells run **25–35% occupied**: 128 bytes
+/// of slot per cell of which some ninety-six are empty. So this is the number that is
+/// over-provisioned, and it is the one that should not grow.
 pub const SLOT_COUNT: usize = 16;
+
+/// How many organelle *types* the catalogue defines. Type operands wrap `ty % CATALOGUE_SIZE`.
+///
+/// Separate from [`SLOT_COUNT`], which it was folded into until now — they are independent
+/// quantities that happened to be equal, and `docs/FEEDING.md` §8 asks for exactly this split
+/// whether or not the catalogue is ever widened, because it "makes §6's decision a one-constant
+/// edit rather than a refactor".
+///
+/// The two want to move in opposite directions. Slots per cell are a quarter full; the catalogue
+/// is *exhausted* — the holdfast took 14 at ISA 3 and the shell took 15 at ISA 6, and there is no
+/// reserved entry left. Widening this alone costs one array per world of about half a kilobyte
+/// and nothing per cell.
+///
+/// **A change here is an ISA bump** (hard rule 8). It renumbers nothing, but it changes what an
+/// out-of-range operand means: `BUILD 19` reduces to the chloroplast at sixteen types and would
+/// name type 19 at thirty-two. Mutation produces such operands constantly, so archived genomes
+/// have to be replayed under their stamped version — which `genome_file.rs` already enforces.
+pub const CATALOGUE_SIZE: usize = 32;
 
 /// Slot 0 is always the membrane.
 pub const MEMBRANE_SLOT: usize = 0;
@@ -91,11 +116,72 @@ pub enum OrganelleType {
     /// drifted as one, and staying put was not a strategy that went unrewarded so much as a
     /// strategy that was unavailable.
     Holdfast = 14,
-    /// Unimplemented; a no-op until a later milestone fills it.
-    ReservedB = 15,
+    /// A mineral test: armour, paid for in matter and in shade.
+    ///
+    /// The catalogue's first *defence*. Until it existed a spike met either bare membrane or
+    /// nothing, so predation was free or worthless with nothing between the two and no arms race
+    /// was possible from either end — `docs/FEEDING.md` §4 measures the predator's side of that
+    /// and this is the prey's.
+    ///
+    /// It costs twice over, which is what keeps it a strategy rather than an upgrade every
+    /// lineage grows. Matter to build, as everything does — and **shade**: a shell is opaque, so
+    /// the light reaching the chloroplasts under it is reduced by exactly the fraction of the
+    /// body it covers. Armour and photosynthesis are therefore rival, and a cell that wants both
+    /// has to choose how much of each, on one control word, with no threshold anywhere in it.
+    Shell = 15,
+    // ---- the upper half: `n + 16` is the same job done a different way ----
+    //
+    // Laid out so that bit 4 of a type operand *means* something. A copy error is a single bit
+    // flip, so `cilium` and `flagellum` are one mutation apart and evolution can hill-climb
+    // between stirring and swimming rather than having to find it. Without the pairing, flipping
+    // bit 4 would simply turn a working organelle into a no-op — one flip in eight on every type
+    // byte in every genome — which is the cost `docs/FEEDING.md` §6 identifies and this layout is
+    // the answer to.
+    //
+    // A `Reserved` entry up here therefore means "this organ has no variant yet", which is a
+    // meaningful reservation rather than filler.
+    Reserved16 = 16,
+    Reserved17 = 17,
+    /// Pairs with [`OrganelleType::Mitochondrion`]: the engine oxygen drives, and the engine
+    /// oxygen stops.
+    ///
+    /// Turns dissolved nitrogen into body. Inhibited by local oxidant, which is what makes an
+    /// anoxic corner worth living in and gives the shell's impermeability a second job.
+    Diazosome = 18,
+    /// Pairs with [`OrganelleType::Chloroplast`]: a producer that needs no light.
+    ///
+    /// The same reaction a chloroplast runs, driven by a reduced mineral instead of the light
+    /// field. The only entry in the catalogue that can make a living in the dark, and the reason
+    /// `the_vent` and `the_black_smoker` exist.
+    Chemosynth = 19,
+    /// Pairs with [`OrganelleType::Vacuole`]: a store, and a denser store.
+    ///
+    /// Holds energy above the ceiling a cell's membrane otherwise sets, so a lineage can carry a
+    /// surplus through a night or a famine instead of spending it or losing it.
+    LipidDroplet = 20,
+    Reserved21 = 21,
+    /// Pairs with [`OrganelleType::Cilium`]: a cilium stirs, a flagellum propels.
+    ///
+    /// The honest difference is where the thrust goes — more into the body and less into the
+    /// water. A ciliate anchored on a holdfast pumps its own square and filter-feeds on it
+    /// (`tests/ciliary_probe.rs`); a flagellate goes somewhere.
+    Flagellum = 22,
+    Reserved23 = 23,
+    Reserved24 = 24,
+    Reserved25 = 25,
+    Reserved26 = 26,
+    Reserved27 = 27,
+    /// Pairs with [`OrganelleType::Spike`]: stab it, or dissolve it.
+    ///
+    /// Digests a neighbour from the outside, into the square rather than into the digester — a
+    /// leaky public good, and the answer to prey too large to swallow.
+    Exoenzyme = 28,
+    Reserved29 = 29,
+    Reserved30 = 30,
+    Reserved31 = 31,
 }
 
-const CATALOGUE: [OrganelleType; SLOT_COUNT] = [
+const CATALOGUE: [OrganelleType; CATALOGUE_SIZE] = [
     OrganelleType::Membrane,
     OrganelleType::Nucleus,
     OrganelleType::Mitochondrion,
@@ -111,7 +197,23 @@ const CATALOGUE: [OrganelleType; SLOT_COUNT] = [
     OrganelleType::Spike,
     OrganelleType::Oscillator,
     OrganelleType::Holdfast,
-    OrganelleType::ReservedB,
+    OrganelleType::Shell,
+    OrganelleType::Reserved16,
+    OrganelleType::Reserved17,
+    OrganelleType::Diazosome,
+    OrganelleType::Chemosynth,
+    OrganelleType::LipidDroplet,
+    OrganelleType::Reserved21,
+    OrganelleType::Flagellum,
+    OrganelleType::Reserved23,
+    OrganelleType::Reserved24,
+    OrganelleType::Reserved25,
+    OrganelleType::Reserved26,
+    OrganelleType::Reserved27,
+    OrganelleType::Exoenzyme,
+    OrganelleType::Reserved29,
+    OrganelleType::Reserved30,
+    OrganelleType::Reserved31,
 ];
 
 impl OrganelleType {
@@ -119,7 +221,7 @@ impl OrganelleType {
     #[inline(always)]
     #[must_use]
     pub const fn from_operand(ty: i16) -> OrganelleType {
-        CATALOGUE[(ty as u16 as usize) % SLOT_COUNT]
+        CATALOGUE[(ty as u16 as usize) % CATALOGUE_SIZE]
     }
 
     /// The catalogue number, or 255 for an empty slot — what `OTYPE` reports.
@@ -132,13 +234,35 @@ impl OrganelleType {
     /// Whether this milestone implements the type. Unimplemented types can still be built and
     /// paid for; they simply do nothing, which is what `RESERVED` means.
     ///
-    /// That is now one reserved slot and nothing else: M2 brought the metabolic types, M3 the
-    /// sensors and the cilium, M7 the junction port, M8 the lysosome and the spike, and §17.1
-    /// the holdfast. `Empty` is not a type a cell can hold.
+    /// The lower sixteen are all implemented: M2 brought the metabolic types, M3 the sensors and
+    /// the cilium, M7 the junction port, M8 the lysosome and the spike, §17.1 the holdfast, and
+    /// the shell took the last one at ISA 6.
+    ///
+    /// The upper sixteen are the variants — see the enum's own note on the `n + 16` pairing — and
+    /// most of them are still `Reserved`, which up here means "this organ has no variant yet"
+    /// rather than "this number is spare".
+    ///
+    /// The pump is the exception in the other direction: a type with a number, a name and a
+    /// catalogue entry that nothing reads. Declared by SPEC §6.2 and unimplemented, which is not
+    /// the same as reserved.
     #[inline]
     #[must_use]
     pub const fn is_implemented(self) -> bool {
-        !matches!(self, OrganelleType::Empty | OrganelleType::ReservedB)
+        !matches!(
+            self,
+            OrganelleType::Empty
+                | OrganelleType::Reserved16
+                | OrganelleType::Reserved17
+                | OrganelleType::Reserved21
+                | OrganelleType::Reserved23
+                | OrganelleType::Reserved24
+                | OrganelleType::Reserved25
+                | OrganelleType::Reserved26
+                | OrganelleType::Reserved27
+                | OrganelleType::Reserved29
+                | OrganelleType::Reserved30
+                | OrganelleType::Reserved31
+        )
     }
 
     #[must_use]
@@ -160,12 +284,29 @@ impl OrganelleType {
             OrganelleType::Spike => "spike",
             OrganelleType::Oscillator => "oscillator",
             OrganelleType::Holdfast => "holdfast",
-            OrganelleType::ReservedB => "reserved_b",
+            OrganelleType::Shell => "shell",
+            OrganelleType::Diazosome => "diazosome",
+            OrganelleType::Chemosynth => "chemosynthetic granule",
+            OrganelleType::LipidDroplet => "lipid droplet",
+            OrganelleType::Flagellum => "flagellum",
+            OrganelleType::Exoenzyme => "exoenzyme vesicle",
+            OrganelleType::Reserved16 => "reserved_16",
+            OrganelleType::Reserved17 => "reserved_17",
+            OrganelleType::Reserved21 => "reserved_21",
+            OrganelleType::Reserved23 => "reserved_23",
+            OrganelleType::Reserved24 => "reserved_24",
+            OrganelleType::Reserved25 => "reserved_25",
+            OrganelleType::Reserved26 => "reserved_26",
+            OrganelleType::Reserved27 => "reserved_27",
+            OrganelleType::Reserved29 => "reserved_29",
+            OrganelleType::Reserved30 => "reserved_30",
+            OrganelleType::Reserved31 => "reserved_31",
         }
     }
 
     /// How many bands the emission spectrum is divided into.
     pub const EM_BANDS: usize = 2;
+
 
     /// Work done against the world: pushing, gripping, stabbing.
     ///
@@ -186,7 +327,7 @@ impl OrganelleType {
 
     /// All catalogue entries in order.
     #[must_use]
-    pub const fn all() -> &'static [OrganelleType; SLOT_COUNT] {
+    pub const fn all() -> &'static [OrganelleType; CATALOGUE_SIZE] {
         &CATALOGUE
     }
 }
@@ -232,7 +373,7 @@ impl Organelle {
             kind,
             param,
             remaining_build: 0,
-            control: [Q10_ONE as i16, 0],
+            control: default_control(kind),
         }
     }
 
@@ -243,7 +384,7 @@ impl Organelle {
             kind,
             param,
             remaining_build: ticks,
-            control: [Q10_ONE as i16, 0],
+            control: default_control(kind),
         }
     }
 
@@ -292,7 +433,65 @@ pub struct OrganelleSpec {
     /// Fraction of its structural matter recovered by `TEAR`, `Q10`. The rest is lost to the
     /// fluid as waste — dismantling is not free, or a cell would rebuild itself every tick.
     pub teardown_recovery: i32,
+    /// What else it takes to build one, per chemical, `Q10` at `param == 0`.
+    ///
+    /// The recipe. Until this existed an organelle cost one number of one chemical — whatever
+    /// `MetabolicChemistry::structural` names — so the table's other three monomers were flagged
+    /// `structural: true` and could not be built from, and there was no way for a type to need
+    /// something the rest of the catalogue did not.
+    ///
+    /// **This matter is not turned into mass.** Structural matter becomes `cells.mass` and comes
+    /// back out as the structural chemical when the cell dies; a trace cost stays what it is, is
+    /// held *in the organelle*, and is returned as itself. That distinction is the whole reason
+    /// the field exists rather than being folded into `build_matter`: routing silicon through
+    /// mass would hand it back as carbon, which is the one-way conversion `carrion`'s decay used
+    /// to be and which took a population of twelve thousand down to a hundred and ninety.
+    ///
+    /// It scales with `param` the way everything else does — see [`OrganelleSpec::trace_cost`] —
+    /// and `total_matter` counts it, so a body under construction has not made anything vanish.
+    ///
+    /// All zeroes by default, so a catalogue that says nothing behaves exactly as it did.
+    pub build_trace: [i32; crate::chem::CHEM_COUNT],
 }
+
+/// What an organelle's control words start at, by type.
+///
+/// **One constant used to serve every type**, and it was `[Q10_ONE, 0]` — the first word wide
+/// open. That is right for a throttle and wrong for anything that acts on the world, and the
+/// difference was not academic: putting engulfment's appetite on the vacuole's first word turned
+/// every vacuole in `genomes/` into a mouth, and `m2_life::selection_guard` caught it by watching
+/// the tidy strain's advantage collapse. The membrane's own note has been warning about the same
+/// trap for milestones — it is why `permeability` was left unimplemented rather than done
+/// quickly, because a permeability control at full throttle means *wide open*.
+///
+/// The rule, and it is the whole of the design here:
+///
+/// * a control that **acts on the world or spends energy doing so** starts at zero. An organelle
+///   a genome has not wired up is a cost it is carrying, not a free action it is taking — which
+///   is also exactly the premise of M3's chemotaxis experiment, where `drifter.mm` carries every
+///   part it needs and the only thing missing is four instructions connecting them.
+/// * everything else keeps the throttle open. A mitochondrion that has to be switched on before
+///   it burns anything is a mitochondrion nobody builds, and a cell that has to discover its own
+///   metabolism before it can respire does not get a second tick.
+///
+/// Every shipped genome sets the controls it cares about explicitly — checked, not assumed — so
+/// this changes nothing any archetype does. What it changes is what a *mutation* gets for free.
+#[must_use]
+pub const fn default_control(kind: OrganelleType) -> [i16; 2] {
+    match kind {
+        OrganelleType::Cilium
+        | OrganelleType::Flagellum
+        | OrganelleType::Spike
+        | OrganelleType::Holdfast
+        | OrganelleType::Shell
+        | OrganelleType::Exoenzyme => [0, 0],
+        _ => [Q10_ONE as i16, 0],
+    }
+}
+
+/// A recipe that asks for nothing but structural matter — what every entry had before recipes
+/// existed, and what all but the shell still say.
+pub const NO_TRACE: [i32; crate::chem::CHEM_COUNT] = [0; crate::chem::CHEM_COUNT];
 
 impl OrganelleSpec {
     /// Structural matter to build one at a given size.
@@ -301,6 +500,27 @@ impl OrganelleSpec {
     pub fn matter_cost(&self, param: u8) -> i32 {
         self.build_matter
             .saturating_add(self.build_matter_per_param.saturating_mul(param as i32))
+    }
+
+    /// How much of one trace chemical it takes to build one at a given size, `Q10`.
+    ///
+    /// Doubles across the `param` range, which is the same shape `matter_cost` has: a bigger
+    /// organelle needs proportionally more of everything it is made of.
+    #[inline]
+    #[must_use]
+    pub fn trace_cost(&self, c: usize, param: u8) -> i32 {
+        let base = self.build_trace[c % crate::chem::CHEM_COUNT];
+        if base == 0 {
+            return 0;
+        }
+        base.saturating_add(base.saturating_mul(param as i32) / 255)
+    }
+
+    /// Whether this type costs anything beyond structural matter.
+    #[inline]
+    #[must_use]
+    pub fn has_trace(&self) -> bool {
+        self.build_trace.iter().any(|v| *v != 0)
     }
 
     /// Energy per tick to keep one at a given size, `Q10`.
@@ -334,7 +554,7 @@ const UPKEEP_SCALE: i32 = 16;
 #[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct OrganelleCatalogue {
-    specs: [OrganelleSpec; SLOT_COUNT],
+    specs: [OrganelleSpec; CATALOGUE_SIZE],
     /// Which chemical a mitochondrion oxidises, which a chloroplast produces, and so on.
     pub metabolism: MetabolicChemistry,
 }
@@ -556,8 +776,9 @@ impl OrganelleCatalogue {
             upkeep: q10(8) / 64,
             upkeep_per_param: q10(8) / 1024,
             teardown_recovery: Q10_ONE / 2,
+            build_trace: NO_TRACE,
         };
-        let mut specs = [cheap; SLOT_COUNT];
+        let mut specs = [cheap; CATALOGUE_SIZE];
 
         // The membrane is the one thing every cell has, so its upkeep is the floor on the
         // cost of being alive.
@@ -584,6 +805,7 @@ impl OrganelleCatalogue {
             upkeep: q10(8) / 32,
             upkeep_per_param: q10(8) / 512,
             teardown_recovery: 0,
+            build_trace: NO_TRACE,
         };
         // A nucleus is expensive to carry, which is what makes genome bloat cost something
         // (SPEC §4.1) without any rule saying so.
@@ -595,6 +817,7 @@ impl OrganelleCatalogue {
             upkeep: q10(8) / 32,
             upkeep_per_param: q10(8) / 256,
             teardown_recovery: Q10_ONE / 2,
+            build_trace: NO_TRACE,
         };
         specs[OrganelleType::Mitochondrion as usize] = OrganelleSpec {
             build_matter: q10(5),
@@ -604,6 +827,7 @@ impl OrganelleCatalogue {
             upkeep: q10(8) / 48,
             upkeep_per_param: q10(8) / 768,
             teardown_recovery: Q10_ONE / 2,
+            build_trace: NO_TRACE,
         };
         specs[OrganelleType::Chloroplast as usize] = OrganelleSpec {
             build_matter: q10(7),
@@ -613,6 +837,7 @@ impl OrganelleCatalogue {
             upkeep: q10(8) / 40,
             upkeep_per_param: q10(8) / 640,
             teardown_recovery: Q10_ONE / 2,
+            build_trace: NO_TRACE,
         };
 
         // A spike is the dearest thing in the catalogue to build and the dearest to carry —
@@ -629,6 +854,7 @@ impl OrganelleCatalogue {
             upkeep: q10(8) / 24,
             upkeep_per_param: q10(8) / 384,
             teardown_recovery: Q10_ONE / 2,
+            build_trace: NO_TRACE,
         };
 
         // A holdfast is a commitment to a place. Dear to build and slow, because deciding to
@@ -649,6 +875,108 @@ impl OrganelleCatalogue {
             upkeep: q10(8) / 48,
             upkeep_per_param: q10(8) / 768,
             teardown_recovery: Q10_ONE / 4,
+            build_trace: NO_TRACE,
+        };
+
+        // A wall is expensive to raise and cheap to keep: nearly twice a holdfast's matter and
+        // the slowest thing in the catalogue to finish, against an upkeep below a cilium's. That
+        // shape is the point — armour is a commitment made in advance, not a running cost that
+        // can be dropped the moment something bites. `teardown_recovery` is the lowest here for
+        // the same reason: mineral put down does not come back up.
+        specs[OrganelleType::Shell as usize] = OrganelleSpec {
+            build_matter: q10(13),
+            build_matter_per_param: q10(1) / 4,
+            build_energy: q10(20),
+            build_ticks: 28,
+            upkeep: q10(8) / 96,
+            upkeep_per_param: q10(8) / 1024,
+            teardown_recovery: Q10_ONE / 8,
+            // Silicon, and it is the only entry in the catalogue that asks for anything but
+            // carbon. A test is mineral, and the table has carried silicon since the beginning
+            // with nothing able to build from it — `docs/CHEMISTRY.md` §2 lists it among the
+            // three monomers "flagged `structural: true`... nothing can be built out of them".
+            //
+            // What it buys is a second axis of competition. Carbon is contested by everything
+            // alive; silicon is contested only by whatever is armoured, so a shelled lineage is
+            // limited by something its prey is not spending, and depleting it locally is a
+            // pressure that falls on one strategy rather than on the whole slide. That is the
+            // argument `CHEMISTRY.md` §3 makes for a second structural chemical, and this is the
+            // first thing to take it up.
+            build_trace: {
+                let mut r = NO_TRACE;
+                r[7] = q10(6);
+                r
+            },
+        };
+
+        // --- the upper half ---
+        //
+        // Each priced against the entry it pairs with, because that is the comparison a genome is
+        // actually making: bit 4 of the type operand is one mutation away, so these are not new
+        // organs competing with the whole catalogue but variants competing with one sibling.
+
+        // Dearer than a mitochondrion and slower to raise: fixing is expensive machinery, and
+        // the whole point of it is that it is worth carrying only where the alternative is worse.
+        specs[OrganelleType::Diazosome as usize] = OrganelleSpec {
+            build_matter: q10(9),
+            build_matter_per_param: q10(1) / 5,
+            build_energy: q10(16),
+            build_ticks: 22,
+            upkeep: q10(8) / 40,
+            upkeep_per_param: q10(8) / 640,
+            teardown_recovery: Q10_ONE / 3,
+            build_trace: NO_TRACE,
+        };
+
+        // A chloroplast's price, near enough. The two are alternatives and neither should win on
+        // cost — which one pays is a question about the world, not about the catalogue.
+        specs[OrganelleType::Chemosynth as usize] = OrganelleSpec {
+            build_matter: q10(7),
+            build_matter_per_param: q10(1) / 6,
+            build_energy: q10(12),
+            build_ticks: 18,
+            upkeep: q10(8) / 44,
+            upkeep_per_param: q10(8) / 700,
+            teardown_recovery: Q10_ONE / 3,
+            build_trace: NO_TRACE,
+        };
+
+        // Cheap to keep, which is the whole of what a store is for.
+        specs[OrganelleType::LipidDroplet as usize] = OrganelleSpec {
+            build_matter: q10(5),
+            build_matter_per_param: q10(1) / 6,
+            build_energy: q10(8),
+            build_ticks: 12,
+            upkeep: q10(8) / 128,
+            upkeep_per_param: q10(8) / 2048,
+            teardown_recovery: Q10_ONE / 2,
+            build_trace: NO_TRACE,
+        };
+
+        // Dearer than a cilium and slower to build. A flagellum is one large organ where cilia
+        // are many small ones, and the catalogue should say so before the physics does.
+        specs[OrganelleType::Flagellum as usize] = OrganelleSpec {
+            build_matter: q10(8),
+            build_matter_per_param: q10(1) / 5,
+            build_energy: q10(14),
+            build_ticks: 18,
+            upkeep: q10(8) / 40,
+            upkeep_per_param: q10(8) / 512,
+            teardown_recovery: Q10_ONE / 3,
+            build_trace: NO_TRACE,
+        };
+
+        // About a spike, and it should be: they are the two ways of attacking a neighbour and the
+        // choice between them is meant to be about the neighbour, not about the bill.
+        specs[OrganelleType::Exoenzyme as usize] = OrganelleSpec {
+            build_matter: q10(6),
+            build_matter_per_param: q10(1) / 6,
+            build_energy: q10(11),
+            build_ticks: 14,
+            upkeep: q10(8) / 48,
+            upkeep_per_param: q10(8) / 768,
+            teardown_recovery: Q10_ONE / 3,
+            build_trace: NO_TRACE,
         };
 
         // Scavenging is the cheaper trade and the lower-yield one: a lysosome costs about what
@@ -661,6 +989,7 @@ impl OrganelleCatalogue {
             upkeep: q10(8) / 56,
             upkeep_per_param: q10(8) / 896,
             teardown_recovery: Q10_ONE / 2,
+            build_trace: NO_TRACE,
         };
 
         OrganelleCatalogue {
@@ -671,12 +1000,12 @@ impl OrganelleCatalogue {
 
     /// Every spec, in catalogue order. For serialisation (hard rule 7).
     #[must_use]
-    pub fn specs(&self) -> &[OrganelleSpec; SLOT_COUNT] {
+    pub fn specs(&self) -> &[OrganelleSpec; CATALOGUE_SIZE] {
         &self.specs
     }
 
     /// Replace every spec, in catalogue order. For restoring a snapshot.
-    pub fn set_specs(&mut self, specs: [OrganelleSpec; SLOT_COUNT]) {
+    pub fn set_specs(&mut self, specs: [OrganelleSpec; CATALOGUE_SIZE]) {
         self.specs = specs;
     }
 
@@ -685,7 +1014,7 @@ impl OrganelleCatalogue {
     pub fn spec(&self, kind: OrganelleType) -> &OrganelleSpec {
         match kind {
             OrganelleType::Empty => &self.specs[0],
-            other => &self.specs[(other as u8 as usize) % SLOT_COUNT],
+            other => &self.specs[(other as u8 as usize) % CATALOGUE_SIZE],
         }
     }
 
@@ -694,7 +1023,7 @@ impl OrganelleCatalogue {
     /// Charged whether or not an organelle is finished: a half-built mitochondrion is still
     /// matter the cell is carrying around.
     #[must_use]
-    /// A slice rather than `&[Organelle; SLOT_COUNT]`, so that the caller can pass
+    /// A slice rather than `&[Organelle; CATALOGUE_SIZE]`, so that the caller can pass
     /// [`crate::cell::CellArena::slots`] straight in.
     ///
     /// The array form obliged the one hot caller — `metabolism::step`, once per cell per tick —
@@ -783,6 +1112,50 @@ pub fn to_cell_visible(q: i32) -> i16 {
     sat_i16(q / Q10_ONE)
 }
 
+/// Shell per unit of `param`, `Q10` of the body covered.
+///
+/// Sized so that a single full-size shell at full closure covers rather less than half a body: a
+/// cell that wants to be sealed has to spend several slots on it, which is the trade the slot
+/// exists to pose. Coverage is capped below one in [`shell_cover`] whatever is built.
+pub const SHELL_PER_PARAM: i32 = Q10_ONE / 640;
+
+/// The most of a body any amount of shell can cover, `Q10`.
+///
+/// Seven eighths, and the missing eighth is not a rounding allowance. Total immunity is a cliff
+/// of exactly the kind SPEC §3 keeps out of the landscape — above it nothing a predator evolves
+/// matters at all, so the arms race stops having a gradient to climb from either end. It also
+/// keeps a shelled cell answerable to crowding, which is what stops a sealed lineage simply
+/// tiling the slide.
+pub const SHELL_MAX_COVER: i32 = Q10_ONE * 7 / 8;
+
+/// How much of a cell is behind a shell, `Q10`.
+///
+/// The same `control[0]` closes the shell and shades the cell beneath it, deliberately, and for
+/// the same reason the holdfast's one word both grips and strains: it is one surface doing one
+/// thing. A genome that wants the light back opens up, and opening up is what a spike is for.
+#[must_use]
+pub fn shell_cover(cells: &crate::cell::CellArena, i: usize) -> i32 {
+    let mut cover = 0i32;
+    for o in cells.slots(i) {
+        if o.kind != OrganelleType::Shell || !o.is_active() {
+            continue;
+        }
+        let closed = (o.control[0] as i32).clamp(0, Q10_ONE);
+        cover = cover.saturating_add(crate::fixed::q10_scale(
+            SHELL_PER_PARAM.saturating_mul(o.param as i32),
+            closed,
+        ));
+    }
+    cover.clamp(0, SHELL_MAX_COVER)
+}
+
+/// What survives a shell, `Q10` of the damage offered to it.
+#[inline]
+#[must_use]
+pub fn shell_admits(cover: i32) -> i32 {
+    Q10_ONE.saturating_sub(cover.clamp(0, SHELL_MAX_COVER))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -807,8 +1180,13 @@ mod tests {
             );
         }
         assert_eq!(OrganelleType::from_operand(3), OrganelleType::Chloroplast);
-        assert_eq!(OrganelleType::from_operand(19), OrganelleType::Chloroplast);
-        assert_eq!(OrganelleType::from_operand(-13), OrganelleType::Chloroplast);
+        // 19 reduced to the chloroplast until ISA 7 and now names its pair. That change of
+        // meaning is what the version stamp on an archived genome is for — mutation produces
+        // out-of-range type operands constantly, so this is the widest-reaching consequence of
+        // the widening even though it takes nothing away.
+        assert_eq!(OrganelleType::from_operand(19), OrganelleType::Chemosynth);
+        assert_eq!(OrganelleType::from_operand(35), OrganelleType::Chloroplast);
+        assert_eq!(OrganelleType::from_operand(-29), OrganelleType::Chloroplast);
     }
 
     #[test]
@@ -822,7 +1200,7 @@ mod tests {
         assert_eq!(OrganelleType::Pump.number(), 5);
         assert_eq!(OrganelleType::Cilium.number(), 6);
         assert_eq!(OrganelleType::Oscillator.number(), 13);
-        assert_eq!(OrganelleType::ReservedB.number(), 15);
+        assert_eq!(OrganelleType::Shell.number(), 15);
         assert_eq!(OrganelleType::Empty.number(), 255);
         for (i, kind) in OrganelleType::all().iter().enumerate() {
             assert_eq!(kind.number() as usize, i);
@@ -830,15 +1208,37 @@ mod tests {
     }
 
     #[test]
-    fn only_the_reserved_slots_are_unimplemented() {
-        // The list is written out rather than derived, so that filling a `RESERVED` slot has to
-        // be a deliberate edit here as well as in the mechanism.
-        let unimplemented: Vec<&str> = OrganelleType::all()
+    fn every_reservation_is_in_the_upper_half_and_means_something() {
+        // The lower sixteen are the organs and every one of them does something. The upper
+        // sixteen are *variants* — see the enum's note on the `n + 16` pairing — and a `Reserved`
+        // entry up there means "this organ has no variant yet", which is a real statement rather
+        // than filler.
+        //
+        // So the invariant is not "nothing is reserved". It is that nothing in the lower half
+        // ever becomes reserved again: a future change that quietly re-reserved an organ to make
+        // room for itself would break every archived genome that built one, which is what
+        // `drifter_blind.mm` was bitten by twice.
+        let lower_unimplemented: Vec<&str> = OrganelleType::all()
             .iter()
+            .take(16)
             .filter(|k| !k.is_implemented())
             .map(|k| k.name())
             .collect();
-        assert_eq!(unimplemented, vec!["reserved_b"]);
+        assert!(
+            lower_unimplemented.is_empty(),
+            "the lower half has {lower_unimplemented:?} unimplemented; those numbers are spoken \
+             for by archived genomes and cannot be handed back"
+        );
+        // And every reservation that does exist is a variant slot, named so it cannot be mistaken
+        // for an organ somebody forgot to write.
+        for kind in OrganelleType::all().iter().skip(16) {
+            if !kind.is_implemented() {
+                assert!(
+                    kind.name().starts_with("reserved_"),
+                    "{kind:?} is unimplemented but not named as a reservation"
+                );
+            }
+        }
         let implemented: Vec<&str> = OrganelleType::all()
             .iter()
             .filter(|k| k.is_implemented())
@@ -862,6 +1262,12 @@ mod tests {
                 "spike",
                 "oscillator",
                 "holdfast",
+                "shell",
+                "diazosome",
+                "chemosynthetic granule",
+                "lipid droplet",
+                "flagellum",
+                "exoenzyme vesicle",
             ]
         );
     }

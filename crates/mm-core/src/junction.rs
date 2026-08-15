@@ -552,16 +552,16 @@ pub fn cluster_centre(cells: &CellArena, components: &mut Components, root: usiz
 /// be mid-build.
 #[must_use]
 pub fn distinct_loadouts(cells: &CellArena, components: &mut Components, root: usize) -> usize {
-    let mut seen: std::collections::BTreeSet<[u8; crate::organelle::SLOT_COUNT]> =
+    let mut seen: std::collections::BTreeSet<[u8; crate::organelle::CATALOGUE_SIZE]> =
         Default::default();
     for i in cells.iter() {
         if components.component_of(i) != root {
             continue;
         }
-        let mut counts = [0u8; crate::organelle::SLOT_COUNT];
+        let mut counts = [0u8; crate::organelle::CATALOGUE_SIZE];
         for o in cells.slots(i) {
             if o.is_active() {
-                let k = o.kind as usize % crate::organelle::SLOT_COUNT;
+                let k = o.kind as usize % crate::organelle::CATALOGUE_SIZE;
                 counts[k] = counts[k].saturating_add(1);
             }
         }

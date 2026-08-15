@@ -938,8 +938,31 @@ impl World {
         let interiors = self.cells.total_interior();
         let sc = self.biology.structural_chemical % CHEM_COUNT;
         let mut out: [i64; CHEM_COUNT] = std::array::from_fn(|c| fluid[c] + interiors[c]);
+        let catalogue = &self.biology.metabolism.catalogue;
         for i in self.cells.iter() {
             out[sc] = out[sc].saturating_add(self.cells.mass[i] as i64);
+            // And what the organelles are made of beyond structural matter. A recipe's other
+            // ingredients leave the interior at `BUILD` and are held in the slot until the thing
+            // is torn down or the cell dies, so this is the fourth compartment matter can be in
+            // and I4 does not balance without it.
+            for o in self.cells.slots(i) {
+                if !o.is_present() {
+                    continue;
+                }
+                let spec = catalogue.spec(o.kind);
+                if !spec.has_trace() {
+                    continue;
+                }
+                for (c, slot) in out.iter_mut().enumerate() {
+                    if c == sc {
+                        continue;
+                    }
+                    let held = spec.trace_cost(c, o.param);
+                    if held > 0 {
+                        *slot = slot.saturating_add(held as i64);
+                    }
+                }
+            }
         }
         out
     }

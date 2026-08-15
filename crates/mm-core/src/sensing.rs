@@ -239,6 +239,13 @@ pub struct SensorContext<'a> {
     /// the scan is a square of side `2 * range + 1`, and a chemosensor has no business paying
     /// for one.
     pub glow: [ChemReading; crate::organelle::OrganelleType::EM_BANDS],
+    /// How much of the cell is behind a shell, `Q10`.
+    ///
+    /// A whole-cell sum, so it cannot be worked out from the one organelle being read — several
+    /// shells add up and `organelle::shell_cover` caps the total. Supplied the way `touch` and
+    /// `glow` are, and for the same reason: the reading needs the cell and `read_sensor` is only
+    /// given an organelle.
+    pub shell_cover: i32,
 }
 
 /// Read an organelle's output, for the sensor types (M3).
@@ -255,6 +262,7 @@ pub fn read_sensor(organelle: &Organelle, index: i16, ctx: SensorContext<'_>) ->
         cell_key,
         touch,
         glow,
+        shell_cover,
     } = ctx;
     if !organelle.is_active() {
         return None;
@@ -295,6 +303,37 @@ pub fn read_sensor(organelle: &Organelle, index: i16, ctx: SensorContext<'_>) ->
                 6 => sat_i16(glow[1].concentration),
                 7 => sat_i16(glow[1].gradient_x),
                 _ => sat_i16(glow[1].gradient_y),
+            })
+        }
+        OrganelleType::Shell => {
+            // A shell reports the trade it is making, from both ends of it.
+            //
+            // The coverage is a readback: a genome that closed its shell can find out how much
+            // of itself is actually behind mineral, which is not the same as what it asked for
+            // once several shells are summed and the cap in `shell_cover` has bitten.
+            //
+            // The light is the other half, and it is the reading that cannot be computed from
+            // anything else the cell can see: the incident light *after* its own shade. A
+            // photosensor reports what is falling on the square; this reports what is getting
+            // through to the chloroplasts. The difference between the two is what the armour
+            // costs, in the only currency that matters to an autotroph.
+            let cover = shell_cover;
+            // Reported as raw `Q10`, not through `visible`.
+            //
+            // `visible` divides by `Q10_ONE` because it is for *amounts* — a concentration in
+            // `Q10` becoming whole units. Both readings here are *fractions* of one, and coverage
+            // is capped at seven eighths, so every value this organelle can ever report would
+            // divide to zero. A sensor whose whole range rounds to nothing is not a sensor, and
+            // it is the same integer truncation that made `detritus` never decay.
+            Some(match (index as u16) % 2 {
+                0 => sat_i16(cover),
+                _ => {
+                    let incident = sense_light(substrate, x, y).concentration;
+                    sat_i16(q10_scale(
+                        incident,
+                        crate::organelle::shell_admits(cover),
+                    ))
+                }
             })
         }
         OrganelleType::TouchSensor => Some(match (index as u16) % 4 {
@@ -404,15 +443,39 @@ fn visible_gradient(q: i32) -> i16 {
 /// (SPEC §3).
 #[must_use]
 pub fn cilium_thrust(o: &Organelle) -> i32 {
-    if !o.is_active() || o.kind != OrganelleType::Cilium {
+    if !o.is_active() || !matches!(o.kind, OrganelleType::Cilium | OrganelleType::Flagellum) {
         return 0;
     }
     let power = (o.control[0] as i32).clamp(-Q10_ONE, Q10_ONE);
+    if o.kind == OrganelleType::Flagellum {
+        let capacity = FLAGELLUM_THRUST_PER_PARAM.saturating_mul(o.param as i32) / THRUST_SCALE;
+        return q10_scale(capacity, power);
+    }
     // Multiply before dividing, so the sixteenths are spent on resolution rather than lost to
     // truncation: `param 3` at the old unit was 12 and is 3 here, not 0.
     let capacity = THRUST_PER_PARAM.saturating_mul(o.param as i32) / THRUST_SCALE;
     q10_scale(capacity, power)
 }
+
+/// Thrust one unit of flagellum `param` produces, in [`THRUST_SCALE`]ths of `Q10`.
+///
+/// Half again a cilium's. A flagellum is one large organ where cilia are many small ones, and it
+/// costs more to build and more to carry — see the catalogue.
+pub const FLAGELLUM_THRUST_PER_PARAM: i32 = THRUST_PER_PARAM * 3 / 2;
+
+/// How much of a flagellum's thrust the water feels, `Q10`.
+///
+/// **This is the whole difference between the two, and it is a number rather than a mechanism.**
+/// `docs/FEEDING.md` §7: "a cilium stirs and a flagellum propels" — a rotifer beats cilia to make
+/// a vortex that brings food to a body going nowhere; a flagellate swims. In engine terms that is
+/// the split between how much of a thrust goes into the fluid as impulse and how much goes into
+/// the body as motion, and a cilium puts all of it into the water.
+///
+/// A quarter, so a flagellum is a poor pump and a good engine. The consequence that matters is
+/// that an anchored flagellate cannot filter-feed on its own current the way an anchored ciliate
+/// can — `tests/ciliary_probe.rs` measures the ciliate at 1.03× a real current — so the choice
+/// between the pair is a choice between two livings and not an upgrade.
+pub const FLAGELLUM_WAKE: i32 = Q10_ONE / 4;
 
 /// Total holding force this cell's holdfasts are exerting, `Q10`.
 ///
@@ -448,6 +511,10 @@ pub struct BodyScan {
     /// Summed cilium thrust, `Q10` of a square per tick, before any energy shortfall is applied.
     pub thrust_x: i32,
     pub thrust_y: i32,
+    /// The share of that thrust the water feels. Equal to `thrust_*` for a cell whose propulsors
+    /// are all cilia, and a quarter of it for one driven by flagella — see [`FLAGELLUM_WAKE`].
+    pub wake_x: i32,
+    pub wake_y: i32,
     /// What beating that hard costs, whether or not the cell can afford it.
     pub spent: i32,
     /// Summed holdfast grip.
@@ -465,18 +532,31 @@ pub fn scan_bodies_into(cells: &CellArena, into: &mut Vec<BodyScan>) {
         // Slots in order, and accumulated with the same saturating adds the loop used, because
         // both are order-sensitive in general and the point of this is that nothing changes.
         let (mut fx, mut fy, mut spent) = (0i32, 0i32, 0i32);
+        // What the *water* feels, which is not the same sum: a cilium gives the water all of its
+        // thrust and a flagellum a quarter of it. See `FLAGELLUM_WAKE`.
+        let (mut wx, mut wy) = (0i32, 0i32);
         for o in cells.slots(i) {
             let thrust = cilium_thrust(o);
             if thrust == 0 {
                 continue;
             }
             let (dx, dy) = cilium_direction(o);
-            fx = fx.saturating_add(q10_scale(thrust, dx));
-            fy = fy.saturating_add(q10_scale(thrust, dy));
+            let (tx, ty) = (q10_scale(thrust, dx), q10_scale(thrust, dy));
+            fx = fx.saturating_add(tx);
+            fy = fy.saturating_add(ty);
+            let share = if o.kind == OrganelleType::Flagellum {
+                FLAGELLUM_WAKE
+            } else {
+                Q10_ONE
+            };
+            wx = wx.saturating_add(q10_scale(tx, share));
+            wy = wy.saturating_add(q10_scale(ty, share));
             spent = spent.saturating_add(q10_scale(thrust.abs(), THRUST_ENERGY));
         }
         scan.thrust_x = fx;
         scan.thrust_y = fy;
+        scan.wake_x = wx;
+        scan.wake_y = wy;
         scan.spent = spent;
         scan.grip = holdfast_grip(cells, i);
     });
@@ -581,6 +661,7 @@ pub fn step_physics(
         // Summed in `scan_bodies_into`, which is a parallel pass. See `BodyScan`.
         let body = scan.get(i).copied().unwrap_or_default();
         let (mut fx, mut fy) = (body.thrust_x, body.thrust_y);
+        let (mut wake_x, mut wake_y) = (body.wake_x, body.wake_y);
         let spent = body.spent;
         if spent > 0 {
             // Beating costs energy whether or not it achieves anything, which is what makes
@@ -591,13 +672,17 @@ pub fn step_physics(
                 // Could not afford full power; scale the thrust back to what was paid for.
                 fx = ((fx as i64 * paid as i64) / spent as i64) as i32;
                 fy = ((fy as i64 * paid as i64) / spent as i64) as i32;
+                wake_x = ((wake_x as i64 * paid as i64) / spent as i64) as i32;
+                wake_y = ((wake_y as i64 * paid as i64) / spent as i64) as i32;
             }
             report.energy_spent += paid as i64;
         }
 
-        // Cilium thrust alone, kept before anything else is added to `fx`, because it is the
-        // only part of a cell's motion the water is entitled to feel. See the reaction below.
-        let (thrust_x, thrust_y) = (fx, fy);
+        // What the water is entitled to feel, kept before anything else is added to `fx`. Not
+        // the body's whole motion and, since the flagellum arrived, not the whole of its thrust
+        // either — a flagellum puts most of its push into going somewhere. See the reaction
+        // below and `FLAGELLUM_WAKE`.
+        let (thrust_x, thrust_y) = (wake_x, wake_y);
 
         // --- gravity, towards the middle of the slide ---
         //

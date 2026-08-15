@@ -428,6 +428,8 @@ fn a_chemosensor_can_actually_read_the_gradient_it_is_standing_in() {
         cell_key: 0,
         touch: mm_core::sensing::TouchReading::default(),
         glow: Default::default(),
+        // No shell on this cell; the chemotaxis experiment is about a chemosensor.
+        shell_cover: 0,
     };
     let gx = mm_core::sensing::read_sensor(&sensor, 1, ctx).expect("a chemosensor reads");
     let gy = mm_core::sensing::read_sensor(&sensor, 2, ctx).expect("a chemosensor reads");
@@ -737,7 +739,12 @@ fn cilia_push_on_the_water_rather_than_on_nothing() {
     // So the test is given the thing it is about. That is the claim in its name, and waiting on
     // a genome to produce a cilium tested construction and mutation rates instead, slowly and
     // at whatever tick they happened to deliver one.
-    world.cells_mut().slots_mut(i)[2] = Organelle::finished(OrganelleType::Cilium, 50);
+    // Beating, asked for. A cilium's power now starts at zero like every control that acts on
+    // the world, which is also the premise this milestone rests on: `drifter.mm` carries every
+    // part it needs and the only thing missing is the instructions connecting them.
+    let mut cil = Organelle::finished(OrganelleType::Cilium, 50);
+    cil.control[0] = mm_core::Q10_ONE as i16;
+    world.cells_mut().slots_mut(i)[2] = cil;
     world.adopt_current_contents_as_baseline();
 
     // A still slide with one cell on it: any momentum in the water came from that cell.

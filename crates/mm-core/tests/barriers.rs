@@ -208,7 +208,12 @@ fn anchor(world: &mut World, id: CellId, param: u8) {
     let Some(i) = world.cells_mut().index(id) else {
         return;
     };
-    world.cells_mut().slots_mut(i)[4] = Organelle::finished(OrganelleType::Holdfast, param);
+    // Gripping, asked for. A holdfast's control word now starts at zero like every other
+    // control that acts on the world — an organelle nobody wired up is a cost, not a free
+    // action — so a test about *holding on* has to say so.
+    let mut hold = Organelle::finished(OrganelleType::Holdfast, param);
+    hold.control[0] = mm_core::Q10_ONE as i16;
+    world.cells_mut().slots_mut(i)[4] = hold;
 }
 
 /// How far a cell has travelled from where it was put, along each axis.
