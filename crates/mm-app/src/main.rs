@@ -119,9 +119,8 @@ use mm_app::wiki;
 use mm_core::biology::BiologyConfig;
 use mm_core::cell::CellSeed;
 use mm_core::fixed::{pos, q10};
-use mm_core::light::CurrentField;
 use mm_core::metrics::Sample;
-use mm_core::{CellId, LightRegime, MutationRates, Organelle, OrganelleType, Scenario, Seeding};
+use mm_core::{CellId, LightRegime, MutationRates, Organelle, OrganelleType, Scenario};
 
 /// Render one frame to a PNG and carry on, when asked by the environment.
 ///
@@ -1410,51 +1409,27 @@ fn slide_size() -> u32 {
 ///
 /// Sized by the caller, because the slide is a thing the user can change now — see the Slide
 /// menu. `petri()` is this at whatever [`slide_size`] says.
+///
+/// **Written in terms of [`library::NewWorld`] rather than as its own set of literals**, and that
+/// is the point of it. There were two definitions of "the world a fresh slide is", this one and
+/// the New scenario sheet's, and keeping two in step by hand is how ISA 7 came to ship a shell
+/// that no cell could build: the catalogue gained a recipe and neither list of seeded chemicals
+/// heard about it. `NewWorld` lives in a module that can be tested, and
+/// `the_default_world_seeds_every_ingredient_the_catalogue_needs` now holds it to supplying
+/// whatever the catalogue asks for. A copy here would not be covered by that test, so there is
+/// no copy here.
+///
+/// What stays local is the name. A slide built from the sheet is `untitled` because you are
+/// about to save it as something; this one is `petri`, because it is what the microscope opens
+/// on and nobody chose it.
 fn petri_of(size: u32) -> Scenario {
     Scenario {
         name: "petri".to_string(),
-        seed: 1,
-        width: size,
-        height: size,
-        light: LightRegime::Uniform {
-            intensity: mm_core::Q10_ONE,
-        },
-        current: CurrentField::Still,
-        // Forty a square, not the four hundred this opened on for its first three releases.
-        //
-        // The number was never measured, it was picked. Measuring where a slide actually sits
-        // once it has settled puts the working level near forty, so four hundred was not a
-        // well-fed world so much as a world with most of its matter parked in the water where
-        // nothing was competing for it — and `docs/CHEMISTRY.md`'s carbon sweep says the same
-        // thing from the other end, putting the knee at roughly four to ten a square and the
-        // shipped figure two orders of magnitude above it.
-        //
-        // **Every level above this one rings**, and that is what picked it rather than any
-        // argument about headroom. Measured to 120,000 ticks on 256 squares: 400, 100, 60 and 50
-        // all overshoot and starve back, differing only in period — 100's is long enough that at
-        // 60,000 ticks it reads as perfectly flat and is not. Forty holds at about 23,900 with a
-        // drift of 0.17% across the last twenty thousand ticks, and carries two and a half times
-        // the distinct genomes of the 100 world, because a slide that troughs loses lineages in
-        // every trough. `docs/CHEMISTRY.md` §7 has the table and the caveat, which is that forty
-        // is one seed and the claim is only that its period is longer than anything yet measured.
-        //
-        // `scenarios/soup.ron` stays at four hundred — it is the recorded control that every
-        // other world in the library is a variation on, and moving it would move them all.
-        seeding: vec![
-            Seeding::Uniform {
-                chemical: 11,
-                per_square: q10(40),
-            },
-            Seeding::Uniform {
-                chemical: 14,
-                per_square: q10(40),
-            },
-            Seeding::Uniform {
-                chemical: 4,
-                per_square: q10(40),
-            },
-        ],
-        ..Scenario::default()
+        ..library::NewWorld {
+            size,
+            ..Default::default()
+        }
+        .scenario()
     }
 }
 

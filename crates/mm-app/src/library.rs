@@ -32,8 +32,8 @@ use mm_core::{Inhabitant, Scenario, ScenarioError, Seeding};
 /// description honest.
 ///
 /// It is the decision now, and deliberately not all of it. Light is one uniform intensity here
-/// where the build window's `world` view has all six regimes, and the chemistry is the three a
-/// cell cannot do without where that view reaches all sixteen. A starting point that can be got
+/// where the build window's `world` view has all six regimes, and the chemistry is the four a
+/// slide cannot do without where that view reaches all sixteen. A starting point that can be got
 /// wrong and corrected is worth having; a second full editor for the same fields would be a
 /// second thing to keep in step with the first.
 ///
@@ -46,9 +46,13 @@ pub struct NewWorld {
     pub size: u32,
     /// Uniform daylight, `Q10`. 1024 is full.
     pub light: i32,
-    /// `(chemical, per square)` for carbon, carbon dioxide and the oxidant — what a body is
-    /// built out of, and what a chloroplast runs on.
-    pub chemistry: [(usize, i32); 3],
+    /// `(chemical, per square)` for carbon, carbon dioxide, the oxidant and silicon — what a
+    /// body is built out of, what a chloroplast runs on, and what a shell is made of.
+    ///
+    /// Silicon is here for a different reason from the other three, and the reason is a bug it
+    /// is fixing: it is not something every cell needs, it is something *no* cell could obtain.
+    /// See [`NewWorld::default`].
+    pub chemistry: [(usize, i32); 4],
     /// Who lives here, as a name the scenario can write down and [`mm_asm::locate`] can find.
     pub genome: String,
     /// Zero is a legal answer, and is the one you want when the point is to draw the world
@@ -62,6 +66,8 @@ pub const CARBON: usize = 4;
 pub const CARBON_DIOXIDE: usize = 11;
 /// The oxidant.
 pub const OXIDANT: usize = 14;
+/// Silicon: what a shell is made of, and the only recipe ingredient in the catalogue.
+pub const SILICON: usize = 7;
 
 impl Default for NewWorld {
     fn default() -> Self {
@@ -72,10 +78,27 @@ impl Default for NewWorld {
             // same world and the number being changed has something to be a change *from*. See
             // `petri_of` in `main.rs` for why it is forty and not the four hundred
             // `scenarios/soup.ron` still records.
+            //
+            // **Silicon is here because without it a shell cannot be built at all.** ISA 7 gave
+            // the shell a recipe — `build_trace[7]`, the only non-zero entry in the catalogue —
+            // and `biology::resolve` refuses a build whose ingredients are absent. Nothing
+            // produces silicon, so a slide that does not seed it is a slide where armour is
+            // unreachable however a lineage evolves. `scenarios/the_scattering.ron` was the only
+            // world in the repo that seeded any.
+            //
+            // Twenty, on two arguments that happen to agree. It is what `the_scattering` seeds,
+            // which is the only figure in the repo; and the shell's own recipe asks for `q10(6)`
+            // silicon against `q10(13)` carbon, so twenty against carbon's forty is roughly the
+            // proportion the organelle consumes them in. That makes silicon comfortably
+            // available rather than contested, which is the right way round for now: the point
+            // of this number is to make armour *possible*, and how scarce it should be is a
+            // question for the sweep `docs/CHEMISTRY.md` §8 asks for. §6's lesson is that
+            // guessing a level is how the soup ended up at four hundred.
             chemistry: [
                 (CARBON, mm_core::fixed::q10(40)),
                 (CARBON_DIOXIDE, mm_core::fixed::q10(40)),
                 (OXIDANT, mm_core::fixed::q10(40)),
+                (SILICON, mm_core::fixed::q10(20)),
             ],
             genome: "ancestor.mm".to_string(),
             founders: 0,
@@ -636,6 +659,9 @@ mod tests {
                 (CARBON, mm_core::fixed::q10(40)),
                 (CARBON_DIOXIDE, mm_core::fixed::q10(400)),
                 (OXIDANT, mm_core::fixed::q10(400)),
+                // Zero, so this test also covers a chemical being dropped from the recipe while
+                // the others are kept — the case the test below checks in isolation.
+                (SILICON, 0),
             ],
             genome: "predator.mm".to_string(),
             founders: 6,
@@ -672,12 +698,74 @@ mod tests {
         assert!(s.barriers.is_empty(), "nothing is drawn on it yet");
     }
 
+    /// **The default world must seed every ingredient the catalogue can ask for.**
+    ///
+    /// Written after ISA 7 shipped an organelle nobody could build. The shell's recipe is
+    /// `build_trace[7] = q10(6)` silicon, `biology::resolve` refuses a build whose ingredients
+    /// are absent, and nothing in the engine produces silicon — so on every slide that did not
+    /// seed it, a lineage that evolved armour paid for a `BUILD` that could never complete. One
+    /// scenario in the whole repo seeded any.
+    ///
+    /// A test about *silicon* would have been the wrong test. The fault is not that this
+    /// ingredient was missed, it is that adding a recipe and seeding the world it needs are two
+    /// edits in two crates with nothing tying them together — so this is quantified over the
+    /// catalogue rather than written against a list. Fill another `build_trace` entry and this
+    /// fails until the fresh slide can supply it.
+    ///
+    /// It cannot see `petri_of`, which lives in `main.rs` and so is untestable; that is why
+    /// `petri_of` is written in terms of this type rather than repeating its own literals.
+    #[test]
+    fn the_default_world_seeds_every_ingredient_the_catalogue_needs() {
+        let catalogue = mm_core::OrganelleCatalogue::default();
+        let recipe = NewWorld::default().scenario().seeding;
+        // Every entry has to be one this test understands, or it could pass by ignoring the one
+        // that mattered. A non-uniform seeding is a legal thing for the sheet to grow, and if it
+        // does, the per-square reasoning below needs rethinking rather than extending.
+        assert!(
+            recipe
+                .iter()
+                .all(|s| matches!(s, Seeding::Uniform { .. })),
+            "the default world seeds something other than a uniform level; this test reads \
+             per-square availability and cannot speak for a gradient or a patch"
+        );
+        let seeded: std::collections::BTreeMap<usize, i32> = recipe
+            .iter()
+            .filter_map(|s| match s {
+                Seeding::Uniform {
+                    chemical,
+                    per_square,
+                } => Some((*chemical, *per_square)),
+                _ => None,
+            })
+            .collect();
+
+        for kind in mm_core::OrganelleType::all() {
+            let spec = catalogue.spec(*kind);
+            for c in 0..mm_core::chem::CHEM_COUNT {
+                // At `param` 0, which is the cheapest any of them gets. An ingredient needed at
+                // all is an ingredient that has to be there.
+                let needed = spec.trace_cost(c, 0);
+                if needed <= 0 {
+                    continue;
+                }
+                let held = seeded.get(&c).copied().unwrap_or(0);
+                assert!(
+                    held >= needed,
+                    "a {} needs {needed} of chemical {c} to build and the fresh slide seeds \
+                     {held}: nothing in the engine produces it, so that organelle can never be \
+                     built on the world the microscope opens on",
+                    kind.name()
+                );
+            }
+        }
+    }
+
     /// A slide with nothing in the water is a legal and useful thing to ask for, and it has to
     /// come out as a recipe that *says nothing* rather than one listing three zeroes.
     #[test]
     fn a_chemical_set_to_nothing_is_left_out_of_the_recipe() {
         let s = NewWorld {
-            chemistry: [(CARBON, 0), (CARBON_DIOXIDE, 0), (OXIDANT, 0)],
+            chemistry: [(CARBON, 0), (CARBON_DIOXIDE, 0), (OXIDANT, 0), (SILICON, 0)],
             ..NewWorld::default()
         }
         .scenario();
