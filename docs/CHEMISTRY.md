@@ -417,3 +417,77 @@ the mobilities, and an oxidant-gated reversion as the slow leak back — is unim
 correction to note before it is: an oxidant-gated reversion is **not** expressible as `decay_to`
 plus `decay_rate`. `World::decay_fluid` applies one unconditional rate per chemical and cannot see
 the oxidant field, so gating it is a mechanism rather than a table edit.
+
+## 9. Mineral-bearing walls: where phosphorus and silicon come from
+
+§8 settles that a reservoir which is not on the slide cannot exist, because only energy crosses
+the wall of the fishbowl. For nitrogen that costs a seventeenth chemical. For phosphorus and
+silicon it costs no chemical at all, because their reservoir is not a fluid — **it is rock**, and
+the slide already has rock in it.
+
+### Why this is not the same mechanism as the nitrogen pool
+
+It is the actual difference between the two cycles rather than a convenience. **Phosphorus has no
+gas phase.** Its cycle is purely sedimentary: the only primary source is the weathering of rock,
+which is why it is so often the ultimate limiting nutrient on long timescales — nothing can fix
+it out of the air, and a world can only wait for a mineral to dissolve. Nitrogen's reservoir is
+atmospheric and therefore *everywhere*; phosphorus's is lithic and therefore *somewhere*. Silicon
+is the same story as phosphorus.
+
+So the three want three reservoirs with three geometries, and that is what makes them three
+niches instead of three copies of one scarcity:
+
+| | reservoir | geometry | mobility |
+| --- | --- | --- | --- |
+| nitrogen | inert dissolved pool, the seventeenth chemical | uniform, everywhere | diffuses, does not advect (§8) |
+| phosphorus | **rock** | *places* | barely moves — carried by cells |
+| silicon | **rock** | places | low advection; settles where shelled cells die |
+
+Set beside phosphorus barely moving, a phosphate outcrop stops being a level and becomes a
+**location**. Life clusters on rock, and colonising away from it means carrying phosphorus with
+you — in vacuoles, at the cost of slots, which is what finally gives `interior_capacity` a job
+beyond osmosis. "Keeps life local" becomes literal geography rather than a diffusion constant.
+
+### The mechanism
+
+A barrier square may hold a stock of one or more chemicals and release it into the water it
+touches, at a rate set by how far the local water is from saturation.
+
+**Concentration-dependent, which does three things at once.** It is a solubility product, so it
+is the physically right law; it is self-limiting, so a wall in saturated water does nothing and
+the system has an equilibrium rather than a ratchet; and it gives **biological weathering** for
+free — a mat stripping phosphate out of the water next to an outcrop lowers the local
+concentration and so makes the rock dissolve faster. A population accelerates its own supply,
+which is true of the real thing, and the feedback runs until the stock is spent.
+
+**Per exposed edge, not per square.** Dissolution is a surface process, and the substrate already
+keeps `open_x`/`open_y` edge masks, so the exposed surface of a barrier is already computed. The
+consequence is that **barrier shape becomes supply rate**: a thin reef leaches far faster per unit
+of stock than a solid massif, and a massif's interior is locked until its outside has eroded. The
+scenario editor's rectangle tool quietly becomes a decision about fertility, which is a great deal
+of emergent geography for very little mechanism.
+
+**A world ages.** The stock is finite, so a spent outcrop becomes ordinary rock and the slide's
+fertility has a history. That is the same property §8 wants from the nitrogen split — scarcity as
+something a world arrives at rather than something a number declares.
+
+### What it costs, and why it is better than the tool that exists
+
+No chemical slot: barriers are already `Vec<bool>`, and this is stock attached to the small
+fraction of squares that are barriers, so it wants a sparse map keyed by square index — a
+`BTreeMap`, since hard rule 6 forbids outcomes depending on `HashMap` order. It must serialise
+(hard rule 7) and it becomes a fifth compartment for `World::total_matter`, alongside fluid,
+interiors, `mass` and the trace held in organelle slots. There is precedent for exactly that: the
+organelle-trace compartment was added at ISA 7 for the same reason.
+
+`Flux::Source` is the only thing today that puts matter into a world over time, and it is an
+**unbounded tap** — `per_tick`, forever, recorded as injected. That is defensible for a scenario
+declaring an inlet, but it means `the_tide` and `the_drift` are open systems. A leaching wall is
+finite, and so is closed by construction: nothing is created, a reservoir is drawn down. For a
+mineral that is not merely the safer option, it is the more accurate one.
+
+### Not built
+
+Design only, as §8 is. The immediate consequence of §8's bug — that a shell could not be built on
+any slide but one — was fixed by seeding silicon uniformly on the fresh slide, which is a
+stopgap standing in for this.
