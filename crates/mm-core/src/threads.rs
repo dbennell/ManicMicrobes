@@ -29,6 +29,38 @@
 //! it needs `sched_setaffinity`, `mm-core` is `#![forbid(unsafe_code)]`, and that rule is worth
 //! more than four percent. [`performance_cores`] is public so that a front end, which is under no
 //! such rule, can build its own pool and pin to the same set — `mm_app::threads` does.
+//!
+//! # How the two kinds are told apart
+//!
+//! By asking the kernel, and only falling back to inferring it from the clock. A hybrid part
+//! publishes one PMU device per core type, and their `cpus` files are the answer outright:
+//!
+//! ```text
+//! /sys/devices/cpu_core/cpus   0-15     the performance cores, hyperthreads included
+//! /sys/devices/cpu_atom/cpus   16-19    the efficiency cores
+//! ```
+//!
+//! That is what [`performance_cores`] reads first. The frequency comparison it used to lead with
+//! is still there behind it, because it is the only thing that works on a machine that does not
+//! publish the PMU split — but it is a proxy, and it fails in both directions: it gives up
+//! entirely where `cpufreq` is absent, and on a part that bins two favoured cores well above
+//! their siblings it can decide the machine has two performance cores. Neither can happen to a
+//! question about which cores are `cpu_core`.
+//!
+//! # Is there anything worth giving the efficiency cores?
+//!
+//! Not in here. A tick is a chain of parallel phases and every one of them ends at a barrier, so
+//! a phase costs what its *slowest* worker costs, and a worker on a core a fifth slower holds the
+//! whole phase there. That is why the table above goes the way it does, and it applies to every
+//! phase in `World::step` without exception.
+//!
+//! Leaving them out is not leaving them idle. The four cores this pool declines are the ones the
+//! render thread, egui and Bevy's own task pools then have to themselves, and that is where the
+//! work with no barrier on it actually lives. The candidates worth moving there deliberately are
+//! all in the front end and none is in the tick: the food web, which is presentation-only and
+//! rebuilt for every published frame; the metrics and archive writing in `mm-cli`; and Bevy's IO
+//! pool. Being one frame stale costs nothing for any of them, which is exactly what makes them
+//! suitable and the tick unsuitable.
 
 /// The CPUs running at or near the highest clock this machine offers.
 ///
@@ -43,6 +75,10 @@
 /// already the right answer and the caller should leave it alone.
 #[must_use]
 pub fn performance_cores() -> Option<Vec<usize>> {
+    // What the kernel says, before what the clock implies.
+    if let Some(cpus) = hybrid_performance_cpus() {
+        return Some(cpus);
+    }
     let speeds = max_frequencies()?;
     let top = speeds.iter().map(|(_, k)| *k).max()?;
     let cut = top - top / 10;
@@ -56,6 +92,68 @@ pub fn performance_cores() -> Option<Vec<usize>> {
         return None;
     }
     Some(fast)
+}
+
+/// The performance CPUs as the kernel itself reports them, rather than as a clock implies.
+///
+/// On a hybrid processor the perf subsystem publishes one PMU device per kind of core, and the
+/// `cpus` file under each is the authoritative list — on a 12700K, `/sys/devices/cpu_core/cpus`
+/// reads `0-15` and `/sys/devices/cpu_atom/cpus` reads `16-19`. That is a statement about the
+/// silicon. [`max_frequencies`] is an inference from a number that may not be published at all
+/// (no `cpufreq` driver, a virtual machine, a locked-down kernel), and it is the reason
+/// `performance_cores` used to give up and hand back the whole machine on those.
+///
+/// It also removes a way the heuristic can be wrong in the *other* direction. Several Intel parts
+/// bin two favoured cores a few hundred megahertz above their siblings — Turbo Boost Max 3.0 —
+/// and on a part where that gap exceeded a tenth, the frequency rule would conclude the machine
+/// had two performance cores and build a pool of two. Asking which cores are `cpu_core` cannot
+/// make that mistake, because it never looks at speed.
+///
+/// `None` on every non-hybrid machine and every non-Linux one, where there is nothing to choose
+/// between and rayon's default is already right.
+#[cfg(target_os = "linux")]
+fn hybrid_performance_cpus() -> Option<Vec<usize>> {
+    // Both files, deliberately. `cpu_core` is present on some non-hybrid parts as well, where it
+    // is simply "the CPU PMU" and lists every processor there is; it is only evidence of a split
+    // when there is something on the other side of it.
+    let fast = parse_cpu_list(&std::fs::read_to_string("/sys/devices/cpu_core/cpus").ok()?)?;
+    let slow = parse_cpu_list(&std::fs::read_to_string("/sys/devices/cpu_atom/cpus").ok()?)?;
+    if fast.len() < 2 || slow.is_empty() {
+        return None;
+    }
+    Some(fast)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn hybrid_performance_cpus() -> Option<Vec<usize>> {
+    None
+}
+
+/// Parse a kernel cpulist — comma-separated indices and inclusive ranges, as `0-7,16,18-19`.
+///
+/// `None` rather than a partial answer on anything unexpected, because the caller's fallback is
+/// a working heuristic and half a CPU list is worse than none.
+fn parse_cpu_list(text: &str) -> Option<Vec<usize>> {
+    let mut out: Vec<usize> = Vec::new();
+    for part in text.trim().split(',').filter(|p| !p.trim().is_empty()) {
+        match part.split_once('-') {
+            Some((lo, hi)) => {
+                let lo: usize = lo.trim().parse().ok()?;
+                let hi: usize = hi.trim().parse().ok()?;
+                // A reversed or absurd range is a file this code does not understand.
+                if hi < lo || hi.checked_sub(lo)? > 4096 {
+                    return None;
+                }
+                out.extend(lo..=hi);
+            }
+            None => out.push(part.trim().parse().ok()?),
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -112,13 +210,39 @@ mod tests {
         let Some(fast) = performance_cores() else {
             return; // a uniform machine, or one that does not say; nothing to check
         };
-        let all = max_frequencies().expect("frequencies, since a fast set was found");
         assert!(fast.len() >= 2, "a pool of one is not worth building");
-        assert!(fast.len() < all.len(), "a subset, or there was no choice to make");
+        // Against the machine's own processor count rather than against `max_frequencies`, which
+        // is now only one of the two ways the set can be arrived at and is absent on a hybrid
+        // machine with no `cpufreq` driver.
+        let total = std::thread::available_parallelism().map_or(usize::MAX, std::num::NonZero::get);
+        assert!(fast.len() < total, "a subset, or there was no choice to make");
         assert!(
-            fast.iter().all(|c| *c < all.len()),
+            fast.iter().all(|c| *c < total),
             "a cpu index outside the machine"
         );
+        let mut sorted = fast.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), fast.len(), "a cpu listed twice");
+    }
+
+    /// The cpulist grammar, including the shapes this machine does not happen to produce.
+    ///
+    /// `/sys/devices/cpu_core/cpus` reads `0-15` here, so every other spelling the kernel is
+    /// entitled to use — a bare index, several ranges, a mixture — is untested by running on it.
+    #[test]
+    fn cpu_lists_parse_the_way_the_kernel_writes_them() {
+        assert_eq!(parse_cpu_list("0-15"), Some((0..=15).collect()));
+        assert_eq!(parse_cpu_list("16-19\n"), Some((16..=19).collect()));
+        assert_eq!(parse_cpu_list("3"), Some(vec![3]));
+        assert_eq!(parse_cpu_list("0-3,8,12-13"), Some(vec![0, 1, 2, 3, 8, 12, 13]));
+        // Nothing, and nothing that can be trusted: the caller has a working fallback and would
+        // rather take it than act on half an answer.
+        assert_eq!(parse_cpu_list(""), None);
+        assert_eq!(parse_cpu_list("\n"), None);
+        assert_eq!(parse_cpu_list("7-3"), None, "a reversed range");
+        assert_eq!(parse_cpu_list("0-15,frog"), None);
+        assert_eq!(parse_cpu_list("0-999999"), None, "wider than any machine");
     }
 
     #[test]
