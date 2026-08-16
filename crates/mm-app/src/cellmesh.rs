@@ -357,6 +357,7 @@ mod tests {
                 cluster_size: 1,
                 age: 1_000,
                 organelles: Vec::new(),
+                limbs: Vec::new(),
                 squash: Vec::new(),
                 area_swell: 1.0,
             })

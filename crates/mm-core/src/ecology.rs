@@ -32,7 +32,7 @@ use crate::cell::CellArena;
 use crate::chem::CHEM_COUNT;
 use crate::fixed::{q10_scale, Q10_ONE};
 use crate::ledger::Ledger;
-use crate::organelle::OrganelleType;
+use crate::organelle::{Organelle, OrganelleType};
 use crate::substrate::Substrate;
 
 /// The chemical a corpse becomes.
@@ -323,19 +323,61 @@ pub struct EcologyReport {
     pub crossed: i64,
 }
 
-/// A cell's total spike extension, `0..` — zero if it has none.
+/// How far one spike is out, `Q10` of its full travel — zero if it is sheathed, still building,
+/// or not a spike.
 ///
 /// The control input is signed, and a retracted spike does nothing: SPEC §8's catalogue calls
 /// it "signed extension", so a genome can put a spike away without tearing it off.
+///
+/// Separate from [`spike_extension_of`], which multiplies this by the size, because they answer
+/// different questions and only one of them is *how far out it is*. The renderer needs this one:
+/// a spike's drawn length is its travel and its drawn thickness is its `param`, and folding the
+/// two together would draw a large sheathed spike as a small drawn one.
+#[must_use]
+pub fn spike_reach(o: &Organelle) -> i32 {
+    if o.kind != OrganelleType::Spike || !o.is_active() {
+        return 0;
+    }
+    (o.control[0] as i32).clamp(0, Q10_ONE)
+}
+
+/// What one spike contributes to its cell's total extension.
+///
+/// [`spike_reach`] scaled by how big the spike is, so a bigger one hurts more and costs more.
+#[must_use]
+pub fn spike_extension_of(o: &Organelle) -> i32 {
+    q10_scale(spike_reach(o), crate::fixed::q10(o.param as i32))
+}
+
+/// How wide open one exoenzyme vesicle is, `Q10` — zero if it is shut, still building, or not an
+/// exoenzyme.
+///
+/// The sibling of [`spike_reach`], [`crate::sensing::cilium_power`] and
+/// [`crate::sensing::holdfast_effort`].
+#[must_use]
+pub fn exoenzyme_throttle(o: &Organelle) -> i32 {
+    if o.kind != OrganelleType::Exoenzyme || !o.is_active() {
+        return 0;
+    }
+    (o.control[0] as i32).clamp(0, Q10_ONE)
+}
+
+/// What one exoenzyme vesicle is dissolving with, `Q10`. Throttle against the size `param` bought.
+#[must_use]
+pub fn exoenzyme_output_of(o: &Organelle) -> i32 {
+    let throttle = exoenzyme_throttle(o);
+    if throttle == 0 {
+        return 0;
+    }
+    q10_scale(crate::fixed::q10(o.param as i32), throttle)
+}
+
+/// A cell's total spike extension, `0..` — zero if it has none.
 #[must_use]
 pub fn spike_extension(cells: &CellArena, i: usize) -> i32 {
     let mut total = 0i32;
     for o in cells.slots(i) {
-        if o.kind == OrganelleType::Spike && o.is_active() {
-            let extension = (o.control[0] as i32).clamp(0, Q10_ONE);
-            // Scaled by how big the spike is, so a bigger one hurts more and costs more.
-            total = total.saturating_add(q10_scale(extension, crate::fixed::q10(o.param as i32)));
-        }
+        total = total.saturating_add(spike_extension_of(o));
     }
     total
 }
@@ -822,8 +864,7 @@ pub fn step(
         let enzyme = cells
             .slots(i)
             .iter()
-            .filter(|o| o.kind == OrganelleType::Exoenzyme && o.is_active())
-            .map(|o| q10_scale(crate::fixed::q10(o.param as i32), (o.control[0] as i32).clamp(0, Q10_ONE)))
+            .map(exoenzyme_output_of)
             .fold(0i32, i32::saturating_add);
         if enzyme > 0 {
             let cost = q10_scale(enzyme, config.spike_upkeep);
@@ -1242,6 +1283,69 @@ mod tests {
             cells.damage[si],
             cells.damage[bi]
         );
+    }
+
+    #[test]
+    fn effort_and_size_are_separable_and_the_per_cell_sum_is_unchanged() {
+        // The split the renderer needs and the property that makes it safe. A limb's drawn
+        // *length* is how far out it is and its drawn *thickness* is what the cell built, so
+        // folding the two together — which is all `spike_extension` ever reported — would draw a
+        // large sheathed spike as a small drawn one.
+        //
+        // The sums must be to the byte what they were, because the ecology reads them.
+        let (mut cells, pool, _substrate, _ledger) = arena();
+        let id = spawn(&mut cells, &pool, 5, 5);
+        let i = cells.index(id).unwrap();
+
+        let mut spike = Organelle::finished(OrganelleType::Spike, 200);
+        spike.control[0] = Q10_ONE as i16 / 2;
+        cells.slots_mut(i)[4] = spike;
+        let mut sheathed = Organelle::finished(OrganelleType::Spike, 255);
+        sheathed.control[0] = -1;
+        cells.slots_mut(i)[5] = sheathed;
+        let mut unbuilt = Organelle::building(OrganelleType::Spike, 255, 4);
+        unbuilt.control[0] = Q10_ONE as i16;
+        cells.slots_mut(i)[6] = unbuilt;
+
+        assert_eq!(spike_reach(&cells.slots(i)[4]), Q10_ONE / 2, "half out");
+        assert_eq!(spike_reach(&cells.slots(i)[5]), 0, "a sheathed spike is away");
+        assert_eq!(spike_reach(&cells.slots(i)[6]), 0, "and an unfinished one");
+        // The biggest spike on the cell is the one that shows nothing, which is the whole point.
+        assert!(cells.slots(i)[5].param > cells.slots(i)[4].param);
+
+        let summed: i32 = cells
+            .slots(i)
+            .iter()
+            .map(spike_extension_of)
+            .fold(0, i32::saturating_add);
+        assert_eq!(spike_extension(&cells, i), summed);
+
+        // And the same shape for the other three, so a limb never has to reach past these for a
+        // number and reimplement the semantics on the way.
+        let mut enzyme = Organelle::finished(OrganelleType::Exoenzyme, 100);
+        enzyme.control[0] = Q10_ONE as i16 / 4;
+        assert_eq!(exoenzyme_throttle(&enzyme), Q10_ONE / 4);
+        assert_eq!(exoenzyme_throttle(&sheathed), 0, "not an exoenzyme");
+
+        let mut anchor = Organelle::finished(OrganelleType::Holdfast, 128);
+        anchor.control[0] = Q10_ONE as i16;
+        assert_eq!(crate::sensing::holdfast_effort(&anchor), Q10_ONE);
+        anchor.control[0] = -5;
+        assert_eq!(
+            crate::sensing::holdfast_effort(&anchor),
+            0,
+            "a negative grip is letting go, not gripping backwards"
+        );
+        assert_eq!(crate::sensing::holdfast_grip_of(&anchor), 0);
+
+        let mut beater = Organelle::finished(OrganelleType::Cilium, 64);
+        beater.control[0] = -(Q10_ONE as i16);
+        assert_eq!(
+            crate::sensing::cilium_power(&beater),
+            -Q10_ONE,
+            "a cilium can beat backwards and the picture has to be able to say so"
+        );
+        assert!(crate::sensing::cilium_thrust(&beater) < 0);
     }
 
     #[test]

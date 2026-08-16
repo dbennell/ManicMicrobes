@@ -48,6 +48,11 @@ pub struct CellDot {
     /// at far zoom nobody can see them and building the list would be a hundred thousand
     /// allocations for nothing.
     pub organelles: Vec<OrganelleDot>,
+    /// What this cell has grown that reaches outside its membrane — cilia, a flagellum, a drawn
+    /// spike, a holdfast, an exoenzyme's cloud. Present on the same terms as `organelles`, and
+    /// usually empty even then: on the mixed benchmark slide 3.8% of cells carry a cilium and
+    /// 7.7% a holdfast.
+    pub limbs: Vec<LimbDot>,
     /// How many cells are in this one's organism, over hard junctions (M7). One means a
     /// solitary cell.
     pub cluster_size: u32,
@@ -593,6 +598,63 @@ pub struct OrganelleDot {
     pub rgb: [f32; 3],
     /// `0..=1`. Scaffolding that is still being built is drawn faint.
     pub built: f32,
+}
+
+/// One thing a cell has grown that reaches **outside its own membrane**.
+///
+/// Six organelles in the catalogue do — cilium, flagellum, spike, holdfast, exoenzyme, and the
+/// junction port through the links it anchors — and every one of them was drawn as a coloured dot
+/// on the ring inside the cell, so nothing a cell built ever changed its silhouette. See
+/// `docs/MORPHOLOGY.md`.
+///
+/// This is geometry only: where the limb starts, which way it points, how far it reaches and how
+/// hard it is working. What each form actually looks like is `limb.wgsl`'s business, and how it
+/// gets there is `limbmesh.rs`'s.
+///
+/// # What each field is allowed to say
+///
+/// Everything here comes from a named quantity in `mm-core` and nothing is invented, with two
+/// exceptions that are labelled where they arise: the mount angle of a limb whose organelle has no
+/// simulated direction (SPEC §6 — position within a cell is not state), and [`LimbDot::phase`].
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct LimbDot {
+    pub kind: mm_core::OrganelleType,
+    /// Where it leaves the body: an offset from the cell centre, in substrate squares, on the
+    /// cell's own *drawn* wall in the mount direction — cut back by the seams, so a limb on a
+    /// squashed side starts where that side actually is.
+    pub dx: f32,
+    pub dy: f32,
+    /// Outward unit direction.
+    pub ux: f32,
+    pub uy: f32,
+    /// How far past the root it reaches, in squares.
+    pub length: f32,
+    /// Half-width at the root, in squares.
+    pub width: f32,
+    /// How far back *inside* the body the quad starts, in squares.
+    ///
+    /// The limb mesh is drawn under the cells, so the body covers this and there is no join to
+    /// draw. Without it a limb meets the membrane along a hairline of background.
+    pub inset: f32,
+    /// How hard it is working, `-1..=1`.
+    ///
+    /// **Signed exactly where the control it comes from is signed.** A cilium beating backwards
+    /// is a thing a genome can do and nothing in the picture could say so; a spike's extension
+    /// clamps at zero, because SPEC §8 calls it "signed extension" and a retracted spike does
+    /// nothing.
+    pub extent: f32,
+    /// Where in its beat it is, `0..1`. **A drawing convention** — nothing in the simulation has
+    /// a beat phase. Derived from the tick and never from the clock, so a paused slide is still
+    /// and a screenshot at tick N is reproducible.
+    pub phase: f32,
+    /// How many sub-elements the form draws: hairs in a tuft, rootlets on a foot, one otherwise.
+    pub count: f32,
+    /// The hollow fraction of a form that has one — the halo, and nothing else. `0` for a solid.
+    pub inner: f32,
+    /// Tip width as a fraction of the root's. `0` tapers to a point.
+    pub taper: f32,
+    /// Fixes whatever the form varies per limb. From the cell and the slot, so it is stable.
+    pub seed: f32,
 }
 
 /// How much detail a frame carries, chosen by zoom (SPEC §14).
@@ -1396,6 +1458,8 @@ impl Slide {
         // before there is a cell big enough to have a visible inside — see [`Lod`].
         let packed = self.lod.resolves_packing();
         let detailed = self.lod.resolves_organelles();
+        // The only clock a limb is allowed to have. See `limb_phase`.
+        let tick = self.world.tick_count();
 
         // Components, for colouring a cluster as one thing. Rebuilt here rather than kept,
         // because they are derived from the junctions and a stale copy would draw an organism
@@ -1484,6 +1548,19 @@ impl Slide {
                 } else {
                     (Vec::new(), 1.0)
                 };
+                let (organelles, limbs) = if detailed && near {
+                    cell_parts(
+                        cells,
+                        i,
+                        radius,
+                        &squash,
+                        area_swell,
+                        tick,
+                        id.ordering_key(),
+                    )
+                } else {
+                    (Vec::new(), Vec::new())
+                };
                 CellDot {
                     x: cells.x[i] as f32 / POS_ONE as f32,
                     y: cells.y[i] as f32 / POS_ONE as f32,
@@ -1491,11 +1568,8 @@ impl Slide {
                     rgb: cell_colour(cells, i, table),
                     depth: crate::optics::depth_of(id.ordering_key()),
                     id,
-                    organelles: if detailed && near {
-                        organelle_dots(cells, i, radius, &squash, area_swell)
-                    } else {
-                        Vec::new()
-                    },
+                    organelles,
+                    limbs,
                     cluster_size: cluster_size[i],
                     age: cells.age[i],
                     squash,
@@ -1698,30 +1772,34 @@ impl Slide {
 /// So the ring is pulled in to whatever room there is in each organelle's own direction. Per
 /// organelle rather than per cell, because a cell flattened on one side has plenty of room on
 /// the other and shrinking the whole ring would waste it.
-fn organelle_dots(
+/// The dots inside a cell and the limbs outside it, from one walk of the slots.
+///
+/// One walk rather than two because the two have to agree: a spike's blade must grow out of the
+/// spike's own dot, and the dot's angle is the ring convention above. Two walks would be two
+/// copies of "which slot is `nth`".
+fn cell_parts(
     cells: &mm_core::CellArena,
     i: usize,
     radius: f32,
     seams: &[Squash],
     swell: f32,
-) -> Vec<OrganelleDot> {
+    tick: u64,
+    key: u64,
+) -> (Vec<OrganelleDot>, Vec<LimbDot>) {
     use mm_core::organelle::MEMBRANE_SLOT;
     let slots = cells.slots(i);
-    let mut out = Vec::new();
+    let mut dots = Vec::new();
+    let mut limbs = Vec::new();
     // How many non-membrane slots are occupied, so the ring is evenly spaced for what is
     // actually there rather than leaving gaps where empty slots would have been.
     let occupied: Vec<usize> = (0..slots.len())
         .filter(|n| *n != MEMBRANE_SLOT && slots[*n].is_present())
         .collect();
     let count = occupied.len().max(1) as f32;
-    for (nth, n) in occupied.iter().enumerate() {
-        let o = &slots[*n];
-        let angle = std::f32::consts::TAU * nth as f32 / count;
-        let (ux, uy) = (angle.cos(), angle.sin());
-        let size = (radius * 0.28).max(0.02);
-        // How far the cell's own outline is in this direction: the swollen radius, cut back by
-        // whichever seam bites first. The same expression the shader draws to.
-        let drawn = radius * PACKING * swell;
+    // How far the cell's own outline is in a direction: the swollen radius, cut back by whichever
+    // seam bites first. The same expression the shader draws to.
+    let drawn = radius * PACKING * swell;
+    let wall_towards = |ux: f32, uy: f32| -> f32 {
         let mut wall = drawn;
         for s in seams {
             let along = s.nx * ux + s.ny * uy;
@@ -1729,10 +1807,18 @@ fn organelle_dots(
                 wall = wall.min(s.face * drawn / along);
             }
         }
+        wall.max(0.0)
+    };
+    for (nth, n) in occupied.iter().enumerate() {
+        let o = &slots[*n];
+        let angle = std::f32::consts::TAU * nth as f32 / count;
+        let (ux, uy) = (angle.cos(), angle.sin());
+        let size = (radius * 0.28).max(0.02);
+        let wall = wall_towards(ux, uy);
         // Room to sit in, and never negative: a cell cut past its own middle has nowhere to put
         // anything, and an organelle at the centre is better than one outside the wall.
         let ring = (radius * 0.45).min((wall - size).max(0.0));
-        out.push(OrganelleDot {
+        dots.push(OrganelleDot {
             kind: o.kind,
             dx: ring * ux,
             dy: ring * uy,
@@ -1741,8 +1827,192 @@ fn organelle_dots(
             // Scaffolding is drawn faint so that a cell mid-build looks mid-build.
             built: if o.remaining_build == 0 { 1.0 } else { 0.35 },
         });
+        if let Some(limb) = limb_of(o, *n, drawn, (ux, uy), &wall_towards, tick, key) {
+            limbs.push(limb);
+        }
     }
-    out
+    (dots, limbs)
+}
+
+/// How many ticks a beat takes.
+///
+/// Twenty, which at 1× is about three cycles a second — fast enough to read as a beat and slow
+/// enough not to alias into a shimmer at the frame rates the microscope actually runs at.
+const BEAT_TICKS: u64 = 20;
+
+/// How far past the body a holdfast reaches, in squares. `mm_core::sensing::HOLDFAST_REACH` in
+/// the renderer's units.
+///
+/// Absolute, and note that it does not scale with the cell: the reach is a property of the world,
+/// so a large cell's foot is proportionally shorter and that is what the physics says.
+const HOLDFAST_SQUARES: f32 =
+    mm_core::sensing::HOLDFAST_REACH as f32 / mm_core::fixed::POS_ONE as f32;
+
+/// How far past the body an exoenzyme's cloud spreads, in squares.
+///
+/// Half a square, matching the holdfast's reach, because both are "just outside the body" and the
+/// picture should not imply that one carries further than the other without a mechanism saying so.
+/// The dissolving itself happens to whatever is *touching*, and puts its result in the square.
+const HALO_SQUARES: f32 = 0.5;
+
+/// Where in its beat a limb is. See [`LimbDot::phase`].
+///
+/// **The modulo is in `u64` and that is not fussiness.** `tick as f32 / 20.0` loses the fraction
+/// entirely past about sixteen million ticks — an hour at 1× — and every cilium on the slide would
+/// quietly stop moving. Reducing first keeps it exact for as long as the run lasts.
+fn limb_phase(tick: u64, key: u64, slot: usize) -> f32 {
+    let cycle = (tick % BEAT_TICKS) as f32 / BEAT_TICKS as f32;
+    // Spread, or every cilium on the slide beats in lockstep, which reads as a machine.
+    let offset = crate::cellmesh::seed_of(key.wrapping_mul(31).wrapping_add(slot as u64 + 1));
+    (cycle + offset).fract()
+}
+
+/// The limb one organelle grows, or `None` for the fifteen types that grow none.
+///
+/// `drawn` is the cell's drawn radius — `PACKING` and the area swell included — because a limb
+/// belongs to the cell as it is *drawn*, not as the physics stores it. `ring` is the direction of
+/// this slot's dot on the ring, used by the forms whose organelle has no simulated direction.
+fn limb_of(
+    o: &mm_core::Organelle,
+    slot: usize,
+    drawn: f32,
+    ring: (f32, f32),
+    wall_towards: &impl Fn(f32, f32) -> f32,
+    tick: u64,
+    key: u64,
+) -> Option<LimbDot> {
+    use mm_core::OrganelleType as T;
+    let big = o.param as f32 / 255.0;
+    let seed = crate::cellmesh::seed_of(key.wrapping_mul(97).wrapping_add(slot as u64 + 1));
+
+    // Direction, length, half-width, inset, effort, sub-elements, hollow fraction, tip taper.
+    let (dir, length, width, inset, extent, count, inner, taper) = match o.kind {
+        T::Cilium | T::Flagellum if o.is_active() => {
+            // **The one direction on this list that is real.** Sixteen mount angles from
+            // `control[1]`, and the thrust genuinely goes that way — so a flagellate drawn with
+            // its whip on the wrong side would be the picture contradicting the physics.
+            let (qx, qy) = mm_core::sensing::cilium_direction(o);
+            let (qx, qy) = (qx as f32, qy as f32);
+            let len = (qx * qx + qy * qy).sqrt().max(1.0);
+            let dir = (qx / len, qy / len);
+            // Signed: the sign is which way the wave travels, and a cilium beating backwards
+            // pushes its cell backwards.
+            let power =
+                mm_core::sensing::cilium_power(o) as f32 / mm_core::fixed::Q10_ONE as f32;
+            if o.kind == T::Flagellum {
+                // One large organ, longer than the body it drives.
+                (
+                    dir,
+                    (1.2 + 1.3 * big) * drawn,
+                    0.075 * drawn,
+                    0.12 * drawn,
+                    power,
+                    1.0,
+                    0.0,
+                    0.22,
+                )
+            } else {
+                // Many small ones. The half-width is the tuft's span, not one hair's.
+                (
+                    dir,
+                    (0.22 + 0.22 * big) * drawn,
+                    (0.20 + 0.16 * big) * drawn,
+                    0.06 * drawn,
+                    power,
+                    (2.0 + (o.param as f32 / 64.0).floor()).min(5.0),
+                    0.0,
+                    0.0,
+                )
+            }
+        }
+        T::Spike => {
+            // Out when it is out and gone when it is sheathed, which is the whole point:
+            // `OrganelleType::EM_MECHANICAL` already argues that a predator at rest must be
+            // indistinguishable and unmistakable the instant it extends. Drawing the spike a cell
+            // *has* rather than the spike it has *drawn* would contradict that.
+            let reach = mm_core::ecology::spike_reach(o) as f32 / mm_core::fixed::Q10_ONE as f32;
+            if reach <= 0.0 {
+                return None;
+            }
+            (
+                ring,
+                0.9 * drawn * reach,
+                0.10 * drawn * (0.35 + big),
+                0.20 * drawn,
+                reach,
+                1.0,
+                0.0,
+                0.0,
+            )
+        }
+        T::Holdfast if o.is_active() => {
+            // Drawn whether or not it is gripping — cement built is cement carried — but limp
+            // when it has let go and taut when it has not.
+            let effort =
+                mm_core::sensing::holdfast_effort(o) as f32 / mm_core::fixed::Q10_ONE as f32;
+            (
+                ring,
+                HOLDFAST_SQUARES,
+                0.09 * drawn * (0.35 + big),
+                0.12 * drawn,
+                effort,
+                3.0,
+                0.0,
+                0.45,
+            )
+        }
+        T::Exoenzyme => {
+            let throttle =
+                mm_core::ecology::exoenzyme_throttle(o) as f32 / mm_core::fixed::Q10_ONE as f32;
+            if throttle <= 0.0 {
+                return None;
+            }
+            // A cloud, not a limb: centred on the cell and pointing nowhere, because what an
+            // exoenzyme dissolves it dissolves into the square. The quad is the square that holds
+            // it, and `inner` is the body it is drawn around.
+            let outer = drawn + HALO_SQUARES;
+            return Some(LimbDot {
+                kind: o.kind,
+                dx: 0.0,
+                dy: 0.0,
+                ux: 1.0,
+                uy: 0.0,
+                length: outer,
+                width: outer,
+                inset: outer,
+                extent: throttle,
+                phase: limb_phase(tick, key, slot),
+                count: 1.0,
+                inner: (drawn / outer).clamp(0.0, 0.98),
+                taper: 0.0,
+                seed,
+            });
+        }
+        _ => return None,
+    };
+
+    if length <= 0.0 || width <= 0.0 {
+        return None;
+    }
+    // Rooted on the wall the cell is actually drawn to, so a limb on a squashed side leaves from
+    // that side and not from where the cell would have been unpressed.
+    let wall = wall_towards(dir.0, dir.1);
+    Some(LimbDot {
+        kind: o.kind,
+        dx: dir.0 * wall,
+        dy: dir.1 * wall,
+        ux: dir.0,
+        uy: dir.1,
+        length,
+        width,
+        inset,
+        extent,
+        phase: limb_phase(tick, key, slot),
+        count,
+        inner,
+        taper,
+        seed,
+    })
 }
 
 /// The colour an organelle is drawn in, so the inspector's schematic and the cell on the
@@ -2490,6 +2760,183 @@ mod tests {
         assert_eq!(slide.square_at(999.0, 4.0), None);
         assert_eq!(slide.square_at(0.0, 0.0), Some((0, 0)));
         assert_eq!(slide.cell_at(4.0, 4.0, 1.0), None, "nothing is alive yet");
+    }
+
+    /// A slide with one cell at (6, 6), zoomed in far enough to resolve its contents.
+    fn one_cell() -> (Slide, mm_core::CellId) {
+        use mm_core::fixed::{pos, q10};
+        use mm_core::{CellId, CellSeed};
+        let mut slide = Slide::new(scenario()).unwrap();
+        let genome = slide.world_mut().genomes().intern(vec![0u8; 16]).unwrap();
+        let id = slide.world_mut().spawn_cell(CellSeed {
+            x: pos(6),
+            y: pos(6),
+            mass: q10(40),
+            energy: q10(100),
+            membrane: 20,
+            key: 1,
+            badge: 0,
+            species: 0,
+            parent: CellId::NONE,
+            birth_tick: 0,
+            genome,
+        });
+        slide.world_mut().adopt_current_contents_as_baseline();
+        slide.set_zoom(60.0);
+        (slide, id)
+    }
+
+    fn limbs_of(slide: &mut Slide, id: mm_core::CellId) -> Vec<LimbDot> {
+        let frame = slide.frame();
+        frame
+            .cells
+            .iter()
+            .find(|c| c.id == id)
+            .map(|c| c.limbs.clone())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_sheathed_spike_is_nothing_and_a_drawn_one_is_as_long_as_it_is_out() {
+        // The claim `OrganelleType::EM_MECHANICAL` already makes about the energy signature, said
+        // in the picture: a predator at rest is indistinguishable from anything else its size and
+        // becomes unmistakable the instant it extends. Drawing the spike a cell *has* rather than
+        // the spike it has *drawn* would contradict it, and would make ambush unavailable.
+        use mm_core::{Organelle, OrganelleType, Q10_ONE};
+        let (mut slide, id) = one_cell();
+        let i = slide.world_mut().cells_mut().index(id).unwrap();
+
+        let mut spike = Organelle::finished(OrganelleType::Spike, 200);
+        spike.control[0] = 0;
+        slide.world_mut().cells_mut().slots_mut(i)[4] = spike;
+        assert!(
+            limbs_of(&mut slide, id).is_empty(),
+            "a sheathed spike was drawn"
+        );
+
+        // Still being built: inert, and therefore invisible, however wide open the control is.
+        let mut building = Organelle::building(OrganelleType::Spike, 200, 5);
+        building.control[0] = Q10_ONE as i16;
+        slide.world_mut().cells_mut().slots_mut(i)[4] = building;
+        assert!(
+            limbs_of(&mut slide, id).is_empty(),
+            "an unfinished spike was drawn"
+        );
+
+        let mut half = Organelle::finished(OrganelleType::Spike, 200);
+        half.control[0] = (Q10_ONE / 2) as i16;
+        slide.world_mut().cells_mut().slots_mut(i)[4] = half;
+        let short = limbs_of(&mut slide, id);
+        assert_eq!(short.len(), 1);
+        assert_eq!(short[0].kind, OrganelleType::Spike);
+
+        let mut full = Organelle::finished(OrganelleType::Spike, 200);
+        full.control[0] = Q10_ONE as i16;
+        slide.world_mut().cells_mut().slots_mut(i)[4] = full;
+        let long = limbs_of(&mut slide, id);
+        assert_eq!(long.len(), 1);
+        assert!(
+            (long[0].length - 2.0 * short[0].length).abs() < 1e-4,
+            "length is not the extension: {} against {}",
+            long[0].length,
+            short[0].length
+        );
+        // Thickness is what the cell built, and does not move with the extension.
+        assert!((long[0].width - short[0].width).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_propulsor_points_where_its_thrust_goes() {
+        // The one direction on the list that is real. A flagellate drawn with its whip on the
+        // wrong side is the picture contradicting the physics, and the mount angle is four bits
+        // of `control[1]` that nothing on screen could previously show.
+        use mm_core::{Organelle, OrganelleType, Q10_ONE};
+        let (mut slide, id) = one_cell();
+        let i = slide.world_mut().cells_mut().index(id).unwrap();
+        for angle in 0..16i16 {
+            let mut flagellum = Organelle::finished(OrganelleType::Flagellum, 128);
+            flagellum.control[0] = Q10_ONE as i16;
+            flagellum.control[1] = angle;
+            slide.world_mut().cells_mut().slots_mut(i)[4] = flagellum;
+            let limbs = limbs_of(&mut slide, id);
+            assert_eq!(limbs.len(), 1);
+            let (qx, qy) = mm_core::sensing::cilium_direction(&flagellum);
+            let len = ((qx * qx + qy * qy) as f32).sqrt();
+            assert!(
+                (limbs[0].ux - qx as f32 / len).abs() < 1e-3
+                    && (limbs[0].uy - qy as f32 / len).abs() < 1e-3,
+                "mount {angle} drawn at ({}, {}) and thrusting at ({qx}, {qy})",
+                limbs[0].ux,
+                limbs[0].uy
+            );
+            // And the root is on the wall in that direction, not at the centre.
+            let out = limbs[0].dx * limbs[0].ux + limbs[0].dy * limbs[0].uy;
+            assert!(out > 0.0, "the flagellum leaves from inside the cell");
+        }
+    }
+
+    #[test]
+    fn a_cilium_beating_backwards_is_drawn_beating_backwards() {
+        use mm_core::{Organelle, OrganelleType, Q10_ONE};
+        let (mut slide, id) = one_cell();
+        let i = slide.world_mut().cells_mut().index(id).unwrap();
+        let mut cilium = Organelle::finished(OrganelleType::Cilium, 128);
+        cilium.control[0] = -(Q10_ONE as i16);
+        slide.world_mut().cells_mut().slots_mut(i)[4] = cilium;
+        let back = limbs_of(&mut slide, id);
+        assert_eq!(back.len(), 1);
+        assert!(back[0].extent < -0.9, "extent {}", back[0].extent);
+
+        // Idle, and still drawn: a cilium is not a weapon, and one a cell has built is one it is
+        // paying for whether or not it is beating.
+        cilium.control[0] = 0;
+        slide.world_mut().cells_mut().slots_mut(i)[4] = cilium;
+        let idle = limbs_of(&mut slide, id);
+        assert_eq!(idle.len(), 1);
+        assert_eq!(idle[0].extent, 0.0);
+        assert!(
+            (idle[0].length - back[0].length).abs() < 1e-6,
+            "an idle cilium was drawn shorter; length is what the cell built"
+        );
+    }
+
+    #[test]
+    fn nothing_grows_a_limb_below_the_tier_that_can_show_one() {
+        use mm_core::{Organelle, OrganelleType, Q10_ONE};
+        let (mut slide, id) = one_cell();
+        let i = slide.world_mut().cells_mut().index(id).unwrap();
+        let mut spike = Organelle::finished(OrganelleType::Spike, 200);
+        spike.control[0] = Q10_ONE as i16;
+        slide.world_mut().cells_mut().slots_mut(i)[4] = spike;
+        assert_eq!(limbs_of(&mut slide, id).len(), 1);
+
+        slide.set_zoom(3.0);
+        assert_eq!(slide.lod(), Lod::Dots);
+        assert!(
+            limbs_of(&mut slide, id).is_empty(),
+            "whole-slide zoom built a limb list nobody can see"
+        );
+    }
+
+    #[test]
+    fn a_beat_does_not_stop_after_an_hour() {
+        // `tick as f32 / 20.0` loses the fraction entirely past about sixteen million ticks, and
+        // every cilium on the slide would quietly stop moving. The modulo is in `u64` for exactly
+        // this, and the failure is invisible in any test that does not run the clock out.
+        let mut seen = std::collections::BTreeSet::new();
+        for tick in 40_000_000u64..40_000_000 + BEAT_TICKS {
+            let p = limb_phase(tick, 12_345, 4);
+            seen.insert((p * 1000.0) as i32);
+        }
+        assert_eq!(
+            seen.len(),
+            BEAT_TICKS as usize,
+            "the beat has {} distinct phases forty million ticks in",
+            seen.len()
+        );
+        // And it is the tick's, not the clock's: the same tick is always the same phase.
+        assert_eq!(limb_phase(77, 12_345, 4), limb_phase(77, 12_345, 4));
+        assert_ne!(limb_phase(77, 12_345, 4), limb_phase(77, 12_345, 5));
     }
 
     #[test]

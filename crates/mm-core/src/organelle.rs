@@ -1207,23 +1207,29 @@ pub const SHELL_PER_PARAM: i32 = Q10_ONE / 640;
 /// tiling the slide.
 pub const SHELL_MAX_COVER: i32 = Q10_ONE * 7 / 8;
 
-/// How much of a cell is behind a shell, `Q10`.
+/// How much of a body one shell covers, `Q10`, before the whole-cell cap.
 ///
 /// The same `control[0]` closes the shell and shades the cell beneath it, deliberately, and for
 /// the same reason the holdfast's one word both grips and strains: it is one surface doing one
 /// thing. A genome that wants the light back opens up, and opening up is what a spike is for.
+///
+/// Uncapped, unlike [`shell_cover`]: [`SHELL_MAX_COVER`] is a limit on the *cell*, not on a slot,
+/// and applying it here would let two half-shells cover more than the pair of them can.
+#[must_use]
+pub fn shell_cover_of(o: &Organelle) -> i32 {
+    if o.kind != OrganelleType::Shell || !o.is_active() {
+        return 0;
+    }
+    let closed = (o.control[0] as i32).clamp(0, Q10_ONE);
+    crate::fixed::q10_scale(SHELL_PER_PARAM.saturating_mul(o.param as i32), closed)
+}
+
+/// How much of a cell is behind a shell, `Q10`.
 #[must_use]
 pub fn shell_cover(cells: &crate::cell::CellArena, i: usize) -> i32 {
     let mut cover = 0i32;
     for o in cells.slots(i) {
-        if o.kind != OrganelleType::Shell || !o.is_active() {
-            continue;
-        }
-        let closed = (o.control[0] as i32).clamp(0, Q10_ONE);
-        cover = cover.saturating_add(crate::fixed::q10_scale(
-            SHELL_PER_PARAM.saturating_mul(o.param as i32),
-            closed,
-        ));
+        cover = cover.saturating_add(shell_cover_of(o));
     }
     cover.clamp(0, SHELL_MAX_COVER)
 }

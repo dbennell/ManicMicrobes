@@ -393,13 +393,30 @@ pub fn read_sensor(organelle: &Organelle, index: i16, ctx: SensorContext<'_>) ->
     }
 }
 
-/// The grip one holdfast is exerting, `Q10`. See [`holdfast_grip`] for the whole cell.
+/// How hard one holdfast is holding on, `Q10` of its own capacity — zero if it has let go, is
+/// still building, or is not a holdfast.
+///
+/// Unsigned, unlike [`cilium_power`]: there is no such thing as gripping backwards, and a negative
+/// control input clamps to zero, which is "let go".
+///
+/// The sibling of [`cilium_power`] and [`crate::ecology::spike_reach`], and separate from
+/// [`holdfast_grip_of`] for the reason they are: effort and size are independent, and the renderer
+/// needs them apart. A large holdfast that has let go is drawn thick and limp.
 #[must_use]
-pub fn holdfast_grip_of(o: &Organelle) -> i32 {
+pub fn holdfast_effort(o: &Organelle) -> i32 {
     if !o.is_active() || o.kind != OrganelleType::Holdfast {
         return 0;
     }
-    let effort = (o.control[0] as i32).clamp(0, Q10_ONE);
+    (o.control[0] as i32).clamp(0, Q10_ONE)
+}
+
+/// The grip one holdfast is exerting, `Q10`. See [`holdfast_grip`] for the whole cell.
+#[must_use]
+pub fn holdfast_grip_of(o: &Organelle) -> i32 {
+    let effort = holdfast_effort(o);
+    if effort == 0 {
+        return 0;
+    }
     q10_scale(GRIP_PER_PARAM.saturating_mul(o.param as i32), effort)
 }
 
@@ -436,17 +453,34 @@ fn visible_gradient(q: i32) -> i16 {
     sat_i16(q / (Q10_ONE / GRADIENT_GAIN))
 }
 
-/// Thrust one cilium is producing, `Q10` of a square per tick.
+/// How hard one propulsor is beating, `Q10` of its own capacity — zero if it is idle, still
+/// building, or not a propulsor.
 ///
-/// Signed: a cilium beating backwards pushes the cell backwards. Power is the genome's control
-/// input and saturates, so a mutation to it is a small change in speed rather than a reversal
+/// Signed, and that is the whole of it: a cilium beating backwards pushes the cell backwards.
+/// Power saturates, so a mutation to it is a small change in speed rather than a reversal
 /// (SPEC §3).
+///
+/// Separate from [`cilium_thrust`], which multiplies this by the capacity `param` bought, because
+/// they answer different questions. Effort and size are the two independent things a propulsor
+/// has, and the renderer needs them apart: a beat's *amplitude* is the effort and a beat's
+/// *length* is the size, so a large cilium idling is drawn long and still rather than short.
 #[must_use]
-pub fn cilium_thrust(o: &Organelle) -> i32 {
+pub fn cilium_power(o: &Organelle) -> i32 {
     if !o.is_active() || !matches!(o.kind, OrganelleType::Cilium | OrganelleType::Flagellum) {
         return 0;
     }
-    let power = (o.control[0] as i32).clamp(-Q10_ONE, Q10_ONE);
+    (o.control[0] as i32).clamp(-Q10_ONE, Q10_ONE)
+}
+
+/// Thrust one cilium is producing, `Q10` of a square per tick.
+///
+/// [`cilium_power`] against the capacity the organelle's `param` bought.
+#[must_use]
+pub fn cilium_thrust(o: &Organelle) -> i32 {
+    let power = cilium_power(o);
+    if power == 0 {
+        return 0;
+    }
     if o.kind == OrganelleType::Flagellum {
         let capacity = FLAGELLUM_THRUST_PER_PARAM.saturating_mul(o.param as i32) / THRUST_SCALE;
         return q10_scale(capacity, power);
