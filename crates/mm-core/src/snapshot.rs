@@ -40,7 +40,7 @@ use crate::world::World;
 pub const MAGIC: [u8; 8] = *b"MMSNAP\0\x01";
 /// Snapshot format version, distinct from the ISA version. The format may change without
 /// the meaning of a genome changing, and vice versa.
-pub const FORMAT_VERSION: u16 = 11;
+pub const FORMAT_VERSION: u16 = 12;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum SnapshotError {
@@ -448,6 +448,11 @@ impl Snapshot {
         for c in 0..CHEM_COUNT {
             w.i32_slice(s.chem_plane(c));
         }
+        // The solid planes, which are matter and therefore state (hard rule 7). A world restored
+        // without them would come back with its rock dissolved and its books short.
+        for k in 0..crate::chem::SOLID_COUNT {
+            w.i32_slice(s.solid_plane(k));
+        }
         w.i32_slice(s.light());
         let (vx, vy) = s.velocity();
         w.i32_slice(vx);
@@ -710,6 +715,17 @@ impl Snapshot {
                 )));
             }
             planes.push(plane);
+        }
+        let mut solid = Vec::with_capacity(crate::chem::SOLID_COUNT);
+        for k in 0..crate::chem::SOLID_COUNT {
+            let plane = r.i32_vec()?;
+            if plane.len() != expected {
+                return Err(SnapshotError::Corrupt(format!(
+                    "solid plane {k} has {} values, expected {expected}",
+                    plane.len()
+                )));
+            }
+            solid.push(plane);
         }
         let light = r.i32_vec()?;
         let vx = r.i32_vec()?;
@@ -1022,6 +1038,7 @@ impl Snapshot {
         world.restore(
             tick,
             planes,
+            solid,
             light,
             vx,
             vy,

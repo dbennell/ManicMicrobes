@@ -35,6 +35,42 @@ pub const CHEM_COUNT: usize = 17;
 /// Scarcity becomes a historical property of that world rather than a parameter.
 pub const DINITROGEN: usize = 16;
 
+/// The chemicals that can exist as a solid, in the order their planes are stored.
+///
+/// # Why a list rather than a flag on `ChemicalDef`
+///
+/// Because it decides a *memory layout*, not a behaviour. Each entry costs one whole
+/// `width × height` plane in every `Substrate` — 0.26 MB at 256², 4.19 MB at 1024² — and a per-
+/// chemical `bool` invites a scenario to switch one on and quietly quadruple the substrate. The
+/// list is compiled in, and adding to it is a deliberate edit with a number attached.
+///
+/// **Sugar does not form reefs.** Only a mineral precipitates, which is what keeps this list
+/// short: phosphorus and silicon, the two the catalogue's recipes are costed in and the two
+/// `docs/CHEMISTRY.md` §9 identifies as coming out of rock rather than out of the air.
+///
+/// Carbon is the interesting candidate to add and is deliberately absent from the first cut — a
+/// carbonate reef locking carbon out of circulation is real world-structure, but §7 shows the
+/// carbon cycle is the one that oscillates, and giving it a new sink is not a change to make
+/// blind.
+pub const SOLID_CHEMICALS: [usize; 2] = [6, 7];
+
+/// How many planes of solid a substrate carries. See [`SOLID_CHEMICALS`].
+pub const SOLID_COUNT: usize = SOLID_CHEMICALS.len();
+
+/// Which solid plane holds chemical `c`, or `None` if it cannot be solid.
+#[inline]
+#[must_use]
+pub const fn solid_slot(c: usize) -> Option<usize> {
+    let mut k = 0;
+    while k < SOLID_COUNT {
+        if SOLID_CHEMICALS[k] == c {
+            return Some(k);
+        }
+        k += 1;
+    }
+    None
+}
+
 /// Reduce an arbitrary index to a chemical. Addressing wraps (SPEC §3).
 #[inline(always)]
 #[must_use]

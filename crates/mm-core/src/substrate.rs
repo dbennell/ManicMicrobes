@@ -63,6 +63,18 @@ pub struct Substrate {
     height: u32,
     /// `chem[c][y * width + x]`, `Q10`. Never negative.
     chem: Vec<Vec<i32>>,
+    /// `solid[k][y * width + x]`, `Q10` — mineral held as a solid, one plane per entry of
+    /// [`crate::chem::SOLID_CHEMICALS`]. Never negative.
+    ///
+    /// **Outside the fluid, and that is the whole point of it.** These planes are never
+    /// diffused, never advected and never decayed: a solid is precisely the thing the water does
+    /// not carry. They are, however, *matter* — counted by `World::total_matter`, serialised, and
+    /// hashed — which is what lets a wall hold something instead of destroying it.
+    ///
+    /// Planes rather than a sparse map keyed by square, because the patches are meant to be
+    /// large: a map is cheap while walls are rare and walls being rare is not the design. Planes
+    /// also give the sweep the same contiguous working set `chem` gets, for the same reason.
+    solid: Vec<Vec<i32>>,
     /// Incident light, `Q10`. Prescribed by the light regime, not conserved.
     light: Vec<i32>,
     /// Velocity, `Q10` in squares per fluid step. The CFL limit bounds these to ±1 square.
@@ -117,6 +129,7 @@ impl PartialEq for Substrate {
         self.width == other.width
             && self.height == other.height
             && self.chem == other.chem
+            && self.solid == other.solid
             && self.light == other.light
             && self.vx == other.vx
             && self.vy == other.vy
@@ -141,6 +154,7 @@ impl Substrate {
             vx: vec![0i32; n],
             vy: vec![0i32; n],
             blocked: vec![false; n],
+            solid: vec![vec![0; n]; crate::chem::SOLID_COUNT],
             open_x: vec![false; n],
             open_y: vec![false; n],
             has_barriers: false,
@@ -489,12 +503,14 @@ impl Substrate {
     pub(crate) fn restore(
         &mut self,
         chem: Vec<Vec<i32>>,
+        solid: Vec<Vec<i32>>,
         light: Vec<i32>,
         vx: Vec<i32>,
         vy: Vec<i32>,
         blocked: Vec<bool>,
     ) {
         self.chem = chem;
+        self.solid = solid;
         self.light = light;
         self.vx = vx;
         self.vy = vy;
@@ -585,6 +601,57 @@ impl Substrate {
         std::array::from_fn(|c| self.chem[c].iter().map(|v| *v as i64).sum())
     }
 
+    /// One solid plane, by slot. See [`crate::chem::SOLID_CHEMICALS`].
+    #[must_use]
+    pub fn solid_plane(&self, k: usize) -> &[i32] {
+        &self.solid[k % crate::chem::SOLID_COUNT]
+    }
+
+    /// One solid plane, mutably.
+    #[must_use]
+    pub fn solid_plane_mut(&mut self, k: usize) -> &mut [i32] {
+        &mut self.solid[k % crate::chem::SOLID_COUNT]
+    }
+
+    /// How much solid mineral of slot `k` stands on a square, `Q10`.
+    #[inline]
+    #[must_use]
+    pub fn solid_at(&self, k: usize, x: i32, y: i32) -> i32 {
+        let i = self.index(x, y);
+        self.solid[k % crate::chem::SOLID_COUNT][i]
+    }
+
+    /// Add to (or take from) the solid standing on a square, returning what actually moved.
+    ///
+    /// Bounded below by zero and above by [`MAX_QUANTITY`], and it returns what it *achieved*
+    /// rather than what it was asked for — the difference between asking and achieving is where
+    /// a conservation bug lives, and every caller here is moving matter between two places.
+    ///
+    /// Unlike [`Substrate::add_chem`] this does **not** refuse a blocked square. A blocked square
+    /// is exactly where solid belongs.
+    pub fn add_solid(&mut self, k: usize, x: i32, y: i32, amount: i32) -> i32 {
+        let i = self.index(x, y);
+        let plane = &mut self.solid[k % crate::chem::SOLID_COUNT];
+        let held = plane[i];
+        let want = held.saturating_add(amount).clamp(0, MAX_QUANTITY);
+        let moved = want - held;
+        plane[i] = want;
+        moved
+    }
+
+    /// Total solid of each chemical, mapped back onto chemical indices.
+    ///
+    /// A compartment of `World::total_matter`: solid mineral is matter, and the whole reason
+    /// these planes exist is that a wall holding it is not the same as a wall destroying it.
+    #[must_use]
+    pub fn total_solid(&self) -> [i64; CHEM_COUNT] {
+        let mut out = [0i64; CHEM_COUNT];
+        for (k, c) in crate::chem::SOLID_CHEMICALS.iter().enumerate() {
+            out[*c] = self.solid[k].iter().map(|v| *v as i64).sum();
+        }
+        out
+    }
+
     /// Whether any square holds a negative quantity. Should never be true: the solver's
     /// fluxes are bounded by what their donor square holds.
     #[must_use]
@@ -607,6 +674,11 @@ impl StateHash for Substrate {
         h.u32(self.width);
         h.u32(self.height);
         for plane in &self.chem {
+            for v in plane {
+                h.i32(*v);
+            }
+        }
+        for plane in &self.solid {
             for v in plane {
                 h.i32(*v);
             }

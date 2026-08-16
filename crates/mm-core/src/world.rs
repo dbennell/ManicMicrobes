@@ -465,7 +465,36 @@ impl World {
         let evicted = self
             .substrate
             .set_blocked_deferred(x as i32, y as i32, true);
-        self.ledger.record_evicted(&evicted);
+        self.keep_or_evict(x as i32, y as i32, &evicted);
+    }
+
+    /// What becomes of a square's contents when a wall goes up over them.
+    ///
+    /// **The mineral stays.** It is solid-capable, the square is now rock, and rock holding
+    /// mineral is the entire premise of `docs/CHEMISTRY.md` §9 and §10 — so it moves into the
+    /// square's solid planes rather than out of the world. Nothing is created and nothing
+    /// destroyed; matter changes compartment, which `World::total_matter` counts.
+    ///
+    /// Everything else is still evicted and still recorded. Sugar does not survive being buried
+    /// in a rock, and `Ledger::record_evicted` remains what says so out loud — but it is now the
+    /// exception rather than the rule, where before it was the only outcome. That is the leak
+    /// this compartment exists to close: the ledger's note has said since M1 that "the one
+    /// genuine exit is a barrier raised over an occupied square", and for the minerals it is no
+    /// longer an exit at all.
+    fn keep_or_evict(&mut self, x: i32, y: i32, evicted: &[i32; CHEM_COUNT]) {
+        let mut lost = *evicted;
+        for (k, c) in crate::chem::SOLID_CHEMICALS.iter().enumerate() {
+            let held = lost[*c];
+            if held <= 0 {
+                continue;
+            }
+            // `add_solid` returns what it achieved, and only what it could not take stays lost.
+            let kept = self.substrate.add_solid(k, x, y, held);
+            lost[*c] = held.saturating_sub(kept);
+        }
+        if lost.iter().any(|v| *v != 0) {
+            self.ledger.record_evicted(&lost);
+        }
     }
 
     /// One fluid step's worth of matter across the edge of the slide. See [`crate::Flux`].
@@ -1014,8 +1043,16 @@ impl World {
     pub fn total_matter(&self) -> [i64; CHEM_COUNT] {
         let fluid = self.substrate.total_chem();
         let interiors = self.cells.total_interior();
+        // The fifth compartment: mineral held as a solid, in a wall or as a crust lying in the
+        // water. Not in the fluid — the solver never touches those planes — and emphatically not
+        // gone. Before this existed, raising a barrier over occupied water *evicted* what was
+        // there and `Ledger::record_evicted` recorded the loss, which was the one genuine exit
+        // from a world that otherwise conserves exactly. Counting it here is what turns that exit
+        // into a compartment.
+        let solid = self.substrate.total_solid();
         let sc = self.biology.structural_chemical % CHEM_COUNT;
-        let mut out: [i64; CHEM_COUNT] = std::array::from_fn(|c| fluid[c] + interiors[c]);
+        let mut out: [i64; CHEM_COUNT] =
+            std::array::from_fn(|c| fluid[c] + interiors[c] + solid[c]);
         let catalogue = &self.biology.metabolism.catalogue;
         for i in self.cells.iter() {
             out[sc] = out[sc].saturating_add(self.cells.mass[i] as i64);
@@ -2097,6 +2134,18 @@ impl World {
                 continue;
             }
             let mut left = *amount;
+            // A mineral does not get displaced: it stays, as solid, in the square that just
+            // became rock. That is what a mineral wall *is* — and it is why drawing a wall
+            // through phosphate-rich water leaves a phosphate-rich wall rather than shoving the
+            // phosphate aside. Only what cannot be solid goes looking for somewhere to be.
+            if blocked {
+                if let Some(k) = crate::chem::solid_slot(c) {
+                    left -= self.substrate.add_solid(k, x as i32, y as i32, left);
+                    if left <= 0 {
+                        continue;
+                    }
+                }
+            }
             // Outward in rings, the same way a corpse finds somewhere to go.
             'placed: for ring in 1..4i32 {
                 for dy in -ring..=ring {
@@ -2183,6 +2232,7 @@ impl World {
         &mut self,
         tick: u64,
         planes: Vec<Vec<i32>>,
+        solid: Vec<Vec<i32>>,
         light: Vec<i32>,
         vx: Vec<i32>,
         vy: Vec<i32>,
@@ -2193,7 +2243,7 @@ impl World {
         ledger: crate::ledger::LedgerState,
     ) {
         self.tick = tick;
-        self.substrate.restore(planes, light, vx, vy, blocked);
+        self.substrate.restore(planes, solid, light, vx, vy, blocked);
         self.impulse_x = impulse_x;
         self.impulse_y = impulse_y;
         self.pressure = pressure;
