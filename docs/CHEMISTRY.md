@@ -629,3 +629,146 @@ mineral that is not merely the safer option, it is the more accurate one.
 Design only. §8's minerals are built and this is the source that would keep them coming; without
 it a world has exactly the phosphorus and silicon it was seeded with, forever, and an outcrop is
 the mechanism that would make that a geography rather than a budget.
+
+## 10. Making the walls real: one compartment, one threshold
+
+§9 argues that phosphorus and silicon come out of rock. This is how, and the shape of it is set by
+a single line in `ledger.rs`:
+
+> Matter deliberately removed from the world, per chemical. **Only barriers do this.**
+
+Raising a barrier over occupied water evicts what was there, and `Ledger::record_evicted` exists so
+that the loss is *said out loud* rather than silently breaking I4. It is the one genuine exit from
+a world that otherwise conserves matter exactly. **The whole of this design is turning that exit
+into a compartment**: matter does not leave when a wall goes up, it is held *in* the wall, and it
+can come back out. Closed-matter gets stronger, not weaker, and the leak the ledger has been
+apologising for since M1 stops existing.
+
+### The state: planes, not a map, because the patches are meant to be big
+
+The first sketch had a sparse `BTreeMap<u32, [i32; CHEM_COUNT]>`, on the reasoning that walls are
+rare. They are not meant to be: the point of this is **large solid patches that give the world
+structure**, and a map that is cheap while walls are rare is the wrong bet if walls are the
+feature.
+
+Dense over all seventeen chemicals is the other wrong answer — 68 bytes a square, which *doubles*
+the substrate, to store zero in fourteen of them everywhere. But only a few chemicals can ever be
+solid. Sugar does not form reefs.
+
+So: **one plane per solid-capable chemical**, exactly the layout `Substrate::chem` already uses and
+for the same reason its note gives — the sweep goes one chemical at a time across the whole grid,
+so a plane keeps the working set contiguous where an interleaved struct would stream all of it to
+do one chemical's work. Two planes to begin with, phosphorus and silicon:
+
+| | 256² | 512² | 1024² |
+| --- | ---: | ---: | ---: |
+| one solid plane | 0.26 MB | 1.05 MB | 4.19 MB |
+| two | 0.52 MB | 2.10 MB | 8.39 MB |
+
+Against a substrate that is already seventeen planes, adding two is a 12% increase in fluid memory
+and nothing at all in the tick, because these planes are not stirred — the whole point of a solid
+is that the fluid solver never touches it.
+
+Extending the set later costs one plane and one line. The list is the design decision, not the
+container: **carbon is the interesting candidate**, because a carbonate reef locking carbon out of
+circulation is a real world-structuring mechanism and §7 has already shown that carbon is not what
+limits these worlds. It is left out of the first cut deliberately, because §7 also shows the carbon
+cycle is the one that oscillates, and giving it a new sink is not a change to make blind.
+
+It joins fluid, cell interiors, `mass` and organelle-held trace as a compartment of
+`World::total_matter`, and it serialises (hard rule 7) and hashes. Iteration order is an array
+index, so hard rule 6 is satisfied by construction rather than by choosing the right map.
+
+### One quantity, and the wall is derived from it
+
+The temptation is two concepts — a wall, and stuff inside it. One is enough:
+
+* a square holds some solid mineral;
+* **above a threshold it is a wall**: blocked, opaque to the fluid, impassable to cells;
+* below it, the square is open and the solid is a *crust* lying in the water.
+
+Everything else falls out. Dissolution below the threshold unblocks a square with no special case.
+Precipitation above it raises a wall with no special case. `Substrate::set_blocked` already evicts
+contents and rebuilds the edge masks, so the mechanics of becoming and un-becoming a wall are
+built — what changes is where the evicted matter goes.
+
+**Rock stays rock.** A blocked square with no entry in the map is the immutable barrier there has
+always been: insoluble, permanent, drawn as it is now. Nothing in `fluid.rs`, `neighbours.rs` or
+the cell paths needs to know the difference, because they all read `blocked` and that is unchanged.
+
+### Dissolution: per exposed edge, towards saturation
+
+For each mineral square, for each of its four edges facing an *open* square, mineral crosses at a
+rate proportional to how far that water is below saturation. Three things follow, and they are the
+reasons for this shape rather than a flat rate:
+
+* it is a solubility product, so it is the right law;
+* it is **self-limiting** — a wall in saturated water does nothing, and the system has an
+  equilibrium rather than a ratchet;
+* it gives **biological weathering** for free: cells stripping phosphate from the water beside an
+  outcrop lower the local concentration and so dissolve the rock faster. A population accelerates
+  its own supply until the stock is spent.
+
+Per *edge* rather than per square because dissolution is a surface process, and the substrate
+already keeps `open_x`/`open_y`. The consequence is that **barrier shape becomes supply rate**: a
+thin reef gives up its mineral far faster per unit of stock than a massif, whose interior is locked
+until the outside has gone. The scenario editor's rectangle tool quietly becomes a decision about
+fertility.
+
+### Precipitation: on surfaces, on a cadence, and into empty squares only
+
+The reverse of the same law — water above saturation gives its excess up as solid — with three
+restrictions, and each of them is doing real work.
+
+**On surfaces.** Scanning every open square for over-saturation is a full-grid pass per mineral,
+landing on the phase §1 already has furthest from its gate. Growth happens on squares that already
+touch solid, which are the squares the dissolution pass is visiting anyway: the same visit with the
+sign flipped. It is also how crystals actually grow. What it gives up is spontaneous nucleation in
+open water, so a slide with no rock on it stays that way — mineral has to be seeded or drawn before
+it can spread, which is a reasonable price and an honest one to state.
+
+**On a cadence.** Nothing here needs to happen every tick. Rock is the slowest thing in the world
+and a `mineral_interval` alongside `fluid_interval` makes that explicit rather than implicit in a
+small rate constant — a rate of one-sixteenth applied every step and a rate of one applied every
+sixteenth are not the same thing when the concentration between them is being driven by cells, and
+the second is the one that reads as geology.
+
+**Into empty squares only.** A square holding a cell does not solidify. Refusing beats evicting or
+killing it: it avoids a class of bugs, and it reads correctly — living tissue keeps its own ground
+open, which is why a mat resists cementation and why the edge of a reef is where the cells are.
+
+### The water displaced when a square closes
+
+**This is the part that has to be exact.** Only the mineral becomes solid; the sugar and oxygen
+and everything else dissolved in that square has to go somewhere, and "nowhere" is the leak this
+design exists to close. It is pushed into the neighbouring open squares, bounded by what they will
+take — and if it cannot all be placed, **the square does not close this tick**. Conservation is
+then exact by construction rather than by accounting.
+
+### Colour from composition
+
+`art::BARRIER_RGB` is one constant today. A mineral square's colour is instead the blend of its
+held chemicals' own `colour` entries, weighted by amount — so a silica reef comes out pale
+blue-grey and a phosphate outcrop yellow-brown, and the picture says what the rock is made of
+without a legend. Rock with no stock keeps the constant.
+
+`paint_barriers` already writes RGBA per square, so this is a parameter rather than a new path.
+
+### Ragged, without blurring the wall
+
+`paint_barriers`'s own note is that a barrier is **nearest**-sampled on purpose: a wall is blocked
+or not, and interpolating it invents half a wall, which is a value the simulation never held. That
+argument does not weaken for mineral walls, so the raggedness must not come from softening the
+texture.
+
+It comes from *grains* instead: a scatter of small mineral sprites along the wall's exposed edges,
+drawn with the machinery the carrion flakes already use — a pure function of `(square, index)`,
+tinted from the composition, sized and turned per grain. The wall stays a hard-edged truth about
+which squares are solid, and what breaks the outline is loose material lying against it, which is
+what the edge of a real mineral bed looks like.
+
+### Not built
+
+Design only. The pieces it rests on all exist: `set_blocked` and its eviction, the edge masks, the
+per-chemical `colour` in the table, the sprite pool, and a `total_matter` that already counts four
+compartments and needs a fifth.
