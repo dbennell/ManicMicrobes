@@ -83,6 +83,13 @@ fn the_limb_shader_is_a_program() {
 }
 
 #[test]
+fn the_cell_shader_is_a_program() {
+    // The same two stubs serve: `cell.wgsl` also imports `mesh2d_view_bindings::view`, and does
+    // not use it — a dead import, which the strip removes along with the rest of the block.
+    check("cell.wgsl", concat!(env!("CARGO_MANIFEST_DIR"), "/src/cell.wgsl"));
+}
+
+#[test]
 fn every_form_the_mesh_can_emit_is_one_the_shader_knows() {
     // The failure this catches has no other symptom at all: `limbmesh::form_of` hands the shader a
     // number, `field_of` branches on it, and a form the shader has never heard of falls through to

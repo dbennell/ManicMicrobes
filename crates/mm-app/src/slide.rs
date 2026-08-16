@@ -69,6 +69,15 @@ pub struct CellDot {
     /// How much larger than [`PACKING`] this cell is drawn so that its clipped outline still
     /// encloses the area it has. See [`area_swell`]. One for a cell nothing is pressing on.
     pub area_swell: f32,
+    /// How much of this cell is behind a shell, `0..=7/8` — `organelle::shell_cover` as a
+    /// fraction, and zero for the great majority of cells, which carry none.
+    ///
+    /// **Not gated on the detail tier**, unlike `organelles` and `limbs`. It is one integer
+    /// divide over sixteen slots with no allocation, and unlike an organelle a shell is a change
+    /// to the whole body's colour and value rather than a mark inside it — so it is legible at a
+    /// zoom where a nucleus is two pixels, and a slide of armoured cells should read as armoured
+    /// before you can make out anything in them.
+    pub armour: f32,
 }
 
 /// One flat face where a cell is pressed into a neighbour.
@@ -1640,6 +1649,8 @@ impl Slide {
                     age: cells.age[i],
                     squash,
                     area_swell,
+                    armour: mm_core::organelle::shell_cover(cells, i) as f32
+                        / mm_core::Q10_ONE as f32,
                 }
             })
             .collect();
@@ -2864,6 +2875,52 @@ mod tests {
             .find(|c| c.id == id)
             .map(|c| c.limbs.clone())
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_shelled_cell_carries_its_cover_to_the_shader_and_a_bare_one_carries_zero() {
+        // `armour == 0` is exactly the identity in `blob` — every term the shell adds is a `mix`
+        // at zero — so this is the property that keeps `shader_probe`, `nine_cells` and the rest
+        // drawing what they drew. A cell that reported a stray fraction of a shell it does not
+        // have would move every one of them.
+        use mm_core::{Organelle, OrganelleType, Q10_ONE};
+        let (mut slide, id) = one_cell();
+        let i = slide.world_mut().cells_mut().index(id).unwrap();
+        let armour_of = |slide: &mut Slide| -> f32 {
+            slide
+                .frame()
+                .cells
+                .iter()
+                .find(|c| c.id == id)
+                .map_or(-1.0, |c| c.armour)
+        };
+        assert_eq!(armour_of(&mut slide), 0.0, "a bare cell reports armour");
+
+        // Open, so it covers nothing however big it is — the same `control[0]` closes the shell
+        // and shades the cell beneath it, and an open shell does neither.
+        let mut open = Organelle::finished(OrganelleType::Shell, 255);
+        open.control[0] = 0;
+        slide.world_mut().cells_mut().slots_mut(i)[3] = open;
+        assert_eq!(armour_of(&mut slide), 0.0, "an open shell shades the cell");
+
+        let mut shut = Organelle::finished(OrganelleType::Shell, 255);
+        shut.control[0] = Q10_ONE as i16;
+        slide.world_mut().cells_mut().slots_mut(i)[3] = shut;
+        let one = armour_of(&mut slide);
+        assert!(one > 0.0 && one < 0.5, "one full shell covers {one}");
+
+        // And however many are built, never all of it. Total immunity is a cliff of exactly the
+        // kind SPEC §3 keeps out of the landscape, and the picture must not draw one either.
+        for slot in 4..mm_core::organelle::SLOT_COUNT {
+            slide.world_mut().cells_mut().slots_mut(i)[slot] = shut;
+        }
+        let sealed = armour_of(&mut slide);
+        assert!(sealed > one, "more shell covered no more of the cell");
+        let cap = mm_core::organelle::SHELL_MAX_COVER as f32 / Q10_ONE as f32;
+        assert!(
+            (sealed - cap).abs() < 1e-4,
+            "a fully sealed cell reports {sealed} against the cap of {cap}"
+        );
     }
 
     #[test]

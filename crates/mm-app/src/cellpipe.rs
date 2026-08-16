@@ -84,6 +84,15 @@ pub const ATTRIBUTE_SQUASH_FACE3: MeshVertexAttribute = MeshVertexAttribute::new
 pub const ATTRIBUTE_SWELL: MeshVertexAttribute =
     MeshVertexAttribute::new("CellSwell", 0x6D_6D_5F_63_65_6C_73, VertexFormat::Float32);
 
+/// How much of the cell is behind a shell, `0..=7/8`.
+///
+/// A bare `Float32`, as the swell is, and on [`CellMaterial`] only. [`DotMaterial`] does not carry
+/// it and must not: below `Lod::Packed` a cell is a dozen pixels across and a mineral rim on it
+/// would be the whole cell, and keeping the narrow layout narrow is that material's entire job.
+/// `dot_fragment` passes a zero, which is exactly the identity in `blob`.
+pub const ATTRIBUTE_ARMOUR: MeshVertexAttribute =
+    MeshVertexAttribute::new("CellArmour", 0x6D_6D_5F_63_65_6C_74, VertexFormat::Float32);
+
 /// Embedded at compile time rather than loaded from an `assets/` directory, so the binary runs
 /// from anywhere. The same thing `bevy_sprite` does for its own shaders.
 ///
@@ -181,6 +190,7 @@ impl Material2d for CellMaterial {
             ATTRIBUTE_SQUASH_DIR3.at_shader_location(8),
             ATTRIBUTE_SQUASH_FACE3.at_shader_location(9),
             ATTRIBUTE_SWELL.at_shader_location(10),
+            ATTRIBUTE_ARMOUR.at_shader_location(11),
         ])?];
         Ok(())
     }
@@ -305,6 +315,7 @@ pub fn empty_mesh() -> Mesh {
     mesh.insert_attribute(ATTRIBUTE_SQUASH_DIR3, Vec::<[f32; 4]>::new());
     mesh.insert_attribute(ATTRIBUTE_SQUASH_FACE3, Vec::<[f32; 4]>::new());
     mesh.insert_attribute(ATTRIBUTE_SWELL, Vec::<f32>::new());
+    mesh.insert_attribute(ATTRIBUTE_ARMOUR, Vec::<f32>::new());
     mesh.insert_indices(Indices::U32(Vec::new()));
     mesh
 }
@@ -455,6 +466,7 @@ pub fn upload(mesh: &mut Mesh, buffers: &mut cellmesh::Buffers) {
         &mut buffers.squash_faces3
     );
     swap_attribute!(mesh, ATTRIBUTE_SWELL, Float32, &mut buffers.swells);
+    swap_attribute!(mesh, ATTRIBUTE_ARMOUR, Float32, &mut buffers.armours);
 }
 
 #[cfg(test)]
@@ -484,6 +496,7 @@ mod tests {
                 },
                 squash: Default::default(),
                 swell: mark,
+                armour: 0.0,
             });
         }
     }
@@ -554,6 +567,7 @@ mod tests {
             ATTRIBUTE_SQUASH_DIR3,
             ATTRIBUTE_SQUASH_FACE3,
             ATTRIBUTE_SWELL,
+            ATTRIBUTE_ARMOUR,
         ] {
             let values = mesh
                 .attribute(id)
@@ -592,6 +606,7 @@ mod tests {
         assert!(buffers.squash_dirs3.is_empty());
         assert!(buffers.squash_faces3.is_empty());
         assert!(buffers.swells.is_empty());
+        assert!(buffers.armours.is_empty());
     }
 
     #[test]
@@ -605,7 +620,12 @@ mod tests {
         ] {
             assert!(dots.attribute(id).is_some(), "{} is missing", id.name);
         }
-        for id in [ATTRIBUTE_SQUASH_DIR, ATTRIBUTE_SQUASH_FACE, ATTRIBUTE_SWELL] {
+        for id in [
+            ATTRIBUTE_SQUASH_DIR,
+            ATTRIBUTE_SQUASH_FACE,
+            ATTRIBUTE_SWELL,
+            ATTRIBUTE_ARMOUR,
+        ] {
             assert!(
                 dots.attribute(id).is_none(),
                 "{} is on the dot mesh, and paying for itself every frame",

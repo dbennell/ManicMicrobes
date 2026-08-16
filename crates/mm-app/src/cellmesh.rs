@@ -139,6 +139,8 @@ pub struct Buffers {
     /// One bare `f32` rather than a fifth component on [`Shape`], which is full. Four bytes a
     /// vertex against the forty-eight another `vec4` would cost, and nothing else needs the room.
     pub swells: Vec<f32>,
+    /// How much of each cell is behind a shell, `0..=7/8`. See [`Placed::armour`].
+    pub armours: Vec<f32>,
     pub indices: Vec<u32>,
 }
 
@@ -253,6 +255,7 @@ impl Buffers {
             self.squash_dirs3.push(dirs3);
             self.squash_faces3.push(faces3);
             self.swells.push(p.swell);
+            self.armours.push(p.armour);
         }
     }
 
@@ -271,6 +274,7 @@ impl Buffers {
         self.squash_dirs3.clear();
         self.squash_faces3.clear();
         self.swells.clear();
+        self.armours.clear();
         self.indices.clear();
     }
 }
@@ -299,6 +303,20 @@ pub struct Placed {
     /// back along the shared walls. See `slide::area_swell` and the taper in `cell.wgsl`. One for
     /// anything that was not swollen, which is everything except a clipped cell.
     pub swell: f32,
+    /// How much of this cell is behind a shell, `0..=7/8` — `mm_core::organelle::shell_cover`
+    /// as a fraction.
+    ///
+    /// **A ring and not an arc, and that is a decision about honesty rather than about taste.**
+    /// Coverage is a *scalar*: `shell_cover` returns one number and the catalogue is explicit that
+    /// the same `control[0]` closes the shell and shades the cell beneath it because "it is one
+    /// surface doing one thing". There is no direction anywhere in it. An arc spanning
+    /// `cover × 2π` of the perimeter looks more like a mineral test and invents a facing the
+    /// simulation does not have; a rim that thickens with cover draws the number that exists.
+    ///
+    /// Zero for everything that is not a cell — organelles, motes, the bench's calibration quads —
+    /// and zero is exactly the identity in `cell.wgsl`, so a slide with no shell on it is drawn
+    /// the picture it was drawn before.
+    pub armour: f32,
 }
 
 /// Build the vertex buffers for a frame.
@@ -360,6 +378,7 @@ mod tests {
                 limbs: Vec::new(),
                 squash: Vec::new(),
                 area_swell: 1.0,
+                armour: 0.0,
             })
             .collect()
     }
@@ -377,6 +396,7 @@ mod tests {
             },
             squash: Default::default(),
             swell: dot.area_swell,
+            armour: 0.0,
         })
     }
 
@@ -390,6 +410,27 @@ mod tests {
         assert_eq!(buf.colours.len(), 20);
         assert_eq!(buf.shapes.len(), 20);
         assert_eq!(buf.indices.len(), 30);
+    }
+
+    #[test]
+    fn armour_reaches_every_vertex_of_the_cell_it_belongs_to() {
+        // A per-cell scalar has to be on all four corners or the shader interpolates it, and an
+        // interpolated shell is a rim that fades across the cell — which reads as a cell half
+        // armoured, a state that does not exist.
+        let mut buf = Buffers::default();
+        build(&mut buf, &dots(3), Detail::Seamed, |dot| {
+            Some(Placed {
+                armour: 0.5,
+                ..placed(dot).unwrap()
+            })
+        });
+        assert_eq!(buf.armours.len(), buf.positions.len());
+        assert!(buf.armours.iter().all(|a| *a == 0.5));
+        // And it clears with everything else, or a frame with no shell on it wears the last
+        // frame's.
+        build(&mut buf, &dots(2), Detail::Seamed, placed);
+        assert_eq!(buf.armours.len(), 8);
+        assert!(buf.armours.iter().all(|a| *a == 0.0));
     }
 
     #[test]

@@ -445,6 +445,11 @@ fn redraw(
             },
             squash: slots(cell),
             swell: cell.swell,
+            // The bench draws no shell. It exists to answer questions about the *outline* and the
+            // seams, and a mineral rim over the edge it is measuring would be a second thing in
+            // the picture — `tools/check_outline.py` compares the drawn edge against the data's,
+            // and the rim sits exactly there.
+            armour: 0.0,
         });
     }
     // The outline the *data* says each cell has, laid over what the shader drew. Plain quads —
@@ -475,6 +480,7 @@ fn redraw(
                     },
                     squash: Default::default(),
                     swell: 1.0,
+                    armour: 0.0,
                 });
             }
         }

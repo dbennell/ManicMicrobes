@@ -1,7 +1,15 @@
-# Morphology — the organelles the picture does not draw
+# Morphology — the organelles the picture did not draw
 
-**Status: proposal.** Nothing here is implemented. It is a plan for a deliverable, and §12 lists
-the decisions in it that want review before any of it is written.
+**Status: implemented**, in the six commits §9 lays out. What follows is the design and the
+argument behind it; §12's decisions were taken as recommended, with the two the user settled
+noted in place — limbs **may** be drawn over neighbouring cells, and the shell is a **ring**.
+
+One thing in §8 is outstanding and is written down rather than quietly dropped: the photographic
+check. `tools/check_outline.py` compares what the shader actually put on the screen against what
+it was told to draw, and it needs a window this work could not get one of — every screenshot taken
+during it came back an empty surface. Everything else in §8 landed, plus one thing that was not in
+the plan: `tests/shader_syntax.rs`, which parses and validates the WGSL with naga so that a syntax
+error is a failing test in a second rather than a layer that silently does not draw.
 
 Read `docs/OVERLAPS.md` first. It is the record of what opening the cell renderer cost last time,
 and §3 of this document is largely an argument about how not to pay that again.

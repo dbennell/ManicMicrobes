@@ -39,6 +39,9 @@ struct Vertex {
     // How much this cell was grown to keep its area. The quad is already that big; this is what
     // the outline gives back along the seams. See the taper in the fragment shader.
     @location(10) swell: f32,
+    // How much of this cell is behind a shell, 0..7/8. Zero for everything that is not a shelled
+    // cell — organelles, dust, the bench's calibration quads — and zero is the identity in `blob`.
+    @location(11) armour: f32,
 };
 
 // Everything but the corner is **flat**, and on the seam directions that is not an optimisation.
@@ -75,6 +78,7 @@ struct Output {
     @location(7) @interpolate(flat) squash_dir3: vec4<f32>,
     @location(8) @interpolate(flat) squash_face3: vec4<f32>,
     @location(9) @interpolate(flat) swell: f32,
+    @location(10) @interpolate(flat) armour: f32,
 };
 
 @vertex
@@ -96,6 +100,7 @@ fn vertex(vertex: Vertex) -> Output {
     out.squash_dir3 = vertex.squash_dir3;
     out.squash_face3 = vertex.squash_face3;
     out.swell = vertex.swell;
+    out.armour = vertex.armour;
     return out;
 }
 
@@ -457,7 +462,7 @@ fn fragment(in: Output) -> @location(0) vec4<f32> {
     field = smax(field, dot(p, d10) - faces3.z, shoulder);
     field = smax(field, dot(p, d11) - faces3.w, shoulder);
 
-    return blob(in.colour, p, r, field, radius, edge, integrity, seed);
+    return blob(in.colour, p, r, field, radius, edge, integrity, seed, in.armour);
 }
 
 /// The same cell with no seam cutting it, over the narrow vertex layout.
@@ -489,7 +494,11 @@ fn dot_fragment(in: DotOutput) -> @location(0) vec4<f32> {
     let radius = outline_radius(seed, integrity, theta, 1.0, 1.0, 0.65);
     let edge = edge_width(r, softness, radius);
     let field = r - radius;
-    return blob(in.colour, p, r, field, radius, edge, integrity, seed);
+    // No armour down here, and that is the narrow layout's whole point: `DotMaterial` carries
+    // four attributes, a cell at this tier is a dozen pixels across, and a mineral rim on one
+    // would be the entire cell. Zero is exactly the identity in `blob`, so this is the same
+    // call it was.
+    return blob(in.colour, p, r, field, radius, edge, integrity, seed, 0.0);
 }
 
 /// The cell itself, once the field is known: the antialiased edge, the body and the membrane.
@@ -507,6 +516,7 @@ fn blob(
     edge: f32,
     integrity: f32,
     seed: f32,
+    armour: f32,
 ) -> vec4<f32> {
     let alpha = 1.0 - smoothstep(-edge, edge, field);
     if (alpha <= 0.001) {
@@ -604,7 +614,38 @@ fn blob(
     // than the cell it bounds has nothing to contrast against, and a packed sheet with no walls
     // reads as one lumpy object rather than as cells. A third is still plainly darker than any
     // body colour on the slide.
-    let body = colour.rgb * lum;
-    let rgb = mix(body, colour.rgb * 0.34, membrane);
+    // --- the shell ---
+    //
+    // **A ring and not an arc.** `organelle::shell_cover` is a *scalar*: one number, and the
+    // catalogue is explicit that the same `control[0]` closes the shell and shades the cell
+    // beneath it because "it is one surface doing one thing". There is no direction anywhere in
+    // it. An arc spanning `cover × 2π` of the perimeter looks more like a mineral test and invents
+    // a facing the simulation does not have; a rim that thickens with cover draws the number that
+    // exists. `docs/MORPHOLOGY.md` §12.3.
+    //
+    // Measured against the *field*, as the membrane is, so the test follows the seams and runs
+    // along a flattened side as well as a curved one.
+    //
+    // **The body under it darkens, and that is the mechanic rather than decoration.** A shell is
+    // opaque, so the light reaching the chloroplasts beneath it is reduced by exactly the fraction
+    // of the body it covers — armour and photosynthesis are rival for that reason, and a cell that
+    // has sealed itself in should look like one that is not getting any light.
+    let body = colour.rgb * lum * (1.0 - 0.42 * armour);
+    var rgb = mix(body, colour.rgb * 0.34, membrane);
+    // At `armour == 0` every term here is exactly the identity — `mix(a, b, 0.0)` is `a*1 + b*0`
+    // as WGSL defines it — so an unshelled cell is drawn the picture it was drawn before this
+    // existed, which is what keeps `shader_probe`, `nine_cells` and the rest honest. The one ulp a
+    // driver may add by evaluating `mix` as `a + t*(b - a)` is the same caveat the note above
+    // `DotVertex` makes, and it lands on the antialiasing ramp where it always has.
+    //
+    // Silica: pale, cool, and plainly not tissue. Lit by the same `lum` as the body so it sits on
+    // the cell rather than over it, and brighter, because a mineral surface is.
+    let test = max(radius * 0.0125 + radius * 0.11 * armour, fwidth(r));
+    let mineral = smoothstep(-test, -test * 0.45, field);
+    // A thin shell is a film and a thick one is opaque. `SHELL_MAX_COVER` is seven eighths, so a
+    // cell that has spent every slot it can on armour still does not reach a flat white — which
+    // is the same refusal of a cliff that the cap itself is.
+    let opaque = clamp(armour * 1.7, 0.0, 1.0);
+    rgb = mix(rgb, vec3<f32>(0.82, 0.86, 0.90) * (0.55 + 0.45 * lum), mineral * opaque);
     return vec4<f32>(rgb, colour.a * alpha);
 }

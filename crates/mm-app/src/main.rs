@@ -3939,6 +3939,7 @@ fn redraw(
             // The newborn swell is deliberately not included: that one is a cell arriving, and
             // it should shrink the whole outline, seams and all.
             swell: dot.area_swell,
+            armour: dot.armour,
         })
     });
     // Organelles, into the same buffers and therefore the same draw call, at the tiers that
@@ -3983,6 +3984,10 @@ fn redraw(
                     squash: Default::default(),
                     // And not swollen, so there is nothing to hand back.
                     swell: 1.0,
+                    // A shell is a wall on the *cell*. An organelle inside one does not get a rim
+                    // of its own, and the contents of a shelled cell are already darkened by the
+                    // light its body is not admitting.
+                    armour: 0.0,
                 });
             }
         }
