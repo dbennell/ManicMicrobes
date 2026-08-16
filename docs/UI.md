@@ -729,6 +729,31 @@ and ignoring both the light and the overlays, because a blocked square genuinely
 it to paint. The mask is empty rather than all-false on a slide with no barriers, so such a
 slide pays neither the copy nor the per-texel branch.
 
+**Two kinds of wall, and rock has a surface.** Since `docs/CHEMISTRY.md` §10 a blocked square is
+either *bedrock* — a hole in the world, permanent, holding nothing — or *rock*, made of minerals
+that dissolve and deposit. The picture says which without a legend, in three ways that all come
+from the same fact rather than from three decisions:
+
+- **Colour.** A mineral square is painted the composition of what it holds, weighted by how much
+  of each and normalised per square, so a silica bank reads cool and a phosphate outcrop warm,
+  and a thin crust and a deep bed of the same mineral are the same colour. Darkened towards
+  `BARRIER_RGB`, because a wall has to read as *solid* before it reads as made of anything: the
+  first blend put a reef at about the value of the water behind it and the rock vanished.
+- **Grit.** Loose grains along the exposed faces only, tinted from the same composition. This is
+  where the raggedness comes from, and it has to: the barrier layer is nearest-sampled precisely
+  so that a wall's edge is where the simulation put it, and softening the texture to make an
+  edge look worn would draw the half-wall §1 forbids. Grains lying against a face are material
+  that has come off the rock, which is what the edge of a real mineral bed looks like.
+- **Surface.** `rock.wgsl` roughens the *inside* of a mineral square — grain and pitting in
+  slide coordinates, so the surface stays on the rock as the view moves and runs continuously
+  across the boundary between two rock squares. The silhouette is untouched; only the value of
+  the colour within a square varies, which is a claim about nothing. Amplitude fades out below a
+  few pixels a square, because grain finer than the pixels drawing it reads as noise that crawls.
+
+Bedrock gets none of the three, and that falls out rather than being arranged: it holds no
+mineral, so there is no composition to colour it with, nothing to shed as grit, and nothing to
+weather. Smooth and plain means permanent; mottled and gritty means the water is working on it.
+
 ### Overlay visibility lives in the legend, not in a menu
 
 Switching a chemical overlay was View ▸ Overlays ▸ item — **three levels of menu**, with the

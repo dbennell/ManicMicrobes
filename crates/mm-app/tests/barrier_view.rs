@@ -85,7 +85,13 @@ fn the_wall_is_painted_and_the_water_beside_it_is_not() {
         water[3], 0,
         "open water is not transparent, so it would hide the field under it"
     );
-    assert_eq!(wall[3], 255, "the wall is not opaque: {wall:?}");
+    assert_eq!(
+        wall[3],
+        art::WALL_BEDROCK,
+        "a wall with no mineral in it did not come out as bedrock: {wall:?}. The alpha channel \
+         carries which kind of wall a square is, not how much of one there is — see \
+         `art::WALL_BEDROCK`"
+    );
     assert!(
         wall[..3].iter().all(|c| *c > 20),
         "the wall came out as a hole rather than a wall: {wall:?}"
@@ -98,9 +104,14 @@ fn the_wall_is_painted_and_the_water_beside_it_is_not() {
 
 #[test]
 fn the_wall_layer_is_binary_which_is_what_makes_it_crisp() {
-    // The property behind the sampler choice. Every texel is fully a wall or fully not, with
-    // no partial alpha anywhere — so nearest sampling has nothing to lose, and the edge on
-    // screen falls exactly on the square boundary the simulation put it at.
+    // The property behind the sampler choice. Every texel is a wall or not, with no *partial*
+    // coverage anywhere — so nearest sampling has nothing to lose, and the edge on screen falls
+    // exactly on the square boundary the simulation put it at.
+    //
+    // The alpha takes one of two non-zero values rather than one, because it also says which
+    // kind of wall the square is (`art::WALL_BEDROCK`, `art::WALL_MINERAL`). Both are opaque:
+    // what matters here is that neither is *between* opaque and clear, which is the value a
+    // sampler could smear and the world does not have.
     //
     // Painted through a *vignette* rather than a flat one, because the vignette scales the
     // colour and must not be allowed to leak into the coverage: a wall that faded out towards
@@ -113,13 +124,13 @@ fn the_wall_layer_is_binary_which_is_what_makes_it_crisp() {
 
     for (i, chunk) in pixels.chunks_exact(4).enumerate() {
         assert!(
-            chunk[3] == 0 || chunk[3] == 255,
+            chunk[3] == 0 || chunk[3] == art::WALL_BEDROCK || chunk[3] == art::WALL_MINERAL,
             "texel {i} has partial coverage {}, which a nearest sampler cannot represent \
              and a linear one would smear",
             chunk[3]
         );
         assert_eq!(
-            chunk[3] == 255,
+            chunk[3] != 0,
             frame.barriers[i],
             "texel {i} disagrees with the mask about whether it is a wall"
         );

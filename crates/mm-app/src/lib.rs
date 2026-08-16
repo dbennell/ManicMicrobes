@@ -43,6 +43,10 @@ pub mod cellmesh;
 /// apart in what they draw through.
 #[cfg(feature = "render")]
 pub mod cellpipe;
+/// The surface of rock, for the same reason and behind the same feature as [`cellpipe`]: a
+/// material and the shader it names, and no logic of its own.
+#[cfg(feature = "render")]
+pub mod rockpipe;
 pub mod debugger;
 pub mod editor;
 pub mod engine;

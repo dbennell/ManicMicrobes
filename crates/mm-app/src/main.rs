@@ -100,6 +100,7 @@ use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 use mm_app::art;
 use mm_app::cellmesh;
 use mm_app::cellpipe;
+use mm_app::rockpipe;
 use mm_app::debugger::{Breakpoint, Breakpoints, Sandbox};
 use mm_app::editor::Editor;
 use mm_app::engine::{Engine, Published, Rate};
@@ -717,6 +718,7 @@ fn main() {
     // `AssetPlugin` is what puts that resource in the world. Before it, this is a panic on the
     // first line of `main` with a message about a missing resource rather than about a shader.
     cellpipe::plugin(&mut app);
+    rockpipe::plugin(&mut app);
     app.add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(EguiPlugin::default())
         .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.03)))
@@ -2203,6 +2205,7 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut cell_materials: ResMut<Assets<cellpipe::CellMaterial>>,
     mut dot_materials: ResMut<Assets<cellpipe::DotMaterial>>,
+    mut rock_materials: ResMut<Assets<rockpipe::RockMaterial>>,
 ) {
     // Order -1 so the slide is composited *before* anything egui draws. bevy_egui attaches its
     // context to a camera, and with both at the default order the tie-break is spawn order —
@@ -2314,14 +2317,19 @@ fn setup(
             ..default()
         },
     ));
+    // The walls are a mesh rather than a sprite, and the only reason is that a sprite cannot
+    // carry a shader. What is drawn is the same texture through the same nearest sampler; what
+    // the material adds is a surface inside a mineral square — see `rockpipe` and `rock.wgsl`.
+    //
+    // A unit rectangle scaled by the transform, so the quad is sized the way the mesh entities
+    // above are and not the way `Sprite::custom_size` is.
     commands.spawn((
         BarrierQuad,
-        Sprite {
-            image: barriers.clone(),
-            color: Color::NONE,
-            custom_size: Some(Vec2::splat(1.0)),
-            ..default()
-        },
+        Mesh2d(meshes.add(Rectangle::new(1.0, 1.0))),
+        MeshMaterial2d(rock_materials.add(rockpipe::RockMaterial {
+            barriers: barriers.clone(),
+        })),
+        Transform::from_xyz(0.0, 0.0, 0.25),
     ));
 
     // The carrion flake, baked once. See `art::hex_tile` for why it is a tile and not a mesh.
@@ -2989,9 +2997,11 @@ fn redraw(
         ),
     >,
     mut barrier_quad: Query<
-        (&mut Sprite, &mut Transform),
+        (&mut Transform, &mut Visibility),
         (
             With<BarrierQuad>,
+            Without<CellMesh>,
+            Without<DotMesh>,
             Without<FieldQuad>,
             Without<MoteSprite>,
             Without<JunctionSprite>,
@@ -3001,8 +3011,17 @@ fn redraw(
         ),
     >,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut cell_mesh: Query<(&Mesh2d, &mut Visibility), (With<CellMesh>, Without<DotMesh>)>,
-    mut dot_mesh: Query<(&Mesh2d, &mut Visibility), (With<DotMesh>, Without<CellMesh>)>,
+    // `Without<BarrierQuad>` for the reason every other query here carries a list of them: the
+    // wall layer became a mesh with a `Visibility` of its own, and two queries that can reach the
+    // same component mutably are rejected when the schedule is built, not when they collide.
+    mut cell_mesh: Query<
+        (&Mesh2d, &mut Visibility),
+        (With<CellMesh>, Without<DotMesh>, Without<BarrierQuad>),
+    >,
+    mut dot_mesh: Query<
+        (&Mesh2d, &mut Visibility),
+        (With<DotMesh>, Without<CellMesh>, Without<BarrierQuad>),
+    >,
     mut motes: Query<
         (&MoteSprite, &mut Sprite, &mut Transform),
         (
@@ -3193,17 +3212,19 @@ fn redraw(
         sprite.custom_size = Some(Vec2::new((b.x - a.x).abs(), (a.y - b.y).abs()));
         transform.translation = ((a + b) / 2.0).with_z(0.0);
     }
-    for (mut sprite, mut transform) in &mut barrier_quad {
+    for (mut transform, mut visible) in &mut barrier_quad {
         let a = to_screen(0.0, 0.0);
         let b = to_screen(frame.width as f32, frame.height as f32);
         // Switched off rather than drawn transparent when there is nothing to draw, so a slide
-        // with no barriers costs no blend and no sample.
-        sprite.color = if frame.barriers.is_empty() {
-            Color::NONE
+        // with no barriers costs no blend and no sample. `Visibility` rather than a clear tint,
+        // because the mesh carries no tint to clear.
+        *visible = if frame.barriers.is_empty() {
+            Visibility::Hidden
         } else {
-            Color::WHITE
+            Visibility::Visible
         };
-        sprite.custom_size = Some(Vec2::new((b.x - a.x).abs(), (a.y - b.y).abs()));
+        // A unit rectangle, so the scale *is* the size in pixels.
+        transform.scale = Vec3::new((b.x - a.x).abs(), (a.y - b.y).abs(), 1.0);
         // Above the field, below the junctions at 0.5 and the cells above them: a wall is part
         // of the slide, and everything alive sits on top of it.
         transform.translation = ((a + b) / 2.0).with_z(0.25);

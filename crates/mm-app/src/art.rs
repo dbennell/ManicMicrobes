@@ -119,6 +119,31 @@ pub fn variant_of(id: u64) -> usize {
 /// visible on an unlit slide, dark enough not to compete with the cells, which are the subject.
 pub const BARRIER_RGB: [f32; 3] = [0.17, 0.18, 0.22];
 
+/// What the barrier layer's alpha says, beyond "there is a wall here".
+///
+/// **The channel carries the kind of wall, not how much of one.** Both values are opaque as far
+/// as the picture is concerned — `rock.wgsl` writes an alpha of one for either — and the number
+/// is read by the shader to decide whether to put a surface on the square. Bedrock is a hole in
+/// the world with nothing in it to weather; rock is made of minerals and is worn by the water,
+/// and the two should not look like the same stuff.
+///
+/// It rides in the alpha rather than in a second texture because it is one bit per square and a
+/// second texture is a second binding, a second allocation and a second thing to resize when a
+/// scenario changes shape. Anything at or above [`WALL_MINERAL`] is weathered, anything below it
+/// and above zero is a wall drawn flat, and zero is open water.
+pub const WALL_BEDROCK: u8 = 160;
+
+/// A wall made of minerals: weathered by `rock.wgsl`, and gritty along its exposed faces.
+pub const WALL_MINERAL: u8 = 255;
+
+/// The alpha at or above which `rock.wgsl` calls a texel a wall at all, and below which it
+/// discards. **This must match `WALL` in that file**, which holds it as a fraction: 0.25.
+///
+/// It is written down here as well because the two ends of the encoding are in different
+/// languages, and the failure if they disagree is not a compile error — it is walls that stop
+/// being drawn, or water that starts being.
+pub const WALL_MIN: u8 = 64;
+
 /// Paint the barrier mask into its own RGBA buffer, transparent everywhere else.
 ///
 /// # Why this is not a layer of [`paint_field`]
@@ -177,6 +202,7 @@ pub fn paint_barriers(
                 // slide whose background is a mid warm grey that means going down, not up. So the
                 // hue is the mineral's and the value is the barrier's: half of `BARRIER_RGB` for
                 // the weight, a third of the composition for the colour.
+                let held = matches!(mineral.get(i), Some(m) if m[0] + m[1] + m[2] > 0.0);
                 let rgb = match mineral.get(i) {
                     Some(m) if m[0] + m[1] + m[2] > 0.0 => [
                         0.42 * BARRIER_RGB[0] + 0.30 * m[0],
@@ -188,7 +214,7 @@ pub fn paint_barriers(
                 for k in 0..3 {
                     px[k] = ((rgb[k] * d).clamp(0.0, 1.0) * 255.0) as u8;
                 }
-                px[3] = 255;
+                px[3] = if held { WALL_MINERAL } else { WALL_BEDROCK };
             } else {
                 // Fully transparent, so the field shows through unchanged. Zeroed rather than
                 // left alone because this buffer is reused between frames and a wall that was
@@ -625,6 +651,20 @@ mod tests {
         let phosphate = paint(vec![norm([220, 180, 90])]);
         let silica = paint(vec![norm([180, 180, 200])]);
 
+        // And the alpha says which kind of wall it is, which is what `rock.wgsl` reads to decide
+        // whether to weather the surface. Both are opaque; the number is a label, not a coverage.
+        let alpha = |mineral: Vec<[f32; 3]>| {
+            let mut px = [0u8; 4];
+            paint_barriers(&mut px, 1, 1, &[true], &mineral, |_, _| 1.0);
+            px[3]
+        };
+        assert_eq!(alpha(Vec::new()), WALL_BEDROCK, "plain rock is not bedrock");
+        assert_eq!(
+            alpha(vec![norm([180, 180, 200])]),
+            WALL_MINERAL,
+            "a square with mineral in it was labelled bedrock, so its surface is drawn flat"
+        );
+
         assert_ne!(
             phosphate, silica,
             "two walls of different composition painted the same colour: the composition is being \
@@ -904,9 +944,22 @@ mod tests {
         // The field still paints chemistry under the wall — it is the wall layer on top,
         // opaque, that hides it. Cheaper than branching per texel, and invisible because a
         // blocked square holds nothing to paint in the first place.
+        //
+        // **What "opaque" means here changed when the alpha became a label.** The channel now
+        // says which *kind* of wall the square is ([`WALL_BEDROCK`], [`WALL_MINERAL`]) and
+        // `rock.wgsl` writes an alpha of one for either, so the drawn opacity is the shader's
+        // and cannot be read out of this buffer. What this can still hold is the half that
+        // would break it silently: the label has to sit above the cut-off the shader discards
+        // below, or a wall stops being drawn at all.
+        assert!(
+            wall_layer[7] >= WALL_MIN,
+            "the wall's label {} is below the cut-off `rock.wgsl` discards at, so the square \
+             would not be drawn",
+            wall_layer[7]
+        );
         assert_eq!(
-            wall_layer[7], 255,
-            "the wall is not opaque over the overlay"
+            wall_layer[7], WALL_BEDROCK,
+            "a wall with no mineral in it is not labelled bedrock"
         );
         assert_eq!(wall_layer[3], 0, "open water is not transparent");
     }
