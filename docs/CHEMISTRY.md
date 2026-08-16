@@ -836,3 +836,265 @@ measurement into a slide that is 100% wall on the first weathering step — whic
 Making nucleation deposit a grain-sized amount keeps "a grain, not a wall" true by arithmetic and
 leaves surface growth to do the rest, but surface growth is capped at one deposit per square, so
 that needs the cap lifted too. Both dials are in `MineralRates`.
+
+## 11. The carbonate system: store the buffer, read the pH
+
+Design only. Nothing below is built.
+
+§8 gave the world a nitrogen cycle and §10 gave it rock. This is the third: a **carbonate
+buffer**, a pH that follows from it, calcium as the fourth mineral, and two catalogue entries that
+make the swing matter to something alive.
+
+The framing that decided its shape is the aquarium, not the ocean model. A fish tank is simulated
+by a handful of coupled cycles — nitrogen, carbon, KH, calcium — and it behaves like a tank
+because of them; it does not need speciation constants to do it. This is the same bargain SPEC
+makes everywhere else, and §11 is written to take the cheapest mechanism that produces the
+behaviour, not the most faithful one.
+
+### Why pH is not a plane
+
+**pH is not matter.** It does not conserve, so a `chem` plane holding it would be a field the M1
+gate cannot check and a hole in the one invariant this project will not trade — §8 already refused
+a nitrogen-importing port for the same reason and paid a whole chemical instead.
+
+The aquarium says how to have it anyway, because a tank keeps the two apart already: you **measure
+KH**, which is matter in the water, and you **read pH**, which is a number derived from it. So:
+
+> **Store the buffer. Derive the pH.**
+
+The buffer is a chemical, conserved like everything else. The pH is a function of two planes at a
+square, computed where it is needed and stored nowhere — which means hard rule 7 is untouched,
+there is nothing to serialise, and there is no way for a saved world to come back with a pH that
+disagrees with the chemistry that produced it.
+
+### The driver already exists
+
+Nothing has to be built to make biology move this, which is the strongest argument for the whole
+section. The metabolic chemistry is already:
+
+```
+photosynthesis:  2 CO2 + light -> sugar + O2
+respiration:     sugar + O2   -> energy + 2 CO2
+```
+
+CO₂ is produced by every respiring cell and consumed by every photosynthesising one, and §7
+measured how hard it swings: on a 64² slide seeded at 400 units, **26,667 of CO₂ consumed against
+13,333 of sugar and 13,333 of oxygen produced** — the pool very nearly emptied by the population
+and then refilled as respiration caught up. That is already a biology-driven acid-base swing with
+nothing reading it.
+
+### Two chemicals
+
+| | index | saturation | diffusion | advection | structural | why |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| calcium | 17 | `Q10 * 24` | `Q10/24` | `Q10/2` | yes | mobile enough to arrive, slow enough that a reef is a place |
+| carbonate | 18 | `Q10 * 24` | `Q10/12` | `Q10` | no | the buffer has to be well mixed or it is not a buffer |
+
+Both join `chem::SOLID_CHEMICALS`, taking `SOLID_COUNT` to four. Calcite is not a fifth species:
+it is a square holding **both** planes as solid, and `Substrate::solid_total_at` already sums
+across planes for exactly this reason — §10 records that judging a wall one plane at a time opened
+walls that were plainly solid, and "a reef made of two minerals is a reef".
+
+Carbonate is `structural: false` and has no `energy_yield`: it is not something to be built out of
+or burnt, it is the water's capacity to absorb an insult.
+
+The saturations are the least-supported numbers here and are flagged as such below.
+
+### pH, derived
+
+Integer, bounded, and monotone in the ratio that matters:
+
+```
+r  = ((carbonate - co2) * Q10) / (carbonate + co2)      // i64 intermediate; [-Q10, +Q10]
+pH = 7*Q10 + 7*r                                        // [0, 14*Q10]
+```
+
+Both planes empty at a square gives `pH = 7*Q10` by definition rather than by division — neutral
+water is the honest reading for water with no carbon chemistry in it.
+
+**It is linear in a bounded ratio where the real thing is logarithmic, and that is deliberate.**
+Every mechanism downstream needs monotone, bounded and cheap; none of them needs the decade. A
+`log2` over fixed point would be three times the arithmetic to move a threshold that is going to
+be swept empirically anyway. If a sweep later shows the linear version compresses the interesting
+range, the function is one place and can be changed without touching anything that reads it.
+
+Computed on demand from the two planes, never stored. `sense_chemical` already reads a square and
+its neighbours to produce a value and two gradients, so a pH gradient costs the same walk twice
+and no state.
+
+### What the buffer does, for free
+
+The whole point of a ratio: **a square thick with carbonate barely moves when respiration dumps
+CO₂ into it; a square scoured of carbonate swings hard.** That is KH, and it is emergent from the
+arithmetic rather than a mechanism anybody wrote. A slide with a deep carbonate pool is a stable
+world; one that has had its carbonate locked into reef is a world where a crowd can crash its own
+pH — and get it back only by dissolving the reef.
+
+Over a day/night cycle that gives a **diel swing** with no new machinery: the mat photosynthesises,
+CO₂ falls, pH rises, calcite precipitates; at night respiration takes over, pH falls, calcite
+dissolves and returns its carbonate to the water. A carbonate cycle beside the carbon and nitrogen
+ones, driven entirely by what the cells are already doing.
+
+### Calcite: precipitation and dissolution are a mechanism, not a table edit
+
+§10's weathering law is one `saturation` per chemical, compared per plane. Calcite cannot use it:
+it is a function of **three** quantities at a square — calcium, carbonate and pH — and §8 has the
+precedent written down already, from denitrification: *"an oxidant-gated reversion is not
+`decay_to` plus `decay_rate` ... it is a function of two chemicals at a square, so it is a
+mechanism and not a table edit."*
+
+So `World::weather` gains a calcite arm beside the existing per-plane one:
+
+* **precipitates** where `calcium * carbonate` exceeds a solubility product **and** pH is above a
+  threshold, taking both out of the water in equal measure and into the two solid planes;
+* **dissolves** where pH is below it, returning both — at a rate driven by how far below, which is
+  the same deficit shape the existing law uses and keeps the two recognisably one law;
+* **closes the square** by the same derived rule everything else uses: `solid_total_at` over the
+  threshold is rock, under it is a crust.
+
+The reef is then the buffer's reservoir, which is the behaviour a real tank has and the reason
+this is worth building: acid dissolves the substrate, the substrate raises the buffer, the buffer
+resists further acid. Negative feedback that nobody wrote as a feedback.
+
+**This inherits §10's open fault.** The promotion-to-rock test currently only runs on the
+deposition path, so a square that gains solid any other way sits above the wall line and never
+closes. Calcite must not be built on top of that; §10's "Built, and two things found afterwards"
+has to be settled first, or the calcite arm gets the same bug on day one.
+
+### The calcite shell, at slot 31
+
+`Shell = 15` and `Reserved31` is empty — and that is not a free slot, it is *the* slot. The
+catalogue's upper half is laid out so bit 4 of a type operand means "the same job done a different
+way", so a single copy error moves a lineage between siblings; the layout comment says a
+`Reserved` entry up there means "this organ has no variant yet, which is a meaningful reservation
+rather than filler". A calcite test at 31 is one mutation from a silica test at 15.
+
+**It has to be a sibling and not an option on the existing entry.** `OrganelleSpec::build_trace`
+is a fixed `[i32; CHEM_COUNT]` and every non-zero entry is *required*: the affordability gate
+refuses if any is short, and all are charged and refunded together. Putting calcium beside silicon
+in the shell's trace makes a shell needing **both**, not either. The two alternatives are worse: a
+recipe selected by a control word puts a branch in the gate, the charge and all four refund sites
+— that is a branch in the conservation path; and a substitutable trace needs the organelle to
+*remember which mineral it was made of* so the refund can return it, which is new per-slot state
+and hard rule 7 on top.
+
+Priced against its sibling rather than against the catalogue, since that is the comparison a
+mutation is actually making:
+
+| | silica shell (15) | calcite shell (31) | why |
+| --- | ---: | ---: | --- |
+| `build_matter` | `q10(13)` | `q10(11)` | limestone is cheaper to lay down than glass |
+| `build_energy` | `q10(20)` | `q10(14)` | and much cheaper to precipitate |
+| `build_ticks` | 28 | 18 | armour you can raise in a hurry |
+| `upkeep` | `q10(8)/96` | `q10(8)/96` | same: a wall is cheap to keep |
+| `teardown_recovery` | `Q10/8` | `Q10/8` | mineral put down does not come back up |
+| `build_trace` | silicon `q10(6)` | calcium `q10(4)` + carbonate `q10(4)` | |
+
+The trade is the point. Silica is dear, slow and **pH-indifferent**; calcite is cheap, quick and
+**dissolves in acid** — so a calcite-armoured cell in a crowded respiring mat is paying for its
+neighbours' CO₂, and the same cell in bright open water is armoured for nearly nothing. Neither
+dominates, which is the test of whether a sibling was worth a slot.
+
+Dissolution acts on the organelle, not just on the rock: below the threshold a calcite shell loses
+coverage over time and its silicon returns — mechanically the same as `TEAR`'s partial recovery,
+which already exists, gated on pH rather than on a genome's instruction.
+
+### The pH sensor, at slot 23
+
+`Chemosensor = 7` pairs with the empty `Reserved23`. Same argument, same slot logic: one bit-flip
+retunes a lineage from tasting a chemical to tasting acidity.
+
+It reads like its sibling — `index % 3` gives the value and the two gradients — and reports pH in
+`Q10` rather than divided down to whole units, following the photosensor's glow readings, whose
+note gives the reason: a reading rounded to integers loses everything a gradient is made of.
+
+Priced as the `cheap` default with `nitrogen_trace(618)`, exactly as the other three sensors are.
+**And it wants the same caveat §8 attached to that number**: the sensors are the cost of perceiving
+at all, taxing them is a distinct pressure from taxing metabolism, and a fourth sensor is a fourth
+call on the same sixteen slots. If behaviour changes when this lands, this entry has to be ruled in
+or out separately.
+
+Without it the swing would select on lineages that cannot act on it, which is a pressure with no
+strategy behind it. With it, "swim away from the acid" and "build armour only where the water is
+sweet" are both reachable by mutation.
+
+### What this costs
+
+Measured on the development machine, performance-core pool, ancestor grown to ~11–12k cells, still
+water, ten planes carrying matter:
+
+| grid | whole tick | fluid step | fluid share | one more plane |
+| --- | ---: | ---: | ---: | ---: |
+| 256² | 5.73 ms | 0.39 ms | 7% | +0.04 ms (0.7% of a tick) |
+| 500² | 9.58 ms | 0.90 ms | 9% | +0.09 ms (0.9% of a tick) |
+
+Two always-present planes is therefore **about 1.5–1.9% of a tick**, and pH itself is free because
+it is derived from planes already being walked.
+
+**§8's cost table has been misread and this is why.** Its +8%/+15% figures are shares of the *fluid
+step*, measured at 512² with every plane carrying matter and the water moving — the M1 gate's
+workload, chosen deliberately as the worst case, where the fluid essentially *is* the tick. On a
+populated slide the cells dominate and the fluid is under a tenth of it. Both numbers are right and
+they are not the same number.
+
+Flow matters more than plane count: advection roughly doubles to triples the step (500², eleven
+planes: 1.03 ms still against 2.46 ms flowing), and a plane with advection on costs about 2.5× one
+with only diffusion. `fluid_interval` divides all of it.
+
+### What is deliberately not modelled
+
+Written down because the fishbowl argument is only worth anything if the line is somewhere:
+
+* **No DIC speciation.** One carbonate pool, not CO₂/H₂CO₃/HCO₃⁻/CO₃²⁻ in equilibrium.
+* **No alkalinity-versus-DIC distinction.** The buffer is one number.
+* **No temperature, no salinity, no ionic strength.** Nothing here has a temperature.
+* **No log scale**, per above.
+* **No aragonite/calcite polymorphs**, no magnesium.
+* **pH does not directly harm a cell.** It acts through calcite and through what a genome chooses
+  to do about it. A direct metabolic penalty is listed as open below rather than assumed — a
+  mechanism that kills is a big lever and wants its own measurement.
+
+### The decisions that are open
+
+1. **Every number above.** The saturations, the solubility product, the pH thresholds and the
+   precipitation rate are written from stoichiometry and shape, not from a sweep. §6's lesson is
+   that a requirement is not a binding constraint and the one you did not measure alone is the one
+   that was two orders out.
+2. **CO₂ is doing double duty.** It is already the carbon source and already the thing §7 says
+   runs out; making it the acid couples two pressures through one pool. That is correct chemistry
+   and it is also a real design coupling, and it means a change to photosynthesis is now also a
+   change to pH.
+3. **Whether pH should have a direct metabolic cost.** Left out above. If it goes in, it wants to
+   be its own experiment.
+4. **Whether the reef's carbonate should be reachable by a cell.** A lysosome or exoenzyme that
+   can dissolve calcite directly would make bioerosion a strategy. Not proposed here; noted so it
+   is not stumbled into.
+
+### Acceptance tests
+
+* `tests/carbonate.rs::total_carbon_is_constant_across_water_reef_and_body` — over 200 ticks, the
+  M1 discipline applied to the new compartments.
+* `..::a_crowd_acidifies_its_own_water_and_a_mat_sweetens_it` — pH falls under respiration and
+  rises under photosynthesis, on the same slide, from the existing pathways alone.
+* `..::carbonate_buffers_the_swing` — the same CO₂ insult moves pH less in high-carbonate water
+  than in low, monotonically. **This is the test the section exists for.**
+* `..::calcite_precipitates_above_the_line_and_dissolves_below_it`, and conserves both ways.
+* `..::a_reef_dissolving_raises_the_buffer` — the negative feedback, end to end.
+* `..::a_calcite_shell_wears_in_acid_and_a_silica_shell_does_not` — the pair, as §10's rock and
+  bedrock are tested as a pair, because either half alone passes on a re-skin.
+* `..::a_genome_can_follow_a_ph_gradient` — the sensor reaches a behaviour, not just a number.
+* And the guard that has now been earned twice: the mm-app world test must hold every scenario to
+  seeding calcium and carbonate, and a shipped genome must *eat* them. §8 records both halves of
+  that lesson — a world test cannot catch a gate, a gate cannot catch an empty world, and neither
+  catches a cell that never goes shopping.
+
+### Versioning
+
+Two landings, two stamps (hard rule 8):
+
+* **ISA 12** — calcium and carbonate exist, calcium is a rock, seeded everywhere, genomes taught to
+  eat them. `chem_index` reduces `% CHEM_COUNT`, so every genome operand at or above 17 changes
+  meaning; archived genomes replay under 11.
+* **ISA 13** — the calcite shell at 31 and the pH sensor at 23. The derived pH, the buffer and the
+  calcite weathering arm need no stamp of their own: nothing a genome can observe changes until
+  the catalogue does.
