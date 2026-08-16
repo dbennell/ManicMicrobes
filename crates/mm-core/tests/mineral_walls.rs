@@ -615,3 +615,154 @@ fn a_wall_that_grew_closes_the_masks_and_shows_on_the_slide() {
     );
     world.check_matter().expect("growing a wall must conserve");
 }
+
+/// **The hand can lay rock, and rock is not bedrock.**
+///
+/// `World::set_barriers` — the drawing tool's call — can only ever make the permanent kind: a
+/// blocked square holding nothing, with nothing in it to dissolve. A reef that gives its mineral
+/// up to thirsty water was something a scenario file could author with `Seeding::Rock` and a hand
+/// could not draw. `World::set_rock` is the hand's version of that recipe.
+///
+/// The claim is the pair, not either half: the same stroke drawn both ways gives two walls that
+/// look identical and behave oppositely. Testing only that rock blocks would pass on a tool that
+/// quietly drew bedrock.
+#[test]
+fn rock_laid_by_hand_wears_away_and_bedrock_does_not() {
+    let squares: Vec<(u32, u32)> = (8..16).map(|y| (12, y)).collect();
+    // **Silicon, and the choice is not arbitrary.** Phosphate is deliberately immobile — zero
+    // diffusion and zero advection, so that an outcrop is a *location* rather than a level and a
+    // stripped patch heals only when something dies there. The consequence for a reef is that
+    // what it dissolves has nowhere to go: the water against its face fills to saturation, the
+    // deficit the dissolution rate is a fraction *of* goes to nothing, and a phosphate wall
+    // stalls behind its own skin at 8177 of 8192 for as long as you care to run it. Measured,
+    // not assumed. Silica is middling mobile and is the mineral a reef is actually made of.
+    let c = SOLID_CHEMICALS[1];
+    let k = solid_slot(c).expect("solid-capable");
+
+    let mut rock = World::new(slide()).expect("world");
+    let dose = rock.rock_dose();
+    let placed = rock.set_rock(&squares, c, dose);
+    assert_eq!(
+        placed,
+        dose * squares.len() as i32,
+        "the stroke did not lay what it was asked for"
+    );
+    for &(x, y) in &squares {
+        let i = rock.substrate().index(x as i32, y as i32);
+        assert!(rock.substrate().blocked()[i], "rock at ({x},{y}) is not a wall");
+        assert!(
+            rock.substrate().solid_at(k, x as i32, y as i32) > 0,
+            "the wall at ({x},{y}) holds no mineral, which makes it bedrock"
+        );
+    }
+    assert!(
+        rock.substrate().has_barriers(),
+        "the slide does not report the walls the tool just drew, so nothing is drawn"
+    );
+    rock.check_matter().expect("laying rock must conserve");
+
+    let mut bedrock = World::new(slide()).expect("world");
+    bedrock.set_barriers(&squares, true);
+    for &(x, y) in &squares {
+        assert_eq!(
+            bedrock.substrate().solid_at(k, x as i32, y as i32),
+            0,
+            "the barrier tool took up mineral, which would make its walls dissolve"
+        );
+    }
+
+    // Thirsty water on both sides of both walls, so the weathering law has a deficit to work
+    // against. Without it a wall in saturated water dissolves not at all, which is the whole
+    // shape of the law and would pass this test for the wrong reason.
+    for world in [&mut rock, &mut bedrock] {
+        for y in 0..24i32 {
+            for x in 0..24i32 {
+                world.substrate_mut().set_chem(c, x, y, 0);
+            }
+        }
+        world.adopt_current_contents_as_baseline();
+        world.run(20_000);
+    }
+
+    let still_rock = squares
+        .iter()
+        .filter(|(x, y)| rock.substrate().blocked()[rock.substrate().index(*x as i32, *y as i32)])
+        .count();
+    assert!(
+        still_rock < squares.len(),
+        "twenty thousand ticks in water stripped bare and not one square of rock opened; a reef \
+         that never wears is bedrock with extra steps"
+    );
+    let still_bedrock = squares
+        .iter()
+        .filter(|(x, y)| {
+            bedrock.substrate().blocked()[bedrock.substrate().index(*x as i32, *y as i32)]
+        })
+        .count();
+    assert_eq!(
+        still_bedrock,
+        squares.len(),
+        "bedrock wore away, and it has nothing in it to wear"
+    );
+    rock.check_matter().expect("dissolving rock must conserve");
+}
+
+/// Rock made of something that cannot be solid is refused, not diverted into the water.
+#[test]
+fn a_reef_of_sugar_is_refused() {
+    let mut world = World::new(slide()).expect("world");
+    let sugar = 8;
+    assert!(solid_slot(sugar).is_none(), "the fixture picked a mineral");
+    let before = world.total_matter();
+    let placed = world.set_rock(&[(10, 10)], sugar, world.rock_dose());
+    assert_eq!(placed, 0, "sugar was laid as rock");
+    assert!(
+        !world.substrate().blocked()[world.substrate().index(10, 10)],
+        "a refused ask still raised a wall"
+    );
+    assert_eq!(
+        world.total_matter(),
+        before,
+        "a refused ask changed the world's totals"
+    );
+}
+
+/// And what the hand drew is in the scenario, so saving and reopening gives it back.
+#[test]
+fn rock_laid_by_hand_is_written_into_the_scenario() {
+    let mut world = World::new(slide()).expect("world");
+    let c = SOLID_CHEMICALS[1];
+    let dose = world.rock_dose();
+    world.set_rock(&[(6, 6), (6, 7)], c, dose);
+    // Twice over the same square, which is what leaning on a brush does.
+    world.set_rock(&[(6, 6)], c, dose);
+
+    let laid: Vec<_> = world
+        .scenario()
+        .seeding
+        .iter()
+        .filter(|s| matches!(s, Seeding::Rock { chemical, .. } if *chemical == c))
+        .collect();
+    assert_eq!(
+        laid.len(),
+        2,
+        "a second stroke over the same square appended an entry instead of growing one: {laid:?}"
+    );
+    let at_66 = laid
+        .iter()
+        .find(|s| matches!(s, Seeding::Rock { x: 6, y: 6, .. }))
+        .expect("the square that was drawn twice is not in the scenario");
+    assert!(
+        matches!(at_66, Seeding::Rock { per_square, .. } if *per_square == dose * 2),
+        "the entry did not grow by the second stroke: {at_66:?}"
+    );
+
+    // And the recipe rebuilds the same slide.
+    let reopened = World::new(world.scenario().clone()).expect("world");
+    for (x, y) in [(6u32, 6u32), (6, 7)] {
+        assert!(
+            reopened.substrate().blocked()[reopened.substrate().index(x as i32, y as i32)],
+            "reopening the scenario lost the rock at ({x},{y})"
+        );
+    }
+}

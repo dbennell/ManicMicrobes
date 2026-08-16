@@ -238,3 +238,62 @@ fn the_eraser_can_take_back_what_the_pen_drew() {
         "the eraser left some of the wall behind"
     );
 }
+
+/// **The rock tool draws a wall that is made of something, and the picture says so.**
+///
+/// The barrier tool can only ever draw bedrock — a blocked square holding nothing, permanent
+/// because there is nothing in it to dissolve. This is the other kind, end to end through the
+/// stroke the front end actually makes: the brush's squares, the batched world call, the frame,
+/// and the texels. It is one test rather than three because the failure it is guarding against
+/// is the seam — rock that reaches the substrate and not the frame, or the frame and not the
+/// alpha, looks exactly like rock that was never laid.
+#[test]
+fn a_stroke_of_rock_reaches_the_texels_as_rock() {
+    let mut scenario = mm_core::Scenario {
+        width: 32,
+        height: 32,
+        light: LightRegime::Uniform { intensity: 0 },
+        ..Scenario::default()
+    };
+    scenario.barriers.clear();
+    let mut slide = Slide::new(scenario).expect("slide");
+
+    let silica = mm_core::chem::SOLID_CHEMICALS[1];
+    let squares: Vec<(u32, u32)> = mm_app::ui::line_squares((8, 16), (24, 16))
+        .into_iter()
+        .flat_map(|c| mm_app::ui::brush_squares(c, 3))
+        .filter(|(x, y)| *x >= 0 && *y >= 0)
+        .map(|(x, y)| (x as u32, y as u32))
+        .collect();
+    let dose = slide.world().rock_dose();
+    let laid = slide.world_mut().set_rock(&squares, silica, dose);
+    assert!(laid > 0, "the stroke laid no mineral at all");
+
+    let frame = slide.frame();
+    let (w, h) = (frame.width as usize, frame.height as usize);
+    let at = |x: u32, y: u32| (y * frame.width + x) as usize;
+    assert!(
+        frame.barriers[at(16, 16)],
+        "the rock never became a wall the frame knows about"
+    );
+    assert!(
+        frame.mineral[at(16, 16)].iter().sum::<f32>() > 0.0,
+        "the wall carries no mineral colour, so it would be painted as plain bedrock"
+    );
+
+    let mut pixels = vec![0u8; w * h * 4];
+    art::paint_barriers(&mut pixels, w, h, &frame.barriers, &frame.mineral, &|_, _| 1.0);
+    let texel = |x: usize, y: usize| {
+        let i = (y * w + x) * 4;
+        [pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]]
+    };
+    assert_eq!(
+        texel(16, 16)[3],
+        art::WALL_MINERAL,
+        "the texel says bedrock, so `rock.wgsl` leaves it flat and a reef looks like a hole in \
+         the world rather than like stone"
+    );
+    // And beside the stroke is still water, which is the half that catches a tool painting the
+    // whole slide.
+    assert_eq!(texel(16, 22)[3], 0, "open water was painted as rock");
+}

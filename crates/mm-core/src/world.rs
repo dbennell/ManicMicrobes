@@ -2325,6 +2325,119 @@ impl World {
         self.set_barriers(&[(x, y)], blocked);
     }
 
+    /// How much solid a square wants before it reads as rock rather than a crust, `Q10`.
+    ///
+    /// Twice `MineralRates::wall_threshold`: enough that the square is unambiguously a wall and
+    /// survives a weathering step or two in thirsty water, little enough that it is *rock* and
+    /// wears away rather than standing forever. A reef laid at the threshold itself opens on the
+    /// first step that dissolves anything out of it, which reads as the tool not working.
+    #[must_use]
+    pub fn rock_dose(&self) -> i32 {
+        self.biology.minerals.wall_threshold.saturating_mul(2)
+    }
+
+    /// Lay rock over many squares as one edit: solid mineral, and a wall wherever it is thick
+    /// enough to be one. Returns how much solid actually landed, `Q10`.
+    ///
+    /// # Rock is not bedrock, and that is the whole reason this exists beside `set_barriers`
+    ///
+    /// Nothing declares which kind of wall a square is; the difference is only what it holds
+    /// (`docs/CHEMISTRY.md` §10). A blocked square holding no solid is **bedrock** — there is
+    /// nothing in it to dissolve, so it never enters the weathering loop and is permanent. A
+    /// blocked square holding solid is **rock** — it gives its mineral up to thirsty water,
+    /// faster where cells are stripping that water, and opens when it is worn past
+    /// `MineralRates::wall_threshold`.
+    ///
+    /// So the barrier tool could only ever draw the permanent kind, and a reef that dissolves —
+    /// the thing §9 argues phosphorus and silicon come out of — was something a scenario file
+    /// could author with `Seeding::Rock` and a hand could not draw. This is the hand's version of
+    /// that recipe.
+    ///
+    /// # Where the matter comes from
+    ///
+    /// From outside the world, through the ledger, exactly as [`World::inject`] does for the
+    /// paint brush — `record_injected` plus whatever latent energy the chemical carries. A tool
+    /// that conjured a reef out of nothing would break I4 as thoroughly as a bug in the solver
+    /// and would be harder to find, because the books would blame the physics.
+    ///
+    /// Anything not in [`crate::chem::SOLID_CHEMICALS`] is refused rather than diverted into the
+    /// water: rock made of sugar is a thing the world does not have, and quietly turning the ask
+    /// into dissolved sugar would hide the mistake instead of leaving it visible.
+    ///
+    /// Squares already occupied by a cell are blocked anyway, which is what [`World::set_barriers`]
+    /// does and is the behaviour a brush wants. `World::weather` refuses them instead, and that
+    /// difference is deliberate: rock closing over a cell by itself is the physics doing something
+    /// nobody asked for, and a brush is somebody asking.
+    pub fn set_rock(&mut self, squares: &[(u32, u32)], chemical: usize, per_square: i32) -> i32 {
+        let Some(k) = crate::chem::solid_slot(chemical) else {
+            return 0;
+        };
+        if per_square <= 0 {
+            return 0;
+        }
+        let threshold = self.biology.minerals.wall_threshold;
+        let (w, h) = (self.substrate.width(), self.substrate.height());
+        let mut placed = 0i32;
+        for &(x, y) in squares {
+            if x >= w || y >= h {
+                continue;
+            }
+            let (ix, iy) = (x as i32, y as i32);
+            let moved = self.substrate.add_solid(k, ix, iy, per_square);
+            if moved > 0 {
+                placed = placed.saturating_add(moved);
+                self.ledger.record_injected(chemical, i64::from(moved));
+                let latent = self.biology.metabolism.latent_in(
+                    &self.scenario.chemicals,
+                    chemical,
+                    i64::from(moved),
+                );
+                self.ledger.import(latent);
+                self.note_rock(chemical, x, y, moved);
+            }
+            // The same derived law the weathering uses, asked of the square's *whole* solid: a
+            // reef of two minerals is a reef, and a square already holding silica needs less
+            // phosphate to close than an empty one does.
+            if self.substrate.solid_total_at(ix, iy) > threshold {
+                self.place_barrier(x, y, true);
+            }
+        }
+        // Once for the batch, as `set_barriers` does and for the same reason — and it is the
+        // correctness rather than the saving. See `World::weather`.
+        self.substrate.rebuild_edge_masks();
+        placed
+    }
+
+    /// Keep `scenario.seeding` in step with rock laid on the slide by hand.
+    ///
+    /// The same argument as `record_barriers` and `note_seeding`: a reef drawn into the substrate
+    /// and nowhere else is a reef that vanishes when the scenario is saved and opened again. A
+    /// stroke becomes a run of one-square `Seeding::Rock` entries, which is verbose in the file
+    /// and exactly right — an authored reef stays the rectangle it was authored as until somebody
+    /// draws over it, and the file says what is actually there.
+    ///
+    /// Merged per square rather than appended, so leaning on the brush over one patch is one
+    /// entry that grows and not ten thousand saying the same thing.
+    fn note_rock(&mut self, chemical: usize, x: u32, y: u32, delta: i32) {
+        if let Some(i) = self.scenario.seeding.iter().position(|s| {
+            matches!(s, crate::Seeding::Rock { chemical: c, x: sx, y: sy, width: 1, height: 1, .. }
+                if *c == chemical && *sx == x && *sy == y)
+        }) {
+            if let crate::Seeding::Rock { per_square, .. } = &mut self.scenario.seeding[i] {
+                *per_square = per_square.saturating_add(delta);
+            }
+            return;
+        }
+        self.scenario.seeding.push(crate::Seeding::Rock {
+            chemical,
+            x,
+            y,
+            width: 1,
+            height: 1,
+            per_square: delta,
+        });
+    }
+
     /// Draw or erase many barrier squares as one edit.
     ///
     /// The same thing [`World::set_barrier`] does, `n` times, with the fluid's edge masks

@@ -361,11 +361,36 @@ Setting an experiment up is half of what this is for, and until now the only sli
 build in the front end was one with walls on it. Everything else — the chemistry, the sources,
 who lives there — was a `.ron` and a text editor.
 
-The tools are `Select, Move, Remove, DrawBarrier, EraseBarrier, Paint, Unpaint, Source, Drain,
-PlaceCell`, on `F1`–`F10`. The last five are the new ones. `Paint` and `Unpaint` stroke like the
-wall tools do, at the same brush width; `Source` and `Drain` are dragged as rectangles, because a
-flux is an area and clicking a point cannot say how big; `PlaceCell` drops founders of a named
-genome where you point.
+The tools are `Select, Move, Remove, DrawBarrier, DrawRock, EraseBarrier, Paint, Unpaint, Source,
+Drain, PlaceCell`, on `F1`–`F11`. `Paint` and `Unpaint` stroke like the wall tools do, at the same
+brush width; `Source` and `Drain` are dragged as rectangles, because a flux is an area and
+clicking a point cannot say how big; `PlaceCell` drops founders of a named genome where you point.
+
+#### Two tools, because there are two kinds of wall
+
+`DrawRock` is its own tool rather than a checkbox on `DrawBarrier`, and the reason is that the two
+make **opposite** kinds of wall. Nothing in the engine declares which kind a square is; the
+difference is only what it holds (`docs/CHEMISTRY.md` §10). A blocked square holding no solid is
+bedrock — there is nothing in it to dissolve, so it never enters the weathering loop and is
+permanent. A blocked square holding solid is rock — it gives its mineral up to water that is short
+of it, faster where cells are stripping that water, and opens once it is worn past
+`MineralRates::wall_threshold`. A checkbox would make that look like a shade of one thing.
+
+Until this existed, a reef that dissolves — the thing `docs/CHEMISTRY.md` §9 argues phosphorus and
+silicon come out of — was something a scenario file could author with `Seeding::Rock` and a hand
+could not draw. `World::set_rock` is the hand's version of that recipe, and the picture already
+told the two apart: `rock.wgsl` weathers a mineral square and leaves bedrock flat, and grit is
+shed along a mineral face and not a bedrock one.
+
+Which mineral is a submenu under the tool's own row in the Tools menu, exactly as the seeding
+genome is under `seed`'s — chosen once and then used, which is the kind of setting a menu can
+hold. Only `chem::SOLID_CHEMICALS` are offered, because rock made of sugar is a thing the world
+does not have and an interface that offers it and then refuses is worse than one that never
+offers it. **Silica is the default and it is measured, not picked**: phosphate has zero diffusion
+and zero advection by design, so a phosphate reef has nowhere to put what it dissolves — the water
+against its face fills to saturation, the deficit the rate is a fraction *of* goes to nothing, and
+the wall stalls behind its own skin. An outcrop of phosphate is a *place*; a reef of silica is a
+*supply*.
 
 **Every one of them goes through `World`, never through `substrate_mut()`.** `World::inject` and
 `World::extract` put matter in and take it out through the ledger, in both currencies. The
@@ -400,7 +425,9 @@ For that to mean anything, everything the tools do has to reach the `Scenario`, 
 did not:
 
 - **Walls** lived in the substrate only. `place_barrier` never touched `scenario.barriers`, so
-  drawing on a slide and saving gave back a scenario with no walls in it.
+  drawing on a slide and saving gave back a scenario with no walls in it. Rock is recorded the
+  same way but as `Seeding::Rock` per square rather than `Barrier::Square`, because what makes it
+  rock is the mineral and not the blocking — a `Barrier::Square` would reopen as bedrock.
 - **Painted chemistry** likewise. It is recorded as `Seeding::Spike` per square, merged, so
   leaning on the brush is one entry that grows rather than ten thousand saying the same thing.
 - **A hand-placed cell** had nowhere in the format to be said at all, which is what

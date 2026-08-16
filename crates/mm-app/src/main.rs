@@ -606,11 +606,12 @@ const FLOW_FLOOR: f32 = 0.002;
 const FLOW_FULL: f32 = 0.25;
 
 /// Every tool and its key, in one list so the menu and the toolbox cannot disagree.
-const TOOLS: [(Tool, &str); 10] = [
+const TOOLS: [(Tool, &str); 11] = [
     (Tool::Select, "F1"),
     (Tool::Move, "F2"),
     (Tool::Remove, "F3"),
     (Tool::DrawBarrier, "F4"),
+    (Tool::DrawRock, "F11"),
     (Tool::EraseBarrier, "F5"),
     (Tool::Paint, "F6"),
     (Tool::Unpaint, "F7"),
@@ -1610,6 +1611,13 @@ struct View {
     paint_from: Option<(i32, i32)>,
     /// Which chemical the brush and the flux tools are loaded with.
     load: usize,
+    /// Which mineral the rock tool lays. One of `mm_core::chem::SOLID_CHEMICALS`.
+    ///
+    /// Its own setting rather than sharing `load` with the paint brush, because the two answer
+    /// different questions and only two of the seventeen chemicals can be an answer to this one.
+    /// Sharing it would put "rock made of sugar" one click away, and the tool would have to
+    /// refuse rather than the interface never offering it.
+    rock_mineral: usize,
     /// How much the brush puts in one square per stamp, and what a new source puts in per step.
     dose: i32,
     /// What fraction a new drain takes per step, `Q10`.
@@ -1807,6 +1815,13 @@ impl Default for View {
             // Carbon: the thing a cell builds itself out of, and so the one a slide is most
             // often short of.
             load: 4,
+            // Silica, not phosphate, and this is measured rather than picked. Phosphorus is
+            // deliberately immobile — zero diffusion and zero advection, so an outcrop is a
+            // location rather than a level — which means a phosphate reef has nowhere to put
+            // what it dissolves: the water against its face fills to saturation, the deficit
+            // the rate is a fraction *of* goes to nothing, and the wall stalls behind its own
+            // skin. Silica is middling mobile, and is the mineral a reef is actually made of.
+            rock_mineral: mm_core::chem::SOLID_CHEMICALS[1],
             dose: mm_core::fixed::q10(100),
             drain_rate: mm_core::Q10_ONE / 8,
             flux_from: None,
@@ -1856,6 +1871,13 @@ enum Tool {
     Remove,
     DrawBarrier,
     EraseBarrier,
+    /// Draw *rock*: a wall made of a mineral, which dissolves and opens again.
+    ///
+    /// Its own tool rather than a setting on `DrawBarrier`, because the two make opposite kinds
+    /// of wall and nothing declares which is which — a blocked square holding no solid is
+    /// bedrock and permanent, one holding solid is rock and wears (`docs/CHEMISTRY.md` §10).
+    /// A checkbox would make the difference look like a shade of the same thing.
+    DrawRock,
     /// Paint chemistry into the water. Matter from outside the world, through the ledger.
     Paint,
     /// Take it out again. Matter *leaving*, not matter ceasing to exist.
@@ -1876,6 +1898,7 @@ impl Tool {
             Tool::Remove => "remove",
             Tool::DrawBarrier => "wall",
             Tool::EraseBarrier => "erase",
+            Tool::DrawRock => "rock",
             Tool::Paint => "paint",
             Tool::Unpaint => "unpaint",
             Tool::Source => "source",
@@ -1907,7 +1930,7 @@ impl Tool {
         match self {
             // Nothing to set. These act on the cell you point at.
             Tool::Select | Tool::Move | Tool::Remove => Uses::NOTHING,
-            Tool::DrawBarrier | Tool::EraseBarrier => Uses {
+            Tool::DrawBarrier | Tool::EraseBarrier | Tool::DrawRock => Uses {
                 brush: true,
                 ..Uses::NOTHING
             },
@@ -1967,7 +1990,15 @@ impl Tool {
             }
             Tool::EraseBarrier => {
                 "Take wall away again. Same width as the pen, so it can always undo what the pen \
-                 just drew."
+                 just drew. It erases rock as readily as bedrock."
+            }
+            Tool::DrawRock => {
+                "Draw rock: a wall made of the chosen mineral, which **dissolves back into water \
+                 that is short of it** and opens once it is worn thin — faster where cells are \
+                 stripping the water, which is biological weathering for free. That is the whole \
+                 difference from the wall tool, whose walls hold nothing and are therefore \
+                 permanent. Pick the mineral in the Tools menu; the matter comes from outside \
+                 the world through the ledger, and the reef goes into the scenario."
             }
             Tool::Paint => {
                 "Add the chosen chemical to the water, one dose a square. The matter comes from \
@@ -2676,6 +2707,7 @@ fn keyboard(keys: &ButtonInput<KeyCode>, view: &mut View, sim: &mut SlideRes) {
         (KeyCode::F8, Tool::Source),
         (KeyCode::F9, Tool::Drain),
         (KeyCode::F10, Tool::PlaceCell),
+        (KeyCode::F11, Tool::DrawRock),
     ] {
         if keys.just_pressed(key) {
             view.tool = tool;
@@ -2812,7 +2844,7 @@ fn handle_mouse(
     // pushes the square's chemistry outwards. It was the single reason the tool was unusable.
     let painting = matches!(
         view.tool,
-        Tool::DrawBarrier | Tool::EraseBarrier | Tool::Paint | Tool::Unpaint
+        Tool::DrawBarrier | Tool::EraseBarrier | Tool::DrawRock | Tool::Paint | Tool::Unpaint
     );
     let tool_target = view.tool_focus.resolve(live_target);
     if painting && buttons.pressed(MouseButton::Right) && tool_target == Target::Slide {
@@ -2822,6 +2854,7 @@ fn handle_mouse(
             let from = view.paint_from.unwrap_or(to);
             if view.paint_from != Some(to) {
                 let chemistry = matches!(view.tool, Tool::Paint | Tool::Unpaint);
+                let rock = view.tool == Tool::DrawRock;
                 let draw = view.tool == Tool::DrawBarrier;
                 // The whole stroke segment, brush and all, gathered before the lock is taken:
                 // `World::set_barriers` rebuilds the fluid's edge masks once for the batch, and
@@ -2861,6 +2894,25 @@ fn handle_mouse(
                         "{} {moved} {name}",
                         if add { "added" } else { "removed" }
                     )));
+                } else if !squares.is_empty() && rock {
+                    // `World::set_rock`, never `substrate_mut().add_solid`: a reef is matter
+                    // from outside the world and has to reach the ledger, the same way the
+                    // paint brush does. It blocks the squares it makes thick enough and
+                    // rebuilds the fluid's edge masks once for the batch.
+                    let mineral = view.rock_mineral;
+                    let held = sim.engine.handle();
+                    let mut slide = held.slide();
+                    let world = slide.world_mut();
+                    let dose = world.rock_dose();
+                    let laid = world.set_rock(&squares, mineral, dose);
+                    drop(slide);
+                    drop(held);
+                    sim.last_tool = Some(tools::ToolEvent::RockLaid {
+                        x: to.0.max(0) as u32,
+                        y: to.1.max(0) as u32,
+                        mineral: mineral_name(sim, mineral),
+                        amount: i64::from(laid),
+                    });
                 } else if !squares.is_empty() {
                     let held = sim.engine.handle();
                     held.slide().world_mut().set_barriers(&squares, draw);
@@ -2922,7 +2974,11 @@ fn handle_mouse(
                     }
                 }
                 // Painted above, for as long as the button is held, rather than once here.
-                Tool::DrawBarrier | Tool::EraseBarrier | Tool::Paint | Tool::Unpaint => {}
+                Tool::DrawBarrier
+                | Tool::EraseBarrier
+                | Tool::DrawRock
+                | Tool::Paint
+                | Tool::Unpaint => {}
                 // Dragged: the press only marks the corner. See below.
                 Tool::Source | Tool::Drain => {}
             }
@@ -5409,48 +5465,102 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
 
             let tools = ui.menu_button("Tools", |ui| {
                 skin::menu(ui);
+                // Each tool's row, and directly under it whatever second thing that tool needs
+                // chosen before it does anything. **Inside the loop, not after it**: emitted
+                // afterwards the submenus pile up at the bottom of the menu, so the one belonging
+                // to `rock` sat five rows below `rock` and immediately under `seed`, which reads
+                // as `seed`'s. Two tools have ammunition and neither of them is the last row.
+                //
+                // A middle dot to mark the sub-row and not the `\u{21b3}` that was there: neither of
+                // egui's default faces has a glyph for it, so the row rendered as a tofu box —
+                // which in a list of checkable items reads as an unticked checkbox.
+                //
+                // A submenu rather than a copy of the build panel's combo box, and the "a menu
+                // shuts the moment you click the slide" argument below does not apply to either.
+                // That is about settings adjusted *between* strokes; which organism you are
+                // seeding and which mineral your reef is made of are chosen once and then used,
+                // and the panel keeps its copy of the first for when it is not.
                 for (tool, key) in TOOLS {
                     if skin::menu_toggle(ui, tool.name(), key, view.tool == tool).clicked() {
                         view.tool = tool;
                         ui.close();
                     }
+                    match tool {
+                        // What the rock tool is made of. The row above says "rock" without saying
+                        // rock *of what*, and the answer is a choice of two.
+                        //
+                        // Only `chem::SOLID_CHEMICALS` are offered. Rock made of sugar is a thing
+                        // the world does not have, and an interface that offers it and then
+                        // refuses is worse than one that never offers it.
+                        Tool::DrawRock => {
+                            ui.menu_button(
+                                skin::text(
+                                    Role::Body,
+                                    format!("   \u{b7} {}", mineral_name(sim, view.rock_mineral)),
+                                ),
+                                |ui| {
+                                    skin::menu(ui);
+                                    skin::menu_caption(ui, "made of");
+                                    for c in mm_core::chem::SOLID_CHEMICALS {
+                                        let chosen =
+                                            view.rock_mineral == c && view.tool == Tool::DrawRock;
+                                        if skin::menu_toggle(ui, &mineral_name(sim, c), "", chosen)
+                                            .clicked()
+                                        {
+                                            view.rock_mineral = c;
+                                            view.tool = Tool::DrawRock;
+                                            ui.close();
+                                        }
+                                    }
+                                },
+                            )
+                            .response
+                            .on_hover_text(
+                                "which mineral the rock tool lays. Choosing one also picks the \
+                                 tool. Silica is mobile once dissolved and feeds the water around \
+                                 a reef; phosphate does not move at all, so an outcrop of it is a \
+                                 place rather than a supply.",
+                            );
+                        }
+                        // What the seed tool will drop. Until this existed it lived in the build
+                        // panel, so the tool and its ammunition were two rooms apart. Picking here
+                        // does both: it sets the genome and arms the tool.
+                        Tool::PlaceCell => {
+                            ui.menu_button(
+                                skin::text(
+                                    Role::Body,
+                                    format!("   \u{b7} {}", view.place_genome),
+                                ),
+                                |ui| {
+                                    skin::menu(ui);
+                                    skin::menu_caption(ui, "genomes/");
+                                    let found = library::genomes();
+                                    if found.is_empty() {
+                                        ui.label(skin::text(
+                                            Role::Small,
+                                            "no genomes/ directory found",
+                                        ));
+                                    }
+                                    for name in found {
+                                        let chosen = view.place_genome == name
+                                            && view.tool == Tool::PlaceCell;
+                                        if skin::menu_toggle(ui, &name, "", chosen).clicked() {
+                                            view.place_genome = name;
+                                            view.tool = Tool::PlaceCell;
+                                            ui.close();
+                                        }
+                                    }
+                                },
+                            )
+                            .response
+                            .on_hover_text(
+                                "which organism the seed tool drops. Choosing one also picks the \
+                                 tool.",
+                            );
+                        }
+                        _ => {}
+                    }
                 }
-                // What the seed tool will drop, right under the row that arms it.
-                //
-                // The seed tool is the only one that needs a second thing chosen before it does
-                // anything, and until now that thing lived in the build panel — so the tool and
-                // its ammunition were two rooms apart and the row above said "seed" without
-                // saying seed *what*. Picking here does both: it sets the genome and arms the
-                // tool, which is the whole gesture in one place.
-                //
-                // A submenu rather than a copy of the panel's combo box, and the "a menu shuts
-                // the moment you click the slide" argument below does not apply to it. That is
-                // about settings adjusted *between* strokes; which organism you are seeding is
-                // chosen once and then used, and the panel keeps its copy for when it is not.
-                ui.menu_button(
-                    skin::text(Role::Body, format!("   ↳ {}", view.place_genome)),
-                    |ui| {
-                        skin::menu(ui);
-                        skin::menu_caption(ui, "genomes/");
-                        let found = library::genomes();
-                        if found.is_empty() {
-                            ui.label(skin::text(Role::Small, "no genomes/ directory found"));
-                        }
-                        for name in found {
-                            let chosen =
-                                view.place_genome == name && view.tool == Tool::PlaceCell;
-                            if skin::menu_toggle(ui, &name, "", chosen).clicked() {
-                                view.place_genome = name;
-                                view.tool = Tool::PlaceCell;
-                                ui.close();
-                            }
-                        }
-                    },
-                )
-                .response
-                .on_hover_text(
-                    "which organism the seed tool drops. Choosing one also picks the tool.",
-                );
                 skin::menu_rule(ui);
                 // The settings live in the build window, not here. A menu closes the moment you
                 // click the slide, so a dose adjusted from a menu costs open-change-close for
@@ -5704,6 +5814,14 @@ fn status_bar(
                         Tool::DrawBarrier | Tool::EraseBarrier => {
                             format!("tool {} · brush {}", view.tool.name(), view.brush)
                         }
+                        // And what it is made of, because "rock" alone does not say, and which
+                        // mineral it is decides whether the reef feeds the water or merely
+                        // stands in it.
+                        Tool::DrawRock => format!(
+                            "tool rock · {} · brush {}",
+                            mineral_name(sim, view.rock_mineral),
+                            view.brush
+                        ),
                         // What it will drop, because "seed" alone does not say, and the answer
                         // is set two rooms away in the build panel.
                         Tool::PlaceCell => format!(
@@ -9254,6 +9372,18 @@ fn legend_body(ui: &mut egui::Ui, sim: &SlideRes, view: &View, frame: &Frame) {
         ui.separator();
         ui.small(format!("{} — {event:?}", view.tool.name()));
     }
+}
+
+/// A chemical's name, off the running world's own table.
+///
+/// Asked rather than hard-coded, because the table is a property of the scenario (SPEC §7.1) and
+/// not a constant: a world that posed its own chemistry names its own minerals, and an interface
+/// that said "silicon" over slot seven would be lying about that world.
+fn mineral_name(sim: &SlideRes, c: usize) -> String {
+    sim.chem_names
+        .get(c)
+        .cloned()
+        .unwrap_or_else(|| c.to_string())
 }
 
 /// The live metric plots.

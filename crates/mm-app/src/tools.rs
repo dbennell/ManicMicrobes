@@ -47,6 +47,17 @@ pub enum ToolEvent {
         x: u32,
         y: u32,
     },
+    /// Rock laid by hand: a wall made of a mineral, which dissolves where bedrock does not.
+    RockLaid {
+        x: u32,
+        y: u32,
+        /// What it is made of, resolved to a name here because the chemical table lives on the
+        /// world and the status bar does not have one.
+        mineral: String,
+        /// How much solid actually landed, `Q10`. What the tool *achieved*, not what it asked
+        /// for: a square already at the quantity cap takes less than a dose.
+        amount: i64,
+    },
     /// A cell's genome was replaced while it was running.
     Rewritten {
         cell: CellId,
