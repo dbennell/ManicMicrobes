@@ -625,6 +625,48 @@ pub const FIELDS: &[Field] = &[
                dissolving your neighbour is a living or a gift to whoever is standing nearby",
     },
     Field {
+        path: "minerals.interval",
+        label: "weathering every",
+        group: Group::Chemistry,
+        unit: Unit::Count,
+        note: "ticks between weathering steps. Rock is the slowest thing in the world and this is \
+               where that is said — a sixteenth applied every tick and a whole one applied every \
+               sixteenth are not the same mechanism when cells are driving the water in between, \
+               and only the second reads as geology",
+    },
+    Field {
+        path: "minerals.dissolve",
+        label: "dissolving",
+        group: Group::Chemistry,
+        unit: Unit::Q10,
+        note: "how much of a neighbouring square's *deficit* a solid gives up each step. Of the \
+               deficit rather than of the stock, which is what makes it a solubility law: a wall \
+               in saturated water dissolves not at all, and the same wall beside cells stripping \
+               the water dissolves fast. That is biological weathering, and it costs no mechanism \
+               of its own",
+    },
+    Field {
+        path: "minerals.deposit",
+        label: "depositing",
+        group: Group::Chemistry,
+        unit: Unit::Q10,
+        note: "how much of a square's *excess* comes out of solution each step, onto rock it \
+               already touches. Faster than dissolving by default, because supersaturated water \
+               is the unstable state and should not sit: rock is quick to form and slow to give \
+               up, which is why a spring builds a terrace in a season and takes an age to wear \
+               one away",
+    },
+    Field {
+        path: "minerals.wall_threshold",
+        label: "wall at",
+        group: Group::Chemistry,
+        unit: Unit::Q10,
+        note: "solid on one square above which it *is* a wall — blocked, opaque to the fluid, \
+               impassable. The wall is derived rather than declared: nothing sets a flag, \
+               dissolution takes a square below this line and it opens, deposition takes it above \
+               and it closes. Below it the same stock is a crust lying in open water",
+    },
+    Field {
         path: "ecology.em_range",
         label: "sight range",
         group: Group::Ecology,

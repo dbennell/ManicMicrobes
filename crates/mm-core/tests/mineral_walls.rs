@@ -182,3 +182,133 @@ fn a_world_with_rock_in_it_still_balances_every_tick() {
         }
     }
 }
+
+/// **Rock dissolves into water that is below saturation, and stops when it is not.**
+///
+/// The self-limiting half of the law, and the reason dissolution follows the *deficit* rather
+/// than the stock: a wall standing in saturated water gives up nothing, and the same wall beside
+/// water that something is stripping gives up fast. That is biological weathering, and it costs
+/// no mechanism of its own.
+#[test]
+fn rock_dissolves_into_thirsty_water_and_not_into_full_water() {
+    let dissolved = |fill: i32| {
+        let mut world = World::new(slide()).expect("world");
+        let c = SOLID_CHEMICALS[0];
+        let k = solid_slot(c).expect("solid-capable");
+        // A wall with a stock, and the water around it set to `fill`.
+        world.set_barrier(12, 12, true);
+        world.substrate_mut().add_solid(k, 12, 12, q10(400));
+        for (x, y) in [(11, 12), (13, 12), (12, 11), (12, 13)] {
+            world.substrate_mut().set_chem(c, x, y, fill);
+        }
+        world.adopt_current_contents_as_baseline();
+        let before = world.substrate().solid_at(k, 12, 12);
+        world.run(200);
+        world.check_matter().expect("weathering must conserve");
+        before - world.substrate().solid_at(k, 12, 12)
+    };
+
+    let saturation = mm_core::chem::ChemTable::spec_default()
+        .get(SOLID_CHEMICALS[0])
+        .saturation;
+    let thirsty = dissolved(0);
+    let full = dissolved(saturation);
+    assert!(thirsty > 0, "a wall in empty water gave up nothing");
+    assert_eq!(
+        full, 0,
+        "a wall in saturated water dissolved {full} anyway; the rate follows the deficit, and \
+         there is no deficit"
+    );
+}
+
+/// And a wall worn below the threshold stops being a wall.
+///
+/// The wall is *derived*, not declared: nothing clears a flag, the stock simply falls past the
+/// line. If this ever stops holding, rock becomes permanent again and the mechanism is only half
+/// of itself.
+#[test]
+fn a_wall_worn_away_opens() {
+    let mut world = World::new(slide()).expect("world");
+    let c = SOLID_CHEMICALS[0];
+    let k = solid_slot(c).expect("solid-capable");
+    {
+        let mut biology = world.biology().clone();
+        // Barely a wall, and dissolving fast: the point is the crossing, not the wait.
+        biology.minerals.wall_threshold = q10(10);
+        biology.minerals.dissolve = mm_core::Q10_ONE / 2;
+        world.set_biology(biology);
+    }
+    world.set_barrier(12, 12, true);
+    world.substrate_mut().add_solid(k, 12, 12, q10(12));
+    world.adopt_current_contents_as_baseline();
+    let at = world.substrate().index(12, 12);
+    assert!(world.substrate().blocked()[at], "it did not start as a wall");
+
+    world.run(400);
+
+    assert!(
+        !world.substrate().blocked()[at],
+        "the rock wore down to {} and stayed a wall; the threshold is what makes it one",
+        world.substrate().solid_at(k, 12, 12)
+    );
+    world.check_matter().expect("opening a worn wall must conserve");
+}
+
+/// **Supersaturated water deposits onto a surface, and closes into rock.**
+///
+/// The other direction of the same law, and the reason §10 restricts it to surfaces: scanning
+/// every open square for excess is a full-grid pass per mineral, on the phase already furthest
+/// from its gate. Growth happens where solid already is, which is how crystals grow anyway — and
+/// the cost is that a slide with no rock on it has nowhere to start, which the nucleation scan is
+/// for and which is not built yet.
+#[test]
+fn supersaturated_water_grows_the_rock_it_touches() {
+    let mut world = World::new(slide()).expect("world");
+    let c = SOLID_CHEMICALS[0];
+    let k = solid_slot(c).expect("solid-capable");
+    let saturation = mm_core::chem::ChemTable::spec_default().get(c).saturation;
+
+    // A seed of solid, and one square beside it holding far more than it can keep in solution.
+    world.substrate_mut().add_solid(k, 12, 12, q10(20));
+    world.substrate_mut().set_chem(c, 13, 12, saturation * 8);
+    world.adopt_current_contents_as_baseline();
+    let before = world.substrate().solid_at(k, 13, 12);
+
+    world.run(200);
+    world.check_matter().expect("deposition must conserve");
+
+    assert!(
+        world.substrate().solid_at(k, 13, 12) > before,
+        "water at eight times saturation beside a seed of rock deposited nothing"
+    );
+    assert!(
+        world.substrate().chem_at(c, 13, 12) < saturation * 8,
+        "the water is as full as it started; nothing came out of solution"
+    );
+}
+
+/// Growth is on surfaces only, so open water far from any rock keeps its excess.
+///
+/// Stated as a test rather than left implicit, because it is the *cost* of the surface
+/// restriction and the thing the nucleation scan will change. Until that exists, a supersaturated
+/// square with no solid anywhere near it stays supersaturated — which is a real state of matter
+/// and a temporary state of this engine.
+#[test]
+fn open_water_with_no_surface_near_it_keeps_its_excess_for_now() {
+    let mut world = World::new(slide()).expect("world");
+    let c = SOLID_CHEMICALS[0];
+    let k = solid_slot(c).expect("solid-capable");
+    let saturation = mm_core::chem::ChemTable::spec_default().get(c).saturation;
+    world.substrate_mut().set_chem(c, 4, 4, saturation * 8);
+    world.adopt_current_contents_as_baseline();
+
+    world.run(200);
+
+    assert_eq!(
+        world.substrate().solid_at(k, 4, 4),
+        0,
+        "solid appeared with no surface to grow on; that is nucleation, and it is supposed to \
+         come from the amortised scan rather than from anywhere convenient"
+    );
+    world.check_matter().expect("doing nothing must also conserve");
+}

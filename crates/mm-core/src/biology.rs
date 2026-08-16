@@ -753,10 +753,59 @@ impl Host for CellHost<'_> {
     }
 }
 
+/// How fast rock gives itself up to the water, and the water back to rock.
+///
+/// `docs/CHEMISTRY.md` §10. The *what* — which chemicals can be solid, and the concentration each
+/// stands at in solution — lives on the chemicals themselves, in `chem::SOLID_CHEMICALS` and
+/// `ChemicalDef::saturation`. This is only the *how fast*.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct MineralRates {
+    /// Ticks between weathering steps.
+    ///
+    /// **Rock is the slowest thing in the world and this is where that is said.** A sixteenth
+    /// applied every tick and a whole one applied every sixteenth tick are not the same mechanism
+    /// when the concentration between them is being driven by cells: the first tracks the water,
+    /// the second lets it get somewhere first. The second is the one that reads as geology.
+    pub interval: u32,
+    /// Fraction of a neighbouring square's *deficit* a solid gives up per step, `Q10`.
+    ///
+    /// Of the deficit rather than of the stock, which is what makes it a solubility law: a wall
+    /// standing in saturated water dissolves not at all, and the same wall beside cells stripping
+    /// the water dissolves fast. Biological weathering, for no extra mechanism.
+    pub dissolve: i32,
+    /// Fraction of a square's *excess* that comes out of solution per step, `Q10`.
+    pub deposit: i32,
+    /// Solid on one square above which it is rock: blocked, opaque to the fluid, impassable.
+    ///
+    /// The wall is *derived* rather than declared. Nothing sets a flag — dissolution takes a
+    /// square below this line and it opens, deposition takes it above and it closes.
+    pub wall_threshold: i32,
+}
+
+impl Default for MineralRates {
+    fn default() -> MineralRates {
+        MineralRates {
+            interval: 16,
+            // A sixteenth of the deficit, an eighth of the excess. Deposition faster than
+            // dissolution because supersaturated water is the unstable state and should not sit:
+            // rock is quick to form and slow to give up, which is why a spring deposits a terrace
+            // in a season and takes an age to wear one away.
+            dissolve: crate::fixed::Q10_ONE / 16,
+            deposit: crate::fixed::Q10_ONE / 8,
+            // Two hundred units on a square. Below it the same stock is a *crust* lying in open
+            // water, which is the state a square passes through on its way to being either.
+            wall_threshold: crate::fixed::Q10_ONE * 200,
+        }
+    }
+}
+
 /// Everything resolve needs that is not the world.
 #[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct BiologyConfig {
+    /// Weathering: how fast rock dissolves and water deposits. See [`MineralRates`].
+    pub minerals: MineralRates,
     pub metabolism: Metabolism,
     pub mutation: MutationRates,
     /// Structural matter a daughter needs beyond half the parent's, `Q10`.
@@ -829,6 +878,11 @@ pub struct BiologyConfig {
 /// to hash it is a visible omission here rather than an invisible one everywhere.
 impl crate::state_hash::StateHash for BiologyConfig {
     fn hash_state(&self, h: &mut crate::state_hash::StateHasher) {
+        let m = &self.minerals;
+        h.u32(m.interval);
+        h.i32(m.dissolve);
+        h.i32(m.deposit);
+        h.i32(m.wall_threshold);
         let m = &self.mutation;
         h.u32(m.point);
         h.u32(m.insertion);
@@ -958,6 +1012,7 @@ pub struct Intervention {
 impl Default for BiologyConfig {
     fn default() -> Self {
         BiologyConfig {
+            minerals: MineralRates::default(),
             metabolism: Metabolism::default(),
             mutation: MutationRates::default(),
             division_matter: q10(4),

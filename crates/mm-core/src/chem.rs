@@ -134,6 +134,21 @@ pub struct ChemicalDef {
     /// this field existed.
     #[serde(default = "full_advection")]
     pub advection: i32,
+
+    /// The concentration this chemical will stand in solution, `Q10` per square. Zero means it
+    /// never comes out of solution and never goes back in — which is every chemical but the
+    /// minerals.
+    ///
+    /// Above it, water is supersaturated and gives its excess up as solid; below it, solid
+    /// standing in that water dissolves. One number does both directions, which is what makes
+    /// them a single equilibrium rather than two mechanisms that have to be kept consistent with
+    /// each other.
+    ///
+    /// It belongs on the chemical rather than in a global rate table for the same reason
+    /// `diffusion` does: it is a property of the substance. Silica and phosphate do not have the
+    /// same solubility and a world should be able to say so.
+    #[serde(default)]
+    pub saturation: i32,
 }
 
 /// A chemical that goes exactly where the water goes, which is what all of them did before
@@ -156,6 +171,7 @@ impl ChemicalDef {
             decay_to: None,
             decay_rate: 0,
             advection: Q10_ONE,
+            saturation: 0,
         }
     }
 }
@@ -211,6 +227,7 @@ impl ChemTable {
             decay_to: None,
             decay_rate: 0,
             advection: Q10_ONE,
+            saturation: 0,
         };
         let monomer = |name: &str, colour: [u8; 3]| ChemicalDef {
             name: name.to_string(),
@@ -222,6 +239,7 @@ impl ChemTable {
             decay_to: None,
             decay_rate: 0,
             advection: Q10_ONE,
+            saturation: 0,
         };
         let substrate = |name: &str, yield_: i32, colour: [u8; 3]| ChemicalDef {
             name: name.to_string(),
@@ -233,6 +251,7 @@ impl ChemTable {
             decay_to: None,
             decay_rate: 0,
             advection: Q10_ONE,
+            saturation: 0,
         };
         let waste = |name: &str, colour: [u8; 3]| ChemicalDef {
             name: name.to_string(),
@@ -244,6 +263,7 @@ impl ChemTable {
             decay_to: None,
             decay_rate: 0,
             advection: Q10_ONE,
+            saturation: 0,
         };
 
         ChemTable::new(vec![
@@ -274,6 +294,7 @@ impl ChemTable {
                 decay_to: None,
                 decay_rate: 0,
                 advection: Q10_ONE,
+                saturation: 0,
             },
             // Phosphorus does not move at all. Its cycle has no gas phase — the only primary
             // source is rock — which is why it is so often the ultimate limiting nutrient, and
@@ -287,6 +308,11 @@ impl ChemTable {
             // for a chemical with nothing to do, so being immobile costs nothing at all.
             ChemicalDef {
                 name: "phosphorus".to_string(),
+                // Above eight a square it comes out of solution, below it rock dissolves.
+                // Comfortably above what any shipped world seeds — the fresh slide holds one and
+                // `soup.ron` four — so nothing precipitates by accident; a world has to
+                // *concentrate* phosphate before it starts making rock.
+                saturation: Q10_ONE * 8,
                 diffusion: 0,
                 toxicity: 0,
                 energy_yield: 0,
@@ -303,6 +329,9 @@ impl ChemTable {
             // is diatom ooze, which is a real thing made the same way.
             ChemicalDef {
                 name: "silicon".to_string(),
+                // Silica stands in solution far better than phosphate, and is seeded far higher
+                // — twenty a square on the fresh slide — so its ceiling is higher again.
+                saturation: Q10_ONE * 40,
                 diffusion: Q10_ONE / 32,
                 toxicity: 0,
                 energy_yield: 0,
@@ -370,6 +399,7 @@ impl ChemTable {
                 // it breaks into turns back to building material.
                 decay_rate: 1,
                 advection: Q10_ONE / 3,
+                saturation: 0,
             },
             // Respiration's byproduct. Toxic, so a cell has to get rid of it or take
             // damage; unstable, so what it gets rid of finds its way back into the loop
@@ -386,6 +416,7 @@ impl ChemTable {
                 decay_to: Some(11),
                 decay_rate: Q10_ONE / 64,
                 advection: Q10_ONE,
+                saturation: 0,
             },
             // The oxidant, and the only reason it is not obvious is that it used to be called
             // `brine`. It is `ChemicalDef::inert` because it needs no engine semantics of its
@@ -412,6 +443,7 @@ impl ChemTable {
                 decay_to: None,
                 decay_rate: 0,
                 advection: Q10_ONE,
+                saturation: 0,
             },
             // What a dead cell leaves behind (SPEC §7.2, M8). A chemical rather than an
             // object, so it is conserved, diffuses and decays through machinery that already
@@ -457,6 +489,7 @@ impl ChemTable {
                 decay_to: Some(12),
                 decay_rate: Q10_ONE / 512,
                 advection: Q10_ONE,
+                saturation: 0,
             },
             // Dinitrogen: the inert pool, and the only chemical in the table that is inert on
             // purpose rather than for want of a mechanism.
@@ -483,6 +516,7 @@ impl ChemTable {
                 decay_to: None,
                 decay_rate: 0,
                 advection: 0,
+                saturation: 0,
             },
         ])
     }

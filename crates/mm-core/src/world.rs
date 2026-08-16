@@ -857,7 +857,8 @@ impl World {
             self.step_flux();
             fluid::step(&mut self.substrate, &self.fluid_rates, &mut self.scratch);
             self.decay_fluid();
-        self.denitrify();
+            self.denitrify();
+            self.weather();
             if self.active_impulses > 0 {
                 decay_impulses(
                     &mut self.impulse_x,
@@ -977,6 +978,142 @@ impl World {
                 self.ledger.convert(c, into, moved);
             }
         }
+    }
+
+    /// Rock giving itself up to the water, and water giving itself up as rock.
+    ///
+    /// `docs/CHEMISTRY.md` §10. One law in both directions: a chemical stands in solution at its
+    /// `saturation` and no higher, so water below it dissolves the solid standing in it and water
+    /// above it deposits the excess. A single equilibrium rather than two mechanisms that have to
+    /// be kept agreeing with each other.
+    ///
+    /// # Per exposed edge, which is what makes shape mean something
+    ///
+    /// Dissolution is a surface process. A solid square gives up mineral only across the edges it
+    /// shares with open water, so a thin reef surrenders its stock far faster per unit than a
+    /// massif whose interior is locked until the outside has gone. The substrate already keeps
+    /// `open_x`/`open_y`, so the exposed surface costs nothing to find.
+    ///
+    /// It is also self-limiting and it yields biological weathering for free: the rate follows
+    /// how far the water is *below* saturation, so a wall in saturated water does nothing, and
+    /// cells stripping phosphate from the square beside an outcrop dissolve it faster. A
+    /// population accelerates its own supply until the stock is spent.
+    ///
+    /// # And the wall is derived, not declared
+    ///
+    /// A square is rock when it holds more than `wall_threshold` of solid. Nothing sets a flag:
+    /// dissolution takes a square below the line and it opens, deposition takes it above and it
+    /// closes. `set_blocked` already evicts contents and rebuilds the edge masks, so both
+    /// directions are one call.
+    fn weather(&mut self) {
+        let rates = self.biology.minerals;
+        if rates.dissolve <= 0 && rates.deposit <= 0 {
+            return;
+        }
+        if !self.tick.is_multiple_of(rates.interval.max(1) as u64) {
+            return;
+        }
+        let (w, h) = (self.substrate.width() as i32, self.substrate.height() as i32);
+        // Both directions want the same walk, so they share it: every square that holds solid,
+        // and every open square that touches one. Squares with neither are the whole slide on a
+        // world with no rock in it, and they cost one comparison each.
+        let mut became_rock: Vec<(i32, i32)> = Vec::new();
+        let mut became_water: Vec<(i32, i32)> = Vec::new();
+        for (k, c) in crate::chem::SOLID_CHEMICALS.iter().enumerate() {
+            let ceiling = self.scenario.chemicals.get(*c).saturation;
+            if ceiling <= 0 {
+                continue;
+            }
+            for y in 0..h {
+                for x in 0..w {
+                    let held = self.substrate.solid_at(k, x, y);
+                    if held > 0 {
+                        // Dissolve into each open neighbour, in proportion to its deficit.
+                        let mut left = held;
+                        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                            let (nx, ny) = (x + dx, y + dy);
+                            if nx < 0 || ny < 0 || nx >= w || ny >= h {
+                                continue;
+                            }
+                            if self.substrate.blocked()[self.substrate.index(nx, ny)] {
+                                continue;
+                            }
+                            let there = self.substrate.chem_at(*c, nx, ny);
+                            let deficit = ceiling.saturating_sub(there);
+                            if deficit <= 0 {
+                                continue;
+                            }
+                            let want = crate::fixed::q10_scale(deficit, rates.dissolve).min(left);
+                            if want <= 0 {
+                                continue;
+                            }
+                            let placed = self.substrate.add_chem(*c, nx, ny, want);
+                            if placed > 0 {
+                                self.substrate.add_solid(k, x, y, -placed);
+                                left -= placed;
+                            }
+                        }
+                        if left <= rates.wall_threshold
+                            && self.substrate.blocked()[self.substrate.index(x, y)]
+                        {
+                            became_water.push((x, y));
+                        }
+                    } else if rates.deposit > 0 {
+                        // Growth on a surface: an open square touching solid, holding more than
+                        // it can keep in solution. Surfaces only, because a full scan of open
+                        // water is a pass this engine cannot afford every step — see §10.
+                        let here = self.substrate.chem_at(*c, x, y);
+                        if here <= ceiling || self.substrate.blocked()[self.substrate.index(x, y)] {
+                            continue;
+                        }
+                        let touches = [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|(dx, dy)| {
+                            let (nx, ny) = (x + dx, y + dy);
+                            nx >= 0
+                                && ny >= 0
+                                && nx < w
+                                && ny < h
+                                && self.substrate.solid_at(k, nx, ny) > 0
+                        });
+                        if !touches {
+                            continue;
+                        }
+                        let excess = here - ceiling;
+                        let want = crate::fixed::q10_scale(excess, rates.deposit);
+                        if want <= 0 {
+                            continue;
+                        }
+                        // Out of the water and onto the square, and only what actually left.
+                        let taken = -self.substrate.add_chem(*c, x, y, -want);
+                        if taken > 0 {
+                            self.substrate.add_solid(k, x, y, taken);
+                            if self.substrate.solid_at(k, x, y) > rates.wall_threshold {
+                                became_rock.push((x, y));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for (x, y) in became_water {
+            self.substrate.set_blocked(x, y, false);
+        }
+        for (x, y) in became_rock {
+            // **A square with a cell in it does not close.** Refusing beats evicting or killing:
+            // it avoids a class of bugs and it reads correctly, since living tissue keeps its own
+            // ground open and the edge of a reef is where the cells are.
+            if self.cell_at(x, y).is_some() {
+                continue;
+            }
+            self.place_barrier(x as u32, y as u32, true);
+        }
+    }
+
+    /// Whichever cell is standing on a square, if any.
+    fn cell_at(&self, x: i32, y: i32) -> Option<usize> {
+        self.cells.iter().find(|i| {
+            crate::fixed::pos_to_square(self.cells.x[*i]) == x
+                && crate::fixed::pos_to_square(self.cells.y[*i]) == y
+        })
     }
 
     /// Bioavailable nitrogen reverting to the inert pool where the water has no oxidant in it.

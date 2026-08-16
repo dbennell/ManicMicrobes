@@ -616,7 +616,7 @@ mod tests {
             seen.push((s.dx, s.dy));
         }
         // One speck's whole life, in order, starting from wherever its stagger puts it.
-        let (x0, y0) = seen[0];
+        let (x0, _y0) = seen[0];
         let t0 = (x0 / vel[0]).round();
         for (n, (x, y)) in seen.iter().enumerate() {
             let t = t0 + n as f32;
