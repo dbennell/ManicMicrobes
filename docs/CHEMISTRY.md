@@ -796,3 +796,43 @@ what the edge of a real mineral bed looks like.
 Design only. The pieces it rests on all exist: `set_blocked` and its eviction, the edge masks, the
 per-chemical `colour` in the table, the sprite pool, and a `total_matter` that already counts four
 compartments and needs a fifth.
+
+### Built, and two things found afterwards
+
+The above shipped. Two faults in it were found by looking at a slide, and one is fixed.
+
+**Fixed: a wall that grew was a wall only half the engine believed in.** `weather` closes a square
+through `World::place_barrier`, which is the *deferred* setter — the same one the drawing tool
+uses, which leaves `Substrate::rebuild_edge_masks` to the caller because the rebuild walks the
+whole slide and one weathering step can close hundreds of squares at once. `World::set_barriers`
+makes that call and `weather` did not. So `blocked` was set, the light regime shadowed the square
+and `add_chem` refused it — while the `open_x`/`open_y` masks still said the edge was open, so the
+fluid fluxed straight through the rock, and `has_barriers` still said the slide had no walls at
+all, so the renderer was never asked to draw one. What you saw was a black hole in the picture
+with the chemistry piling up behind it: the signature of a drawing bug, out of a solver contract.
+Held by `a_wall_that_grew_closes_the_masks_and_shows_on_the_slide` in `tests/mineral_walls.rs`.
+
+**Open: a nucleated grain is over the wall line and never becomes a wall.** The law above is that
+a square is rock when it holds more than `wall_threshold` of solid, and nothing sets a flag. The
+code only asks the question on the *deposition* path — inside the `else` branch that fires when a
+square holds no solid of that plane — so it is asked exactly once per square, at the moment the
+first grain lands on it, and never again.
+
+Two consequences, and they compound. A square that already holds solid takes the dissolve branch
+forever after, so surface growth can add **one step's worth** and no more; a reef spreads sideways
+and cannot thicken. And nucleation takes the *whole* excess over saturation rather than a fraction
+of it, which is routinely several times the threshold, and pushes nothing onto `became_rock` —
+deliberately, per its own note, "a grain, not a wall".
+
+Measured on a 32×32 slide seeded uniformly at 400 units of a mineral whose saturation is 8, run to
+40,000 ticks: **1,024 squares of 1,024 hold solid, every one of them at twice `wall_threshold`,
+and not one is blocked.** The world is entirely paved in rock that is not rock. So "walls that grow
+from minerals falling out of solution" produces solid and no walls at any concentration a slide
+actually reaches.
+
+The fix is a design decision rather than a repair, which is why it is written down here instead of
+made. Asking the question of every square that holds solid honours the stated law, and turns that
+measurement into a slide that is 100% wall on the first weathering step — which is not a world.
+Making nucleation deposit a grain-sized amount keeps "a grain, not a wall" true by arithmetic and
+leaves surface growth to do the rest, but surface growth is capped at one deposit per square, so
+that needs the cap lifted too. Both dials are in `MineralRates`.
