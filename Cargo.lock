@@ -3131,7 +3131,7 @@ dependencies = [
 
 [[package]]
 name = "mm-app"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bevy",
  "bevy_egui",
@@ -3146,14 +3146,14 @@ dependencies = [
 
 [[package]]
 name = "mm-asm"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "mm-core",
 ]
 
 [[package]]
 name = "mm-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "mm-asm",
  "mm-core",
@@ -3161,7 +3161,7 @@ dependencies = [
 
 [[package]]
 name = "mm-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "criterion",
  "mm-asm",
