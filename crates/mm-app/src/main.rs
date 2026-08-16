@@ -2111,6 +2111,11 @@ struct JunctionSprite(usize);
 #[derive(Component)]
 struct Suspended(usize);
 
+// Grit rides in the `Suspended` pool rather than having a marker of its own: a second component
+// would mean a second query, and the redraw system is already at Bevy's parameter limit. The two
+// are told apart by index — everything past `stipple` is grit — which is the same trick the
+// flakes and specks already share.
+
 
 #[derive(Component)]
 struct FlowArrow(usize);
@@ -3157,6 +3162,7 @@ fn redraw(
                         frame.width as usize,
                         frame.height as usize,
                         &frame.barriers,
+                        &frame.mineral,
                         &|x, y| optics.vignette(field_radius(to_screen(x, y))),
                     );
                 }
@@ -3295,6 +3301,8 @@ fn redraw(
     // `(where, alpha, is a flake, size multiplier, spin)`. The last two are per fleck and
     // meaningless for a speck, which is a dot.
     let mut speck_slots: Vec<(Vec3, f32, bool, f32, f32)> = Vec::new();
+    // Grit along the exposed faces of mineral rock: `(where, colour, size, spin)`.
+    let mut grain_slots: Vec<(Vec3, [f32; 3], f32, f32)> = Vec::new();
     if !frame.detritus.is_empty() && frame.flow_cols > 0 {
         let cols = frame.flow_cols as usize;
         let rows = frame.detritus.len() / cols.max(1);
@@ -3437,6 +3445,104 @@ fn redraw(
         }
     }
 
+    // --- the ragged edge of a mineral bed ---
+    //
+    // `paint_barriers` is **nearest**-sampled on purpose: a wall is blocked or not, and
+    // interpolating it invents half a wall, which is a value the simulation never held and
+    // `docs/UI.md` §1 forbids. That argument does not weaken for rock made of chemistry, so the
+    // raggedness cannot come from softening the texture.
+    //
+    // It comes from loose grains lying against the exposed faces instead. The wall stays a hard
+    // truth about which squares are solid; what breaks the outline is material that has come off
+    // it, which is what the edge of a real mineral bed looks like. Tinted from the square's own
+    // composition, so a silica reef sheds pale grit and a phosphate outcrop sheds ochre.
+    //
+    // Only the squares on screen, and only their open faces — a buried face shows nothing and a
+    // wall off-camera is not drawn. That keeps this proportional to what is visible rather than
+    // to the size of the slide.
+    if !frame.mineral.is_empty() && !frame.barriers.is_empty() && scale > 2.0 {
+        let (w, h) = (frame.width as i32, frame.height as i32);
+        // The visible square range, from the two corners of the cull rectangle.
+        let corner = |sx: f32, sy: f32| {
+            let p = to_screen(sx, sy);
+            (p.x, p.y)
+        };
+        let _ = corner(0.0, 0.0);
+        // One a face, two when a square is wide. The first attempt put two to four on every
+        // face and the result was a *beaded fringe* — a tidy line of pebbles, which is the
+        // opposite of ragged. What breaks an outline is grit that is sparse enough to leave gaps.
+        let per_face = ((scale / 14.0) as u64).clamp(1, 2);
+        for y in 0..h {
+            for x in 0..w {
+                let i = (y * w + x) as usize;
+                if !frame.barriers.get(i).copied().unwrap_or(false) {
+                    continue;
+                }
+                let Some(rgb) = frame.mineral.get(i).copied() else {
+                    continue;
+                };
+                if rgb[0] + rgb[1] + rgb[2] <= 0.0 {
+                    continue;
+                }
+                for (d, (dx, dy)) in [(0usize, (1i32, 0i32)), (1, (-1, 0)), (2, (0, 1)), (3, (0, -1))]
+                {
+                    let (nx, ny) = (x + dx, y + dy);
+                    // A face is exposed when what is beyond it is water — or the edge of the
+                    // slide, where there is nothing to hold the grit in.
+                    let open = nx < 0
+                        || ny < 0
+                        || nx >= w
+                        || ny >= h
+                        || !frame
+                            .barriers
+                            .get((ny * w + nx) as usize)
+                            .copied()
+                            .unwrap_or(false);
+                    if !open {
+                        continue;
+                    }
+                    for g in 0..per_face {
+                        let seed = i as u64 * 4 * FLECK_MAX_SIDE + d as u64 * 4 + g;
+                        // Along the face, and a little way over it: grit sits *on* the boundary
+                        // rather than inside the square, which is what stops it reading as a
+                        // pattern painted on the wall.
+                        let along = art::hash01(seed.wrapping_mul(0x9E37_79B9)) - 0.5;
+                        let over = 0.30 + 0.34 * art::hash01(seed.wrapping_mul(0x85EB_CA6B));
+                        let (gx, gy) = (
+                            x as f32 + 0.5 + dx as f32 * over + dy.abs() as f32 * along,
+                            y as f32 + 0.5 + dy as f32 * over + dx.abs() as f32 * along,
+                        );
+                        if gx < 0.0 || gy < 0.0 || gx > w as f32 || gy > h as f32 {
+                            continue;
+                        }
+                        let at = to_screen(gx, gy);
+                        if at.x < cull.min_x
+                            || at.x > cull.max_x
+                            || at.y < cull.min_y
+                            || at.y > cull.max_y
+                        {
+                            continue;
+                        }
+                        let size = 0.45 + 0.75 * art::hash01(seed.wrapping_mul(0xC2B2_AE35));
+                        let spin =
+                            art::hash01(seed.wrapping_mul(0x27D4_EB2F)) * std::f32::consts::TAU;
+                        grain_slots.push((at, rgb, size, spin));
+                    }
+                }
+            }
+        }
+    }
+
+    // The grit rides in the same pool as the stipple, appended after it. One query, one loop,
+    // and a sprite that was a flake last frame may be a grain this one — which is exactly the
+    // property the pool already had to have.
+    let stipple = speck_slots.len();
+    for (at, _rgb, size, spin) in &grain_slots {
+        // Alpha one and `flake` true: the husk tile is the right silhouette for a chip of
+        // mineral too, and the colour is looked up from `grain_slots` in the loop below rather
+        // than carried twice.
+        speck_slots.push((*at, 1.0, true, *size, *spin));
+    }
     for i in specks.iter().count()..speck_slots.len() {
         commands.spawn((
             Suspended(i),
@@ -3458,7 +3564,12 @@ fn redraw(
             sprite.color = Color::NONE;
             continue;
         };
-        let (rgb, px, fade, z) = if flake {
+        let (rgb, px, fade, z) = if marker.0 >= stipple {
+            // Grit: its own colour, taken from the rock it came off, and drawn *over* the wall
+            // rather than under it — it is lying on the boundary, which is the point of it.
+            let g = grain_slots[marker.0 - stipple];
+            (g.1, fleck_px * 0.34, 0.72, 0.26)
+        } else if flake {
             (FLECK_RGB, fleck_px, 0.92, 0.19)
         } else {
             (SPECK_RGB, speck_px, 0.85, 0.20)
