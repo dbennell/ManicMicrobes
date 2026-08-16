@@ -629,7 +629,14 @@ pub struct LimbDot {
     pub uy: f32,
     /// How far past the root it reaches, in squares.
     pub length: f32,
-    /// Half-width at the root, in squares.
+    /// Half the quad's span across the limb, in squares: **the widest the form ever reaches**,
+    /// not the thickness of the thing drawn in it.
+    ///
+    /// The two differ for every form but the spike. A flagellum's whip is thin and its *wave* is
+    /// wide; a cilium is a tuft of thin hairs spread across an arc. The shader owns those
+    /// proportions — a hair is a fixed fraction of the quad, a wave's amplitude is another — and
+    /// this owns the overall size, so a form can never reach outside the rectangle it is drawn in
+    /// and be silently clipped square.
     pub width: f32,
     /// How far back *inside* the body the quad starts, in squares.
     ///
@@ -1900,11 +1907,13 @@ fn limb_of(
             let power =
                 mm_core::sensing::cilium_power(o) as f32 / mm_core::fixed::Q10_ONE as f32;
             if o.kind == T::Flagellum {
-                // One large organ, longer than the body it drives.
+                // One large organ, longer than the body it drives. The quad is wide enough for
+                // the wave, not for the whip: the whip is a fifth of it and the rest is where the
+                // beat swings.
                 (
                     dir,
                     (1.2 + 1.3 * big) * drawn,
-                    0.075 * drawn,
+                    (0.22 + 0.14 * big) * drawn,
                     0.12 * drawn,
                     power,
                     1.0,
@@ -1950,10 +1959,12 @@ fn limb_of(
             // when it has let go and taut when it has not.
             let effort =
                 mm_core::sensing::holdfast_effort(o) as f32 / mm_core::fixed::Q10_ONE as f32;
+            // Wide enough for the rootlets to splay into, which is most of the quad; the stalk
+            // itself is a third of it.
             (
                 ring,
                 HOLDFAST_SQUARES,
-                0.09 * drawn * (0.35 + big),
+                (0.15 + 0.11 * big) * drawn,
                 0.12 * drawn,
                 effort,
                 3.0,

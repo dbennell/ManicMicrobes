@@ -49,6 +49,19 @@ bevy_egui = { version = "0.41", optional = true }
 # `bevy_winit` re-exports two items and `ResizeDirection` is not one of them.
 winit = { version = "0.30", optional = true }
 
+# The WGSL front-end and validator, for tests only.
+#
+# A shader is parsed when a *pipeline* is compiled, which is at draw time, on a machine with a
+# window — so until now a syntax error in `limb.wgsl` or a type that did not check surfaced as a
+# layer that silently did not draw, several minutes and one graphics stack away from the line that
+# was wrong. `tests/shader_syntax.rs` does the same parse and the same validation in a second, with
+# no display.
+#
+# **The version has to be the one Bevy resolves** — `cargo tree -i naga` — or the test is checking
+# a dialect the renderer does not speak, which is worse than not checking at all.
+[dev-dependencies]
+naga = { version = "29", features = ["wgsl-in"] }
+
 [features]
 default = []
 render = ["dep:bevy", "dep:bevy_egui", "dep:winit"]

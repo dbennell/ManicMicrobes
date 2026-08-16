@@ -848,6 +848,63 @@ pub fn flicker(prev: &[Drawn], now: &[Drawn]) -> Flicker {
 /// limb whatever it is drawn at, and `q.x` runs `-aspect..aspect` root to tip. That is exactly the
 /// frame `limb.wgsl`'s fragment stage builds from `uv` and `limb_a.w`.
 pub mod limb {
+    use std::f32::consts::TAU;
+
+    /// How thick one hair of a tuft is at its root, in half-widths. `limb.wgsl`'s `HAIR`.
+    pub const HAIR: f32 = 0.10;
+    /// How far from the tuft's axis the outermost hairs are rooted.
+    pub const TUFT: f32 = 0.62;
+    /// How far the tip of a hair swings at full beat. `TUFT + SWING + HAIR == 1`.
+    pub const SWING: f32 = 0.28;
+    /// How thick a flagellum's whip is at its root.
+    pub const WHIP: f32 = 0.22;
+    /// The wave's amplitude at the tip, at full beat.
+    pub const WAVE: f32 = 0.72;
+    /// How many wavelengths fit along a flagellum.
+    pub const WAVES: f32 = 1.5;
+    /// How thick a holdfast's stalk is at its root, and where along the limb the rootlets start.
+    pub const STALK: f32 = 0.40;
+    pub const STALK_END: f32 = 0.55;
+
+    /// How far along the limb a point is, `0..1` root to tip.
+    fn along(qx: f32, aspect: f32) -> f32 {
+        ((qx + aspect) / (2.0 * aspect)).clamp(0.0, 1.0)
+    }
+
+    /// Which way the wave travels. The sign of the power, and a cilium beating backwards pushes
+    /// its cell backwards.
+    fn sense(extent: f32) -> f32 {
+        if extent >= 0.0 {
+            1.0
+        } else {
+            -1.0
+        }
+    }
+
+    /// `limb.wgsl`'s `hash21`.
+    #[must_use]
+    pub fn hash21(x: f32, y: f32) -> f32 {
+        let mut v = [
+            (x * 0.1031).fract(),
+            (y * 0.1031).fract(),
+            (x * 0.1031).fract(),
+        ];
+        let d = v[0] * (v[1] + 33.33) + v[1] * (v[2] + 33.33) + v[2] * (v[0] + 33.33);
+        v[0] += d;
+        v[1] += d;
+        v[2] += d;
+        ((v[0] + v[1]) * v[2]).fract()
+    }
+
+    fn sd_segment(p: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
+        let pa = (p.0 - a.0, p.1 - a.1);
+        let ba = (b.0 - a.0, b.1 - a.1);
+        let h = (pa.0 * ba.0 + pa.1 * ba.1) / (ba.0 * ba.0 + ba.1 * ba.1).max(1e-6);
+        let h = h.clamp(0.0, 1.0);
+        let d = (pa.0 - ba.0 * h, pa.1 - ba.1 * h);
+        (d.0 * d.0 + d.1 * d.1).sqrt()
+    }
+
     /// The barb. Positive outside it, zero on the outline.
     ///
     /// Quadratic rather than linear, and that is the difference between a spike and an arrow: a
@@ -858,10 +915,82 @@ pub mod limb {
     /// is drawn over the limb mesh, so there is nothing there to cap.
     #[must_use]
     pub fn spike(qx: f32, qy: f32, aspect: f32, taper: f32) -> f32 {
-        let t = ((qx + aspect) / (2.0 * aspect)).clamp(0.0, 1.0);
-        let s = 1.0 - t;
+        let s = 1.0 - along(qx, aspect);
         let w = taper + (1.0 - taper) * s * s;
         (qy.abs() - w).max(qx - aspect)
+    }
+
+    /// A tuft of hairs, beating. The swing goes as `t * t`, so the root stays put and the tip
+    /// moves — a hair that slid sideways as a rigid rod reads as a twitching whisker.
+    #[must_use]
+    pub fn cilium(qx: f32, qy: f32, aspect: f32, extent: f32, phase: f32, count: f32) -> f32 {
+        let t = along(qx, aspect);
+        let swing = SWING * extent.abs() * t * t;
+        let n = count.max(1.0);
+        let mut best = 1e6f32;
+        let mut i = 0.0f32;
+        while i < n {
+            let spread = if n < 1.5 {
+                0.0
+            } else {
+                (2.0 * i / (n - 1.0)) - 1.0
+            };
+            let root = TUFT * spread;
+            let beat = swing * (TAU * (sense(extent) * phase + i * 0.17)).sin();
+            let w = HAIR * (1.0 - t);
+            best = best.min((qy - root - beat).abs() - w);
+            i += 1.0;
+        }
+        best.max(qx - aspect)
+    }
+
+    /// One whip with a travelling wave whose amplitude grows along the length, which is what a
+    /// flagellar wave does: the base is held by the body and the far end is free.
+    #[must_use]
+    pub fn flagellum(qx: f32, qy: f32, aspect: f32, extent: f32, phase: f32, taper: f32) -> f32 {
+        let t = along(qx, aspect);
+        let centre =
+            WAVE * extent.abs() * t * (TAU * (WAVES * t - sense(extent) * phase)).sin();
+        let w = WHIP * (1.0 + (taper - 1.0) * t);
+        ((qy - centre).abs() - w).max(qx - aspect)
+    }
+
+    /// A stalk with three rootlets: taut and splayed when it is gripping, limp and closed when it
+    /// has let go.
+    #[must_use]
+    pub fn holdfast(qx: f32, qy: f32, aspect: f32, extent: f32, taper: f32, seed: f32) -> f32 {
+        let t = along(qx, aspect);
+        let slack = 1.0 - extent.clamp(0.0, 1.0);
+        let curl = (hash21(seed * 7.13 + 2.7, seed * 3.71 + 9.1) - 0.5) * 1.1 * slack;
+        let centre = curl * t * t;
+        let x_end = -aspect + 2.0 * aspect * STALK_END;
+        let y_end = curl * STALK_END * STALK_END;
+        let step = (t / STALK_END).clamp(0.0, 1.0);
+        let mut d = (qy - centre).abs() - STALK * (1.0 + (taper - 1.0) * step);
+        d = d.max(qx - x_end);
+        let splay = 0.30 + 0.55 * extent.clamp(0.0, 1.0);
+        for k in [-1.0f32, 0.0, 1.0] {
+            let tip = (aspect, y_end + k * splay);
+            d = d.min(sd_segment((qx, qy), (x_end, y_end), tip) - STALK * taper * 0.8);
+        }
+        d
+    }
+
+    /// How opaque the exoenzyme's cloud is at a point, `0..1`.
+    ///
+    /// Not a field: a cloud has no outline, and one drawn with an antialiased edge would be a
+    /// claim about a boundary that does not exist. Densest against the body and reaching zero at
+    /// the outer edge on its own.
+    #[must_use]
+    pub fn halo(qx: f32, qy: f32, throttle: f32, inner: f32, seed: f32) -> f32 {
+        let r = (qx * qx + qy * qy).sqrt();
+        if r > 1.0 || r < inner {
+            return 0.0;
+        }
+        let t = (r - inner) / (1.0 - inner).max(1e-3);
+        let fall = (1.0 - t) * (1.0 - t);
+        let curdle = 0.55 + 0.45 * hash21(qx * 6.0 + seed, qy * 6.0 + seed);
+        throttle.clamp(0.0, 1.0) * 0.34 * fall * curdle
     }
 }
 

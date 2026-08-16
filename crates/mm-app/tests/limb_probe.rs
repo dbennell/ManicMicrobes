@@ -184,6 +184,248 @@ fn a_tapered_limb_keeps_a_tip_of_the_width_it_asked_for() {
     );
 }
 
+// --- the beating forms --------------------------------------------------------------------
+
+#[test]
+fn a_tuft_has_as_many_hairs_as_it_was_told_to() {
+    // A cilium organelle is many small ones where a flagellum is one large one, which the
+    // catalogue and `docs/FEEDING.md` §7 both say before the physics is consulted. Drawing a tuft
+    // as one hair would make the pair indistinguishable at exactly the zoom the pair matters.
+    let aspect = 3.0;
+    for count in [2.0f32, 3.0, 4.0, 5.0] {
+        // Count the runs of "inside" across the tuft, a third of the way along where the hairs
+        // have separated but not yet swung far.
+        let qx = -aspect + 2.0 * aspect * 0.33;
+        let mut runs = 0;
+        let mut inside = false;
+        for i in 0..4000 {
+            let qy = -1.2 + 2.4 * i as f32 / 3999.0;
+            let now = limb::cilium(qx, qy, aspect, 0.0, 0.0, count) < 0.0;
+            if now && !inside {
+                runs += 1;
+            }
+            inside = now;
+        }
+        assert_eq!(runs, count as i32, "asked for {count} hairs and got {runs}");
+    }
+}
+
+#[test]
+fn a_hair_is_anchored_at_the_root_and_swings_at_the_tip() {
+    // The swing goes as `t * t`. A hair that slid sideways as a rigid rod would read as a
+    // twitching whisker rather than as something beating, and the root would come away from the
+    // membrane it grows out of.
+    let aspect = 3.0;
+    let at = |t: f32, phase: f32| -> f32 {
+        let qx = -aspect + 2.0 * aspect * t;
+        // Walk across to find the hair's centre: the deepest point of the field.
+        let (mut best, mut best_y) = (1e6f32, 0.0f32);
+        for i in 0..4000 {
+            let qy = -1.2 + 2.4 * i as f32 / 3999.0;
+            let d = limb::cilium(qx, qy, aspect, 1.0, phase, 1.0);
+            if d < best {
+                best = d;
+                best_y = qy;
+            }
+        }
+        best_y
+    };
+    // A quarter turn apart, which is where a sine differs most.
+    let (root_a, root_b) = (at(0.02, 0.0), at(0.02, 0.25));
+    let (tip_a, tip_b) = (at(0.98, 0.0), at(0.98, 0.25));
+    assert!(
+        (root_a - root_b).abs() < 0.02,
+        "the root moved by {} between two phases",
+        (root_a - root_b).abs()
+    );
+    assert!(
+        (tip_a - tip_b).abs() > 0.15,
+        "the tip only moved by {} between two phases",
+        (tip_a - tip_b).abs()
+    );
+}
+
+#[test]
+fn a_beat_reverses_when_the_power_does() {
+    // The one thing a genome can do with a propulsor that nothing in the picture could say: a
+    // cilium beating backwards pushes its cell backwards. `cilium_power` is signed for it, and
+    // the wave has to travel the other way or the sign is carried and then thrown away.
+    let aspect = 6.0;
+    let sample = |extent: f32, phase: f32| -> f32 {
+        let qx = -aspect + 2.0 * aspect * 0.6;
+        let (mut best, mut best_y) = (1e6f32, 0.0f32);
+        for i in 0..4000 {
+            let qy = -1.0 + 2.0 * i as f32 / 3999.0;
+            let d = limb::flagellum(qx, qy, aspect, extent, phase, 0.22);
+            if d < best {
+                best = d;
+                best_y = qy;
+            }
+        }
+        best_y
+    };
+    // Forwards and backwards at the same non-zero phase must put the whip in different places.
+    let f = sample(1.0, 0.2);
+    let b = sample(-1.0, 0.2);
+    assert!(
+        (f - b).abs() > 0.05,
+        "a reversed beat is drawn identically: {f} against {b}"
+    );
+    // And at phase zero they coincide, because the wave has not travelled yet — which is what
+    // says the sign is on the *travel* and not on the shape.
+    assert!((sample(1.0, 0.0) - sample(-1.0, 0.0)).abs() < 1e-4);
+}
+
+#[test]
+fn a_flagellums_wave_grows_towards_its_free_end() {
+    // What makes a whip a whip rather than a wiggly line: the base is held by the body and the
+    // far end is free, so the amplitude grows along the length.
+    let aspect = 8.0;
+    let envelope = |t: f32| -> f32 {
+        let qx = -aspect + 2.0 * aspect * t;
+        let mut worst = 0.0f32;
+        for phase in 0..24 {
+            let p = phase as f32 / 24.0;
+            let (mut best, mut best_y) = (1e6f32, 0.0f32);
+            for i in 0..2000 {
+                let qy = -1.0 + 2.0 * i as f32 / 1999.0;
+                let d = limb::flagellum(qx, qy, aspect, 1.0, p, 0.22);
+                if d < best {
+                    best = d;
+                    best_y = qy;
+                }
+            }
+            worst = worst.max(best_y.abs());
+        }
+        worst
+    };
+    let (near, far) = (envelope(0.15), envelope(0.95));
+    assert!(
+        far > near * 2.0,
+        "the wave is {near} at the root and {far} at the tip: it is not growing"
+    );
+    assert!(near < 0.2, "the root is already swinging by {near}");
+}
+
+#[test]
+fn an_idle_propulsor_is_straight_and_still_there() {
+    // A cilium is not a weapon. One a cell has built is one it is paying for whether or not it is
+    // beating, so an idle propulsor is drawn — straight, and at the length its `param` bought.
+    let aspect = 6.0;
+    for phase in [0.0f32, 0.25, 0.5, 0.75] {
+        assert!(
+            limb::flagellum(0.0, 0.0, aspect, 0.0, phase, 0.22) < 0.0,
+            "an idle flagellum has a hole down its middle at phase {phase}"
+        );
+        assert!(
+            limb::flagellum(0.0, 0.6, aspect, 0.0, phase, 0.22) > 0.0,
+            "an idle flagellum is swinging at phase {phase}"
+        );
+    }
+}
+
+// --- gripping and letting go ------------------------------------------------------------------
+
+#[test]
+fn a_holdfast_splays_when_it_grips_and_closes_when_it_lets_go() {
+    // The readable half of the holdfast, and a decision a genome makes every tick that nothing on
+    // the slide could show: gripping cement is spread against what it is gripping, and cement that
+    // has let go hangs together.
+    let aspect = 4.0;
+    let spread = |extent: f32| -> f32 {
+        // The widest the foot gets, measured at the tip.
+        let mut widest = 0.0f32;
+        for i in 0..2000 {
+            let qy = -1.0 + 2.0 * i as f32 / 1999.0;
+            if limb::holdfast(aspect - 0.02, qy, aspect, extent, 0.45, 3.0) < 0.0 {
+                widest = widest.max(qy.abs());
+            }
+        }
+        widest
+    };
+    let (loose, tight) = (spread(0.0), spread(1.0));
+    assert!(
+        tight > loose + 0.2,
+        "a gripping foot spans {tight} and a loose one {loose}"
+    );
+}
+
+#[test]
+fn a_holdfast_that_has_let_go_hangs_off_its_own_axis() {
+    // Limp, and seeded so two feet on one cell do not slump identically — which would read as a
+    // symmetry the cell does not have.
+    let aspect = 4.0;
+    let lean = |extent: f32, seed: f32| -> f32 {
+        let qx = -aspect + 2.0 * aspect * 0.5;
+        let (mut best, mut best_y) = (1e6f32, 0.0f32);
+        for i in 0..2000 {
+            let qy = -1.0 + 2.0 * i as f32 / 1999.0;
+            let d = limb::holdfast(qx, qy, aspect, extent, 0.45, seed);
+            if d < best {
+                best = d;
+                best_y = qy;
+            }
+        }
+        best_y
+    };
+    // Straight to within the resolution of the scan, which is a thousandth of the quad's width.
+    assert!(
+        lean(1.0, 3.0).abs() < 0.01,
+        "a gripping holdfast leans by {}",
+        lean(1.0, 3.0)
+    );
+    // Across a spread of seeds, some slump one way and some the other.
+    let leans: Vec<f32> = (0..12).map(|s| lean(0.0, s as f32)).collect();
+    assert!(
+        leans.iter().any(|l| *l > 0.05) && leans.iter().any(|l| *l < -0.05),
+        "every slack holdfast slumps the same way: {leans:?}"
+    );
+}
+
+// --- the cloud ---------------------------------------------------------------------------------
+
+#[test]
+fn the_halo_is_densest_against_the_cell_and_reaches_zero_on_its_own() {
+    // A hard edge on it would be a claim about a boundary that does not exist: an exoenzyme puts
+    // what it dissolves in the *square*, and the square has no rim.
+    let inner = 0.6;
+    let at = |r: f32| -> f32 {
+        // Averaged around the ring, because it is curdled and one sample is noise.
+        let n = 64;
+        (0..n)
+            .map(|i| {
+                let a = std::f32::consts::TAU * i as f32 / n as f32;
+                limb::halo(r * a.cos(), r * a.sin(), 1.0, inner, 2.0)
+            })
+            .sum::<f32>()
+            / n as f32
+    };
+    let near = at(inner + 0.01);
+    let mid = at((inner + 1.0) / 2.0);
+    assert!(near > mid, "the cloud is thicker away from the cell");
+    assert!(mid > at(0.99), "the cloud does not thin towards its edge");
+    assert!(at(0.999) < 0.002, "the cloud has a visible rim: {}", at(0.999));
+    assert_eq!(at(1.2), 0.0, "the cloud reaches outside its own quad");
+    // Inside the membrane there is nothing to draw: the body covers it and the enzyme is outside.
+    assert_eq!(at(inner - 0.05), 0.0);
+}
+
+#[test]
+fn the_halo_thickens_with_the_throttle_and_vanishes_when_shut() {
+    let inner = 0.5;
+    let total = |throttle: f32| -> f32 {
+        (0..200)
+            .map(|i| {
+                let r = inner + (1.0 - inner) * i as f32 / 199.0;
+                limb::halo(r, 0.0, throttle, inner, 5.0)
+            })
+            .sum::<f32>()
+    };
+    assert!(total(1.0) > total(0.5) * 1.6);
+    assert!(total(0.5) > total(0.1) * 3.0);
+    assert_eq!(total(0.0), 0.0, "a shut vesicle still dissolves the water");
+}
+
 // --- the two together -------------------------------------------------------------------------
 
 #[test]

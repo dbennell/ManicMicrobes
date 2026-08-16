@@ -3138,6 +3138,7 @@ dependencies = [
  "libc",
  "mm-asm",
  "mm-core",
+ "naga",
  "rayon",
  "winit",
  "winresource",
