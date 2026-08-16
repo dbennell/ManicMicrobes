@@ -715,17 +715,41 @@ thin reef gives up its mineral far faster per unit of stock than a massif, whose
 until the outside has gone. The scenario editor's rectangle tool quietly becomes a decision about
 fertility.
 
-### Precipitation: on surfaces, on a cadence, and into empty squares only
+### Precipitation: on surfaces, on a cadence, into empty squares — and a way in from nothing
 
-The reverse of the same law — water above saturation gives its excess up as solid — with three
+The reverse of the same law — water above saturation gives its excess up as solid — with four
 restrictions, and each of them is doing real work.
 
 **On surfaces.** Scanning every open square for over-saturation is a full-grid pass per mineral,
 landing on the phase §1 already has furthest from its gate. Growth happens on squares that already
 touch solid, which are the squares the dissolution pass is visiting anyway: the same visit with the
-sign flipped. It is also how crystals actually grow. What it gives up is spontaneous nucleation in
-open water, so a slide with no rock on it stays that way — mineral has to be seeded or drawn before
-it can spread, which is a reasonable price and an honest one to state.
+sign flipped. It is also how crystals actually grow.
+
+**And a nucleation scan, because otherwise the water stays supersaturated.** Surface growth alone
+has a hole in it: a slide with no rock on it and rising phosphate has nowhere to precipitate, so it
+climbs without limit. That is a *supersaturated solution*, which is a real thing and not one this
+engine should be modelling — it is a metastable state that wants a nucleus, and the honest
+behaviour is for one to appear.
+
+The cheap version of "find a supersaturated square" is **an amortised slice**: each mineral step
+walks one contiguous slice of one solid-capable plane, cycling through slices and planes by tick.
+A sixty-fourth of a 256² plane is a thousand squares of linear read, and the whole grid is covered
+every sixty-fourth mineral step — which on a cadence is thousands of ticks, and thousands of ticks
+is the right timescale for a rock to appear out of nothing. Deterministic by construction: the
+slice is a function of the tick, not of an RNG and not of iteration order.
+
+Two cheap guards keep even that off the books most of the time. A plane whose `present` flag is
+clear is skipped outright. And a plane whose *whole-world total* is below the nucleation threshold
+cannot have a single square above it, however the matter is arranged, so one comparison against a
+running total skips the slice entirely — which is the common case on every slide that is not
+actively concentrating a mineral.
+
+**Two thresholds, and the gap between them is the point.** Nucleation is harder than growth in the
+real thing — a dissolved salt will happily deposit onto an existing crystal at a concentration that
+would never start one — so the scan looks for a *high* threshold while surface growth uses a lower
+one. The consequence is exactly what is wanted: the expensive path fires rarely and only where the
+water has genuinely run away, and once it has fired, the cheap path takes over and does all the
+work of growing the patch out.
 
 **On a cadence.** Nothing here needs to happen every tick. Rock is the slowest thing in the world
 and a `mineral_interval` alongside `fluid_interval` makes that explicit rather than implicit in a
