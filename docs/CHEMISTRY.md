@@ -1018,6 +1018,72 @@ Without it the swing would select on lineages that cannot act on it, which is a 
 strategy behind it. With it, "swim away from the acid" and "build armour only where the water is
 sweet" are both reachable by mutation.
 
+### What the cell's interior needs, which is nothing
+
+**No new per-cell state, and the reason is that there is nothing to add.** `CellArena::interior` is
+a flat `Vec<i32>` sliced `CHEM_COUNT` per cell, and the snapshot writes it as a slice and checks
+its length on the way back in. Calcium and carbonate get interior slots the moment `CHEM_COUNT`
+goes to nineteen — no new field, no new serialisation, and hard rule 7 satisfied by the mechanism
+that is already there. Old snapshots fail the length check, which is exactly what the stamp is for.
+
+Interior pH is the same derived function applied to the interior array instead of the substrate
+planes. Stored nowhere, there too.
+
+The membrane's self-sensor already reads internal chemistry through `MembraneReading::Chemical`, so
+a cell can read its own calcium and carbonate for free. An interior *pH* reading would be a new
+`MembraneReading`, appended after `Crowding` — the pattern `Badge` and `Crowding` both followed,
+and for the reason their notes give: appending renumbers nothing.
+
+### Which pH acts on a shell, and the fork nobody has taken
+
+This section assumed above that the *water's* pH wears a calcite test. That is not obviously right,
+because of where the carbon actually goes:
+
+> Respiration writes its waste to `interior[p.waste]`, and photosynthesis consumes it from
+> `interior[p.waste]`. The exchange happens **inside the cell**; CO₂ reaches the water only through
+> `EMIT` or through leakage.
+
+So a cell's internal CO₂ already swings with its own metabolism, with no transport at all. A
+respiring cell acidifies itself and a photosynthesising one sweetens itself, today, unread. Which
+means interior pH is a real per-cell number the moment carbonate exists, and a shell built from the
+interior and sitting on the membrane has at least as good a claim to be judged against it.
+
+The two give quite different worlds. Against the **water's** pH, calcite armour is a bet on the
+neighbourhood: cheap in bright open water, expensive in a crowded respiring mat, and the cost is
+something a cell's neighbours impose on it. Against the **cell's own** pH, calcite armour is a bet
+on its own metabolism: a hard-breathing predator dissolves its own shell, and armour and aerobic
+throughput become rival in a way nothing else in the catalogue makes them.
+
+**And there is a known hazard on the interior side.** `metabolism.rs` records that with free
+interior decay, *retaining* waste was an advantage — it decayed into carbon dioxide right where
+photosynthesis needed it, and "the strain that dutifully excreted its waste lost every time for
+having given away its own food supply". Interior CO₂ is therefore already something lineages are
+selected to hoard, and hanging a mechanism on interior pH steps directly into that dynamic. It may
+be the more interesting world; it is certainly the one with more ways to go wrong, and it should be
+measured rather than assumed.
+
+Not settled here. Both are one line in the same place, so this is a thing to try both ways.
+
+### The membrane index space moves, and that is what the stamp is for
+
+Worth writing down because it is the concrete cost of ISA 12 and is easy to miss:
+`MembraneReading::decode` places `Badge` at `5 + CHEM_COUNT` and `Crowding` at `6 + CHEM_COUNT`.
+They are at **22 and 23** today — not the 21 and 22 the enum discriminants suggest, which are
+labels from when the table held sixteen. Adding two chemicals moves them to **24 and 25**, so every
+genome that reads its own badge or its own crowding at a hard-coded index reads something else
+afterwards.
+
+That is not a bug; it is the reason hard rule 8 exists, and archived genomes replay under the
+version they evolved in. But it means the bump is load-bearing rather than ceremonial, and the
+doc comment on `MembraneReading::Chemical` — "`5..=20`" — wants correcting to `5..=(4 + CHEM_COUNT)`
+in the same commit, since it has been stale by one since dinitrogen landed.
+
+Noticed while checking that: `decode` reduces its operand `% (7 + CHEM_COUNT)` and `chemical_of`
+reduces `% (5 + CHEM_COUNT)`, so past the first period the two disagree about which chemical an
+index names. Both are total and deterministic, so no rule is broken and nothing is unsafe — but the
+index space is not the clean repeat the doc describes, and a genome walking it does not find what
+the comment says it finds. Its own fix, on its own stamp.
+
 ### What this costs
 
 Measured on the development machine, performance-core pool, ancestor grown to ~11–12k cells, still
