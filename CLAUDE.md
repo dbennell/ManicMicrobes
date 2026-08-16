@@ -156,6 +156,9 @@ docs/ECONOMY.md   what a cell earns and pays, why the autotroph wins everything,
 docs/NEURONS.md   nervous systems from junctions: what works, what blocks it, what not to build.
 docs/STIFFNESS.md the contact model, turgor, and which of the squish is physics and which is drawn.
 docs/OVERLAPS.md  the overlapping cells: what it was, what it was not, and the bench.
+docs/MORPHOLOGY.md  *proposal*: the six organelles that reach outside the membrane and are drawn
+                  as dots anyway — cilia, flagella, spikes, holdfasts, exoenzymes — plus the
+                  shell and the junction. What may be drawn from what state, and the pipeline.
 README.md         what this is and where to look. Written for somebody arriving.
 tools/            scripts that turn a screenshot into numbers.
 scenarios/        .ron scenario configs — the *worlds*: size, light, current, chemistry seeding,

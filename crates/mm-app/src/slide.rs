@@ -1752,18 +1752,82 @@ pub fn organelle_rgb(kind: mm_core::OrganelleType) -> [f32; 3] {
     organelle_colour(kind)
 }
 
+/// The one colour table, read by the dots inside a cell, by the cell's own colour and by the
+/// inspector's schematic.
+///
+/// **Eleven of the twenty drawable types used to fall through the `_` arm**, so a spike, a shell,
+/// a holdfast, a flagellum, a lysosome and a lipid droplet were all the same grey — which made the
+/// inside of a cell say "six organelles" and nothing else. `cell_colour` had the same hole from
+/// the other end and ignored them entirely, so an armoured cell and a bare one came out the same
+/// colour.
+///
+/// # It is a family per job, not twenty hues
+///
+/// Twenty arbitrary colours is twenty things to memorise and about four the eye can actually tell
+/// apart in a two-pixel dot. Grouped by what the organelle is *for*, a glance at a cell reads as
+/// "mostly producer, some store, one weapon" before any individual blob is identified:
+///
+/// | family | | |
+/// | --- | --- | --- |
+/// | producers | chloroplast, chemosynth | green |
+/// | burners | mitochondrion, diazosome | orange |
+/// | stores | vacuole, lipid droplet | blue, and the droplet bright |
+/// | information | nucleus, oscillator | violet |
+/// | motility | cilium, flagellum | pale gold |
+/// | sensing | chemo-, photo-, touch | pink and warm |
+/// | attack | spike, exoenzyme, lysosome | red and chemical |
+/// | structure | membrane, pump, shell, holdfast, junction port | mineral and neutral |
+///
+/// The families fall out along the catalogue's own `n + 16` pairing, which is not a coincidence:
+/// bit 4 of a type operand means "the same job done a different way", so a pair one mutation apart
+/// should read as a pair. Where the real thing genuinely looks different the picture follows the
+/// real thing rather than the rule — a lipid droplet is bright and refractive and does not look
+/// like a vacuole, whatever the pairing says.
 fn organelle_colour(kind: mm_core::OrganelleType) -> [f32; 3] {
     use mm_core::OrganelleType as T;
     match kind {
+        // Producers.
         T::Chloroplast => [0.35, 0.78, 0.38],
+        // The lightless producer: the same reaction, run in the dark, so a colder green.
+        T::Chemosynth => [0.36, 0.68, 0.62],
+        // Burners.
         T::Mitochondrion => [0.90, 0.55, 0.28],
-        T::Nucleus => [0.58, 0.52, 0.80],
+        // Fixing is expensive machinery — a deeper, more metallic amber than the engine it pairs
+        // with, and far enough from it that an anoxic corner is legible at a glance.
+        T::Diazosome => [0.80, 0.64, 0.22],
+        // Stores.
         T::Vacuole => [0.55, 0.72, 0.88],
-        T::Pump => [0.75, 0.75, 0.78],
+        // Fat, and fat is the one thing in a cell that is genuinely brighter than the cytoplasm.
+        T::LipidDroplet => [0.95, 0.91, 0.74],
+        // Information.
+        T::Nucleus => [0.58, 0.52, 0.80],
+        T::Oscillator => [0.72, 0.64, 0.88],
+        // Motility.
         T::Cilium => [0.86, 0.84, 0.55],
+        // One large organ where a cilium is many small ones, and darker so a tuft and a whip are
+        // not the same mark at two pixels.
+        T::Flagellum => [0.76, 0.72, 0.40],
+        // Sensing.
         T::Chemosensor => [0.88, 0.42, 0.62],
         T::Photosensor => [0.95, 0.80, 0.35],
         T::TouchSensor => [0.70, 0.45, 0.35],
+        // Attack. Three ways of making a living off somebody else, and they should not be one
+        // colour: a spike is mechanical, an exoenzyme is chemical and outside the cell, and a
+        // lysosome is chemical and inside it.
+        T::Spike => [0.88, 0.36, 0.32],
+        T::Exoenzyme => [0.74, 0.82, 0.34],
+        T::Lysosome => [0.68, 0.34, 0.64],
+        // Structure. Mineral and neutral, because none of it is metabolism.
+        T::Pump => [0.75, 0.75, 0.78],
+        // Silica: pale, cool and plainly not tissue.
+        T::Shell => [0.82, 0.86, 0.90],
+        // Cement, and the darkest thing in the catalogue. A holdfast is a commitment to a place.
+        T::Holdfast => [0.50, 0.46, 0.40],
+        T::JunctionPort => [0.58, 0.76, 0.78],
+        T::Membrane => [0.62, 0.60, 0.58],
+        // The reservations, which nothing builds on purpose and a mutation reaches constantly.
+        // Deliberately drab: an organelle that does nothing should not be the brightest thing in
+        // the cell.
         _ => [0.55, 0.55, 0.58],
     }
 }
@@ -1892,23 +1956,37 @@ impl Series {
 /// chemistry. A cell that has invested in chloroplasts looks like chloroplasts. That means the
 /// picture shows what a cell *is* rather than what the analysis layer has decided to call it,
 /// which is the whole reason the microscope is worth looking at.
+///
+/// # It is the same table the organelles are drawn from
+///
+/// This held its own copy of six tints, near-duplicates of [`organelle_colour`]'s that had drifted
+/// a few hundredths apart, and a `_ => continue` that dropped the other fourteen types on the
+/// floor. So a cell that had spent thirteen units of matter and a sixth of its slots on armour was
+/// drawn in exactly the colour of a cell that had spent none, and the *inside* of that cell was
+/// drawn silica-pale while the body around it was not.
+///
+/// One table now, and the consequence is the point rather than the tidiness: **a cell looks like
+/// what it invested in, for everything it can invest in.** A shelled lineage reads mineral, a
+/// predator reads red, a scavenger reads violet.
+///
+/// The membrane is excluded, as it is from the ring. Every cell has one, so it can only wash the
+/// whole population towards one colour — it is the rim, and the rim is drawn by the wall.
+///
+/// **A cell carrying none of the newly-tinted types is unchanged to within a few hundredths**,
+/// which is what makes this safe to land on its own: only cells that actually carry a shell, a
+/// spike, a holdfast, a lysosome, a droplet or a variant move at all.
 fn cell_colour(cells: &mm_core::CellArena, i: usize, table: &mm_core::ChemTable) -> [f32; 3] {
-    use mm_core::OrganelleType;
+    use mm_core::organelle::MEMBRANE_SLOT;
+    // The cytoplasm, at unit weight: what is left when a cell has built nothing.
     let mut rgb = [0.30f32, 0.32, 0.36];
     let mut weight = 1.0f32;
-    for o in cells.slots(i) {
-        if !o.is_present() {
+    for (n, o) in cells.slots(i).iter().enumerate() {
+        if !o.is_present() || n == MEMBRANE_SLOT {
             continue;
         }
-        let tint = match o.kind {
-            OrganelleType::Chloroplast => [0.35, 0.75, 0.35],
-            OrganelleType::Mitochondrion => [0.85, 0.55, 0.30],
-            OrganelleType::Nucleus => [0.55, 0.50, 0.75],
-            OrganelleType::Vacuole => [0.55, 0.70, 0.85],
-            OrganelleType::Cilium => [0.80, 0.80, 0.55],
-            OrganelleType::Chemosensor | OrganelleType::Photosensor => [0.85, 0.45, 0.65],
-            _ => continue,
-        };
+        let tint = organelle_colour(o.kind);
+        // Size, with a floor: a `param 0` organelle is still a thing the cell built and paid for,
+        // and a loadout of small ones should still show.
         let w = (o.param as f32 / 255.0).max(0.05);
         for k in 0..3 {
             rgb[k] += tint[k] * w;
@@ -2412,5 +2490,100 @@ mod tests {
         assert_eq!(slide.square_at(999.0, 4.0), None);
         assert_eq!(slide.square_at(0.0, 0.0), Some((0, 0)));
         assert_eq!(slide.cell_at(4.0, 4.0, 1.0), None, "nothing is alive yet");
+    }
+
+    #[test]
+    fn every_implemented_organelle_has_a_colour_of_its_own() {
+        // Eleven of the twenty drawable types used to share the `_` arm's grey, so a spike, a
+        // shell, a holdfast and a flagellum were the same mark. The catalogue is append-only and
+        // the reservations are being filled one milestone at a time, so this is the test that
+        // fires the *next* time an organ arrives without one — which is how the eleven got there.
+        let fallback = organelle_colour(mm_core::OrganelleType::Reserved31);
+        let mut colourless = Vec::new();
+        for kind in *mm_core::OrganelleType::all() {
+            if !kind.is_implemented() {
+                continue;
+            }
+            if organelle_colour(kind) == fallback {
+                colourless.push(kind.name());
+            }
+        }
+        assert!(
+            colourless.is_empty(),
+            "{colourless:?} are drawn in the reservation grey and cannot be told apart"
+        );
+    }
+
+    #[test]
+    fn no_two_organelles_are_drawn_the_same_colour() {
+        // A table of twenty is easy to add a duplicate to, and a duplicate is invisible until
+        // somebody is trying to read a cell.
+        let all: Vec<_> = mm_core::OrganelleType::all()
+            .iter()
+            .filter(|k| k.is_implemented())
+            .collect();
+        for (n, a) in all.iter().enumerate() {
+            for b in &all[n + 1..] {
+                let (ca, cb) = (organelle_colour(**a), organelle_colour(**b));
+                let apart: f32 = (0..3).map(|k| (ca[k] - cb[k]).abs()).sum();
+                assert!(
+                    apart > 0.12,
+                    "{} and {} are the same colour: {ca:?} against {cb:?}",
+                    a.name(),
+                    b.name()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_cell_looks_like_what_it_invested_in() {
+        // The hole this closes: `cell_colour` tinted from six types and dropped the other
+        // fourteen, so a cell that had spent a sixth of its slots and thirteen units of matter on
+        // armour was drawn in exactly the colour of a cell that had spent none.
+        use mm_core::fixed::{pos, q10};
+        use mm_core::{CellId, CellSeed, Organelle, OrganelleType};
+        let scenario = scenario();
+        let table = scenario.chemicals.clone();
+        let mut slide = Slide::new(scenario).unwrap();
+        let genome = slide.world_mut().genomes().intern(vec![0u8; 16]).unwrap();
+        let id = slide.world_mut().spawn_cell(CellSeed {
+            x: pos(6),
+            y: pos(6),
+            mass: q10(40),
+            energy: q10(100),
+            membrane: 20,
+            key: 1,
+            badge: 0,
+            species: 0,
+            parent: CellId::NONE,
+            birth_tick: 0,
+            genome,
+        });
+        let i = slide.world_mut().cells_mut().index(id).unwrap();
+        let cells = slide.world_mut().cells_mut();
+        cells.slots_mut(i)[0] = Organelle::finished(OrganelleType::Membrane, 40);
+        for slot in 1..mm_core::organelle::SLOT_COUNT {
+            cells.slots_mut(i)[slot] = Organelle::empty();
+        }
+        let bare = cell_colour(slide.world().cells(), i, &table);
+
+        let cells = slide.world_mut().cells_mut();
+        cells.slots_mut(i)[1] = Organelle::finished(OrganelleType::Shell, 255);
+        cells.slots_mut(i)[2] = Organelle::finished(OrganelleType::Shell, 255);
+        let armoured = cell_colour(slide.world().cells(), i, &table);
+        let moved: f32 = (0..3).map(|k| (armoured[k] - bare[k]).abs()).sum();
+        assert!(
+            moved > 0.2,
+            "a doubly-shelled cell is drawn as {armoured:?} against a bare {bare:?}"
+        );
+
+        // And the membrane is not in the mix. Every cell has one, so it could only wash the whole
+        // population towards a single colour.
+        let cells = slide.world_mut().cells_mut();
+        cells.slots_mut(i)[1] = Organelle::empty();
+        cells.slots_mut(i)[2] = Organelle::empty();
+        cells.slots_mut(i)[0] = Organelle::finished(OrganelleType::Membrane, 255);
+        assert_eq!(cell_colour(slide.world().cells(), i, &table), bare);
     }
 }
