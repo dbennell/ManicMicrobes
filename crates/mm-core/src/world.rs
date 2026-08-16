@@ -2594,13 +2594,28 @@ impl World {
 
     /// How much solid a square wants before it reads as rock rather than a crust, `Q10`.
     ///
-    /// Twice `MineralRates::wall_threshold`: enough that the square is unambiguously a wall and
-    /// survives a weathering step or two in thirsty water, little enough that it is *rock* and
-    /// wears away rather than standing forever. A reef laid at the threshold itself opens on the
-    /// first step that dissolves anything out of it, which reads as the tool not working.
+    /// Sixteen times `MineralRates::wall_threshold`, and the multiple is measured.
+    ///
+    /// It was twice, on the reasoning that a wall wants to be unambiguously a wall without being
+    /// permanent. That is the right shape and the wrong size: the shipped worlds seed silicon
+    /// *below* its saturation — deliberately, because at or above it a flowing slide precipitates
+    /// wherever the current converges — so their water is mildly corrosive to silica and a reef
+    /// wears from its rim inwards. Measured at twice the threshold, an exposed face went to
+    /// nothing in about eight thousand ticks, and since a brush stroke three squares wide is
+    /// nearly *all* rim, a drawn wall grew holes through it within one sitting. On the plate that
+    /// reads as walls rendering as black voids, because a square that opens keeps neither its
+    /// light nor its chemistry.
+    ///
+    /// Sixteen puts that at the far side of a hundred thousand ticks, which is a geological
+    /// timescale for this engine rather than a session-long one. It does not make rock permanent
+    /// and must not: **the permanent wall is `set_barriers`**, which holds no mineral and so has
+    /// nothing to give up. That distinction is the entire point of there being two tools.
+    ///
+    /// A thick blob is unaffected either way — its middle has no open neighbour to dissolve into
+    /// and keeps every unit it was laid with. What this buys is time for the *edge*.
     #[must_use]
     pub fn rock_dose(&self) -> i32 {
-        self.biology.minerals.wall_threshold.saturating_mul(2)
+        self.biology.minerals.wall_threshold.saturating_mul(16)
     }
 
     /// Lay rock over many squares as one edit: solid mineral, and a wall wherever it is thick

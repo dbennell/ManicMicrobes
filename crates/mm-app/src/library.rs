@@ -133,6 +133,23 @@ impl Default for NewWorld {
                 (CARBON, mm_core::fixed::q10(40)),
                 (CARBON_DIOXIDE, mm_core::fixed::q10(40)),
                 (OXIDANT, mm_core::fixed::q10(40)),
+                // Twenty, against silicon's ceiling of forty — **below the line on purpose**,
+                // and the reasoning is worth having because both directions are wrong in
+                // different ways.
+                //
+                // *Above* it and the world precipitates: a flowing slide concentrates silica
+                // wherever the current converges, deposition ratchets, and `the_drift` paved a
+                // fifth of itself in two thousand ticks. *At* it is metastable for the same
+                // reason — no headroom, so any convergence tips it over. Below it the water is
+                // mildly corrosive to silica, which is what undersaturated water is, and rock
+                // dissolves into it slowly.
+                //
+                // The consequence is real and is not a fault: a reef in this water **wears from
+                // its rim inwards**. Measured on a seven-by-seven blob, the middle keeps every
+                // unit it was laid with — it has no open neighbour to dissolve into — while the
+                // rim goes to nothing over about eight thousand ticks. That is a reef, and a wall
+                // that is meant to be permanent is `Barrier`, which holds no mineral and has
+                // nothing to give up. See `World::rock_dose` for the other half of this.
                 (SILICON, mm_core::fixed::q10(20)),
                 // The carbonate system (`docs/CHEMISTRY.md` §11).
                 //

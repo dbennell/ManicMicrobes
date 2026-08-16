@@ -359,9 +359,13 @@ fn a_reef_dissolving_raises_the_buffer() {
 #[test]
 fn a_calcite_reef_is_a_wall_and_wears_back_to_water() {
     let mut world = World::new(slide()).expect("world");
-    let dose = world.rock_dose();
-    world.set_rock(&[(12, 12)], CALCIUM, dose / 2);
-    world.set_rock(&[(12, 12)], CARBONATE, dose / 2);
+    // A *thin* reef rather than `rock_dose`, which is sixteen times the wall threshold because a
+    // wall drawn by hand should outlast a sitting. This test is about the far end — a reef worn
+    // back to water — so it starts one just over the line instead of running the clock sixteen
+    // times as long to reach the same place.
+    let thin = world.biology().minerals.wall_threshold * 3 / 4;
+    world.set_rock(&[(12, 12)], CALCIUM, thin);
+    world.set_rock(&[(12, 12)], CARBONATE, thin);
     assert!(
         world.substrate().blocked()[world.substrate().index(12, 12)],
         "a reef over the wall line is not a wall"

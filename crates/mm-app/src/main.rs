@@ -2010,8 +2010,11 @@ impl Tool {
                  that is short of it** and opens once it is worn thin — faster where cells are \
                  stripping the water, which is biological weathering for free. That is the whole \
                  difference from the wall tool, whose walls hold nothing and are therefore \
-                 permanent. Pick the mineral in the Tools menu; the matter comes from outside \
-                 the world through the ledger, and the reef goes into the scenario."
+                 permanent: **if you want it to stay, draw wall.**\n\nA reef wears from its rim \
+                 inwards, because the middle has no open water to dissolve into — so a thick blob \
+                 keeps its heart for a very long time and a thin line does not. Pick the mineral \
+                 in the Tools menu; the matter comes from outside the world through the ledger, \
+                 and the reef goes into the scenario."
             }
             Tool::Paint => {
                 "Add the chosen chemical to the water, one dose a square. The matter comes from \

@@ -936,3 +936,69 @@ fn the_shipped_worlds_do_not_pave_themselves_over() {
     }
     assert!(checked > 10, "only {checked} scenarios were checked");
 }
+
+/// **A reef wears from its rim and keeps its middle**, and the tool's dose buys the edge time.
+///
+/// The shipped worlds seed silicon *below* its saturation, deliberately — at or above it a flowing
+/// slide precipitates wherever the current converges, and `the_drift` paved a fifth of itself in
+/// two thousand ticks. So their water is mildly corrosive to silica, which is what undersaturated
+/// water is, and rock dissolves into it. That is not a fault; it is the whole difference between
+/// rock and bedrock (§10).
+///
+/// What *was* a fault is how fast. At twice the wall threshold an exposed face went to nothing in
+/// about eight thousand ticks, and a brush stroke three squares wide is nearly all face — so a
+/// drawn wall grew holes through it inside one sitting, which on the plate reads as walls
+/// rendering as black voids. `World::rock_dose` is sixteen times the threshold for that reason.
+///
+/// Both halves are asserted, because either alone passes on the wrong thing: a reef that never
+/// wore would be bedrock with extra steps, and one that wore through its middle would mean the
+/// interior is dissolving into squares that are themselves rock.
+#[test]
+fn a_reef_wears_from_its_rim_and_keeps_its_middle() {
+    let mut world = World::new(slide()).expect("world");
+    let c = SOLID_CHEMICALS[1];
+    let k = solid_slot(c).expect("solid-capable");
+    let saturation = mm_core::chem::ChemTable::spec_default().get(c).saturation;
+    // Water half of saturation, which is roughly where the shipped worlds sit.
+    for y in 0..24i32 {
+        for x in 0..24i32 {
+            world.substrate_mut().set_chem(c, x, y, saturation / 2);
+        }
+    }
+    // A blob with a genuine interior: 7x7, so (11,11) has no open neighbour.
+    let squares: Vec<(u32, u32)> = (8..15).flat_map(|y| (8..15).map(move |x| (x, y))).collect();
+    let dose = world.rock_dose();
+    world.set_rock(&squares, c, dose);
+    world.adopt_current_contents_as_baseline();
+
+    let rim = (8i32, 11i32);
+    let middle = (11i32, 11i32);
+    assert_eq!(world.substrate().solid_at(k, middle.0, middle.1), dose);
+    world.run(8_000);
+
+    // The middle is untouched: it has nowhere to dissolve *into*.
+    assert_eq!(
+        world.substrate().solid_at(k, middle.0, middle.1),
+        dose,
+        "the middle of a reef lost mineral, which means it is dissolving into rock"
+    );
+    // The rim has given some up, and has not given all of it up.
+    let left = world.substrate().solid_at(k, rim.0, rim.1);
+    assert!(
+        left < dose,
+        "an exposed face in undersaturated water did not wear at all; that is bedrock behaviour"
+    );
+    assert!(
+        left > dose / 4,
+        "an exposed face lost {} of {dose} in eight thousand ticks. A wall drawn by hand should \
+         outlast a sitting — the permanent one is the barrier tool, and this one is meant to be \
+         rock rather than a puff of smoke",
+        dose - left
+    );
+    assert!(
+        world.substrate().blocked()[world.substrate().index(rim.0, rim.1)],
+        "the rim opened inside eight thousand ticks"
+    );
+    world.check_matter().expect("wearing must conserve");
+}
+
