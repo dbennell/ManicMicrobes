@@ -537,3 +537,81 @@ fn water_just_over_saturation_waits_for_a_surface() {
     );
     world.check_matter().expect("waiting must also conserve");
 }
+
+/// **A wall that grew is a wall the whole engine believes in.**
+///
+/// Rock closing a square is the one place in the crate where the barrier layout changes while the
+/// world is running, and it changes it through the *deferred* setter — `place_barrier`, the same
+/// one the drawing tool uses, which leaves `Substrate::rebuild_edge_masks` to the caller because
+/// the rebuild walks the whole slide and a weathering step can close hundreds of squares at once.
+///
+/// `weather` did not make that call, and the result was a wall that only half the engine could
+/// see. `blocked` was set, so the light regime shadowed the square and `add_chem` refused it — and
+/// the `open_x`/`open_y` masks still said the edge was open, so the fluid fluxed straight through
+/// the rock, and `has_barriers` still said the slide had no walls, so the renderer drew nothing
+/// where the reef was. What you saw was a black hole in the picture with the chemistry piling up
+/// behind it: the exact signature of a drawing bug, from a solver contract.
+///
+/// Three claims, because the three consumers of the barrier layout are independent and it was
+/// possible to be right for one and wrong for the others.
+#[test]
+fn a_wall_that_grew_closes_the_masks_and_shows_on_the_slide() {
+    let mut world = World::new(slide()).expect("world");
+    let c = SOLID_CHEMICALS[0];
+    let k = solid_slot(c).expect("solid-capable");
+    let threshold = world.biology().minerals.wall_threshold;
+    let deposit = world.biology().minerals.deposit;
+    assert!(
+        !world.substrate().has_barriers(),
+        "the fixture starts walled, so this would pass without growing anything"
+    );
+
+    // A seed of rock, and beside it water holding enough that one step's deposit — a fraction
+    // `deposit` of the excess over saturation — carries the square past the wall threshold on
+    // its own. Growth is otherwise a slow ratchet and this test is about what happens at the
+    // moment a square closes, not about how long it takes to get there.
+    world.substrate_mut().add_solid(k, 12, 12, q10(20));
+    let need = (i64::from(threshold) * i64::from(mm_core::fixed::Q10_ONE)) / i64::from(deposit);
+    world
+        .substrate_mut()
+        .set_chem(c, 13, 12, (need as i32).saturating_mul(2));
+    world.adopt_current_contents_as_baseline();
+
+    let mut closed = None;
+    for _ in 0..200 {
+        world.step();
+        if world.substrate().blocked()[world.substrate().index(13, 12)] {
+            closed = Some(world.tick_count());
+            break;
+        }
+    }
+    let at = closed.expect("the water never deposited enough to close a square");
+    let s = world.substrate();
+    let i = s.index(13, 12);
+
+    assert!(
+        s.has_barriers(),
+        "rock closed a square at tick {at} and the substrate still reports no barriers, so \
+         `Slide::frame` carries an empty mask and the renderer draws no wall — the reef is a \
+         black hole in the picture"
+    );
+    // The masks are edge-wise: `open_x[i]` is the edge from `i` to its right-hand neighbour, so
+    // the wall closes the edge on its own index and the one to its left.
+    assert!(
+        !s.open_x()[i] && !s.open_y()[i],
+        "the edges out of the new wall are still open, so the fluid fluxes through rock"
+    );
+    assert!(
+        !s.open_x()[i - 1] && !s.open_y()[i - s.width() as usize],
+        "the edges into the new wall are still open, so the fluid fluxes through rock"
+    );
+
+    // And having closed, it stays sealed: nothing the solver does afterwards puts matter back
+    // inside it. This is the invariant the stale masks were quietly breaking.
+    world.run(400);
+    assert!(
+        !world.substrate().any_matter_inside_a_barrier(),
+        "the fluid filled the inside of a wall, which is matter somewhere it can never leave"
+    );
+    world.check_matter().expect("growing a wall must conserve");
+}

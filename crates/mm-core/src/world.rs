@@ -1206,8 +1206,24 @@ impl World {
             }
         }
 
+        // --- and only now does the layout change ---
+        //
+        // Both loops defer the edge-mask rebuild and one rebuild follows them, for the reason
+        // `World::set_barriers` gives: the rebuild walks the whole slide, so doing it per square
+        // costs `n * width * height`, and a weathering step that closes two hundred squares at
+        // once is exactly the case that makes that visible.
+        //
+        // **The rebuild is not an optimisation, it is the correctness.** It is what recomputes
+        // `Substrate::has_barriers` and the `open_x`/`open_y` masks the fluid reads, and without
+        // it a wall that grew is a wall only half the engine believes in: `blocked` is set, so
+        // the light regime shadows the square and `add_chem` refuses it — but the solver keeps
+        // fluxing straight across the edge, and the renderer is never told the slide has walls
+        // on it at all, so a reef draws as a black hole in the picture. That was the bug: rock
+        // grew, the water behind it went dark, and nothing was drawn where the rock was.
+        let closed = !became_rock.is_empty();
+        let opened = !became_water.is_empty();
         for (x, y) in became_water {
-            self.substrate.set_blocked(x, y, false);
+            self.substrate.set_blocked_deferred(x, y, false);
         }
         for (x, y) in became_rock {
             // **A square with a cell in it does not close.** Refusing beats evicting or killing:
@@ -1217,6 +1233,9 @@ impl World {
                 continue;
             }
             self.place_barrier(x as u32, y as u32, true);
+        }
+        if closed || opened {
+            self.substrate.rebuild_edge_masks();
         }
     }
 
@@ -2377,6 +2396,12 @@ impl World {
             && self.barrier_squares().contains(&(x, y))
     }
 
+    /// One square of the barrier layout, with the contents put somewhere they can go.
+    ///
+    /// **Deferred: the caller owes a `Substrate::rebuild_edge_masks`.** Both callers batch —
+    /// [`World::set_barriers`] for the drawing tool and [`World::weather`] for rock that grew or
+    /// dissolved — and both rebuild once at the end. `weather` did not, for a while, and the
+    /// result was rock the fluid flowed straight through and the renderer never drew.
     fn place_barrier(&mut self, x: u32, y: u32, blocked: bool) {
         let evicted = self
             .substrate

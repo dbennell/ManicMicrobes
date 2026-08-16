@@ -461,8 +461,17 @@ impl Substrate {
     ///
     /// **The caller must call [`Substrate::rebuild_edge_masks`] before the next fluid step**,
     /// or the solver will keep fluxing across an edge that is now a wall. Nothing here can
-    /// enforce that, which is why this is not the one to reach for: use `World::set_barriers`,
-    /// which batches and rebuilds for you and is the only thing in the crate that calls this.
+    /// enforce that, which is why this is not the one to reach for: use `World::set_barriers`
+    /// or `World::weather`, which batch and rebuild for you.
+    ///
+    /// [`Substrate::has_barriers`] is the one derived thing this *does* keep in step, and
+    /// deliberately. It is not an edge mask — it is the flat fact of whether the slide has any
+    /// wall on it, which the renderer reads to decide whether there is a barrier layer to draw
+    /// at all. A caller who forgets the rebuild should pay in a solver that fluxes through a
+    /// wall for a step, which is loud; not in a wall that is never drawn, which reads as a black
+    /// hole in the picture and was hunted as a shader fault. Raising a barrier can only make the
+    /// answer true, so it is set here; clearing the last one still needs the full scan, and until
+    /// it happens this reads conservatively true, which costs a copy of the mask and nothing else.
     pub fn set_blocked_deferred(&mut self, x: i32, y: i32, blocked: bool) -> [i32; CHEM_COUNT] {
         let i = self.index(x, y);
         let mut evicted = [0i32; CHEM_COUNT];
@@ -471,6 +480,7 @@ impl Substrate {
         }
         self.blocked[i] = blocked;
         if blocked {
+            self.has_barriers = true;
             for (c, plane) in self.chem.iter_mut().enumerate() {
                 evicted[c] = plane[i];
                 plane[i] = 0;
