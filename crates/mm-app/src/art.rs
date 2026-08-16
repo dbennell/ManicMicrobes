@@ -361,6 +361,15 @@ pub const SPECK_LIFE: u64 = 84;
 pub struct Speck {
     pub dx: f32,
     pub dy: f32,
+    /// Where the mote was *born*, offset from its lattice point in squares: the jitter alone,
+    /// before the water had carried it anywhere.
+    ///
+    /// Carried alongside the current offset because the pair is a **path**, and a path is what a
+    /// wall can be across. A mote drawn at `(dx, dy)` with no memory of where it started can be
+    /// on the far side of a barrier from the water that is holding it up, which is how the
+    /// particulate came to drift through sealed rock — see `Frame::drifting`.
+    pub from_dx: f32,
+    pub from_dy: f32,
     /// `0..1`, and never 1 at the ends of a life.
     pub alpha: f32,
 }
@@ -467,6 +476,8 @@ fn drift(
     Some(Speck {
         dx: jx * stride + vel[0] * t,
         dy: jy * stride + vel[1] * t,
+        from_dx: jx * stride,
+        from_dy: jy * stride,
         alpha: fade * over.min(1.0),
     })
 }

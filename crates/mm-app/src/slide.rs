@@ -845,6 +845,216 @@ pub struct Frame {
     pub largest_cluster: u32,
 }
 
+/// Which suspended field a drifting mote is a picture of.
+///
+/// The two are drawn differently — a speck is a straw dot and a flake is a dark rose hexagon —
+/// but they are gathered the same way off the same lattice, and the difference that matters here
+/// is which plane and which drift rate. See [`Frame::drifting`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Particulate {
+    /// Suspended particulate: what a body has already broken down into.
+    Detritus,
+    /// The body. Slower, larger, rarer.
+    Carrion,
+}
+
+impl Particulate {
+    /// Most motes drawn per lattice block along one axis, so the square of it per block.
+    ///
+    /// A ceiling on the work rather than a look. Eight a side is sixty-four specks in one block
+    /// of water, which only happens at magnifications where a block fills a good part of the
+    /// window; flakes are larger and two a side already fills a block.
+    ///
+    /// It is also the stride of the mote index, which is why it lives here rather than beside the
+    /// pitch in the renderer: the index has to be stable as `per_side` changes, so that zooming
+    /// in adds motes to the ones already on screen rather than dealing a new hand.
+    #[must_use]
+    pub fn max_side(self) -> u64 {
+        match self {
+            Particulate::Detritus => 8,
+            Particulate::Carrion => 2,
+        }
+    }
+}
+
+/// One mote of suspended matter, in slide coordinates.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Drifting {
+    /// Where it is, in substrate squares.
+    pub x: f32,
+    pub y: f32,
+    /// `0..1`.
+    pub alpha: f32,
+    /// The index it was drawn from, which is what gives a flake its size and its angle.
+    ///
+    /// **Not an identity.** There is no particle in the simulation behind any of this — see
+    /// `art::speck` — and the index shuffles as the lattice is thinned.
+    pub index: u64,
+}
+
+impl Frame {
+    /// Every mote of one suspended field, in slide coordinates.
+    ///
+    /// # Why this is here and not in the renderer
+    ///
+    /// It was in the renderer, and it drew particulate **through solid rock**. The lattice is
+    /// coarse — one sample per [`FLOW_STRIDE`] squares — and a mote is scattered anywhere within
+    /// its block and then carried along that block's velocity for its whole life, so two things
+    /// went wrong at once: a block straddling a wall scattered motes into the half of it that is
+    /// stone, and a mote near a wall was carried straight over it. On a sealed room with a
+    /// current outside it, specks and flakes appeared in water that has never been connected to
+    /// the water they were drawn from. `docs/UI.md` §1 asks that nothing be drawn which the
+    /// simulation did not produce, and a speck outside a sealed box is exactly that.
+    ///
+    /// The fix is a **path** test rather than a point test, and it has to be a path: a flake
+    /// travels for `art::FLECK_LIFE` ticks and can clear a two-square wall between one frame and
+    /// the next, so asking only "is it standing on rock" lets it teleport across. So the mote's
+    /// birth position and its current position are the ends of a segment, and every square that
+    /// segment crosses has to be open water. That is the same claim the simulation makes about
+    /// the matter: it is carried by the water, and water does not cross a wall.
+    ///
+    /// `skip` and `per_side` come from the camera — how crowded the lattice is on screen — and
+    /// are the caller's business. Everything else is the frame's.
+    #[must_use]
+    pub fn drifting(&self, kind: Particulate, skip: usize, per_side: u64) -> Vec<Drifting> {
+        let field = match kind {
+            Particulate::Detritus => &self.detritus,
+            Particulate::Carrion => &self.carrion,
+        };
+        if field.is_empty() || self.flow_cols == 0 {
+            return Vec::new();
+        }
+        let drift = match kind {
+            Particulate::Detritus => self.detritus_drift,
+            Particulate::Carrion => self.carrion_drift,
+        };
+        let cols = self.flow_cols as usize;
+        let rows = field.len() / cols.max(1);
+        let stride = FLOW_STRIDE as f32;
+        let mid = stride / 2.0;
+        let max_side = kind.max_side();
+        let skip = skip.max(1);
+        let per_side = per_side.clamp(1, max_side);
+        let mut out = Vec::new();
+        for row in (0..rows).step_by(skip) {
+            for col in (0..cols).step_by(skip) {
+                let i = row * cols + col;
+                let conc = match kind {
+                    Particulate::Detritus => field.get(i).copied().unwrap_or(0.0),
+                    // Square-rooted, and the specks are not. Carrion is *patchy* where
+                    // particulate is diffuse: one block holding a cell that just died sets the
+                    // peak, everything normalises against it, and the rest of a slide with
+                    // corpses all over it comes out at a concentration no flake's threshold
+                    // passes. The picture then says there are no dead, which is false. The root
+                    // lifts the low end without reordering anything, so a thick patch is still
+                    // thicker than a thin one.
+                    Particulate::Carrion => field.get(i).copied().unwrap_or(0.0).sqrt(),
+                };
+                // The water's velocity, geared down to the speed the matter in it actually
+                // travels: particulate lags the current, and motes drawn at the water's speed
+                // would say it does not.
+                let water = self.flow.get(i).copied().unwrap_or([0.0, 0.0]);
+                let vel = [water[0] * drift, water[1] * drift];
+                let (ax, ay) = (col as f32 * stride + mid, row as f32 * stride + mid);
+                for k in 0..per_side * per_side {
+                    let index = i as u64 * max_side * max_side + k;
+                    let sp = match kind {
+                        Particulate::Detritus => crate::art::speck(index, self.tick, vel, stride, conc),
+                        Particulate::Carrion => crate::art::fleck(index, self.tick, vel, stride, conc),
+                    };
+                    let Some(sp) = sp else {
+                        continue;
+                    };
+                    let from = (ax + sp.from_dx, ay + sp.from_dy);
+                    let to = (ax + sp.dx, ay + sp.dy);
+                    if !self.carried(from, to) {
+                        continue;
+                    }
+                    out.push(Drifting {
+                        x: to.0,
+                        y: to.1,
+                        alpha: sp.alpha,
+                        index,
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether the water could have carried a mote from `from` to `to`.
+    ///
+    /// True when every square the segment crosses is open water on this slide. Off the slide is
+    /// not carried either: a mote is born near an edge and carried past the last square, and one
+    /// drawn out in the black beyond the slide says the matter is somewhere the world does not
+    /// reach.
+    ///
+    /// A supercover walk of the grid (Amanatides–Woo), not a sampled one. Sampling a segment at
+    /// some step misses a wall thinner than the step, and every wall this has to catch is one or
+    /// two squares thick; the walk visits every square the segment actually touches and stops at
+    /// the first that is stone, so the cost is the length of the path and usually one square.
+    #[must_use]
+    pub fn carried(&self, from: (f32, f32), to: (f32, f32)) -> bool {
+        let (w, h) = (self.width as i32, self.height as i32);
+        let open = |x: i32, y: i32| -> bool {
+            if x < 0 || y < 0 || x >= w || y >= h {
+                return false;
+            }
+            // Empty means a slide with no walls on it, where every square is water.
+            match self.barriers.get((y * w + x) as usize) {
+                Some(blocked) => !*blocked,
+                None => self.barriers.is_empty(),
+            }
+        };
+        let (mut x, mut y) = (from.0.floor() as i32, from.1.floor() as i32);
+        let (ex, ey) = (to.0.floor() as i32, to.1.floor() as i32);
+        if !open(x, y) {
+            return false;
+        }
+        let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+        // A budget as well as the destination test, because the loop is stepped by floating
+        // point and a NaN velocity would otherwise spin. Manhattan distance is exactly how many
+        // steps the walk takes, plus one for luck.
+        let budget = (ex - x).abs() + (ey - y).abs() + 1;
+        let (step_x, step_y) = (if dx < 0.0 { -1 } else { 1 }, if dy < 0.0 { -1 } else { 1 });
+        let (t_dx, t_dy) = (
+            if dx == 0.0 { f32::INFINITY } else { (1.0 / dx).abs() },
+            if dy == 0.0 { f32::INFINITY } else { (1.0 / dy).abs() },
+        );
+        // How far along the segment the next vertical and horizontal grid line is.
+        let mut t_x = if dx == 0.0 {
+            f32::INFINITY
+        } else if dx > 0.0 {
+            ((x + 1) as f32 - from.0) / dx
+        } else {
+            (x as f32 - from.0) / dx
+        };
+        let mut t_y = if dy == 0.0 {
+            f32::INFINITY
+        } else if dy > 0.0 {
+            ((y + 1) as f32 - from.1) / dy
+        } else {
+            (y as f32 - from.1) / dy
+        };
+        for _ in 0..budget {
+            if x == ex && y == ey {
+                return true;
+            }
+            if t_x < t_y {
+                t_x += t_dx;
+                x += step_x;
+            } else {
+                t_y += t_dy;
+                y += step_y;
+            }
+            if !open(x, y) {
+                return false;
+            }
+        }
+        x == ex && y == ey
+    }
+}
+
 /// One junction, as it is drawn.
 ///
 /// # It used to be drawn where it cannot be seen

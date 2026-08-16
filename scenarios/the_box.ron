@@ -1,0 +1,49 @@
+// The box — a sealed room, a stirred slide, and nothing that may leave it.
+//
+// A diagnostic scenario, not a habitat. Four walls two squares thick enclose a room with no gap
+// in it; the water outside is stirred and the water inside is not connected to it. Detritus and
+// carrion are seeded *inside only*, so anything drawn outside the box came from the picture and
+// not from the world.
+//
+//   MM_OPEN=scenarios/the_box.ron MM_SHOT=/tmp/box.png MM_SHOT_ZOOM=8 cargo run -p mm-app \
+//     --features render --release
+(
+    name: "the box",
+    seed: 20260816,
+    width: 96,
+    height: 96,
+
+    light: Uniform(intensity: 1024),
+    // Stirred, so the specks have something to be carried by and the arrows have a direction.
+    current: Rotational(strength: 96),
+    fluid_interval: 1,
+
+    seeding: [
+        Uniform(chemical: 11, per_square: 409600),
+        Uniform(chemical: 14, per_square: 409600),
+        Uniform(chemical: 4, per_square: 409600),
+        Uniform(chemical: 5, per_square: 61440),
+        Uniform(chemical: 6, per_square: 4096),
+        Uniform(chemical: 7, per_square: 204800),
+
+        // The particulate, inside the room and nowhere else.
+        Patch(chemical: 12, x: 26, y: 26, width: 44, height: 44, per_square: 409600),
+        Patch(chemical: 15, x: 26, y: 26, width: 44, height: 44, per_square: 409600),
+    ],
+
+    inhabitants: [
+        (
+            genome: "ancestor.mm",
+            count: 16,
+            place: Grid(x: 32, y: 32, width: 32, height: 32),
+        ),
+    ],
+
+    // The room: four walls, two squares thick, with no gap anywhere.
+    barriers: [
+        Rect(x: 24, y: 24, width: 48, height: 2),
+        Rect(x: 24, y: 70, width: 48, height: 2),
+        Rect(x: 24, y: 24, width: 2, height: 48),
+        Rect(x: 70, y: 24, width: 2, height: 48),
+    ],
+)

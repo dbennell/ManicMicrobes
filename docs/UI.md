@@ -1016,6 +1016,27 @@ The gather is gated on `Substrate::present()`, the fluid solver's own per-plane 
 Without it, every slide in existence pays a full pass over a quarter of a million squares each
 published frame to discover that it has no particulate on it.
 
+**Nothing is drawn on the far side of a wall from the water holding it**, and this is §1 rather
+than a nicety. Both halves of the drawing above are approximations that ignore the barrier
+layout: the lattice is four squares coarse, so a block straddling a wall scatters motes into the
+half of it that is stone; and a mote is carried along one velocity sample for its whole life, so
+one near a wall is carried straight over it. Seen on a slide as particulate flowing through a
+sealed reef while the overlay showed the concentration piling up behind it — the solver and the
+picture disagreeing about whether there was a wall there, with the solver right.
+
+So a mote's birth position and its current position are the ends of a **path**, and every square
+that path crosses must be open water or the mote is not drawn. A path and not a point: a flake is
+carried for `FLECK_LIFE` ticks and clears a two-square wall between one frame and the next, so
+asking only "is it standing on rock" lets it teleport across. The walk is a supercover of the grid
+rather than a sampled line, because every wall it has to catch is one or two squares thick and a
+sampled line steps over those.
+
+The gather lives in `Frame::drifting` — on the simulation side of the wall in `slide.rs`, not in
+the renderer — precisely so this is testable without a graphics stack. `mm-app/tests/particulate_walls.rs`
+seals a room, stirs the water outside it, and asserts that nothing is ever drawn beyond the walls;
+`scenarios/the_box.ron` is the same slide to look at. What stays in the renderer is the camera's
+half: how crowded the lattice should be on screen, and where a mote lands in the window.
+
 ### Bevy version
 
 *Done: 0.14.2 → 0.19, in five commits, one per version, each verified by rendering a frame.*

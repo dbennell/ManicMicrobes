@@ -631,12 +631,6 @@ const SPECK_PITCH: f32 = 27.0;
 /// overlay that would show that colour is switched on.
 const SPECK_RGB: [f32; 3] = [0.745, 0.667, 0.510];
 
-/// Most specks drawn per lattice block along one axis, so the square of it per block.
-///
-/// A ceiling on the work rather than a look: eight a side is sixty-four specks in one block of
-/// water, which only happens at magnifications where a block fills a good part of the window.
-const SPECK_MAX_SIDE: u64 = 8;
-
 /// How far apart the flakes of carrion are drawn, in pixels.
 ///
 /// Wider than [`SPECK_PITCH`], because a flake is bigger and a field of them at the specks'
@@ -663,9 +657,13 @@ const FLECK_PITCH: f32 = 62.0;
 /// chemical overlay that would show carrion's own colour is switched on.
 const FLECK_RGB: [f32; 3] = [0.72, 0.63, 0.62];
 
-/// Most flakes per lattice block along one axis. Lower than [`SPECK_MAX_SIDE`] because they are
-/// larger: four a side already fills a block at the magnifications where a block is wide.
-const FLECK_MAX_SIDE: u64 = 2;
+/// Grains of grit drawn per square of rock, over its four faces — the stride of the grit's seed.
+///
+/// Eight, so that a face's two grains and the four faces do not collide: `d * 2 + g` spans
+/// exactly this range and each square gets its own block of the hash. It rode on the particulate's
+/// per-block ceiling before, which was an unrelated number that happened to be nearby and which
+/// gave the third and fourth faces the next square's grains.
+const GRIT_PER_SQUARE: u64 = 8;
 
 fn main() {
     // Before Bevy, because this one does not want a window — it writes files and stops. The
@@ -3429,154 +3427,75 @@ fn redraw(
     // looked empty would be lying about what is on it. The switchable thing is the chemical
     // overlay that washes each square in colour — that one is a reading, and it answers "how
     // much", which is a question a stipple should not be asked.
-    // `(where, alpha, is a flake of carrion rather than a speck of particulate)`. One list
-    // and one pool of sprites for both, because Bevy caps a system's parameters and a second
-    // query for a second kind of dot is not what that budget is for — the two differ in texture,
-    // size and colour, all of which are per-entity and set below.
-    // `(where, alpha, is a flake, size multiplier, spin)`. The last two are per fleck and
-    // meaningless for a speck, which is a dot.
+    //
+    // `(where, alpha, is a flake, size multiplier, spin)`. One list and one pool of sprites for
+    // both kinds, because Bevy caps a system's parameters and a second query for a second kind of
+    // dot is not what that budget is for — they differ in texture, size and colour, all of which
+    // are per-entity and set below. The last two are per flake and meaningless for a speck, which
+    // is a dot.
     let mut speck_slots: Vec<(Vec3, f32, bool, f32, f32)> = Vec::new();
     // Grit along the exposed faces of mineral rock: `(where, colour, size, spin)`.
     let mut grain_slots: Vec<(Vec3, [f32; 3], f32, f32)> = Vec::new();
-    if !frame.detritus.is_empty() && frame.flow_cols > 0 {
-        let cols = frame.flow_cols as usize;
-        let rows = frame.detritus.len() / cols.max(1);
-        let stride = slide::FLOW_STRIDE as f32;
-        let square_px = scale.max(0.0001);
-        // The arrows' trick: a substrate lattice thinned in screen space, so the stipple stays
-        // about as dense at every magnification. Substrate-spaced rather than screen-spaced so
-        // that a speck keeps its place on the slide when the view is panned across it.
-        //
-        // Thinning alone is not enough, and the first version of this had only that. `skip` can
-        // make the lattice coarser and never finer, so the lattice itself is a *floor* on the
-        // density: at high magnification a block is wider than the pitch and one speck in it is
-        // all there is, which had the stipple thinning out as the view zoomed in — precisely
-        // backwards, since magnifying should reveal more of the water and not less of it. So
-        // the two halves are here: `skip` drops blocks when they crowd, `per_side` fills them
-        // when they spread. Only one of the pair is ever above 1.
-        let block_px = square_px * stride;
-        let skip = ((SPECK_PITCH / block_px).ceil() as usize).max(1);
-        let per_side = ((block_px / SPECK_PITCH).round() as u64).clamp(1, SPECK_MAX_SIDE);
-        let mid = stride / 2.0;
-        for row in (0..rows).step_by(skip) {
-            for col in (0..cols).step_by(skip) {
-                let i = row * cols + col;
-                let conc = frame.detritus.get(i).copied().unwrap_or(0.0);
-                // The water's velocity, geared down to the speed the particulate in it
-                // actually travels: detritus lags the current, and specks drawn at the water's
-                // speed would say it does not.
-                let water = frame.flow.get(i).copied().unwrap_or([0.0, 0.0]);
-                let vel = [
-                    water[0] * frame.detritus_drift,
-                    water[1] * frame.detritus_drift,
-                ];
-                for k in 0..per_side * per_side {
-                    // Distinct per speck *and* stable as `per_side` changes, so that zooming in
-                    // adds specks to the ones already on screen rather than dealing a new hand.
-                    let index = i as u64 * SPECK_MAX_SIDE * SPECK_MAX_SIDE + k;
-                    let Some(sp) = art::speck(index, frame.tick, vel, stride, conc) else {
-                        continue;
-                    };
-                    let at = to_screen(
-                        col as f32 * stride + mid + sp.dx,
-                        row as f32 * stride + mid + sp.dy,
-                    );
-                    if at.x < cull.min_x
-                        || at.x > cull.max_x
-                        || at.y < cull.min_y
-                        || at.y > cull.max_y
-                    {
-                        continue;
-                    }
-                    speck_slots.push((
-                        at,
-                        sp.alpha * optics.vignette(field_radius(at)),
-                        false,
-                        1.0,
-                        0.0,
-                    ));
-                }
-            }
-        }
-    }
-    // The dead, as slow brown flakes.
+    // The lattice walk itself is `Frame::drifting`, on the simulation side of the wall in
+    // `slide.rs`, and that is where it has to be: a mote's position is a claim about where the
+    // *water* has carried something, which is a question about barriers and velocities and not
+    // about the camera. It lived here, and it drew particulate straight through solid rock —
+    // see `Frame::drifting` for what went wrong and `tests/particulate_walls.rs` for the sealed
+    // room that holds it. What is left here is the camera's half: how crowded the lattice should
+    // be on screen, and where a mote lands in the window.
     //
-    // The same lattice and the same pure-function-of-(index, tick) drift the specks use, and for
-    // the same reasons — see `art::fleck`. What differs is what it is a picture *of*: detritus is
-    // suspended particulate, the stuff a body has already broken down into, and carrion is the
-    // body. Drawing them alike would say the decay chain has one stage, when the whole of
-    // `docs/CHEMISTRY.md` §7's corpse → carrion → detritus → carbon is that it has three.
+    // The arrows' trick, for both: a substrate lattice thinned in screen space, so the stipple
+    // stays about as dense at every magnification. Substrate-spaced rather than screen-spaced so
+    // that a mote keeps its place on the slide when the view is panned across it.
     //
-    // So: larger, hexagonal, dark red, and slower. The slowness is two things multiplying —
-    // carrion's own `advection` in the chemical table, which is the lowest there is, and
-    // `FLECK_LIFE`, which carries a flake five times as long before it restarts.
-    if !frame.carrion.is_empty() && frame.flow_cols > 0 {
-        let cols = frame.flow_cols as usize;
-        let rows = frame.carrion.len() / cols.max(1);
-        let stride = slide::FLOW_STRIDE as f32;
-        let square_px = scale.max(0.0001);
-        let block_px = square_px * stride;
-        let skip = ((FLECK_PITCH / block_px).ceil() as usize).max(1);
-        let per_side = ((block_px / FLECK_PITCH).round() as u64).clamp(1, FLECK_MAX_SIDE);
-        let mid = stride / 2.0;
-        for row in (0..rows).step_by(skip) {
-            for col in (0..cols).step_by(skip) {
-                let i = row * cols + col;
-                // Square-rooted, and the specks are not. Carrion is *patchy* where particulate
-                // is diffuse: one block holding a cell that just died sets the peak, everything
-                // normalises against it, and the rest of a slide with corpses all over it comes
-                // out at a concentration no flake's threshold passes. The picture then says
-                // there are no dead, which is false. The root lifts the low end without
-                // reordering anything, so a thick patch is still thicker than a thin one.
-                let conc = frame.carrion.get(i).copied().unwrap_or(0.0).sqrt();
-                let water = frame.flow.get(i).copied().unwrap_or([0.0, 0.0]);
-                let vel = [water[0] * frame.carrion_drift, water[1] * frame.carrion_drift];
-                for k in 0..per_side * per_side {
-                    let index = i as u64 * FLECK_MAX_SIDE * FLECK_MAX_SIDE + k;
-                    let Some(fl) = art::fleck(index, frame.tick, vel, stride, conc) else {
-                        continue;
-                    };
-                    // Off the slide is off the picture, and this is checked *before* the screen
-                    // transform because the two questions are different. A fleck is carried from
-                    // its lattice point for its whole life, and near an edge that carries it past
-                    // the last square — so flakes were drawn out in the black beyond the slide,
-                    // which says the dead are somewhere the world does not reach. The cull below
-                    // asks whether a thing is on screen; this asks whether it is in the water,
-                    // and the camera is allowed to see past the edge where the water is not
-                    // allowed to be.
-                    let (fx, fy) = (
-                        col as f32 * stride + mid + fl.dx,
-                        row as f32 * stride + mid + fl.dy,
-                    );
-                    if fx < 0.0
-                        || fy < 0.0
-                        || fx > frame.width as f32
-                        || fy > frame.height as f32
-                    {
-                        continue;
-                    }
-                    let at = to_screen(fx, fy);
-                    if at.x < cull.min_x
-                        || at.x > cull.max_x
-                        || at.y < cull.min_y
-                        || at.y > cull.max_y
-                    {
-                        continue;
-                    }
-                    // Its own size and its own angle, from its index. Dead cells are not a
-                    // stamped set: they were different sizes when they were alive, and nothing
-                    // orients a fragment of membrane.
-                    let h = art::hash01(index.wrapping_mul(0x9E37_79B9));
-                    let spin = art::hash01(index.wrapping_mul(0x85EB_CA6B)) * std::f32::consts::TAU;
-                    speck_slots.push((
-                        at,
-                        fl.alpha * optics.vignette(field_radius(at)),
-                        true,
-                        0.55 + 0.9 * h,
-                        spin,
-                    ));
-                }
+    // Thinning alone is not enough, and the first version of this had only that. `skip` can make
+    // the lattice coarser and never finer, so the lattice itself is a *floor* on the density: at
+    // high magnification a block is wider than the pitch and one speck in it is all there is,
+    // which had the stipple thinning out as the view zoomed in — precisely backwards, since
+    // magnifying should reveal more of the water and not less of it. So the two halves are here:
+    // `skip` drops blocks when they crowd, `per_side` fills them when they spread. Only one of
+    // the pair is ever above 1.
+    let block_px = scale.max(0.0001) * slide::FLOW_STRIDE as f32;
+    let density = |pitch: f32| {
+        (
+            (pitch / block_px).ceil() as usize,
+            (block_px / pitch).round() as u64,
+        )
+    };
+    for (kind, pitch) in [
+        (slide::Particulate::Detritus, SPECK_PITCH),
+        // The dead, as slow brown flakes. The same lattice and the same drift the specks use;
+        // what differs is what it is a picture *of*. Detritus is suspended particulate, the stuff
+        // a body has already broken down into, and carrion is the body. Drawing them alike would
+        // say the decay chain has one stage, when the whole of `docs/CHEMISTRY.md` §7's corpse →
+        // carrion → detritus → carbon is that it has three.
+        (slide::Particulate::Carrion, FLECK_PITCH),
+    ] {
+        let (skip, per_side) = density(pitch);
+        let flake = kind == slide::Particulate::Carrion;
+        for mote in frame.drifting(kind, skip, per_side) {
+            let at = to_screen(mote.x, mote.y);
+            if at.x < cull.min_x || at.x > cull.max_x || at.y < cull.min_y || at.y > cull.max_y {
+                continue;
             }
+            // Its own size and its own angle, from its index. Dead cells are not a stamped set:
+            // they were different sizes when they were alive, and nothing orients a fragment of
+            // membrane. A speck is a dot and would not show either.
+            let (size, spin) = if flake {
+                (
+                    0.55 + 0.9 * art::hash01(mote.index.wrapping_mul(0x9E37_79B9)),
+                    art::hash01(mote.index.wrapping_mul(0x85EB_CA6B)) * std::f32::consts::TAU,
+                )
+            } else {
+                (1.0, 0.0)
+            };
+            speck_slots.push((
+                at,
+                mote.alpha * optics.vignette(field_radius(at)),
+                flake,
+                size,
+                spin,
+            ));
         }
     }
 
@@ -3637,7 +3556,7 @@ fn redraw(
                         continue;
                     }
                     for g in 0..per_face {
-                        let seed = i as u64 * 4 * FLECK_MAX_SIDE + d as u64 * 4 + g;
+                        let seed = i as u64 * GRIT_PER_SQUARE + d as u64 * 2 + g;
                         // Along the face, and a little way over it: grit sits *on* the boundary
                         // rather than inside the square, which is what stops it reading as a
                         // pattern painted on the wall.

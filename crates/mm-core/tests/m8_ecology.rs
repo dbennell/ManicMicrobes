@@ -1064,10 +1064,14 @@ const LIBRARY: [&str; 17] = [
 ];
 
 /// Scenarios that are deliberately not part of the curated library.
-const NOT_CURATED: [&str; 1] = [
+const NOT_CURATED: [&str; 2] = [
     // A physics workload with nothing alive on it. Asking whether it collapses to a single
     // strategy is asking a question about no strategies at all.
     "scale.ron",
+    // A sealed room with the water outside it stirred: an instrument for looking at whether the
+    // renderer draws anything the world does not contain, not a place to live. Its headless
+    // half is `mm-app/tests/particulate_walls.rs`; this is how you *see* the same claim.
+    "the_box.ron",
 ];
 
 #[test]
