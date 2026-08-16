@@ -519,10 +519,16 @@ fn the_junctions_are_the_only_forms_drawn_over_the_cells() {
     for f in [form::SPIKE, form::CILIUM, form::FLAGELLUM, form::HOLDFAST, form::HALO] {
         assert!(!limbmesh::over_cells(f), "form {f} is drawn over the cells");
     }
-    // And the two layers are on either side of the cell mesh, which sits at 1.0.
-    assert!(limbmesh::LIMB_Z < 1.0);
-    assert!(limbmesh::OVER_Z > 1.0);
 }
+
+/// And the two layers are on either side of the cell mesh, which sits at 1.0.
+///
+/// A `const` assertion rather than one inside a test, because both sides are constants and this
+/// way it is a compile error rather than a failure somebody has to run something to see.
+const _: () = {
+    assert!(limbmesh::LIMB_Z < 1.0, "limbs are drawn over the cells");
+    assert!(limbmesh::OVER_Z > 1.0, "junctions are drawn under the cells");
+};
 
 // --- the two together -------------------------------------------------------------------------
 
