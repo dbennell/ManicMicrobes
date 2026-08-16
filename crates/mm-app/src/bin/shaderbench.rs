@@ -63,6 +63,8 @@ use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 
 use mm_app::cellmesh::{self, FIELD_FILL, SQUASH_PER_CELL};
 use mm_app::cellpipe;
+use mm_app::limbmesh;
+use mm_app::limbpipe;
 use mm_app::phantom::{self, Bench, Drawn, Layout, Motion};
 
 fn main() {
@@ -75,6 +77,7 @@ fn main() {
         ..default()
     }));
     cellpipe::plugin(&mut app);
+    limbpipe::plugin(&mut app);
     app.add_plugins(EguiPlugin::default())
         // Continuously, focused or not. Bevy's default waits a second between redraws for an
         // unfocused window, and a bench driven from a script never has focus — which makes a run
@@ -163,6 +166,19 @@ struct State {
     /// roughly seven times the observed difference and still nowhere near what a real divergence
     /// would produce.
     dots: bool,
+    /// Draw the **limb sheet** instead of the cells: every form in `limb.wgsl`, across a sweep of
+    /// effort, size and phase, with a body behind each one so the join reads.
+    ///
+    /// The same argument as the rest of this bench, applied to what a cell grows outside itself.
+    /// A spike that looks wrong on the slide could be the field, the quad, the mount angle, the
+    /// organelle's control word or the tier — five hypotheses and a run each. Here there is no
+    /// world and no organelle: the numbers are a sweep, so what is on the screen is the shader and
+    /// the two vertex attributes, and nothing else. See `docs/MORPHOLOGY.md` §8.
+    ///
+    /// `MM_BENCH_LIMBS=1`, or `k`.
+    sheet: bool,
+    /// The limb sheet's vertices, reused like `buffers`.
+    limbs: limbmesh::Buffers,
 }
 
 impl State {
@@ -226,6 +242,8 @@ impl State {
             show_panel: num("MM_BENCH_PANEL", 1.0) > 0.5,
             rounded: num("MM_BENCH_ROUNDED", 1.0) > 0.5,
             dots: num("MM_BENCH_DOTS", 0.0) > 0.5,
+            sheet: num("MM_BENCH_LIMBS", 0.0) > 0.5,
+            limbs: limbmesh::Buffers::default(),
         }
     }
 }
@@ -245,12 +263,17 @@ fn background() -> Color {
 #[derive(Component)]
 struct CellMesh;
 
+/// The one entity the limb sheet is drawn as. See [`State::sheet`].
+#[derive(Component)]
+struct LimbMesh;
+
 fn setup(
     mut commands: Commands,
     state: Res<State>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<cellpipe::CellMaterial>>,
     mut dot_materials: ResMut<Assets<cellpipe::DotMaterial>>,
+    mut limb_materials: ResMut<Assets<limbpipe::LimbMaterial>>,
 ) {
     // Order -1 so egui composites over the slide, as the microscope does it.
     commands.spawn((
@@ -278,6 +301,19 @@ fn setup(
             MeshMaterial2d(materials.add(cellpipe::CellMaterial {})),
         ));
     }
+    // The limb sheet, always spawned and empty unless asked for — a mesh with no vertices costs
+    // nothing to leave hidden, and spawning one on a keypress would be a pipeline compile in the
+    // middle of the thing being looked at.
+    commands.spawn((
+        LimbMesh,
+        NoFrustumCulling,
+        // Over the bodies, so a spike's root is *visible* here rather than hidden. This is the
+        // one place that should differ from the microscope: on the slide the join is meant to
+        // disappear under the membrane, and a bench that hid it could not show it was right.
+        Transform::from_xyz(0.0, 0.0, 2.0),
+        Mesh2d(meshes.add(limbpipe::empty_mesh())),
+        MeshMaterial2d(limb_materials.add(limbpipe::LimbMaterial {})),
+    ));
 }
 
 fn keys(input: Res<ButtonInput<KeyCode>>, mut state: ResMut<State>) {
@@ -310,6 +346,9 @@ fn keys(input: Res<ButtonInput<KeyCode>>, mut state: ResMut<State>) {
     }
     if input.just_pressed(KeyCode::KeyR) {
         state.at = 0;
+    }
+    if input.just_pressed(KeyCode::KeyK) {
+        state.sheet = !state.sheet;
     }
     if input.just_pressed(KeyCode::Equal) {
         state.zoom = (state.zoom * 1.25).min(2000.0);
@@ -396,12 +435,39 @@ fn slots(cell: &Drawn) -> [cellmesh::Squash; SQUASH_PER_CELL] {
 fn redraw(
     mut state: ResMut<State>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mesh: Query<&Mesh2d, With<CellMesh>>,
+    window: Query<&Window, With<PrimaryWindow>>,
+    mesh: Query<&Mesh2d, (With<CellMesh>, Without<LimbMesh>)>,
+    limb_mesh: Query<&Mesh2d, (With<LimbMesh>, Without<CellMesh>)>,
 ) {
     if state.running || state.step {
         state.at = state.at.wrapping_add(1);
         state.step = false;
     }
+
+    // The sheet replaces the scene rather than sitting beside it: it is a different question, and
+    // laying seven rows of limbs over nine jostling cells would answer neither.
+    if state.sheet {
+        let size = window
+            .single()
+            .map(|w| Vec2::new(w.width(), w.height()))
+            .unwrap_or(Vec2::new(1280.0, 720.0));
+        limb_sheet(&mut state, size * 0.5);
+        if let Ok(handle) = mesh.single() {
+            if let Some(mut m) = meshes.get_mut(&handle.0) {
+                cellpipe::upload(&mut m, &mut state.buffers);
+            }
+        }
+        if let Ok(handle) = limb_mesh.single() {
+            if let Some(mut m) = meshes.get_mut(&handle.0) {
+                limbpipe::upload(&mut m, &mut state.limbs);
+            }
+        }
+        return;
+    }
+    // Nothing in the sheet's buffers when the cells are being drawn, or the last sheet stays on
+    // screen over them.
+    state.limbs.begin(0);
+
     let cells = state.bench.frame(state.at);
     state.report = phantom::inspect(&cells);
     if state.previous.len() == cells.len() {
@@ -491,6 +557,162 @@ fn redraw(
     if let Ok(handle) = mesh.single() {
         if let Some(mut m) = meshes.get_mut(&handle.0) {
             cellpipe::upload(&mut m, &mut state.buffers);
+        }
+    }
+    if let Ok(handle) = limb_mesh.single() {
+        if let Some(mut m) = meshes.get_mut(&handle.0) {
+            limbpipe::upload(&mut m, &mut state.limbs);
+        }
+    }
+}
+
+/// Every form in `limb.wgsl`, across a sweep of effort, and a body behind each so the join reads.
+///
+/// A row per form and a column per `extent`, which is the number that means something different
+/// to every one of them — how far a spike is out, how hard a cilium is beating and which way, how
+/// tightly a holdfast is holding on, how wide an enzyme vesicle is open, how near a junction is to
+/// breaking. Animated by the frame number, so a beat can be stepped through one tick at a time
+/// with `,` and `.` and compared against itself a week later.
+///
+/// **Nothing here came from a cell.** That is the whole point, and it is `phantom`'s argument
+/// applied to the outside of a body: a spike that looks wrong on the slide could be the field, the
+/// quad, the mount angle, the organelle's control word or the tier, and that is five hypotheses
+/// and a run each. Here the numbers are a sweep, so what is on the screen is the shader and the
+/// two vertex attributes and nothing else.
+fn limb_sheet(state: &mut State, half: Vec2) {
+    use limbmesh::form;
+
+    // Form, label colour, and whether `extent` should sweep signed — the propulsors are the two
+    // that can run backwards, and being able to see that is half of why they are here.
+    const ROWS: [(f32, [f32; 3], bool); 7] = [
+        (form::SPIKE, [0.88, 0.36, 0.32], false),
+        (form::CILIUM, [0.86, 0.84, 0.55], true),
+        (form::FLAGELLUM, [0.76, 0.72, 0.40], true),
+        (form::HOLDFAST, [0.50, 0.46, 0.40], false),
+        (form::HALO, [0.74, 0.82, 0.34], false),
+        (form::BAND, [0.80, 0.78, 0.70], false),
+        (form::CHANNEL, [0.55, 0.70, 0.85], false),
+    ];
+    const COLS: usize = 5;
+
+    let rows = ROWS.len();
+    let pitch_x = (half.x * 2.0) / (COLS as f32 + 0.5);
+    let pitch_y = (half.y * 2.0) / (rows as f32 + 0.5);
+    let cell_r = (pitch_x.min(pitch_y) * 0.17).max(3.0);
+    // The beat, on the bench's own frame number rather than a clock, exactly as `slide::limb_phase`
+    // takes it from the tick: a held frame is a held picture.
+    let phase = (state.at % 20) as f32 / 20.0;
+
+    state.buffers.begin(rows * COLS, cellmesh::Detail::Seamed);
+    state.limbs.begin(rows * COLS);
+    for (row, (form, rgb, signed)) in ROWS.into_iter().enumerate() {
+        // Downwards, so the rows are in the order the panel lists them. Screen `y` is up here as
+        // it is everywhere else in the renderer, and the first version had the sheet reading
+        // bottom-to-top against its own legend.
+        let y = half.y - pitch_y * (row as f32 + 0.75);
+        for col in 0..COLS {
+            let x = -half.x + pitch_x * (col as f32 + 0.75);
+            let t = col as f32 / (COLS - 1) as f32;
+            // Signed forms sweep -1 to 1 through zero, so a reversed beat sits beside a forward
+            // one and an idle propulsor sits between them.
+            let extent = if signed { t * 2.0 - 1.0 } else { t };
+            // Size sweeps with the column too, so the sheet is not one `param` five times.
+            let big = 0.25 + 0.75 * t;
+
+            // The body it grew from, through the cell shader, so a limb's root can be seen
+            // meeting a real membrane rather than a disc drawn for the occasion.
+            state.buffers.push(cellmesh::Placed {
+                x,
+                y,
+                half: cell_r / FIELD_FILL,
+                rgba: [0.30, 0.34, 0.38, 1.0],
+                shape: cellmesh::Shape {
+                    seed: cellmesh::seed_of(row as u64 * 16 + col as u64),
+                    softness: 0.0,
+                    integrity: 1.0,
+                    rounded: 1.0,
+                },
+                squash: Default::default(),
+                swell: 1.0,
+                // The last column of the spike row wears a shell, which is the only way to see
+                // the two together — armour and a drawn spike is the trade the catalogue poses.
+                armour: if row == 0 && col + 1 == COLS { 0.55 } else { 0.0 },
+            });
+
+            // A halo is centred on the body; everything else leaves from its rim.
+            let (length, width, inset, count, inner, taper) = match form {
+                form::HALO => {
+                    let outer = cell_r * 2.0;
+                    (outer, outer, outer, 1.0, cell_r / outer, 0.0)
+                }
+                form::CILIUM => (
+                    cell_r * (0.45 + 0.45 * big),
+                    cell_r * (0.40 + 0.30 * big),
+                    cell_r * 0.12,
+                    (2.0 + (big * 3.0).floor()).min(5.0),
+                    0.0,
+                    0.0,
+                ),
+                form::FLAGELLUM => (
+                    cell_r * (1.4 + 1.5 * big),
+                    cell_r * (0.42 + 0.26 * big),
+                    cell_r * 0.24,
+                    1.0,
+                    0.0,
+                    0.22,
+                ),
+                form::HOLDFAST => (
+                    cell_r * 1.1,
+                    cell_r * (0.30 + 0.22 * big),
+                    cell_r * 0.24,
+                    3.0,
+                    0.0,
+                    0.45,
+                ),
+                form::BAND | form::CHANNEL => (
+                    cell_r * 1.6,
+                    cell_r * 0.16,
+                    cell_r * 1.6,
+                    4.0,
+                    0.0,
+                    0.33,
+                ),
+                // The spike, and anything added later, until it has a line of its own.
+                _ => (
+                    cell_r * 1.7 * extent.abs().max(0.02),
+                    cell_r * (0.18 + 0.20 * big),
+                    cell_r * 0.36,
+                    1.0,
+                    0.0,
+                    0.0,
+                ),
+            };
+            let half_len = (length + inset) * 0.5;
+            let along = half_len - inset;
+            // **Three placements, not two**, and the sheet found that by drawing the second one
+            // wrong: a halo came out as a crescent hanging off the side of its cell, because it
+            // was pushed out to the rim like a limb. It is a cloud *around* the body and is
+            // centred on it, a junction lies across a wall and is centred on that, and only a
+            // true limb leaves from the rim.
+            let across = limbmesh::over_cells(form);
+            let centred = across || form == form::HALO;
+            let offset = if centred { 0.0 } else { cell_r + along };
+            state.limbs.push(limbmesh::Placed {
+                cx: x + offset,
+                cy: y,
+                ux: 1.0,
+                uy: 0.0,
+                half_len: if centred { length } else { half_len },
+                half_wid: width,
+                rgba: [rgb[0], rgb[1], rgb[2], 1.0],
+                form,
+                extent,
+                phase,
+                count,
+                inner,
+                taper,
+                seed: (row * 7 + col) as f32,
+            });
         }
     }
 }
@@ -638,6 +860,57 @@ fn panel(mut contexts: EguiContexts, mut state: ResMut<State>) {
         return;
     };
     let ctx = ctx.clone();
+    // The sheet is a different subject and wants a different panel: none of the seam statistics
+    // below say anything about a limb, and reporting them over a picture that has no seams in it
+    // would be a panel of numbers about something that is not on the screen.
+    if state.sheet {
+        egui::Window::new("limb sheet")
+            .default_width(340.0)
+            .show(&ctx, |ui| {
+                let s = &mut *state;
+                ui.label("every form in `limb.wgsl`, on data no cell made.");
+                ui.label(
+                    egui::RichText::new(
+                        "rows: spike · cilium · flagellum · holdfast · halo · band · channel\n\
+                         columns: effort left to right — and size with it. The two propulsors \
+                         sweep signed, so the left half of those rows is beating backwards and \
+                         the middle is idle.",
+                    )
+                    .small(),
+                );
+                ui.separator();
+                ui.label(format!("frame {}   phase {:.2}", s.at, (s.at % 20) as f32 / 20.0));
+                ui.label(
+                    egui::RichText::new(
+                        "the phase is the frame number and never a clock, exactly as \
+                         `slide::limb_phase` takes it from the tick — so a held frame is a held \
+                         picture and two runs a week apart are the same one.",
+                    )
+                    .small(),
+                );
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(if s.running { "⏸ pause" } else { "▶ run" })
+                        .clicked()
+                    {
+                        s.running = !s.running;
+                    }
+                    if ui.button("step").clicked() {
+                        s.step = true;
+                        s.running = false;
+                    }
+                    if ui.button("cells").clicked() {
+                        s.sheet = false;
+                    }
+                });
+                ui.label(
+                    egui::RichText::new("space pause · . step · , back · k cells · p panel")
+                        .small(),
+                );
+            });
+        return;
+    }
     egui::Window::new("shader bench")
         .default_width(340.0)
         .show(&ctx, |ui| {
@@ -808,7 +1081,7 @@ fn panel(mut contexts: EguiContexts, mut state: ResMut<State>) {
             ui.label(
                 egui::RichText::new(
                     "space pause · . step · , back · m motion · l layout · o outline · \
-                     p panel · +/- zoom",
+                     k limbs · p panel · +/- zoom",
                 )
                 .small(),
             );

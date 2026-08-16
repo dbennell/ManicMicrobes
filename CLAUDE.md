@@ -129,6 +129,13 @@ cargo run -p mm-app --features render --release   # the microscope
 cargo run -p mm-app --bin shaderbench --features render --release   # --bin, not the default
 cargo test -p mm-app --test shader_probe -- --ignored --nocapture --test-threads=1  # its numbers
 
+# What a cell has grown *outside* its membrane — cilia, a flagellum, a drawn spike, a holdfast,
+# an exoenzyme's cloud, and the junctions — is a second mesh under (and over) the cells, with its
+# own shader. `docs/MORPHOLOGY.md`. Its numbers, and the WGSL parsed without a display:
+cargo test -p mm-app --test limb_probe
+cargo test -p mm-app --test shader_syntax     # the WGSL, parsed and validated with no display
+MM_BENCH_LIMBS=1 ./target/release/shaderbench   # or `k`: every form, on data no cell made
+
 # And what the shader actually put on the screen, against what it was told to draw. Two
 # photographs of one frame over different backgrounds give the coverage exactly; see the script.
 MM_BENCH_AT=30 MM_BENCH_PANEL=0 MM_BENCH_DUMP=/tmp/f.txt MM_BENCH_SHOT=/tmp/dark.png \
@@ -156,9 +163,10 @@ docs/ECONOMY.md   what a cell earns and pays, why the autotroph wins everything,
 docs/NEURONS.md   nervous systems from junctions: what works, what blocks it, what not to build.
 docs/STIFFNESS.md the contact model, turgor, and which of the squish is physics and which is drawn.
 docs/OVERLAPS.md  the overlapping cells: what it was, what it was not, and the bench.
-docs/MORPHOLOGY.md  *proposal*: the six organelles that reach outside the membrane and are drawn
-                  as dots anyway — cilia, flagella, spikes, holdfasts, exoenzymes — plus the
-                  shell and the junction. What may be drawn from what state, and the pipeline.
+docs/MORPHOLOGY.md  the six organelles that reach outside the membrane and were drawn as dots
+                  anyway — cilia, flagella, spikes, holdfasts, exoenzymes — plus the shell and the
+                  junction. What may be drawn from what state, and why the limbs are their own
+                  pipeline rather than lines added to `cell.wgsl`.
 README.md         what this is and where to look. Written for somebody arriving.
 tools/            scripts that turn a screenshot into numbers.
 scenarios/        .ron scenario configs — the *worlds*: size, light, current, chemistry seeding,
