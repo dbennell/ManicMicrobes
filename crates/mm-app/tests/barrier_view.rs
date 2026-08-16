@@ -72,7 +72,7 @@ fn the_wall_is_painted_and_the_water_beside_it_is_not() {
     let (w, h) = (frame.width as usize, frame.height as usize);
     let mut pixels = vec![0u8; w * h * 4];
     // No vignette, so what is left is the wall and nothing else.
-    art::paint_barriers(&mut pixels, w, h, &frame.barriers, &|_, _| 1.0);
+    art::paint_barriers(&mut pixels, w, h, &frame.barriers, &frame.mineral, &|_, _| 1.0);
 
     let texel = |x: usize, y: usize| {
         let at = (y * w + x) * 4;
@@ -109,7 +109,7 @@ fn the_wall_layer_is_binary_which_is_what_makes_it_crisp() {
     let frame = slide.frame();
     let (w, h) = (frame.width as usize, frame.height as usize);
     let mut pixels = vec![0u8; w * h * 4];
-    art::paint_barriers(&mut pixels, w, h, &frame.barriers, &|x, _| x / w as f32);
+    art::paint_barriers(&mut pixels, w, h, &frame.barriers, &frame.mineral, &|x, _| x / w as f32);
 
     for (i, chunk) in pixels.chunks_exact(4).enumerate() {
         assert!(

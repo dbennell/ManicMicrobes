@@ -749,6 +749,12 @@ pub struct Frame {
     /// Empty rather than all-false when there are no barriers, so a slide without them pays
     /// neither the copy nor the per-texel branch.
     pub barriers: Vec<bool>,
+    /// What each square's solid mineral looks like, or empty on a slide with none.
+    ///
+    /// A colour rather than the amounts, because resolving it needs the chemical table and this
+    /// is the side of the wall that has one. Zero means the square holds no solid — which for a
+    /// blocked square means it is plain immutable rock, and for an open one means nothing at all.
+    pub mineral: Vec<[f32; 3]>,
     pub population: usize,
     /// Detail tier this frame was built at.
     pub lod: Lod,
@@ -1337,6 +1343,55 @@ impl Slide {
             Vec::new()
         };
 
+        // What each square of rock is *made of*, resolved to a colour here rather than in the
+        // renderer, because this is where the chemical table is and the table is where a
+        // chemical's colour lives. A silica reef comes out pale blue-grey and a phosphate outcrop
+        // yellow-brown, and the picture says what the rock is without a legend.
+        //
+        // Empty on a slide with no solid anywhere, so the ordinary world pays neither the walk
+        // nor the copy — the same bargain `barriers` itself makes.
+        let mineral: Vec<[f32; 3]> = {
+            let any = (0..mm_core::chem::SOLID_COUNT)
+                .any(|k| substrate.solid_plane(k).iter().any(|v| *v > 0));
+            if !any {
+                Vec::new()
+            } else {
+                let table = &self.world().scenario().chemicals;
+                let mut out = vec![[0.0f32; 3]; substrate.len()];
+                for (k, c) in mm_core::chem::SOLID_CHEMICALS.iter().enumerate() {
+                    let rgb = table.get(*c).colour;
+                    for (i, held) in substrate.solid_plane(k).iter().enumerate() {
+                        if *held <= 0 {
+                            continue;
+                        }
+                        // Weighted by how much is there, so a square holding both reads as the
+                        // mixture rather than as whichever chemical was looked at last.
+                        let w = *held as f32;
+                        for j in 0..3 {
+                            out[i][j] += w * (rgb[j] as f32 / 255.0);
+                        }
+                    }
+                }
+                // Normalised per square by its own total, so the colour says *composition* and
+                // the brightness does not double as a reading of how much rock is there — a thin
+                // crust and a deep bed of the same mineral are the same stuff.
+                let mut totals = vec![0.0f32; substrate.len()];
+                for k in 0..mm_core::chem::SOLID_COUNT {
+                    for (i, held) in substrate.solid_plane(k).iter().enumerate() {
+                        totals[i] += (*held).max(0) as f32;
+                    }
+                }
+                for (i, t) in totals.iter().enumerate() {
+                    if *t > 0.0 {
+                        for j in 0..3 {
+                            out[i][j] /= *t;
+                        }
+                    }
+                }
+                out
+            }
+        };
+
         // Two questions, not one. Cutting cells against their neighbours starts a long way
         // before there is a cell big enough to have a visible inside — see [`Lod`].
         let packed = self.lod.resolves_packing();
@@ -1584,6 +1639,7 @@ impl Slide {
                 / Q10_ONE as f32,
             flux: self.world.scenario().flux.clone(),
             barriers,
+            mineral,
             population: cells.len(),
             lod: self.lod,
             motes: crate::optics::motes(&self.optics, self.world.tick_count()),

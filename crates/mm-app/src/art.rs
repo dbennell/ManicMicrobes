@@ -142,6 +142,9 @@ pub fn paint_barriers(
     width: usize,
     height: usize,
     barriers: &[bool],
+    // What each square's mineral looks like, or empty for a slide with none. A square reading
+    // zero is plain rock and takes [`BARRIER_RGB`]; anything else is what it is made of.
+    mineral: &[[f32; 3]],
     dim: impl Fn(f32, f32) -> f32 + Sync,
 ) {
     // `par_chunks_mut` panics on a zero chunk size, where the plain loop this replaced simply
@@ -163,8 +166,27 @@ pub fn paint_barriers(
                 // The vignette applies here as it does to everything else on the plate: it is
                 // the objective, and a wall is under the objective too.
                 let d = dim(x as f32 + 0.5, y as f32 + 0.5);
+                // Plain rock is the constant it always was. Rock with mineral in it is the colour
+                // of what it is made of, darkened towards the constant so a reef still reads as
+                // *wall* rather than as a bright patch of chemistry — the overlay is where a
+                // reading belongs, and this is the thing itself.
+                //
+                // **Dark, and that is the correction that mattered.** The first blend put a
+                // mineral wall at roughly the value of the water behind it and the rock vanished
+                // — a wall has to read as *solid* before it reads as made of anything, and on a
+                // slide whose background is a mid warm grey that means going down, not up. So the
+                // hue is the mineral's and the value is the barrier's: half of `BARRIER_RGB` for
+                // the weight, a third of the composition for the colour.
+                let rgb = match mineral.get(i) {
+                    Some(m) if m[0] + m[1] + m[2] > 0.0 => [
+                        0.42 * BARRIER_RGB[0] + 0.30 * m[0],
+                        0.42 * BARRIER_RGB[1] + 0.30 * m[1],
+                        0.42 * BARRIER_RGB[2] + 0.30 * m[2],
+                    ],
+                    _ => BARRIER_RGB,
+                };
                 for k in 0..3 {
-                    px[k] = ((BARRIER_RGB[k] * d).clamp(0.0, 1.0) * 255.0) as u8;
+                    px[k] = ((rgb[k] * d).clamp(0.0, 1.0) * 255.0) as u8;
                 }
                 px[3] = 255;
             } else {
@@ -582,6 +604,53 @@ mod tests {
         }
     }
 
+    /// A mineral wall is the colour of what it is made of, and still reads as rock.
+    ///
+    /// Both halves matter and the second is the one that was got wrong first. A blend weighted
+    /// towards the composition put a reef at about the value of the water behind it and the wall
+    /// disappeared — so this holds the hue to the mineral *and* the value below plain rock's, and
+    /// a change that brightens a wall back into the background fails here rather than in a
+    /// screenshot somebody has to squint at.
+    #[test]
+    fn a_wall_takes_its_hue_from_its_minerals_and_its_weight_from_the_rock() {
+        // One square, painted three ways: plain rock, phosphate rock, silica rock. Colours are
+        // the catalogue's own, normalised the way `Frame::mineral` normalises them.
+        let paint = |mineral: Vec<[f32; 3]>| {
+            let mut px = [0u8; 4];
+            paint_barriers(&mut px, 1, 1, &[true], &mineral, |_, _| 1.0);
+            [px[0], px[1], px[2]]
+        };
+        let norm = |c: [u8; 3]| [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0];
+        let plain = paint(Vec::new());
+        let phosphate = paint(vec![norm([220, 180, 90])]);
+        let silica = paint(vec![norm([180, 180, 200])]);
+
+        assert_ne!(
+            phosphate, silica,
+            "two walls of different composition painted the same colour: the composition is being \
+             gathered and then not used"
+        );
+        // Warm against cool, in the only terms a pixel has: red over blue.
+        assert!(
+            i32::from(phosphate[0]) - i32::from(phosphate[2]) > 20,
+            "phosphate rock did not read warm: {phosphate:?}"
+        );
+        assert!(
+            i32::from(silica[2]) - i32::from(silica[0]) > 3,
+            "silica rock did not read cool: {silica:?}"
+        );
+        // And the half that the first attempt failed. `WATER_RGB`'s value is what a mineral wall
+        // has to stay under to read as solid at all.
+        let value = |c: [u8; 3]| u32::from(c[0]) + u32::from(c[1]) + u32::from(c[2]);
+        for (what, rock) in [("phosphate", phosphate), ("silica", silica)] {
+            assert!(
+                value(rock) < value(plain) * 2,
+                "{what} rock came out far brighter than plain rock ({rock:?} against {plain:?}); a \
+                 wall reads as solid before it reads as made of anything"
+            );
+        }
+    }
+
     /// Which specks are visible must not reshuffle as the concentration changes, or a smooth
     /// gradient crawls.
     #[test]
@@ -789,7 +858,7 @@ mod tests {
         let barriers = vec![false, true, false];
         paint_field(&mut buf, w, h, &light, &[], &|_, _| 1.0);
         let mut wall_layer = vec![0u8; w * 4];
-        paint_barriers(&mut wall_layer, w, h, &barriers, &|_, _| 1.0);
+        paint_barriers(&mut wall_layer, w, h, &barriers, &[], &|_, _| 1.0);
         assert_eq!(
             [buf[0], buf[1], buf[2]],
             [0, 0, 0],
@@ -830,7 +899,7 @@ mod tests {
             &|_, _| 1.0,
         );
         let mut wall_layer = vec![0u8; w * 4];
-        paint_barriers(&mut wall_layer, w, h, &barriers, &|_, _| 1.0);
+        paint_barriers(&mut wall_layer, w, h, &barriers, &[], &|_, _| 1.0);
         assert!(buf[0] > 200, "the open square lost its overlay");
         // The field still paints chemistry under the wall — it is the wall layer on top,
         // opaque, that hides it. Cheaper than branching per texel, and invisible because a
@@ -859,7 +928,7 @@ mod tests {
             &|_, _| 1.0,
         );
         // The barrier mask is short too, for the same reason and with the same answer.
-        paint_barriers(&mut buf, 10, 10, &vec![true; 3], &|_, _| 1.0);
+        paint_barriers(&mut buf, 10, 10, &vec![true; 3], &[], &|_, _| 1.0);
     }
 
     #[test]
