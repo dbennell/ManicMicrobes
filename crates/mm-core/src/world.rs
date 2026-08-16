@@ -1153,6 +1153,59 @@ impl World {
                 }
             }
         }
+        // --- nucleation, the cheap way ---
+        //
+        // Surface growth alone leaves a hole: water with no rock near it has nowhere to deposit,
+        // so it climbs without limit. That is a supersaturated solution — metastable, wanting a
+        // nucleus — and not a state to be modelling. Finding one supersaturated square without a
+        // full-grid pass is an **amortised slice**: a contiguous run of one plane per step,
+        // cycling by tick, so the whole slide is covered every `len / slice` steps and on this
+        // cadence that is thousands of ticks. Which is the right timescale for rock to appear
+        // where there was none.
+        //
+        // Deterministic by construction: the slice is a function of the tick. No RNG (hard rule
+        // 5), no iteration order (hard rule 6).
+        if rates.nucleation > 0 && rates.deposit > 0 {
+            let len = self.substrate.len();
+            let slice = (rates.nucleation_slice.max(1) as usize).min(len.max(1));
+            let steps = self.tick / rates.interval.max(1) as u64;
+            let planes = crate::chem::SOLID_COUNT.max(1) as u64;
+            let k = (steps % planes) as usize;
+            let c = crate::chem::SOLID_CHEMICALS[k];
+            let ceiling = self.scenario.chemicals.get(c).saturation;
+            // Two guards, and between them every slide that is not concentrating a mineral pays
+            // nothing: a plane with none of the chemical anywhere, and a plane whose *whole
+            // world* holds less than one square would need — however the matter is arranged, no
+            // square can be above the line.
+            let threshold = crate::fixed::q10_scale(ceiling, rates.nucleation);
+            if ceiling > 0 && self.substrate.present()[c] {
+                let total: i64 = self.substrate.chem_plane(c).iter().map(|v| i64::from(*v)).sum();
+                if total >= i64::from(threshold) {
+                    let rounds = len.div_ceil(slice) as u64;
+                    let start = ((steps / planes) % rounds) as usize * slice;
+                    let w = self.substrate.width() as i32;
+                    for i in start..(start + slice).min(len) {
+                        if self.substrate.chem_plane(c)[i] <= threshold {
+                            continue;
+                        }
+                        let (x, y) = ((i as i32) % w, (i as i32) / w);
+                        if self.substrate.blocked()[i] || self.cell_at(x, y).is_some() {
+                            continue;
+                        }
+                        // A grain, not a wall: it takes the excess above *saturation* and leaves
+                        // the square open, so what the scan produces is a surface for the cheap
+                        // path to grow on rather than a wall out of nowhere.
+                        let here = self.substrate.chem_at(c, x, y);
+                        let want = here.saturating_sub(ceiling).max(0);
+                        let taken = -self.substrate.add_chem(c, x, y, -want);
+                        if taken > 0 {
+                            self.substrate.add_solid(k, x, y, taken);
+                        }
+                    }
+                }
+            }
+        }
+
         for (x, y) in became_water {
             self.substrate.set_blocked(x, y, false);
         }

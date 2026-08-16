@@ -477,28 +477,63 @@ fn supersaturated_water_grows_the_rock_it_touches() {
     );
 }
 
-/// Growth is on surfaces only, so open water far from any rock keeps its excess.
+/// **Water that runs far enough above saturation grows its own nucleus.**
 ///
-/// Stated as a test rather than left implicit, because it is the *cost* of the surface
-/// restriction and the thing the nucleation scan will change. Until that exists, a supersaturated
-/// square with no solid anywhere near it stays supersaturated — which is a real state of matter
-/// and a temporary state of this engine.
+/// This test used to assert the opposite — `..._keeps_its_excess_for_now` — because surface-only
+/// growth left a hole: water with no rock near it had nowhere to deposit and climbed without
+/// limit, which is a supersaturated solution and not a state to be modelling. It was written as a
+/// test rather than a comment precisely so that it would fail when the nucleation scan landed,
+/// which is what it did.
+///
+/// The scan is an amortised slice — a contiguous run of one plane per weathering step, cycling by
+/// tick — so nucleation is not instant and is not meant to be. It is thousands of ticks, which is
+/// the right timescale for rock appearing where there was none.
 #[test]
-fn open_water_with_no_surface_near_it_keeps_its_excess_for_now() {
+fn water_far_above_saturation_nucleates_without_a_surface() {
     let mut world = World::new(slide()).expect("world");
     let c = SOLID_CHEMICALS[0];
     let k = solid_slot(c).expect("solid-capable");
     let saturation = mm_core::chem::ChemTable::spec_default().get(c).saturation;
-    world.substrate_mut().set_chem(c, 4, 4, saturation * 8);
+    // Well past the nucleation line, which is a multiple of saturation rather than saturation
+    // itself: a crystal starts harder than it grows.
+    world.substrate_mut().set_chem(c, 4, 4, saturation * 12);
     world.adopt_current_contents_as_baseline();
 
-    world.run(200);
+    world.run(4_000);
+    world.check_matter().expect("nucleation must conserve");
+
+    assert!(
+        world.substrate().solid_at(k, 4, 4) > 0,
+        "water at twelve times saturation never came out of solution; supersaturation is \
+         metastable and the scan exists so it cannot persist"
+    );
+}
+
+/// And water merely *over* saturation does not, which is the gap that makes the scan affordable.
+///
+/// Nucleation is harder than growth in the real thing — a dissolved salt deposits happily onto a
+/// crystal that already exists at a concentration which would never start one — so the scan hunts
+/// a multiple of saturation while surface growth uses saturation itself. Without the gap the
+/// expensive path would fire everywhere, and with too much of it the water would never come back.
+#[test]
+fn water_just_over_saturation_waits_for_a_surface() {
+    let mut world = World::new(slide()).expect("world");
+    let c = SOLID_CHEMICALS[0];
+    let k = solid_slot(c).expect("solid-capable");
+    let saturation = mm_core::chem::ChemTable::spec_default().get(c).saturation;
+    let nucleation = world.biology().minerals.nucleation;
+    // Over the line that grows a crystal, under the line that starts one.
+    let held = saturation + (mm_core::fixed::q10_scale(saturation, nucleation) - saturation) / 2;
+    world.substrate_mut().set_chem(c, 4, 4, held);
+    world.adopt_current_contents_as_baseline();
+
+    world.run(4_000);
 
     assert_eq!(
         world.substrate().solid_at(k, 4, 4),
         0,
-        "solid appeared with no surface to grow on; that is nucleation, and it is supposed to \
-         come from the amortised scan rather than from anywhere convenient"
+        "water below the nucleation line started a crystal anyway; the gap between starting and \
+         growing is what keeps the scan a rare event rather than a second deposition rule"
     );
-    world.check_matter().expect("doing nothing must also conserve");
+    world.check_matter().expect("waiting must also conserve");
 }

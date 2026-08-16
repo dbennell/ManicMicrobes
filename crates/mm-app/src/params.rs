@@ -657,6 +657,29 @@ pub const FIELDS: &[Field] = &[
                one away",
     },
     Field {
+        path: "minerals.nucleation",
+        label: "nucleating at",
+        group: Group::Chemistry,
+        unit: Unit::Q10,
+        note: "how far above saturation water has to run before a grain appears in it out of \
+               nothing, as a multiple of the chemical's own solubility. Starting a crystal is \
+               harder than growing one — a dissolved salt deposits happily onto rock it touches \
+               at a concentration that would never begin a grain — and the gap between the two \
+               lines is what keeps this the rare event rather than a second deposition rule. \
+               Without it, water with no rock near it climbs without limit",
+    },
+    Field {
+        path: "minerals.nucleation_slice",
+        label: "nucleation scan",
+        group: Group::Chemistry,
+        unit: Unit::Count,
+        note: "squares of one plane walked per weathering step looking for water above that line. \
+               The whole slide is covered every `squares / this` steps, which on the weathering \
+               cadence is thousands of ticks — the right timescale for rock appearing where there \
+               was none, and the reason the search costs nothing per tick. Lower it and \
+               nucleation gets slower, not rarer",
+    },
+    Field {
         path: "minerals.wall_threshold",
         label: "wall at",
         group: Group::Chemistry,

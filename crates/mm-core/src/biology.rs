@@ -776,6 +776,28 @@ pub struct MineralRates {
     pub dissolve: i32,
     /// Fraction of a square's *excess* that comes out of solution per step, `Q10`.
     pub deposit: i32,
+    /// How far above saturation water must run before a grain appears in it out of nothing,
+    /// `Q10` as a multiple of the chemical's own saturation.
+    ///
+    /// **Nucleation is harder than growth, and the gap between them is the mechanism.** A
+    /// dissolved salt deposits happily onto a crystal that already exists at a concentration
+    /// which would never *start* one, so surface growth uses the saturation line and this uses a
+    /// multiple of it. The consequence is what makes the scan affordable: the expensive path
+    /// fires rarely and only where the water has genuinely run away, and once it has fired the
+    /// cheap path grows the patch out.
+    ///
+    /// Without it, surface growth has a hole — a slide with no rock on it and a rising
+    /// concentration has nowhere to deposit, so it climbs without limit. That is a supersaturated
+    /// solution, which is metastable and wants a nucleus, and not a state this engine should be
+    /// modelling.
+    pub nucleation: i32,
+    /// How many squares of one plane the nucleation scan walks per weathering step.
+    ///
+    /// The whole grid is covered every `len / slice` steps, and on a cadence that is thousands of
+    /// ticks — which is the right timescale for rock to appear where there was none. The slice is
+    /// a function of the tick, so it is deterministic by construction rather than by care: no RNG
+    /// (hard rule 5) and no iteration order (hard rule 6) is involved in choosing it.
+    pub nucleation_slice: u32,
     /// Solid on one square above which it is rock: blocked, opaque to the fluid, impassable.
     ///
     /// The wall is *derived* rather than declared. Nothing sets a flag — dissolution takes a
@@ -793,6 +815,13 @@ impl Default for MineralRates {
             // in a season and takes an age to wear one away.
             dissolve: crate::fixed::Q10_ONE / 16,
             deposit: crate::fixed::Q10_ONE / 8,
+            // Four times saturation before anything appears from nothing. High enough that the
+            // scan is a rare event and low enough that a world concentrating a mineral cannot
+            // run away with it forever.
+            nucleation: crate::fixed::Q10_ONE * 4,
+            // A thousand squares a step: one linear read of a contiguous run, and full cover of a
+            // 256-square slide every sixty-fourth weathering step.
+            nucleation_slice: 1024,
             // Two hundred units on a square. Below it the same stock is a *crust* lying in open
             // water, which is the state a square passes through on its way to being either.
             wall_threshold: crate::fixed::Q10_ONE * 200,
@@ -882,6 +911,8 @@ impl crate::state_hash::StateHash for BiologyConfig {
         h.u32(m.interval);
         h.i32(m.dissolve);
         h.i32(m.deposit);
+        h.i32(m.nucleation);
+        h.u32(m.nucleation_slice);
         h.i32(m.wall_threshold);
         let m = &self.mutation;
         h.u32(m.point);
