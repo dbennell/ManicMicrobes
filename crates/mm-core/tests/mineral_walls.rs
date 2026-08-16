@@ -406,6 +406,44 @@ fn a_wall_worn_away_opens() {
     world.check_matter().expect("opening a worn wall must conserve");
 }
 
+/// **A wall of two minerals is judged on the two of them.**
+///
+/// The threshold asks whether a *square* is rock, and the first version asked it once per
+/// chemical: a wall holding sixty of phosphate and three hundred of silica was found to be under
+/// the line during the phosphate pass and opened, while plainly still made of silica. On a reef of
+/// mixed composition that emptied the whole thing — a hundred and seventy-one blocked squares to
+/// none — and it did so silently, because each individual comparison was doing exactly what it
+/// said.
+#[test]
+fn a_wall_thin_in_one_mineral_and_thick_in_another_stays_a_wall() {
+    let mut world = World::new(slide()).expect("world");
+    let (a, b) = (SOLID_CHEMICALS[0], SOLID_CHEMICALS[1]);
+    let (ka, kb) = (
+        solid_slot(a).expect("solid-capable"),
+        solid_slot(b).expect("solid-capable"),
+    );
+    let threshold = world.biology().minerals.wall_threshold;
+    world.set_barrier(12, 12, true);
+    // Under the line on its own; over it together, twice over.
+    world.substrate_mut().add_solid(ka, 12, 12, threshold / 4);
+    world.substrate_mut().add_solid(kb, 12, 12, threshold * 2);
+    world.adopt_current_contents_as_baseline();
+    let at = world.substrate().index(12, 12);
+
+    // A hundred ticks is a handful of weathering steps — far too few to wear away four hundred
+    // units of silica, and the bug opened the square on the *first* one. Given long enough this
+    // wall does dissolve and should, which is a different test.
+    world.run(100);
+
+    assert!(
+        world.substrate().blocked()[at],
+        "a square holding {} of one mineral and {} of another opened; the threshold is a property \
+         of the square, and comparing one plane at a time empties a mixed reef",
+        world.substrate().solid_at(ka, 12, 12),
+        world.substrate().solid_at(kb, 12, 12)
+    );
+}
+
 /// **Supersaturated water deposits onto a surface, and closes into rock.**
 ///
 /// The other direction of the same law, and the reason §10 restricts it to surfaces: scanning

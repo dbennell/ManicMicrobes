@@ -1110,8 +1110,10 @@ impl World {
                                 left -= placed;
                             }
                         }
-                        if left <= rates.wall_threshold
-                            && self.substrate.blocked()[self.substrate.index(x, y)]
+                        // Against the square's *whole* solid, not this plane's. A wall of two
+                        // minerals is still a wall when either one of them is thin.
+                        if self.substrate.blocked()[self.substrate.index(x, y)]
+                            && self.substrate.solid_total_at(x, y) <= rates.wall_threshold
                         {
                             became_water.push((x, y));
                         }
@@ -1143,7 +1145,7 @@ impl World {
                         let taken = -self.substrate.add_chem(*c, x, y, -want);
                         if taken > 0 {
                             self.substrate.add_solid(k, x, y, taken);
-                            if self.substrate.solid_at(k, x, y) > rates.wall_threshold {
+                            if self.substrate.solid_total_at(x, y) > rates.wall_threshold {
                                 became_rock.push((x, y));
                             }
                         }
