@@ -690,6 +690,19 @@ pub const FIELDS: &[Field] = &[
                and it closes. Below it the same stock is a crust lying in open water",
     },
     Field {
+        path: "minerals.buffer_rate",
+        label: "buffer exchange",
+        group: Group::Chemistry,
+        unit: Unit::Q10,
+        note: "how fast the carbonate pool and the dissolved CO2 swap places each weathering \
+               step, towards the parity the pH reading calls neutral. **This is the buffer's \
+               time constant and both ends of it are failure modes**: fast, and the slide sits \
+               at pH 7 and nothing a crowd does to its own water is ever visible; slow or off, \
+               and pH is a ratio of something biology drives hard against something that never \
+               moves — measured, it pins at the top of the scale by tick 6,000 and stays there. \
+               It also makes carbonate a slow carbon reservoir, which is what a reef locks away",
+    },
+    Field {
         path: "minerals.calcite_saturation",
         label: "calcite at",
         group: Group::Chemistry,

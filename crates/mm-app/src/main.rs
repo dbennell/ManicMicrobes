@@ -545,6 +545,19 @@ fn arrange(spec: &str, sim: &mut SlideRes, view: &mut View) {
             "alloverlays" => sim
                 .engine
                 .set_overlays(ui::all_overlays(sim.chem_names.len())),
+            // One overlay, by name, on its own. `overlay:acidity`.
+            //
+            // The number keys reach the first nine and `[`/`]` step through them, so anything
+            // past that — which now includes the reading the carbonate system exists to make
+            // legible — was photographable only by clicking a legend row, and a screenshot tool
+            // cannot click. A state a script cannot arrange is a state nobody reviews (§12.6).
+            "overlay" => {
+                let want = sub.replace('_', " ");
+                match sim.chem_names.iter().position(|n| *n == want) {
+                    Some(c) => sim.engine.set_overlays(1u32 << c),
+                    None => eprintln!("MM_SHOT_VIEW: no overlay called `{want}`"),
+                }
+            }
             // Open a scenario by library label, so a screenshot can photograph one.
             "open" => {
                 let want = sub.replace('_', " ");

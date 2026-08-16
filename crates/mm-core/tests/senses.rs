@@ -8,10 +8,14 @@ use mm_core::cell::{CellId, CellSeed};
 use mm_core::fixed::{pos, q10};
 use mm_core::{LightRegime, Scenario, Seeding, World, Q10_ONE};
 
-/// The membrane index that reads crowding: after the five scalars, the *seventeen* chemicals and
-/// the badge. Appended, so nothing before it renumbers — but the chemicals are in front of it, so
-/// widening the table moves it, which is what ISA 11 did and why this is 23 and not 22.
-const CROWDING: i16 = 23;
+/// The membrane index that reads crowding: after the five scalars, the chemicals and the badge.
+///
+/// Appended, so nothing before it renumbers — but the chemicals are in front of it, so widening
+/// the table moves it. 22 originally, 23 when dinitrogen landed at ISA 11, **25 when calcium and
+/// carbonate landed at ISA 12**. Derived from `CHEM_COUNT` rather than written down, so the next
+/// widening moves it here too and this test keeps testing crowding instead of whatever ends up at
+/// the old number.
+const CROWDING: i16 = 6 + mm_core::chem::CHEM_COUNT as i16;
 
 fn slide() -> Scenario {
     Scenario {
@@ -130,6 +134,12 @@ fn a_wounded_cell_leaves_a_trail() {
     let mut biology = world.biology().clone();
     biology.ecology.bleed_rate = Q10_ONE / 256;
     biology.ecology.bleed_threshold = 0;
+    // And the carbonate buffer held still, because this asserts matter **per chemical** and the
+    // buffer's job is to move carbon between two of them. That is a species change like the
+    // diazosome's, accounted through the ledger; what it would break is the stricter per-species
+    // equality below, which is the right assertion for a bleeding and the wrong one for a world
+    // with a buffer running in it.
+    biology.minerals.buffer_rate = 0;
     world.set_biology(biology);
     let victim = spawn(&mut world, 8, 8);
     {
@@ -198,6 +208,9 @@ fn a_leaky_membrane_runs_both_ways() {
     let mut world = World::new(slide()).expect("world");
     let mut biology = world.biology().clone();
     biology.ecology.permeability_rate = Q10_ONE / 4;
+    // Held still for the same reason it is in `a_wounded_cell_leaves_a_trail`: this counts
+    // matter per chemical, and the buffer moves carbon between two of them by design.
+    biology.minerals.buffer_rate = 0;
     world.set_biology(biology);
 
     let rich = spawn(&mut world, 6, 6);

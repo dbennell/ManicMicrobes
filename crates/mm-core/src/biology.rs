@@ -831,6 +831,30 @@ pub struct MineralRates {
     pub calcite_ph: i32,
     /// Fraction of the distance to equilibrium that moves per weathering step, `Q10`.
     pub calcite_rate: i32,
+    /// How fast the carbonate pool and the dissolved CO₂ exchange, `Q10` of the gap per step.
+    ///
+    /// **This is what makes the buffer a buffer over time rather than only instantaneously, and
+    /// leaving it out was the one mistake that mattered.** With the two pools independent, pH is
+    /// a ratio of a quantity biology drives hard against one that never moves: §7 measured
+    /// photosynthesis converting essentially *all* the dissolved CO₂ on a lit slide, so the ratio
+    /// ran away and pH pinned at 13.9 by tick 6,000 and stayed there. A world that reaches one end
+    /// of the scale and sits on it is not a reading, it is a wall.
+    ///
+    /// A real buffer *converts*: draw the acid down and the base gives some up to replace it,
+    /// add acid and the base takes it in. So this moves matter between the two — a species change
+    /// like any other, through `Ledger::convert` — towards parity, which is the ratio the pH
+    /// anchor calls neutral.
+    ///
+    /// **The rate is the buffer's time constant, and it is the whole dial.** Fast, and pH is
+    /// pinned at seven and nothing is ever visible; slow, and the swing runs away as it did
+    /// before. What is wanted is a pool that yields over hundreds of ticks — so a mat can sweeten
+    /// its own water within a day and the buffer pulls it back over the night, which is the diel
+    /// cycle §11 exists to produce.
+    ///
+    /// It also makes carbonate a genuine carbon *reservoir*, which is the other half of what a
+    /// tank does: a slow store that photosynthesis can draw on when the fast pool is spent, and
+    /// that calcite locks away when a reef forms.
+    pub buffer_rate: i32,
 }
 
 impl Default for MineralRates {
@@ -862,6 +886,11 @@ impl Default for MineralRates {
             // seven, which is below this, so nothing precipitates until something photosynthesises
             // — the first reef on a slide is laid by the cells rather than by the seeding.
             calcite_ph: crate::chem::PH_NEUTRAL + crate::fixed::Q10_ONE / 2,
+            // A sixty-fourth of the gap per weathering step — with `interval` at 16 that is a
+            // time constant of about a thousand ticks, which is the timescale a day/night cycle
+            // runs on. Measured: at a quarter the slide sits at pH 7 and nothing is ever visible;
+            // left out entirely, pH pins at 13.9 by tick 6,000 and never comes back.
+            buffer_rate: crate::fixed::Q10_ONE / 64,
             // A hundred and twenty-eighth, which is eight times slower than `dissolve` and is
             // measured rather than matched to it. At a sixteenth a lit slide laid down reef over
             // a tenth of itself in two thousand ticks — the mechanism working, at a speed that
@@ -961,6 +990,7 @@ impl crate::state_hash::StateHash for BiologyConfig {
         h.i32(m.calcite_saturation);
         h.i32(m.calcite_ph);
         h.i32(m.calcite_rate);
+        h.i32(m.buffer_rate);
         let m = &self.mutation;
         h.u32(m.point);
         h.u32(m.insertion);

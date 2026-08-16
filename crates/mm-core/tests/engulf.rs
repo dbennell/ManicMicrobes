@@ -167,6 +167,14 @@ fn a_cell_that_is_not_asking_does_not_swallow() {
 #[test]
 fn swallowing_moves_matter_and_creates_none() {
     let mut world = World::new(slide()).expect("world");
+    // The carbonate buffer is held still, because this asserts matter **per chemical** and the
+    // buffer's whole job is to move carbon between two of them. That is a species change like
+    // the diazosome's, accounted through `Ledger::convert` and checked by `check_matter` below;
+    // what would break here is the stricter per-species equality, which is the right assertion
+    // for an engulfment and the wrong one for a world with a buffer running in it.
+    let mut biology = world.biology().clone();
+    biology.minerals.buffer_rate = 0;
+    world.set_biology(biology);
     cell(&mut world, 16, 16, q10(400), Q10_ONE as i16, 0);
     let prey = cell(&mut world, 16, 16, q10(40), 0, 0);
     world.adopt_current_contents_as_baseline();

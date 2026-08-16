@@ -1240,6 +1240,59 @@ impl World {
             }
         }
 
+        // --- the buffer exchanging with the acid it buffers (§11) ---
+        //
+        // What makes a buffer a buffer *over time*. pH is a ratio, and with the two pools
+        // independent it is a ratio of something biology drives hard against something that never
+        // moves — §7 measured photosynthesis converting essentially all the dissolved CO₂ on a lit
+        // slide, so the ratio ran away and pH pinned at the top of the scale by tick 6,000 and
+        // stayed there. A reading that reaches one end and sits on it is a wall, not an
+        // instrument.
+        //
+        // So the pools exchange, towards the parity the pH anchor calls neutral: draw the acid
+        // down and the base gives some up to replace it, add acid and the base takes it in. A
+        // species change like any other, and it goes through the ledger for the reason
+        // denitrification's does — an unaccounted transmutation is indistinguishable from a
+        // conservation bug (I4).
+        //
+        // It also makes carbonate a real carbon *reservoir*: a slow store photosynthesis can draw
+        // on when the fast pool is spent, and one a calcite reef locks away when it forms.
+        if rates.buffer_rate > 0 {
+            let (co2, co3) = (crate::chem::CARBON_DIOXIDE, crate::chem::CARBONATE);
+            for y in 0..h {
+                for x in 0..w {
+                    if self.substrate.blocked()[self.substrate.index(x, y)] {
+                        continue;
+                    }
+                    let a = self.substrate.chem_at(co2, x, y);
+                    let b = self.substrate.chem_at(co3, x, y);
+                    // Halfway between them is parity, which is what `chem::ph_of` reads as seven.
+                    let gap = (i64::from(b) - i64::from(a)) / 2;
+                    let want = crate::fixed::q10_scale(
+                        gap.unsigned_abs().min(i64::from(i32::MAX) as u64) as i32,
+                        rates.buffer_rate,
+                    );
+                    if want <= 0 {
+                        continue;
+                    }
+                    // Whichever way it goes, only what actually moved: `add_chem` clamps at the
+                    // quantity cap and at zero, and asking is not achieving.
+                    let (from, to) = if gap > 0 { (co3, co2) } else { (co2, co3) };
+                    let taken = -self.substrate.add_chem(from, x, y, -want);
+                    if taken > 0 {
+                        let placed = self.substrate.add_chem(to, x, y, taken);
+                        if placed < taken {
+                            // Put back whatever would not fit, so nothing is lost in transit.
+                            self.substrate.add_chem(from, x, y, taken - placed);
+                        }
+                        if placed > 0 {
+                            self.ledger.convert(from, to, i64::from(placed));
+                        }
+                    }
+                }
+            }
+        }
+
         // --- calcite: the pair that comes out of solution together (§11) ---
         //
         // Not the per-plane law above, and their `saturation` entries are zero so that loop skips

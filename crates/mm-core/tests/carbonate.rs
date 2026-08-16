@@ -399,6 +399,17 @@ fn a_calcite_reef_is_a_wall_and_wears_back_to_water() {
 fn a_reef_in_saturated_but_sour_water_still_wears() {
     let build = |co2: i32| {
         let mut world = World::new(slide()).expect("world");
+        // **The buffer is held still for this one, and it has to be.** The exchange moves matter
+        // between carbonate and CO₂ towards parity, so it changes the calcite saturation of the
+        // water within a few steps — in the sweet fixture it converts carbonate away and the reef
+        // then wears on *thirst*, which is the term this test exists to rule out. With it running,
+        // the sweet reef wore more than the sour one and the comparison inverted.
+        //
+        // Switching a mechanism off to isolate another is a fair thing for a test to do and a
+        // dishonest thing to do quietly, so: `minerals.buffer_rate` is zero here and nowhere else.
+        let mut biology = world.biology().clone();
+        biology.minerals.buffer_rate = 0;
+        world.set_biology(biology);
         let dose = world.rock_dose();
         world.set_rock(&[(12, 12)], CALCIUM, dose / 2);
         world.set_rock(&[(12, 12)], CARBONATE, dose / 2);
@@ -435,11 +446,114 @@ fn a_reef_in_saturated_but_sour_water_still_wears() {
          inert and the thirst term was covering for it",
         held(&sour)
     );
+    // The sweet reef is not asked to be *untouched*: the buffer exchange moves carbonate into
+    // CO₂ in alkaline water, which takes the pair a little under its own line, so a slow
+    // undersaturation wear is real and expected. What is asserted is the comparison — the acid
+    // is worth far more than that, which is the claim the pair exists to make.
+    let (sour_lost, sweet_lost) = (sour_before - held(&sour), sweet_before - held(&sweet));
     assert!(
-        held(&sweet) >= sweet_before,
-        "a reef in saturated, sweet water wore away anyway: {sweet_before} -> {}",
-        held(&sweet)
+        sour_lost > 4 * sweet_lost,
+        "the reef wore {sour_lost} in sour water against {sweet_lost} in sweet, at the same \
+         saturation. If those are close, the acid term is doing little and the thirst term is \
+         doing the work"
     );
     sour.check_matter().expect("wearing must conserve");
     sweet.check_matter().expect("standing must conserve");
+}
+
+/// **The buffer exchanges with the acid it buffers**, and without that the reading is a wall.
+///
+/// pH is a ratio. With the two pools independent it is a ratio of something biology drives hard
+/// against something that never moves — and §7 measured photosynthesis converting essentially
+/// *all* the dissolved CO₂ on a lit slide. Measured on `soup.ron` before this existed: pH reached
+/// 13.83 of 14 by tick 6,000 and sat there for the rest of the run, spatial range 13.77 to 13.94.
+/// A reading that reaches one end of its scale and stops is not an instrument.
+///
+/// So the pools convert towards parity, which is the ratio `ph_of` calls neutral, and the rate is
+/// the buffer's time constant. This asserts the property rather than the numbers: acid added to a
+/// square is *absorbed* over time rather than standing there, and the carbonate pool is what pays
+/// for it.
+#[test]
+fn the_buffer_takes_up_acid_over_time() {
+    let mut world = World::new(slide()).expect("world");
+    // A slug of CO₂ over the whole slide: a crowd respiring hard.
+    for y in 0..24i32 {
+        for x in 0..24i32 {
+            world
+                .substrate_mut()
+                .set_chem(CARBON_DIOXIDE, x, y, q10(1200));
+        }
+    }
+    world.adopt_current_contents_as_baseline();
+
+    let ph = |w: &World| w.substrate().ph_at(12, 12);
+    let carbonate = |w: &World| -> i64 {
+        w.substrate()
+            .chem_plane(CARBONATE)
+            .iter()
+            .map(|v| i64::from(*v))
+            .sum()
+    };
+    let acid = |w: &World| -> i64 {
+        w.substrate()
+            .chem_plane(CARBON_DIOXIDE)
+            .iter()
+            .map(|v| i64::from(*v))
+            .sum()
+    };
+    let (ph_before, buffer_before, acid_before) = (ph(&world), carbonate(&world), acid(&world));
+    assert!(ph_before < PH_NEUTRAL, "the insult did not sour the water");
+
+    world.run(4_000);
+
+    assert!(
+        ph(&world) > ph_before,
+        "the water stayed exactly as sour as it was made: {ph_before} -> {}. The buffer is inert",
+        ph(&world)
+    );
+    // **The recovery is matter moving between the two pools, not appearing from nowhere.** In
+    // this lumped model the excess acid converts *into* the buffer — which is the direction that
+    // surprises, because a tank's carbonate hardness is consumed by acid rather than grown by it.
+    // What is being modelled here is one dissolved-carbon system relaxing towards its own
+    // equilibrium, not the KH titration; both pools are carbon and which side of the line it
+    // sits on is what the pH reads.
+    assert!(
+        acid(&world) < acid_before,
+        "the acid pool did not fall, so the pH moved for some other reason"
+    );
+    assert!(
+        carbonate(&world) > buffer_before,
+        "the acid left the CO2 pool and did not arrive in the buffer"
+    );
+    assert_eq!(
+        acid(&world) + carbonate(&world),
+        acid_before + buffer_before,
+        "the exchange created or destroyed carbon"
+    );
+    world.check_matter().expect("buffering must conserve");
+}
+
+/// And it does not simply pin the slide at neutral, which is the other way to get this wrong.
+///
+/// A buffer fast enough to erase every insult is a slide where nothing is ever visible. The rate
+/// is a time constant, and both ends of it are failure modes: too slow and the swing runs away,
+/// too fast and there is no swing to see.
+#[test]
+fn the_buffer_is_slow_enough_that_the_swing_is_visible() {
+    let mut world = World::new(slide()).expect("world");
+    for y in 0..24i32 {
+        for x in 0..24i32 {
+            world
+                .substrate_mut()
+                .set_chem(CARBON_DIOXIDE, x, y, q10(1200));
+        }
+    }
+    world.adopt_current_contents_as_baseline();
+    // A hundred ticks is a few weathering steps — well inside the time a cell lives.
+    world.run(100);
+    assert!(
+        world.substrate().ph_at(12, 12) < PH_NEUTRAL,
+        "the buffer erased the insult inside a hundred ticks, so nothing a crowd does to its own \
+         water would ever be seen"
+    );
 }

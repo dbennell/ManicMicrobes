@@ -1420,8 +1420,10 @@ impl Slide {
 
     #[must_use]
     pub fn overlay_enabled(&self, chemical: usize) -> bool {
+        // `OVERLAY_COUNT`, not `CHEM_COUNT`: acidity is the last of them and reducing modulo the
+        // table would have the legend's acidity row reporting signal_a's state back.
         self.overlays
-            .get(chemical % CHEM_COUNT)
+            .get(chemical % OVERLAY_COUNT)
             .copied()
             .unwrap_or(false)
     }
@@ -2747,9 +2749,10 @@ mod tests {
             a.overlays[0].rgb, b.overlays[0].rgb,
             "each chemical has its own colour"
         );
-        // and an out-of-range choice wraps rather than panicking
+        // and an out-of-range choice wraps rather than panicking. `OVERLAY_COUNT`, not
+        // `CHEM_COUNT`: acidity rides at the end of the space and is a legal thing to land on.
         slide.set_overlay(999);
-        assert!(slide.overlay().is_some_and(|c| c < CHEM_COUNT));
+        assert!(slide.overlay().is_some_and(|c| c < OVERLAY_COUNT));
     }
 
     #[test]

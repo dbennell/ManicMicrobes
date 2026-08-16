@@ -1204,6 +1204,30 @@ The first fix did only the pH half, and the test passed anyway on the thirst ter
 `a_reef_in_saturated_but_sour_water_still_wears` is for — it holds the water at the calcite line
 so thirst is nought and acid is the only thing left that can move the reef.
 
+**5. The buffer had to exchange with the acid it buffers, and this is the one that mattered.**
+§11 had two independent pools and a pH read off their ratio. That buffers an insult *instantly* —
+a bigger pool moves less — and does not buffer at all *over time*, because the ratio is then a
+quantity biology drives hard against one that never moves. §7 had already measured what biology
+does to the CO₂ pool on a lit slide: essentially all of it. Run on `soup.ron`, pH reached **13.83
+of 14 by tick 6,000** and sat there for the rest of the run, spatial range 13.77 to 13.94. A
+reading that arrives at one end of its scale and stops is not an instrument.
+
+So the pools convert, towards the parity the anchor calls neutral — a species change through the
+ledger, like denitrification's. Draw the acid down and the base gives some up to replace it; add
+acid and the base takes it in. Measured after, on the same slide: pH rises to 11.7 by tick 8,000
+and **comes back to 9.7 by 12,000**, with a live spatial range of 9.4 to 11.1 and the carbonate
+pool visibly spent as it pays for the recovery. `the_black_smoker` holds near 6.9 with patches
+down to 2.1, which is a vent world with sour corners in it.
+
+`buffer_rate` is that time constant and both ends of it are failure modes: fast and the slide
+sits at seven with nothing ever visible, slow and the swing runs away as it did before. A
+sixty-fourth of the gap per weathering step is about a thousand ticks, which is the timescale a
+day/night cycle runs on.
+
+It also makes carbonate a genuine carbon **reservoir** — a slow store photosynthesis draws on when
+the fast pool is spent, and one a calcite reef locks away when it forms. That was not designed; it
+falls out of the two pools being the same element.
+
 **And the rate is measured rather than matched.** `calcite_rate` started at a sixteenth, matching
 `dissolve`, and a lit slide laid down reef over a tenth of itself in two thousand ticks — the
 mechanism working, at a speed that reads as the world turning to stone rather than as geology. A
