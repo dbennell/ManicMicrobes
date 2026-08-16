@@ -1,14 +1,19 @@
-//! The M1 performance gate: **512×512 grid, 16 chemicals, ≥ 500 fluid steps/second on 8
-//! cores**.
+//! The M1 performance gate: **512×512 grid, every chemical plane full, ≥ 500 fluid steps/second
+//! on 8 cores**.
+//!
+//! The gate was written as "16 chemicals" and the table is seventeen since ISA 11 put dinitrogen
+//! in it. The workload is `CHEM_COUNT` planes rather than a fixed sixteen and always was — the
+//! number in the prose was the thing that went stale, which is worth saying because a gate whose
+//! label disagrees with what it measures is how a régression gets read as a change of units.
 //!
 //! Benchmarks are gates, not information (CLAUDE.md). The headless runner exists so that
 //! parameter sweeps can run at a thousand times realtime, and that only works if a fluid step
 //! is cheap.
 //!
-//! Three workloads, because "16 chemicals" can mean two quite different things and the gap
+//! Three workloads, because "every plane" can mean two quite different things and the gap
 //! between them is the whole story:
 //!
-//! * `full` — all sixteen chemical planes non-empty **and** the water moving. The most
+//! * `full` — every chemical plane non-empty **and** the water moving. The most
 //!   demanding reading of the gate, and the one this currently misses.
 //! * `still` — all sixteen planes non-empty, no flow. Advection is skipped, which is exactly
 //!   half the work.
@@ -77,11 +82,11 @@ fn gate(_c: &mut Criterion) {
     }
     let rates = ChemTable::spec_default().diffusion_rates();
     let threads = rayon::current_num_threads();
-    eprintln!("\nM1 fluid gate: 512x512, 16 chemicals, need {GATE:.0} steps/s ({threads} threads)");
+    eprintln!("\nM1 fluid gate: 512x512, {CHEM_COUNT} chemicals, need {GATE:.0} steps/s ({threads} threads)");
 
     for (name, flowing) in [
-        ("all 16 populated, flowing", true),
-        ("all 16 populated, still", false),
+        ("every plane populated, flowing", true),
+        ("every plane populated, still", false),
     ] {
         let mut s = populated(512, 512, flowing);
         let mut scratch = FluidScratch::new(s.len());
