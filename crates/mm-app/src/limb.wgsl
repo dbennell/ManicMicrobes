@@ -78,6 +78,8 @@ const FORM_FLAGELLUM: f32 = 2.0;
 const FORM_SPIKE: f32 = 3.0;
 const FORM_HOLDFAST: f32 = 4.0;
 const FORM_HALO: f32 = 5.0;
+const FORM_BAND: f32 = 6.0;
+const FORM_CHANNEL: f32 = 7.0;
 
 /// A barb: wide at the root, narrowing fast, tapering to a long thin point.
 ///
@@ -222,6 +224,40 @@ fn sd_holdfast(q: vec2<f32>, aspect: f32, extent: f32, taper: f32, seed: f32) ->
     return d;
 }
 
+/// A junction, across the wall two cells share.
+///
+/// A rounded bar. The `+x` axis of the quad runs *along the band* rather than out from a body,
+/// because a junction has no root — it belongs to two cells and neither of them owns it.
+///
+/// **Thinning and fading with strain is the point of it.** A hard junction breaks a fixed distance
+/// past its own rest length, and until now nothing on the slide said how near that was: a colony
+/// came apart between one frame and the next with no warning. `extent` is that fraction, and a
+/// junction at the limit is drawn as a thread.
+///
+/// The ends are square rather than round: a desmosome is a patch of wall, and a rounded end reads
+/// as a rod lying on top of the cells rather than as something joining them.
+fn sd_band(q: vec2<f32>, aspect: f32, strain: f32, taper: f32) -> f32 {
+    // A third of the thickness left at breaking point, so it thins visibly and does not vanish
+    // before it goes.
+    let w = mix(1.0, taper, clamp(strain, 0.0, 1.0));
+    return max(abs(q.y) - w, abs(q.x) - aspect);
+}
+
+/// A soft junction: a row of pores rather than a bar.
+///
+/// One is structure and the other is a conversation, and they should not be the same mark. A
+/// channel is drawn as what passes through it — discrete openings along the wall — so that a
+/// colony wired for transfer reads differently from one merely held together, which is a
+/// distinction SPEC §8.1 makes and the picture never did.
+fn sd_channel(q: vec2<f32>, aspect: f32, count: f32) -> f32 {
+    let n = max(count, 1.0);
+    let pitch = 2.0 * aspect / n;
+    // Fold the along-axis into one cell of the row, so `n` pores cost what one does.
+    let x = (q.x + aspect) - pitch * (floor((q.x + aspect) / pitch) + 0.5);
+    let r = length(vec2<f32>(x / max(pitch * 0.30, 1e-4), q.y));
+    return max(r - 1.0, abs(q.x) - aspect);
+}
+
 /// Which field this limb is, and how thick the form is where the pixel is.
 ///
 /// Two numbers rather than one because the shading needs the second: `1 + field` rounds a limb
@@ -243,6 +279,12 @@ fn field_of(form: f32, q: vec2<f32>, a: vec4<f32>, b: vec4<f32>) -> vec2<f32> {
     }
     if (abs(form - FORM_HOLDFAST) < 0.5) {
         return vec2<f32>(sd_holdfast(q, a.w, a.y, b.z, b.w), STALK);
+    }
+    if (abs(form - FORM_BAND) < 0.5) {
+        return vec2<f32>(sd_band(q, a.w, a.y, b.z), 1.0);
+    }
+    if (abs(form - FORM_CHANNEL) < 0.5) {
+        return vec2<f32>(sd_channel(q, a.w, b.x), 1.0);
     }
     // A field nothing can reach draws nothing, which is the right behaviour for a form this build
     // does not know — no quad of stray colour and no discard storm, just the dot on the ring that
@@ -305,6 +347,18 @@ fn fragment(in: Output) -> @location(0) vec4<f32> {
     let alpha = 1.0 - smoothstep(-edge, edge, field);
     if (alpha <= 0.003) {
         discard;
+    }
+
+    // A junction is not made of cell, so it is not shaded like one. It belongs to two of them and
+    // neither owns it, and the lambert below would make it read as a rod of cytoplasm lying across
+    // the pair rather than as the thing holding them together.
+    //
+    // Faded by strain as well as thinned by it, which is the warning: a hard junction breaks a
+    // fixed distance past its own rest length, and until this existed a colony came apart between
+    // one frame and the next with nothing having said it was about to.
+    if (in.limb_a.x >= FORM_BAND - 0.5) {
+        let fade = 1.0 - 0.55 * clamp(in.limb_a.y, 0.0, 1.0);
+        return vec4<f32>(in.colour.rgb, in.colour.a * alpha * fade);
     }
 
     // The same material as the cell it grew from, so a limb reads as part of the organism rather

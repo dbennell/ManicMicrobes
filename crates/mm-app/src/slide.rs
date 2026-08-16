@@ -837,14 +837,43 @@ pub struct Frame {
 }
 
 /// One junction, as it is drawn.
+///
+/// # It used to be drawn where it cannot be seen
+///
+/// A stretched sprite from **centre to centre**, under the cells. On a packed pair — which is
+/// every pair a hard junction holds together — the entire line is inside the two bodies and
+/// invisible; it appeared only when the pair was pulled apart, which is exactly backwards. A hard
+/// junction is most structural when the cells are pressed together and least trustworthy when it
+/// is stretched.
+///
+/// So the renderer is given what it needs to draw the junction **at the boundary**, which is where
+/// a junction is: the gap between the two drawn outlines, how wide a band across their contact
+/// should be, and how close the thing is to breaking.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct JunctionLine {
-    /// Both ends, in substrate squares.
+    /// Both centres, in substrate squares. The line of centres, which is the axis everything else
+    /// here is measured along.
     pub from: (f32, f32),
     pub to: (f32, f32),
     /// Hard junctions are structure and are drawn solid; soft ones are channels and are drawn
     /// faint, because one is a body and the other is a conversation.
     pub hard: bool,
+    /// Distance between the two *drawn* outlines along the line of centres, in squares. Negative
+    /// when the pair is pressed together, which is the ordinary case for a hard junction.
+    pub gap: f32,
+    /// Half the width of the band drawn across a contact, in squares.
+    ///
+    /// **A drawing convention**, and the only one here. A junction's width is not simulated —
+    /// SPEC §8 gives it a kind, a rest length and two ends, and nothing else — so this is a
+    /// fraction of the smaller cell, which is what a desmosome looks like: a patch on the wall
+    /// rather than the whole of it.
+    pub span: f32,
+    /// How close to breaking, `0..1`. **Real**, and the most useful new thing on the slide: a body
+    /// about to come apart says so before it does.
+    ///
+    /// For a hard junction, how far past its rest length it is as a fraction of
+    /// `JunctionConfig::breaking_strain`. For a soft one, how near it is to `soft_max_range`.
+    pub strain: f32,
 }
 
 /// One chemical field, ready to draw.
@@ -1477,6 +1506,7 @@ impl Slide {
 
         let mut junctions: Vec<JunctionLine> = Vec::new();
         if detailed {
+            let config = &self.world.scenario().biology.junctions;
             for i in cells.iter() {
                 for j in cells.junctions(i) {
                     let Some(other) = cells.index(j.other) else {
@@ -1487,16 +1517,45 @@ impl Slide {
                     if other <= i {
                         continue;
                     }
+                    let from = (
+                        cells.x[i] as f32 / POS_ONE as f32,
+                        cells.y[i] as f32 / POS_ONE as f32,
+                    );
+                    let to = (
+                        cells.x[other] as f32 / POS_ONE as f32,
+                        cells.y[other] as f32 / POS_ONE as f32,
+                    );
+                    // Measured against the radii the cells are *drawn* at, not the ones the
+                    // physics stores — the picture has to agree with the picture, and cells are
+                    // drawn `PACKING` over their true size so that a settled pack has no holes
+                    // in it. A gap computed from the physical radii would call a pair that is
+                    // visibly overlapping "apart".
+                    let (ra, rb) = (
+                        drawn_radius(cells.mass[i]) * PACKING,
+                        drawn_radius(cells.mass[other]) * PACKING,
+                    );
+                    let centres =
+                        ((to.0 - from.0).powi(2) + (to.1 - from.1).powi(2)).sqrt();
+                    let hard = j.kind == mm_core::junction::JunctionKind::Hard;
+                    let d = mm_core::junction::distance(cells, i, other);
+                    // How near it is to the range that breaks it, which is a different range for
+                    // each kind: a hard junction breaks a fixed distance past its own rest length
+                    // and a soft one at a fixed range from the other cell.
+                    let strain = if hard {
+                        let over = (d - j.rest).max(0) as f32;
+                        (over / config.breaking_strain.max(1) as f32).clamp(0.0, 1.0)
+                    } else {
+                        (d as f32 / config.soft_max_range.max(1) as f32).clamp(0.0, 1.0)
+                    };
                     junctions.push(JunctionLine {
-                        from: (
-                            cells.x[i] as f32 / POS_ONE as f32,
-                            cells.y[i] as f32 / POS_ONE as f32,
-                        ),
-                        to: (
-                            cells.x[other] as f32 / POS_ONE as f32,
-                            cells.y[other] as f32 / POS_ONE as f32,
-                        ),
-                        hard: j.kind == mm_core::junction::JunctionKind::Hard,
+                        from,
+                        to,
+                        hard,
+                        gap: centres - ra - rb,
+                        // Two fifths of the smaller cell: a patch on the wall rather than the
+                        // whole of it. See the field's own note.
+                        span: 0.40 * ra.min(rb),
+                        strain,
                     });
                 }
             }
@@ -2805,6 +2864,79 @@ mod tests {
             .find(|c| c.id == id)
             .map(|c| c.limbs.clone())
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_junction_says_where_the_boundary_is_and_how_near_breaking_it_is() {
+        // What was wrong with the old picture, stated as numbers. A junction was drawn from
+        // *centre to centre* under the cells, so on a packed pair — which is every pair a hard
+        // junction holds together — the whole of the line was inside the two bodies and invisible.
+        // It appeared only when the pair was pulled apart, which is backwards.
+        use mm_core::cell::CellSeed;
+        use mm_core::fixed::{pos, q10};
+        use mm_core::junction::{Junction, JunctionKind};
+
+        let mut slide = Slide::new(scenario()).unwrap();
+        let g = slide.world_mut().genomes().intern(vec![0x2E; 4]).unwrap();
+        let mut spawn = |x: i32| {
+            slide.world_mut().spawn_cell(CellSeed {
+                x: pos(x),
+                y: pos(6),
+                mass: q10(30),
+                energy: q10(500),
+                membrane: 24,
+                key: 11,
+                badge: 0,
+                species: 0,
+                parent: mm_core::CellId::NONE,
+                birth_tick: 0,
+                genome: g.clone(),
+            })
+        };
+        // Two pairs: one pressed together at its rest length, one hauled well past it.
+        let (a, b) = (spawn(4), spawn(5));
+        let (c, d) = (spawn(14), spawn(17));
+        slide.world_mut().adopt_current_contents_as_baseline();
+        // `slack` is the fraction of the pair's actual separation the junction calls its rest
+        // length: one is unstrained by construction and a quarter is stretched threefold.
+        for ((p, q), slack) in [((a, b), 1), ((c, d), 4)] {
+            let (ip, iq) = (
+                slide.world().cells().index(p).unwrap(),
+                slide.world().cells().index(q).unwrap(),
+            );
+            let cells = slide.world_mut().cells_mut();
+            let rest = mm_core::junction::distance(cells, ip, iq) / slack;
+            for (from, other) in [(ip, q), (iq, p)] {
+                let slot = mm_core::junction::free_slot(cells, from).unwrap();
+                cells.junctions_mut(from)[slot] = Junction {
+                    kind: JunctionKind::Hard,
+                    other,
+                    rest,
+                };
+            }
+        }
+        slide.set_zoom(64.0);
+        let f = slide.frame();
+        assert_eq!(f.junctions.len(), 2);
+        let touching = f.junctions.iter().find(|j| j.gap <= 0.0);
+        let apart = f.junctions.iter().find(|j| j.gap > 0.0);
+        let touching = touching.expect("the pair a square apart is not drawn as touching");
+        let apart = apart.expect("the pair three squares apart is not drawn as apart");
+
+        // A band across the contact needs a width, and it has to be a real length rather than a
+        // fudge: `span` is a fraction of the smaller cell.
+        assert!(touching.span > 0.0 && touching.span < touching.gap.abs() + 1.0);
+        // The stretched one is strained and the resting one is not, which is the reading that did
+        // not exist at all before. A colony used to come apart between one frame and the next.
+        assert_eq!(
+            touching.strain, 0.0,
+            "a junction at its rest length is drawn as strained"
+        );
+        assert!(
+            apart.strain > 0.0,
+            "a junction stretched well past its rest length reads as slack"
+        );
+        assert!(apart.strain <= 1.0, "strain is a fraction of breaking");
     }
 
     #[test]

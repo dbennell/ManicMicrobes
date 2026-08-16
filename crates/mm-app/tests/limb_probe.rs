@@ -426,6 +426,104 @@ fn the_halo_thickens_with_the_throttle_and_vanishes_when_shut() {
     assert_eq!(total(0.0), 0.0, "a shut vesicle still dissolves the water");
 }
 
+// --- the junctions ------------------------------------------------------------------------
+
+#[test]
+fn a_junction_thins_as_it_approaches_breaking() {
+    // The most useful new thing on the slide. A hard junction breaks a fixed distance past its own
+    // rest length, and until this existed a colony came apart between one frame and the next with
+    // nothing having said it was about to.
+    let aspect = 6.0;
+    let taper = 0.33;
+    let half_width = |strain: f32| -> f32 {
+        let mut w = 0.0f32;
+        while w < 2.0 && limb::band(0.0, w, aspect, strain, taper) < 0.0 {
+            w += 0.001;
+        }
+        w
+    };
+    let slack = half_width(0.0);
+    let taut = half_width(1.0);
+    assert!(slack > 0.99, "an unstrained junction is already thin: {slack}");
+    assert!(
+        taut < slack * 0.4,
+        "at breaking point it is still {taut} of {slack} wide"
+    );
+    // And it does not vanish before it goes: a warning you cannot see is not a warning.
+    assert!(taut > 0.2, "it is a hairline before it breaks: {taut}");
+    // Monotone, so the thinning reads as a continuous approach rather than a jump.
+    let widths: Vec<f32> = (0..=10).map(|i| half_width(i as f32 / 10.0)).collect();
+    assert!(
+        widths.windows(2).all(|w| w[1] <= w[0] + 1e-4),
+        "the thinning is not monotone: {widths:?}"
+    );
+}
+
+#[test]
+fn a_junction_has_square_ends_and_stays_in_its_quad() {
+    // A desmosome is a patch of wall. A rounded end reads as a rod lying on top of the pair rather
+    // than as the thing holding them together — and a field that reached past the corner would be
+    // clipped to the rectangle and get a straight edge somebody would read as meant.
+    let aspect = 5.0;
+    assert!(limb::band(aspect - 0.01, 0.0, aspect, 0.0, 0.33) < 0.0);
+    assert!(limb::band(aspect + 0.01, 0.0, aspect, 0.0, 0.33) > 0.0);
+    // Square: the full width is present right up to the end, which a rounded cap would not be.
+    assert!(limb::band(aspect - 0.01, 0.95, aspect, 0.0, 0.33) < 0.0);
+    for i in 0..=200 {
+        let t = i as f32 / 200.0;
+        assert!(limb::band(-aspect + 2.0 * aspect * t, 1.0, aspect, 0.0, 0.33) >= 0.0);
+    }
+}
+
+#[test]
+fn a_channel_is_pores_and_a_band_is_a_bar() {
+    // One is structure and the other is a conversation, and they must not be the same mark: a
+    // colony wired for transfer should read differently from one merely held together, which is a
+    // distinction SPEC §8.1 makes and the picture never did.
+    let aspect = 6.0;
+    for count in [2.0f32, 3.0, 5.0] {
+        let mut runs = 0;
+        let mut inside = false;
+        for i in 0..8000 {
+            let qx = -aspect + 2.0 * aspect * i as f32 / 7999.0;
+            let now = limb::channel(qx, 0.0, aspect, count) < 0.0;
+            if now && !inside {
+                runs += 1;
+            }
+            inside = now;
+        }
+        assert_eq!(runs, count as i32, "asked for {count} pores and got {runs}");
+    }
+    // A band is one unbroken run over the same span, or the two read alike.
+    let mut runs = 0;
+    let mut inside = false;
+    for i in 0..8000 {
+        let qx = -aspect + 2.0 * aspect * i as f32 / 7999.0;
+        let now = limb::band(qx, 0.0, aspect, 0.0, 0.33) < 0.0;
+        if now && !inside {
+            runs += 1;
+        }
+        inside = now;
+    }
+    assert_eq!(runs, 1, "a hard junction is drawn with holes in it");
+}
+
+#[test]
+fn the_junctions_are_the_only_forms_drawn_over_the_cells() {
+    // A form in the wrong layer is invisible or is drawn over a body it should be behind, and
+    // neither says which line was wrong. The junctions have to be over — under them, a hard
+    // junction between two packed cells is entirely inside the two bodies, which is the bug this
+    // whole commit is about.
+    assert!(limbmesh::over_cells(form::BAND));
+    assert!(limbmesh::over_cells(form::CHANNEL));
+    for f in [form::SPIKE, form::CILIUM, form::FLAGELLUM, form::HOLDFAST, form::HALO] {
+        assert!(!limbmesh::over_cells(f), "form {f} is drawn over the cells");
+    }
+    // And the two layers are on either side of the cell mesh, which sits at 1.0.
+    assert!(limbmesh::LIMB_Z < 1.0);
+    assert!(limbmesh::OVER_Z > 1.0);
+}
+
 // --- the two together -------------------------------------------------------------------------
 
 #[test]

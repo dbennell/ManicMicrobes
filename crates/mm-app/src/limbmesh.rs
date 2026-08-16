@@ -58,6 +58,11 @@ pub mod form {
     ///
     /// [`LimbDot::inner`]: crate::slide::LimbDot::inner
     pub const HALO: f32 = 5.0;
+    /// A hard junction: a rivet across the wall two cells share, or a strut across the water
+    /// between them when they have been pulled apart.
+    pub const BAND: f32 = 6.0;
+    /// A soft junction: a pore, faint, because one is a body and the other is a conversation.
+    pub const CHANNEL: f32 = 7.0;
 }
 
 /// Which form an organelle is drawn as, or `None` for the fifteen types that grow nothing outside
@@ -196,9 +201,26 @@ impl Placed {
 
 /// How far under the cells the limb mesh sits.
 ///
-/// Below the cell mesh at 1.0 and above the junction sprites at 0.5, so a limb's root disappears
-/// under the body it grows from and there is no join to draw.
+/// Below the cell mesh at 1.0, so a limb's root disappears under the body it grows from and there
+/// is no join to draw.
 pub const LIMB_Z: f32 = 0.9;
+
+/// And the layer over them, for the things that are *at* a boundary rather than off a body.
+///
+/// The junctions, and only the junctions. A junction drawn under the cells is invisible in the one
+/// case that matters — a packed pair, which is every pair a hard junction holds — because the
+/// whole of it is inside the two bodies. It has to be over them or it is not a picture of
+/// anything. See `slide::JunctionLine`.
+pub const OVER_Z: f32 = 1.05;
+
+/// Which of the two layers a form belongs in.
+///
+/// One answer, here, rather than a condition at the push site: a form in the wrong layer is
+/// invisible or is drawn over a body it should be behind, and neither says which line was wrong.
+#[must_use]
+pub fn over_cells(form: f32) -> bool {
+    form == form::BAND || form == form::CHANNEL
+}
 
 /// Build the vertex buffers for a frame.
 ///

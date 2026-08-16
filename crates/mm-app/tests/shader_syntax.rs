@@ -93,17 +93,22 @@ fn every_form_the_mesh_can_emit_is_one_the_shader_knows() {
         "/src/limb.wgsl"
     ))
     .expect("read limb.wgsl");
-    for kind in *mm_core::OrganelleType::all() {
-        let Some(form) = mm_app::limbmesh::form_of(kind) else {
-            continue;
-        };
+    let organelle_forms = mm_core::OrganelleType::all()
+        .iter()
+        .filter_map(|k| mm_app::limbmesh::form_of(*k).map(|f| (k.name(), f)));
+    // The junctions come from `slide::JunctionLine` rather than from an organelle, so they are
+    // named here or nothing would check them.
+    let junction_forms = [
+        ("hard junction", mm_app::limbmesh::form::BAND),
+        ("soft junction", mm_app::limbmesh::form::CHANNEL),
+    ];
+    for (name, form) in organelle_forms.chain(junction_forms) {
         // The constant the shader compares against, by value rather than by name: the names could
         // agree while the numbers do not, and it is the numbers that travel in the vertex buffer.
         let wanted = format!("= {form:.1};");
         assert!(
             source.contains(&wanted),
-            "{} is emitted as form {form} and `limb.wgsl` declares no such constant",
-            kind.name()
+            "{name} is emitted as form {form} and `limb.wgsl` declares no such constant"
         );
     }
 }

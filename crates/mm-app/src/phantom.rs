@@ -976,6 +976,28 @@ pub mod limb {
         d
     }
 
+    /// A hard junction: a rivet across the wall two cells share, thinning towards breaking.
+    ///
+    /// The `+x` axis runs *along the band* rather than out from a body, because a junction has no
+    /// root — it belongs to two cells and neither of them owns it. Square ends, because a
+    /// desmosome is a patch of wall and a rounded end reads as a rod lying on top of the pair.
+    #[must_use]
+    pub fn band(qx: f32, qy: f32, aspect: f32, strain: f32, taper: f32) -> f32 {
+        let w = 1.0 + (taper - 1.0) * strain.clamp(0.0, 1.0);
+        (qy.abs() - w).max(qx.abs() - aspect)
+    }
+
+    /// A soft junction: a row of pores rather than a bar, because one is structure and the other
+    /// is a conversation and they should not be the same mark.
+    #[must_use]
+    pub fn channel(qx: f32, qy: f32, aspect: f32, count: f32) -> f32 {
+        let n = count.max(1.0);
+        let pitch = 2.0 * aspect / n;
+        let x = (qx + aspect) - pitch * (((qx + aspect) / pitch).floor() + 0.5);
+        let r = ((x / (pitch * 0.30).max(1e-4)).powi(2) + qy * qy).sqrt();
+        (r - 1.0).max(qx.abs() - aspect)
+    }
+
     /// How opaque the exoenzyme's cloud is at a point, `0..1`.
     ///
     /// Not a field: a cloud has no outline, and one drawn with an antialiased edge would be a

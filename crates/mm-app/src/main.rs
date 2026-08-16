@@ -2129,10 +2129,6 @@ impl Uses {
 #[derive(Component)]
 struct MoteSprite(usize);
 
-/// A junction, drawn as a thin sprite stretched between two cells (M7).
-#[derive(Component)]
-struct JunctionSprite(usize);
-
 /// One arrow of the flow overlay: a shaft stretched along the local velocity.
 /// One speck of suspended particulate. Presentation only — see [`art::speck`] for why these
 /// are not particles and must never become clickable.
@@ -2186,6 +2182,7 @@ struct Layers<'w, 's> {
             With<CellMesh>,
             Without<DotMesh>,
             Without<LimbMesh>,
+            Without<OverMesh>,
             Without<BarrierQuad>,
         ),
     >,
@@ -2197,6 +2194,7 @@ struct Layers<'w, 's> {
             With<DotMesh>,
             Without<CellMesh>,
             Without<LimbMesh>,
+            Without<OverMesh>,
             Without<BarrierQuad>,
         ),
     >,
@@ -2208,10 +2206,31 @@ struct Layers<'w, 's> {
             With<LimbMesh>,
             Without<CellMesh>,
             Without<DotMesh>,
+            Without<OverMesh>,
+            Without<BarrierQuad>,
+        ),
+    >,
+    over: Query<
+        'w,
+        's,
+        (&'static Mesh2d, &'static mut Visibility),
+        (
+            With<OverMesh>,
+            Without<CellMesh>,
+            Without<DotMesh>,
+            Without<LimbMesh>,
             Without<BarrierQuad>,
         ),
     >,
 }
+
+/// The layer over the cells, for the things that are *at* a boundary rather than off a body.
+///
+/// The junctions, and only the junctions — `limbmesh::over_cells` is the single answer to which
+/// layer a form belongs in. Same material and same shader as [`LimbMesh`]; a different entity
+/// because the only thing that differs is the z, and one mesh cannot be at two.
+#[derive(Component)]
+struct OverMesh;
 
 /// The entity every limb on the slide is drawn as.
 ///
@@ -2255,6 +2274,8 @@ struct CellArt {
     /// set rather than a second `Detail` on that one: a limb has a different vertex layout, goes
     /// to a different mesh and is drawn by a different material.
     limbs: limbmesh::Buffers,
+    /// The same, for the layer over the cells. See `OverMesh`.
+    over: limbmesh::Buffers,
 }
 
 /// The single quad the chemical field is drawn on.
@@ -2368,6 +2389,18 @@ fn setup(
         Transform::from_xyz(0.0, 0.0, limbmesh::LIMB_Z),
     ));
 
+    // And the junctions, over the cells. Under them they are invisible in the one case that
+    // matters — a packed pair, which is every pair a hard junction holds — because the whole of
+    // the link is inside the two bodies. See `slide::JunctionLine`.
+    let over = limbpipe::empty_mesh();
+    commands.spawn((
+        OverMesh,
+        NoFrustumCulling,
+        Mesh2d(meshes.add(over)),
+        MeshMaterial2d(limb_materials.add(limbpipe::LimbMaterial {})),
+        Transform::from_xyz(0.0, 0.0, limbmesh::OVER_Z),
+    ));
+
     // The same shape as the field, and deliberately not the same sampler.
     let mut barriers = Image::new(
         Extent3d {
@@ -2442,6 +2475,7 @@ fn setup(
         field_size: (1, 1),
         cells: cellmesh::Buffers::default(),
         limbs: limbmesh::Buffers::default(),
+        over: limbmesh::Buffers::default(),
     });
 }
 
@@ -3076,7 +3110,6 @@ fn redraw(
             With<FieldQuad>,
             Without<BarrierQuad>,
             Without<MoteSprite>,
-            Without<JunctionSprite>,
             Without<FlowArrow>,
             Without<Suspended>,
             Without<FluxMark>,
@@ -3089,9 +3122,9 @@ fn redraw(
             Without<CellMesh>,
             Without<DotMesh>,
             Without<LimbMesh>,
+            Without<OverMesh>,
             Without<FieldQuad>,
             Without<MoteSprite>,
-            Without<JunctionSprite>,
             Without<FlowArrow>,
             Without<Suspended>,
             Without<FluxMark>,
@@ -3107,18 +3140,6 @@ fn redraw(
         (
             Without<FieldQuad>,
             Without<BarrierQuad>,
-            Without<JunctionSprite>,
-            Without<FlowArrow>,
-            Without<Suspended>,
-            Without<FluxMark>,
-        ),
-    >,
-    mut junctions: Query<
-        (&JunctionSprite, &mut Sprite, &mut Transform),
-        (
-            Without<FieldQuad>,
-            Without<BarrierQuad>,
-            Without<MoteSprite>,
             Without<FlowArrow>,
             Without<Suspended>,
             Without<FluxMark>,
@@ -3130,7 +3151,6 @@ fn redraw(
             Without<FieldQuad>,
             Without<BarrierQuad>,
             Without<MoteSprite>,
-            Without<JunctionSprite>,
             Without<Suspended>,
             Without<FluxMark>,
         ),
@@ -3141,7 +3161,6 @@ fn redraw(
             Without<FieldQuad>,
             Without<BarrierQuad>,
             Without<MoteSprite>,
-            Without<JunctionSprite>,
             Without<FlowArrow>,
             Without<FluxMark>,
         ),
@@ -3152,7 +3171,6 @@ fn redraw(
             Without<FieldQuad>,
             Without<BarrierQuad>,
             Without<MoteSprite>,
-            Without<JunctionSprite>,
             Without<FlowArrow>,
             Without<Suspended>,
         ),
@@ -4040,6 +4058,87 @@ fn redraw(
             }
         }
     }
+    // Junctions, into the layer *over* the cells and through the same material.
+    //
+    // They were a stretched sprite per link from centre to centre, under the cells — so on a
+    // packed pair, which is every pair a hard junction holds, the whole of the line was inside
+    // the two bodies and invisible. It appeared only when the pair was pulled apart, which is
+    // backwards: a hard junction is most structural when the cells are pressed together and least
+    // trustworthy when it is stretched.
+    //
+    // Now it is drawn at the boundary, which is where a junction is, and it is drawn as what it
+    // is: a rivet across the shared wall when the pair is in contact, a strut across the water
+    // when it has been pulled apart, and a row of pores when it is a channel rather than
+    // structure. The sprite pool is gone with it — an entity per link is ten thousand of them in
+    // a five-thousand-cell colony, which is the cost the cell mesh existed to remove.
+    art_handles.over.begin(frame.junctions.len());
+    if frame.lod.resolves_organelles() && view.limbs {
+        for link in &frame.junctions {
+            let a = to_screen(link.from.0, link.from.1);
+            let b = to_screen(link.to.0, link.to.1);
+            let mid = (a + b) / 2.0;
+            if mid.x < cull.min_x
+                || mid.x > cull.max_x
+                || mid.y < cull.min_y
+                || mid.y > cull.max_y
+            {
+                continue;
+            }
+            let delta = (b - a).truncate();
+            let centres = delta.length().max(1e-3);
+            let along = delta / centres;
+            let dim = optics.vignette(field_radius(mid));
+            // In contact, the band lies **across** the wall; pulled apart, the strut lies along
+            // the line of centres. One is a rivet and the other is a tether, and they are the same
+            // junction in two states rather than two things.
+            let touching = link.gap <= 0.0;
+            let (ux, uy, half_len) = if touching {
+                (-along.y, along.x, (link.span * scale).max(1.0))
+            } else {
+                (along.x, along.y, (link.gap * scale * 0.5).max(1.0))
+            };
+            // Both cases sit at the midpoint of the line of centres: in contact that is the
+            // shared wall for a pair of equal cells and near enough for an unequal one, and apart
+            // it is the middle of the water between them. An exact seam would need the two drawn
+            // radii here, which is a third number to carry for a rivet a few pixels wide.
+            let form = if link.hard {
+                limbmesh::form::BAND
+            } else {
+                limbmesh::form::CHANNEL
+            };
+            // Hard is bone and solid because it is structure; soft is water-blue and faint
+            // because it is a conversation. The same two colours the sprites wore.
+            let (rgb, alpha, thick) = if link.hard {
+                ([0.80, 0.78, 0.70], 0.85, 1.6f32)
+            } else {
+                ([0.55, 0.70, 0.85], 0.40, 1.1f32)
+            };
+            art_handles.over.push(limbmesh::Placed {
+                cx: mid.x,
+                cy: mid.y,
+                ux,
+                uy,
+                half_len,
+                half_wid: thick.max(scale * 0.035),
+                rgba: [rgb[0] * dim, rgb[1] * dim, rgb[2] * dim, alpha],
+                form,
+                // Strain, for both: a band thins and fades towards breaking, a channel only
+                // fades. It is the most useful new thing on the slide — a body about to come
+                // apart says so before it does.
+                extent: link.strain,
+                phase: 0.0,
+                // Pores along a channel, one per thickness or so, so a longer channel has more
+                // rather than larger ones.
+                count: (half_len / thick.max(1.0)).clamp(1.0, 6.0).floor(),
+                inner: 0.0,
+                // A third of the thickness left at breaking point: it thins visibly and does not
+                // vanish before it goes.
+                taper: 0.33,
+                seed: 0.0,
+            });
+        }
+    }
+
     let any_limbs = art_handles.limbs.limbs() > 0;
     if let Ok((mesh_handle, mut visibility)) = layers.limbs.single_mut() {
         *visibility = if any_limbs {
@@ -4049,6 +4148,17 @@ fn redraw(
         };
         if let Some(mut mesh) = meshes.get_mut(&mesh_handle.0) {
             limbpipe::upload(&mut mesh, &mut art_handles.limbs);
+        }
+    }
+    let any_over = art_handles.over.limbs() > 0;
+    if let Ok((mesh_handle, mut visibility)) = layers.over.single_mut() {
+        *visibility = if any_over {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+        if let Some(mut mesh) = meshes.get_mut(&mesh_handle.0) {
+            limbpipe::upload(&mut mesh, &mut art_handles.over);
         }
     }
 
@@ -4088,41 +4198,6 @@ fn redraw(
                 cellpipe::upload(&mut mesh, &mut art_handles.cells);
             }
         }
-    }
-
-    // Junctions. A stretched, rotated sprite per link: hard ones solid because they are
-    // structure, soft ones faint because they are a channel rather than a body.
-    let junction_pool = junctions.iter().count();
-    for i in junction_pool..frame.junctions.len() {
-        commands.spawn((
-            JunctionSprite(i),
-            Sprite {
-                color: Color::NONE,
-                custom_size: Some(Vec2::splat(1.0)),
-                ..default()
-            },
-        ));
-    }
-    for (marker, mut sprite, mut transform) in &mut junctions {
-        let Some(link) = frame.junctions.get(marker.0) else {
-            sprite.color = Color::NONE;
-            continue;
-        };
-        let a = to_screen(link.from.0, link.from.1);
-        let b = to_screen(link.to.0, link.to.1);
-        let delta = (b - a).truncate();
-        let length = delta.length().max(1.0);
-        let dim = optics.vignette(field_radius((a + b) / 2.0));
-        sprite.color = if link.hard {
-            Color::srgba(0.80 * dim, 0.78 * dim, 0.70 * dim, 0.85)
-        } else {
-            Color::srgba(0.55 * dim, 0.70 * dim, 0.85 * dim, 0.35)
-        };
-        sprite.custom_size = Some(Vec2::new(length, if link.hard { 2.0 } else { 1.0 }));
-        // Drawn under the cells, so a junction reads as something the cells sit on rather
-        // than something laid over them.
-        transform.translation = ((a + b) / 2.0).with_z(0.5);
-        transform.rotation = Quat::from_rotation_z(delta.y.atan2(delta.x));
     }
 
     // Dust on the objective: drawn in screen space, in front of everything, and not affected
