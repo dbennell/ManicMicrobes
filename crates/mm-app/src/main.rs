@@ -239,6 +239,22 @@ fn screenshot(
     };
     if arrange_at && !*arranged {
         *arranged = true;
+        // The camera again, and for the same reason `MM_SHOT_VIEW` is applied here rather than at
+        // startup: opening a slide fits the view to it (`zoom = BASE_SCALE * 6 / size`), and that
+        // happens on the engine's schedule, not the renderer's. Set once at frame one it is
+        // sometimes overwritten and sometimes not — the same command photographed the reef at
+        // 220× and then at 1686×, which reads as "the feature draws nothing" when the truth is
+        // "the camera is half a square wide". Re-aim after the world has finished arriving.
+        let (w, h) = {
+            let held = sim.engine.handle();
+            let slide = held.slide();
+            let s = slide.world().substrate();
+            (s.width(), s.height())
+        };
+        view.centre = Vec2::new(w as f32 / 2.0, h as f32 / 2.0);
+        if let Ok(zoom) = std::env::var("MM_SHOT_ZOOM") {
+            view.zoom = zoom.parse().unwrap_or(view.zoom);
+        }
         if let Ok(spec) = std::env::var("MM_SHOT_VIEW") {
             arrange(&spec, &mut sim, &mut view);
         }
