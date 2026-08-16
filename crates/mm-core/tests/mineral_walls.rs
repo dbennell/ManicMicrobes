@@ -8,15 +8,18 @@
 //! existed so that the loss was said out loud rather than silently breaking I4. It was the one
 //! genuine exit from a world that otherwise conserves matter exactly.
 //!
-//! `docs/CHEMISTRY.md` §10 turns that exit into a compartment. A wall now *holds* the mineral it
-//! is raised over, in solid planes the fluid never touches, counted by `World::total_matter` and
-//! carried through a snapshot. For the minerals it is no longer an exit at all.
+//! `docs/CHEMISTRY.md` §10 turns that exit into a compartment. Matter buried under a wall is
+//! pushed into the neighbouring water, and where there is nowhere to push it a *mineral* is kept
+//! as solid — in planes the fluid never touches, counted by `World::total_matter` and carried
+//! through a snapshot. For the minerals the exit is closed.
 //!
-//! What a wall does *not* keep is everything else: only a mineral can be solid, which is the whole
-//! reason the solid planes are two and not seventeen — see `chem::SOLID_CHEMICALS`. Sugar buried
-//! under a rock is pushed into the neighbouring water instead, which is better than the eviction
-//! this file was first written expecting, and is a claim worth a test of its own rather than a
-//! footnote to the total.
+//! **The two kinds of wall, and why nothing declares which is which.** A blocked square holding
+//! solid is rock: it dissolves into thirsty water and opens when it is worn past the threshold. A
+//! blocked square holding none is bedrock — there is nothing to dissolve, so it never enters the
+//! loop and is permanent. That is the whole of the distinction, it needs no flag, and it is why a
+//! wall must not help itself to the mineral it happens to be raised over: such a wall would be
+//! rock made of a crust, and a crust does not survive a weathering step. A scenario that wants
+//! rock says `Seeding::Rock`.
 
 use mm_core::chem::{solid_slot, CHEM_COUNT, SOLID_CHEMICALS};
 use mm_core::fixed::q10;
@@ -33,14 +36,18 @@ fn slide() -> Scenario {
             intensity: mm_core::Q10_ONE,
         },
         seeding: vec![
-            // A mineral, which a wall should keep...
+            // A mineral, which a wall should keep — and **below its own saturation**, which the
+            // first version of this fixture was not. At fifty a square against a solubility of
+            // eight the whole slide was supersaturated, so it nucleated everywhere and every test
+            // that tried to control one square was measuring its neighbours instead. A fixture
+            // has to start in the state the tests assume, and "dissolved" is that state.
             Seeding::Uniform {
                 chemical: SOLID_CHEMICALS[0],
-                per_square: q10(50),
+                per_square: q10(2),
             },
             Seeding::Uniform {
                 chemical: SOLID_CHEMICALS[1],
-                per_square: q10(30),
+                per_square: q10(10),
             },
             // ...and a substrate, which it should not.
             Seeding::Uniform {
@@ -52,9 +59,20 @@ fn slide() -> Scenario {
     }
 }
 
-/// **The claim: a wall raised over mineral keeps it, and the world's books do not move.**
+/// **The claim: a wall raised over mineral pushes it aside, and holds nothing.**
+///
+/// This test asserted the opposite for a day — that the wall *kept* the mineral as solid, which
+/// closes the eviction leak in the tidiest possible way and is why it was written that way first.
+/// It cannot stand, because it erases the distinction the weathering depends on: a blocked square
+/// holding solid is rock and dissolves, a blocked square holding none is bedrock and cannot. A
+/// wall that helps itself to the mineral it was raised over is a wall that has quietly become
+/// rock, and the next weathering step wears its thin crust away and opens it.
+///
+/// So the mineral goes where the sugar goes — into the water around — and the leak is closed by
+/// [`a_wall_with_nowhere_to_push_keeps_the_mineral_rather_than_evicting_it`] instead, which is
+/// the case where there is genuinely no alternative.
 #[test]
-fn a_wall_raised_over_mineral_holds_it_rather_than_destroying_it() {
+fn a_wall_raised_over_mineral_pushes_it_aside() {
     let mut world = World::new(slide()).expect("world");
     let before = world.total_matter();
     let mineral = SOLID_CHEMICALS[0];
@@ -65,19 +83,146 @@ fn a_wall_raised_over_mineral_holds_it_rather_than_destroying_it() {
     let after = world.total_matter();
     assert_eq!(
         after[mineral], before[mineral],
-        "burying mineral under a wall destroyed {} of it; the solid planes exist so that a wall \
-         is a compartment rather than an exit",
+        "burying mineral under a wall destroyed {} of it",
         before[mineral] - after[mineral]
     );
     let k = solid_slot(mineral).expect("a solid-capable chemical");
-    assert!(
-        world.substrate().solid_at(k, 10, 10) > 0,
-        "the wall holds no mineral, so wherever that matter went it was not into the rock"
+    assert_eq!(
+        world.substrate().solid_at(k, 10, 10),
+        0,
+        "the wall took the mineral up as solid; that makes it rock rather than bedrock, and rock \
+         this thin dissolves away and opens"
+    );
+    let in_fluid: i64 = world
+        .substrate()
+        .chem_plane(mineral)
+        .iter()
+        .map(|v| i64::from(*v))
+        .sum();
+    assert_eq!(
+        in_fluid, before[mineral],
+        "the mineral left the water without becoming solid"
     );
     assert!(
         world.substrate().blocked()[world.substrate().index(10, 10)],
         "the square did not become a wall"
     );
+}
+
+/// And when there is nowhere to push to, it is kept rather than evicted.
+///
+/// This is the leak `ledger.rs` has carried since M1 — "the one genuine exit is a barrier raised
+/// over an occupied square" — and for a mineral it is now closed: walled in on every side, the
+/// matter changes compartment instead of leaving the world.
+#[test]
+fn a_wall_with_nowhere_to_push_keeps_the_mineral_rather_than_evicting_it() {
+    // A slide three squares wide with the middle column open: wall the middle square and the
+    // rings outward find nothing but rock.
+    let mut world = World::new(Scenario {
+        width: 3,
+        height: 3,
+        seeding: vec![Seeding::Uniform {
+            chemical: SOLID_CHEMICALS[0],
+            per_square: q10(4),
+        }],
+        ..slide()
+    })
+    .expect("world");
+    for (x, y) in [
+        (0, 0),
+        (1, 0),
+        (2, 0),
+        (0, 1),
+        (2, 1),
+        (0, 2),
+        (1, 2),
+        (2, 2),
+    ] {
+        world.set_barrier(x, y, true);
+    }
+    let mineral = SOLID_CHEMICALS[0];
+    let k = solid_slot(mineral).expect("solid-capable");
+    let before = world.total_matter()[mineral];
+
+    world.set_barrier(1, 1, true);
+
+    assert_eq!(
+        world.total_matter()[mineral],
+        before,
+        "mineral was destroyed by the last wall going up"
+    );
+    assert!(
+        world.substrate().solid_at(k, 1, 1) > 0,
+        "there was nowhere to push it and it did not become solid either, so it left the world"
+    );
+    assert_eq!(
+        world.ledger().evicted()[mineral],
+        0,
+        "the mineral was recorded as evicted; the solid planes are what that column exists to \
+         stop being needed"
+    );
+}
+
+/// **Bedrock does not erode.**
+///
+/// The regression this whole arrangement is arranged around. A scenario's barrier holds no solid,
+/// so it is not in the dissolution loop at all and there is nothing for the threshold to judge —
+/// which is what makes an authored wall permanent without a flag saying so. Run in water hungry
+/// for both minerals, which is the state that dissolves rock fastest.
+#[test]
+fn a_scenario_barrier_is_bedrock_and_stays_shut() {
+    let mut world = World::new(Scenario {
+        barriers: vec![mm_core::Barrier::Square { x: 12, y: 12 }],
+        // Empty water: the maximum deficit, so anything soluble in that square is on its way out.
+        seeding: Vec::new(),
+        ..slide()
+    })
+    .expect("world");
+    let at = world.substrate().index(12, 12);
+    assert!(world.substrate().blocked()[at], "it did not start as a wall");
+
+    world.run(5_000);
+
+    assert!(
+        world.substrate().blocked()[at],
+        "an authored wall dissolved away. Bedrock is a blocked square with nothing solid in it; \
+         if this fails, something put mineral into one"
+    );
+}
+
+/// A scenario declares rock, and it is rock from the first tick.
+#[test]
+fn a_scenario_authors_a_reef_with_rock() {
+    let mineral = SOLID_CHEMICALS[1];
+    let k = solid_slot(mineral).expect("solid-capable");
+    let mut base = slide();
+    base.seeding.push(Seeding::Rock {
+        chemical: mineral,
+        x: 6,
+        y: 6,
+        width: 3,
+        height: 2,
+        per_square: q10(400),
+    });
+    let world = World::new(base).expect("world");
+
+    assert!(
+        world.substrate().solid_at(k, 7, 6) > 0,
+        "the reef holds no mineral"
+    );
+    for (x, y) in [(6, 6), (8, 7)] {
+        assert!(
+            world.substrate().blocked()[world.substrate().index(x, y)],
+            "({x}, {y}) holds four hundred a square and is not a wall; the threshold is two \
+             hundred, and rock thick enough to be a wall should not need a weathering step to \
+             notice"
+        );
+    }
+    assert!(
+        !world.substrate().blocked()[world.substrate().index(9, 6)],
+        "the square beyond the rectangle was blocked too"
+    );
+    world.check_invariants().expect("a world with a reef in it balances");
 }
 
 /// And what a wall cannot hold is pushed aside rather than kept — or lost.
@@ -125,9 +270,16 @@ fn a_wall_pushes_aside_what_it_cannot_hold() {
 /// The compartment survives a snapshot, or it is not state (hard rule 7).
 #[test]
 fn a_wall_keeps_its_minerals_across_a_snapshot() {
-    let mut world = World::new(slide()).expect("world");
-    world.set_barrier(10, 10, true);
-    world.set_barrier(11, 10, true);
+    let mut base = slide();
+    base.seeding.push(Seeding::Rock {
+        chemical: SOLID_CHEMICALS[0],
+        x: 10,
+        y: 10,
+        width: 2,
+        height: 1,
+        per_square: q10(400),
+    });
+    let mut world = World::new(base).expect("world");
     world.run(5);
 
     let held = world.total_matter();

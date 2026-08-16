@@ -47,6 +47,32 @@ pub enum Seeding {
         height: u32,
         per_square: i32,
     },
+    /// A filled rectangle of **solid** mineral: rock, not water.
+    ///
+    /// Everything else here puts matter in the fluid. This puts it in the solid planes
+    /// (`docs/CHEMISTRY.md` §10), which is a different compartment and a different kind of thing:
+    /// it does not diffuse, it does not advect, cells cannot eat it where it lies, and above
+    /// `MineralRates::wall_threshold` it blocks the square.
+    ///
+    /// **This is how a scenario authors a reef, and the alternative was worse.** Rock could be
+    /// arranged instead by seeding the water and drawing a barrier over it, letting the wall take
+    /// up what it was raised on — but then an ordinary authored wall picks up a crust of whatever
+    /// was dissolved nearby, which is under the threshold, which dissolves, which opens the wall.
+    /// Bedrock is a blocked square with no solid in it, and it stays permanent precisely because
+    /// nothing put any there. So rock is declared.
+    ///
+    /// The mineral is subject to the whole of the weathering law from the first tick: a reef in
+    /// thirsty water starts dissolving immediately, and one in saturated water sits. Only the
+    /// chemicals in `chem::SOLID_CHEMICALS` can be placed this way; anything else is ignored,
+    /// because a solid plane for sugar does not exist to put it in.
+    Rock {
+        chemical: usize,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        per_square: i32,
+    },
 }
 
 /// Matter crossing the boundary of the slide, every fluid step.

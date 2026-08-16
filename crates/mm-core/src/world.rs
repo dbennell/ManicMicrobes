@@ -390,6 +390,26 @@ impl World {
             last_report: TickReport::default(),
         };
 
+        // **Walls first, then the water, and bedrock is why.**
+        //
+        // This was briefly the other way round, so that a barrier raised over seeded water would
+        // take up the mineral around it and a scenario could declare a reef by drawing a wall
+        // through silica. It is a pretty idea and it is wrong, because it erases the one
+        // distinction the weathering depends on.
+        //
+        // A blocked square holding solid is *rock*: it dissolves into thirsty water and opens
+        // when it is worn past the threshold. A blocked square holding none is **bedrock** —
+        // there is nothing to dissolve, so it never enters the loop and never opens. That is
+        // exactly the insoluble immutable wall a scenario means when it draws one, and it costs
+        // no flag, no second barrier type and no new state to say so.
+        //
+        // Seed first and every authored wall picks up a crust of whatever was dissolved around
+        // it — twenty of silica on the default slide — which is under the threshold, so the very
+        // next weathering step dissolves it away and *opens the wall*. Bedrock quietly stopped
+        // being permanent. Walls first, and there is nothing in the square to pick up.
+        //
+        // A scenario that wants rock says so with `Seeding::Rock`, which puts the mineral in the
+        // solid planes rather than in the water. Declared, rather than arranged by ordering.
         world.raise_barriers();
         world.seed_chemistry();
         world.ledger.set_baseline(world.total_matter());
@@ -583,8 +603,45 @@ impl World {
                         }
                     }
                 }
+                Seeding::Rock {
+                    chemical,
+                    x,
+                    y,
+                    width,
+                    height,
+                    per_square,
+                } => {
+                    // Only a mineral has a plane to go into. Anything else is dropped rather
+                    // than diverted into the water: a recipe asking for rock made of sugar is
+                    // asking for something that does not exist, and quietly turning it into
+                    // dissolved sugar would hide the mistake instead of leaving it visible in
+                    // the world's totals.
+                    let Some(k) = crate::chem::solid_slot(*chemical) else {
+                        continue;
+                    };
+                    let threshold = self.biology.minerals.wall_threshold;
+                    for dy in 0..*height {
+                        for dx in 0..*width {
+                            let (px, py) = (
+                                x.saturating_add(dx) as i32,
+                                y.saturating_add(dy) as i32,
+                            );
+                            self.substrate.add_solid(k, px, py, *per_square);
+                            // Blocked by the same rule weathering uses, so a reef thick enough
+                            // to be a wall is one from the first tick rather than from the first
+                            // weathering step. `set_blocked_deferred` because the edge masks are
+                            // rebuilt once, below.
+                            if self.substrate.solid_total_at(px, py) > threshold {
+                                let evicted =
+                                    self.substrate.set_blocked_deferred(px, py, true);
+                                self.keep_or_evict(px, py, &evicted);
+                            }
+                        }
+                    }
+                }
             }
         }
+        self.substrate.rebuild_edge_masks();
         // Seeding is the world being given its contents, not the world creating matter, so
         // the baseline is taken afterwards rather than each placement being "injected".
     }
@@ -1999,6 +2056,10 @@ impl World {
             self.ledger.export(latent);
         }
 
+        // Every way of putting that chemical in the *water* is replaced by the one wash.
+        // `Seeding::Rock` is deliberately not in this list: it puts the mineral in the solid
+        // planes, which this call has not touched, and dropping it would delete a reef because
+        // somebody set the dissolved level of what it is made of.
         self.scenario.seeding.retain(|s| {
             !matches!(s,
                 Seeding::Uniform { chemical, .. }
@@ -2271,18 +2332,6 @@ impl World {
                 continue;
             }
             let mut left = *amount;
-            // A mineral does not get displaced: it stays, as solid, in the square that just
-            // became rock. That is what a mineral wall *is* — and it is why drawing a wall
-            // through phosphate-rich water leaves a phosphate-rich wall rather than shoving the
-            // phosphate aside. Only what cannot be solid goes looking for somewhere to be.
-            if blocked {
-                if let Some(k) = crate::chem::solid_slot(c) {
-                    left -= self.substrate.add_solid(k, x as i32, y as i32, left);
-                    if left <= 0 {
-                        continue;
-                    }
-                }
-            }
             // Outward in rings, the same way a corpse finds somewhere to go.
             'placed: for ring in 1..4i32 {
                 for dy in -ring..=ring {
@@ -2300,8 +2349,24 @@ impl World {
                 }
             }
             if left > 0 {
-                // Nowhere to put it: walled in on every side. Recorded as evicted rather than
-                // silently dropped, which is what the ledger's eviction column is for.
+                // Nowhere to put it: walled in on every side. A mineral can still be kept, as
+                // solid in the square that just became rock — the compartment exists precisely so
+                // that burial is a change of state rather than an exit.
+                //
+                // **Last resort rather than first**, and the ordering is deliberate. Capturing
+                // before the ring walk made every wall drawn through mineral water into a thin
+                // mineral wall, which then dissolved and opened: a wall tool whose walls quietly
+                // erode. Displaced first, an ordinary wall keeps no solid at all and stays
+                // bedrock, and only a wall with nowhere to push to holds anything.
+                if blocked {
+                    if let Some(k) = crate::chem::solid_slot(c) {
+                        left -= self.substrate.add_solid(k, x as i32, y as i32, left);
+                    }
+                }
+            }
+            if left > 0 {
+                // Not a mineral, and nowhere to go. Recorded as evicted rather than silently
+                // dropped, which is what the ledger's eviction column is for.
                 unplaced[c] = left;
             }
         }

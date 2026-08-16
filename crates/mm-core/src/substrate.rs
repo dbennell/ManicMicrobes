@@ -639,6 +639,22 @@ impl Substrate {
         moved
     }
 
+    /// Everything solid standing on one square, across every plane, `Q10`.
+    ///
+    /// **The threshold that decides whether a square is rock is about the square, not about a
+    /// chemical.** Comparing one plane at a time was the first version and it opened walls that
+    /// were plainly solid: a square holding sixty of phosphate and two hundred of silica was
+    /// judged below the line during the phosphate pass and unblocked, while still holding more
+    /// than enough silica to be a wall. A reef made of two minerals is a reef.
+    #[inline]
+    #[must_use]
+    pub fn solid_total_at(&self, x: i32, y: i32) -> i32 {
+        let i = self.index(x, y);
+        self.solid
+            .iter()
+            .fold(0i32, |a, plane| a.saturating_add(plane[i]))
+    }
+
     /// Total solid of each chemical, mapped back onto chemical indices.
     ///
     /// A compartment of `World::total_matter`: solid mineral is matter, and the whole reason
