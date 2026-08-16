@@ -436,7 +436,9 @@ fn mix(mut x: u64) -> u64 {
 }
 
 /// Cheap deterministic noise in `0..1`, for the grain and the per-variant phases.
-fn hash01(mut x: u64) -> f32 {
+/// Cheap deterministic noise in `0..1`. Public so the renderer can give a fleck its own size
+/// and angle from its index, on the same terms everything else here is a pure function of one.
+pub fn hash01(mut x: u64) -> f32 {
     x ^= x >> 33;
     x = x.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
     x ^= x >> 33;
@@ -1020,52 +1022,52 @@ mod tests {
 /// showing its own pixels. Linear sampling does the rest, the way it does for the cell sprites.
 pub const HEX_TILE: usize = 32;
 
-/// A hexagon, white with a soft edge, for tinting at draw time.
+/// A husk: a broken hexagonal flake with a rim, for tinting at draw time.
 ///
-/// # Why a baked tile rather than a mesh or a shader
+/// # Why not a clean hexagon
 ///
-/// The same argument the cell sprites are baked under. A hexagon is a fixed shape that never
-/// deforms — unlike a cell, it has no turgor and no contacts — so there is nothing per-frame for
-/// a shader to decide, and a mesh would mean a second pipeline and a second vertex layout for a
-/// shape with six sides. A tinted quad against a baked mask is one draw path the renderer already
-/// has, and `docs/OVERLAPS.md` is the standing argument for not adding a second one casually.
+/// It was one, and a field of them read as crystals rather than as anything that had been alive.
+/// What a flake of carrion *is* is a piece of a cell that has stopped being a cell, so the
+/// silhouette keeps the hexagon's six sides — a broken membrane does keep flat facets where it
+/// tore — and spoils them: the radius is perturbed by two harmonics of the angle, so no two
+/// flecks share an outline and none of them is regular.
 ///
-/// White, so the tint at draw time is the whole of the colour: carrion's own entry in the
-/// chemical table is the honest source for it, and a colour baked in here would quietly disagree
-/// with the overlay the moment a scenario renamed or recoloured the chemical.
+/// The rim is the other half. A cell is drawn as a lit hemisphere, which is what makes it read as
+/// full of something; a husk is drawn as a *shell* — darker in the middle than at its edge —
+/// which is what makes it read as empty. That inversion is the whole trick and it costs one term.
 ///
-/// Pointy-topped, and slightly darker towards the rim, so a fleck reads as a solid flake with a
-/// lit face rather than as a flat token. The grain is the same trick and the same hash the cell
-/// tiles use.
+/// Baked for the reasons the cell sprites are: the shape never deforms, so there is nothing
+/// per-frame for a shader to decide, and a mesh would be a second pipeline for a shape with six
+/// sides. White, so the tint at draw time is the whole of the colour.
 #[must_use]
 pub fn hex_tile() -> Vec<u8> {
     let mut pixels = vec![0u8; HEX_TILE * HEX_TILE * 4];
     let half = HEX_TILE as f32 / 2.0;
     for py in 0..HEX_TILE {
         for px in 0..HEX_TILE {
-            // Centred, in units where the tile spans -1..1.
             let x = ((px as f32 + 0.5) - half) / half;
             let y = ((py as f32 + 0.5) - half) / half;
-            // Signed distance to a regular hexagon of radius `r`, pointy-topped: `ay` carries
-            // the 0.866 so the points fall at top and bottom and the flats at left and right.
-            // With the two swapped it is the same hexagon turned thirty degrees, which is a
-            // flat-topped one — worth saying because the first version of this had them that way
-            // round while the doc comment above claimed otherwise, and only the test noticed.
             let (ax, ay) = (x.abs(), y.abs());
-            let r = 0.86;
+            // Two harmonics of the angle, so the outline is a spoiled hexagon rather than a
+            // regular one. Small amplitudes: enough that the eye reads "torn" and not enough to
+            // stop it reading "flake".
+            let angle = y.atan2(x);
+            let wobble = 0.055 * (3.0 * angle).sin() + 0.035 * (5.0 * angle + 1.2).cos();
+            let r = 0.80 + wobble;
+            // Pointy-topped: `ay` carries the 0.866 so the points fall top and bottom.
             let d = (ay * 0.866_025 + ax * 0.5).max(ax) - r;
-            // A soft edge about a pixel and a half wide, so the flake has no staircase on it at
-            // any magnification the microscope offers.
-            let edge = 2.4 / HEX_TILE as f32;
+            let edge = 3.2 / HEX_TILE as f32;
             let alpha = (1.0 - (d / edge + 0.5)).clamp(0.0, 1.0);
             if alpha <= 0.0 {
                 continue;
             }
-            // Lit from the same quarter the cells are, so a flake sits in the same light as
-            // everything else on the slide rather than looking pasted on.
-            let lit = 0.80 + 0.20 * (-x * 0.5 - y * 0.5).clamp(-1.0, 1.0);
+            // A shell, not a ball: brightest just inside the edge and sinking towards the middle.
+            // A cell's hemisphere normal does the opposite, and that opposition is what tells a
+            // husk from a body at a glance.
+            let inward = (-d / 0.42).clamp(0.0, 1.0);
+            let rim = 1.0 - (inward - 0.18).abs().min(1.0);
             let grain = hash01((py * HEX_TILE + px) as u64 * 2_654_435_761) - 0.5;
-            let lum = (lit + 0.10 * grain).clamp(0.0, 1.0);
+            let lum = (0.34 + 0.52 * rim + 0.10 * grain).clamp(0.0, 1.0);
             let at = (py * HEX_TILE + px) * 4;
             let v = (lum * 255.0) as u8;
             pixels[at] = v;
@@ -1081,8 +1083,9 @@ pub fn hex_tile() -> Vec<u8> {
 mod carrion_tests {
     use super::*;
 
-    /// The tile has to be a hexagon rather than a blob: opaque in the middle, clear at the
-    /// corners, and clear at the *flats* too, which is what tells a hexagon from a circle.
+    /// A husk: solid in the middle, clear at the corners, and *hollow-looking* — brighter near
+    /// its edge than at its centre, which is the one property that tells a shell from a body and
+    /// the reason a field of these reads as dead matter rather than as crystals.
     #[test]
     fn the_hex_tile_is_a_hexagon() {
         let px = hex_tile();
@@ -1093,11 +1096,15 @@ mod carrion_tests {
         for (x, y) in [(0, 0), (HEX_TILE - 1, 0), (0, HEX_TILE - 1), (HEX_TILE - 1, HEX_TILE - 1)] {
             assert_eq!(alpha(x, y), 0, "the corner at ({x},{y}) is not clear");
         }
-        // A pointy top: solid at the top edge's middle, where a corner of the hexagon is.
-        assert!(alpha(mid, 1) > 0, "the point of the hexagon is missing");
-        // And clear at the middle of the left edge, where a circle of the same radius would
-        // still be solid. This is the assertion that would fail for a disc.
+        // Clear at the middle of the left edge, where a disc of the same radius would still be
+        // solid: the outline is a spoiled hexagon, not a circle.
         assert_eq!(alpha(0, mid), 0, "the flat side is not flat; this is a disc");
+        // And hollow: brighter a little inside the edge than dead centre.
+        let lum = |x: usize, y: usize| px[(y * HEX_TILE + x) * 4];
+        assert!(
+            lum(mid, mid + HEX_TILE / 5) > lum(mid, mid),
+            "the husk is brighter at its centre than near its edge, so it reads as a ball"
+        );
     }
 
     /// A fleck drifts for five times as long as a speck before it restarts, which at the same

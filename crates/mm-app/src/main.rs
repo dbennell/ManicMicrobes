@@ -623,17 +623,30 @@ const SPECK_MAX_SIDE: u64 = 8;
 /// Wider than [`SPECK_PITCH`], because a flake is bigger and a field of them at the specks'
 /// spacing reads as a floor rather than as things lying on one. Carrion is also the rarer sight:
 /// detritus drifts through a slide continuously, and a drift of corpses means something died.
-const FLECK_PITCH: f32 = 46.0;
+const FLECK_PITCH: f32 = 62.0;
 
-/// The flakes' colour, matching `carrion` in the chemical table — a dark, browned red.
+/// The flakes' colour: a drained version of what a cell is drawn in.
+///
+/// **Not `carrion`'s entry in the chemical table**, which is a saturated red, and which read as
+/// something spilt rather than as something that had been alive. `slide::cell_colour` builds a
+/// cell from a base of `[0.30, 0.32, 0.36]` blended with organelle tints, so a body on screen is
+/// a pale desaturated blue-grey-green; a *dead* one should be that palette with the life taken
+/// out of it rather than a different palette altogether.
+///
+/// **Pale, and that is the correction that mattered.** The first attempt at "drained" reached for
+/// a dark drab and the flakes disappeared: a cell on screen sits around 0.8 luminance and the gaps
+/// between cells are dark, so a dark flake merges into the water instead of reading as something
+/// lying in it. Value has to match the cells; it is *saturation* that comes out. So this is the
+/// cells' brightness, drably rose rather than sage — near enough to read as tissue, far enough
+/// from the straw of `SPECK_RGB` that a flake is never mistaken for a grain of particulate.
 ///
 /// A constant for the same reason [`SPECK_RGB`] is: the flakes are drawn whether or not the
-/// chemical overlay that would show that colour is switched on.
-const FLECK_RGB: [f32; 3] = [0.588, 0.353, 0.353];
+/// chemical overlay that would show carrion's own colour is switched on.
+const FLECK_RGB: [f32; 3] = [0.72, 0.63, 0.62];
 
 /// Most flakes per lattice block along one axis. Lower than [`SPECK_MAX_SIDE`] because they are
 /// larger: four a side already fills a block at the magnifications where a block is wide.
-const FLECK_MAX_SIDE: u64 = 4;
+const FLECK_MAX_SIDE: u64 = 2;
 
 fn main() {
     // Before Bevy, because this one does not want a window — it writes files and stops. The
@@ -3279,7 +3292,9 @@ fn redraw(
     // and one pool of sprites for both, because Bevy caps a system's parameters and a second
     // query for a second kind of dot is not what that budget is for — the two differ in texture,
     // size and colour, all of which are per-entity and set below.
-    let mut speck_slots: Vec<(Vec3, f32, bool)> = Vec::new();
+    // `(where, alpha, is a flake, size multiplier, spin)`. The last two are per fleck and
+    // meaningless for a speck, which is a dot.
+    let mut speck_slots: Vec<(Vec3, f32, bool, f32, f32)> = Vec::new();
     if !frame.detritus.is_empty() && frame.flow_cols > 0 {
         let cols = frame.flow_cols as usize;
         let rows = frame.detritus.len() / cols.max(1);
@@ -3330,7 +3345,13 @@ fn redraw(
                     {
                         continue;
                     }
-                    speck_slots.push((at, sp.alpha * optics.vignette(field_radius(at)), false));
+                    speck_slots.push((
+                        at,
+                        sp.alpha * optics.vignette(field_radius(at)),
+                        false,
+                        1.0,
+                        0.0,
+                    ));
                 }
             }
         }
@@ -3372,10 +3393,26 @@ fn redraw(
                     let Some(fl) = art::fleck(index, frame.tick, vel, stride, conc) else {
                         continue;
                     };
-                    let at = to_screen(
+                    // Off the slide is off the picture, and this is checked *before* the screen
+                    // transform because the two questions are different. A fleck is carried from
+                    // its lattice point for its whole life, and near an edge that carries it past
+                    // the last square — so flakes were drawn out in the black beyond the slide,
+                    // which says the dead are somewhere the world does not reach. The cull below
+                    // asks whether a thing is on screen; this asks whether it is in the water,
+                    // and the camera is allowed to see past the edge where the water is not
+                    // allowed to be.
+                    let (fx, fy) = (
                         col as f32 * stride + mid + fl.dx,
                         row as f32 * stride + mid + fl.dy,
                     );
+                    if fx < 0.0
+                        || fy < 0.0
+                        || fx > frame.width as f32
+                        || fy > frame.height as f32
+                    {
+                        continue;
+                    }
+                    let at = to_screen(fx, fy);
                     if at.x < cull.min_x
                         || at.x > cull.max_x
                         || at.y < cull.min_y
@@ -3383,7 +3420,18 @@ fn redraw(
                     {
                         continue;
                     }
-                    speck_slots.push((at, fl.alpha * optics.vignette(field_radius(at)), true));
+                    // Its own size and its own angle, from its index. Dead cells are not a
+                    // stamped set: they were different sizes when they were alive, and nothing
+                    // orients a fragment of membrane.
+                    let h = art::hash01(index.wrapping_mul(0x9E37_79B9));
+                    let spin = art::hash01(index.wrapping_mul(0x85EB_CA6B)) * std::f32::consts::TAU;
+                    speck_slots.push((
+                        at,
+                        fl.alpha * optics.vignette(field_radius(at)),
+                        true,
+                        0.55 + 0.9 * h,
+                        spin,
+                    ));
                 }
             }
         }
@@ -3404,7 +3452,8 @@ fn redraw(
     let speck_px = (scale * 0.5).clamp(1.5, 5.0);
     let fleck_px = (scale * 1.8).clamp(5.0, 22.0);
     for (marker, mut sprite, mut transform) in &mut specks {
-        let Some((at, alpha, flake)) = speck_slots.get(marker.0).copied() else {
+        let Some((at, alpha, flake, scale_of, spin)) = speck_slots.get(marker.0).copied()
+        else {
             // Surplus from a busier frame, hidden rather than despawned, like the arrows.
             sprite.color = Color::NONE;
             continue;
@@ -3423,7 +3472,10 @@ fn redraw(
             Handle::default()
         };
         sprite.color = Color::srgba(rgb[0], rgb[1], rgb[2], alpha * fade);
-        sprite.custom_size = Some(Vec2::splat(px));
+        sprite.custom_size = Some(Vec2::splat(px * scale_of));
+        // Turned, so a field of flakes is not one flake stamped repeatedly. Zero for a speck,
+        // which is square and symmetric and would not show it anyway.
+        transform.rotation = Quat::from_rotation_z(spin);
         // Above the field and below the walls at 0.25: both are in the water, and the water is
         // under everything solid. The flakes sit a hair under the specks — a lump of corpse is
         // the heavier of the two, so particulate drifting over it is the right way round.
