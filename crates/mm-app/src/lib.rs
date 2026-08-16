@@ -19,6 +19,7 @@
 //! - [`optics`] — the microscope's look, as parameters rather than as a shader.
 //! - [`art`] — the baked cell atlas, and the chemical field's pixels.
 //! - [`cellmesh`] — the whole population as one mesh, for the per-pixel cell shader.
+//! - [`limbmesh`] — what cells have grown outside their membranes, as a second mesh under them.
 //! - [`phantom`] — cells no simulation made, for testing the renderer rather than the slide.
 //! - [`inspector`] — a read-only transcript of one cell.
 //! - [`editor`] — a `.mm` source buffer, its diagnostics and its exports.
@@ -47,6 +48,12 @@ pub mod cellpipe;
 /// material and the shader it names, and no logic of its own.
 #[cfg(feature = "render")]
 pub mod rockpipe;
+pub mod limbmesh;
+/// The Bevy side of drawing a limb, on the same terms as [`cellpipe`] and separate from it on
+/// purpose: the body's layout, materials and shader are finished work, and a change in how a cell
+/// looks has to stay attributable to something that touched them.
+#[cfg(feature = "render")]
+pub mod limbpipe;
 pub mod debugger;
 pub mod editor;
 pub mod engine;

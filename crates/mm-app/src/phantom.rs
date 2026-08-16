@@ -837,6 +837,34 @@ pub fn flicker(prev: &[Drawn], now: &[Drawn]) -> Flicker {
     f
 }
 
+/// The limb fields, in Rust, so that they can be measured without a GPU.
+///
+/// The same deliberate copy [`Drawn::outline`] is, for the same reason and with the same
+/// obligation: `limb.wgsl` and this must agree, and `tests/limb_probe.rs` is where that is
+/// checked. A copy is worth its keep here because the alternative is that the only way to ask
+/// whether a spike is the length it was told to be is to photograph one.
+///
+/// Everything takes `q` in the limb's own frame and **half-widths**: `q.y` runs `-1..1` across the
+/// limb whatever it is drawn at, and `q.x` runs `-aspect..aspect` root to tip. That is exactly the
+/// frame `limb.wgsl`'s fragment stage builds from `uv` and `limb_a.w`.
+pub mod limb {
+    /// The barb. Positive outside it, zero on the outline.
+    ///
+    /// Quadratic rather than linear, and that is the difference between a spike and an arrow: a
+    /// linear cone reads as a triangle somebody drew on the cell, and the profile of anything
+    /// that has to be both anchored and sharp is concave.
+    ///
+    /// The tip is capped and the root is not — the root end of the quad is inside the body, which
+    /// is drawn over the limb mesh, so there is nothing there to cap.
+    #[must_use]
+    pub fn spike(qx: f32, qy: f32, aspect: f32, taper: f32) -> f32 {
+        let t = ((qx + aspect) / (2.0 * aspect)).clamp(0.0, 1.0);
+        let s = 1.0 - t;
+        let w = taper + (1.0 - taper) * s * s;
+        (qy.abs() - w).max(qx - aspect)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

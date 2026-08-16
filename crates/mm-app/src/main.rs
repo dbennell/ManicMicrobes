@@ -100,6 +100,8 @@ use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 use mm_app::art;
 use mm_app::cellmesh;
 use mm_app::cellpipe;
+use mm_app::limbmesh;
+use mm_app::limbpipe;
 use mm_app::rockpipe;
 use mm_app::debugger::{Breakpoint, Breakpoints, Sandbox};
 use mm_app::editor::Editor;
@@ -718,6 +720,7 @@ fn main() {
     // `AssetPlugin` is what puts that resource in the world. Before it, this is a panic on the
     // first line of `main` with a message about a missing resource rather than about a shader.
     cellpipe::plugin(&mut app);
+    limbpipe::plugin(&mut app);
     rockpipe::plugin(&mut app);
     app.add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(EguiPlugin::default())
@@ -1569,6 +1572,12 @@ struct View {
     /// themselves: at any density a crowd is mostly organelles by area, and the shape of the
     /// crowd — who is squashed against whom, and how hard — is entirely underneath them.
     organelles: bool,
+    /// Draw what cells have grown outside their membranes.
+    ///
+    /// Its own switch rather than a second effect of `organelles`, because they answer different
+    /// questions: the dots say what a cell is *made of* and the limbs say what it is *doing*, and
+    /// a slide being read for one is often a slide the other is clutter on.
+    limbs: bool,
     /// Show the genome with its templates resolved rather than as `%` bits (M10.3b).
     ///
     /// On by default. The `%` form is not a mistake — it is the source, and it is the only
@@ -1788,6 +1797,7 @@ impl Default for View {
             focus: Focus::default(),
             follow: false,
             organelles: true,
+            limbs: true,
             genome_reading: true,
             genome_follow_ip: true,
             genome_scrolled_to: None,
@@ -2159,6 +2169,59 @@ struct CellMesh;
 #[derive(Component)]
 struct DotMesh;
 
+/// The three meshes [`redraw`] writes vertices into, as one system parameter.
+///
+/// Grouped because Bevy's limit is sixteen system parameters and `redraw` was at it, and these are
+/// the right sixteenth to give up: they are one job — swap a buffer in, set a visibility — done
+/// three times. The `Without` lists are what they were as separate arguments and are still
+/// required: two queries that can reach the same component mutably are rejected when the schedule
+/// is built, not when they collide.
+#[derive(bevy::ecs::system::SystemParam)]
+struct Layers<'w, 's> {
+    cells: Query<
+        'w,
+        's,
+        (&'static Mesh2d, &'static mut Visibility),
+        (
+            With<CellMesh>,
+            Without<DotMesh>,
+            Without<LimbMesh>,
+            Without<BarrierQuad>,
+        ),
+    >,
+    dots: Query<
+        'w,
+        's,
+        (&'static Mesh2d, &'static mut Visibility),
+        (
+            With<DotMesh>,
+            Without<CellMesh>,
+            Without<LimbMesh>,
+            Without<BarrierQuad>,
+        ),
+    >,
+    limbs: Query<
+        'w,
+        's,
+        (&'static Mesh2d, &'static mut Visibility),
+        (
+            With<LimbMesh>,
+            Without<CellMesh>,
+            Without<DotMesh>,
+            Without<BarrierQuad>,
+        ),
+    >,
+}
+
+/// The entity every limb on the slide is drawn as.
+///
+/// One mesh for all of them, as the cells are, and drawn *under* the cells at
+/// [`limbmesh::LIMB_Z`]. Not a third member of the [`CellMesh`]/[`DotMesh`] pair: those two are
+/// the same population at two tiers and exactly one is ever visible, where this is a different
+/// population entirely and is visible alongside whichever of them is.
+#[derive(Component)]
+struct LimbMesh;
+
 /// The baked cell atlas, uploaded once (M10.5).
 ///
 /// Held rather than looked up because every cell sprite needs both handles every frame, and an
@@ -2188,6 +2251,10 @@ struct CellArt {
     field_size: (u32, u32),
     /// The population's vertex buffers, reused every frame so a steady world allocates nothing.
     cells: cellmesh::Buffers,
+    /// The limb mesh's vertices, ping-ponging with the mesh's own the way `cells` does. Its own
+    /// set rather than a second `Detail` on that one: a limb has a different vertex layout, goes
+    /// to a different mesh and is drawn by a different material.
+    limbs: limbmesh::Buffers,
 }
 
 /// The single quad the chemical field is drawn on.
@@ -2205,6 +2272,7 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut cell_materials: ResMut<Assets<cellpipe::CellMaterial>>,
     mut dot_materials: ResMut<Assets<cellpipe::DotMaterial>>,
+    mut limb_materials: ResMut<Assets<limbpipe::LimbMaterial>>,
     mut rock_materials: ResMut<Assets<rockpipe::RockMaterial>>,
 ) {
     // Order -1 so the slide is composited *before* anything egui draws. bevy_egui attaches its
@@ -2288,6 +2356,18 @@ fn setup(
         Transform::from_xyz(0.0, 0.0, 1.0),
     ));
 
+    // What cells have grown outside their membranes, as a third mesh under them: cilia, a
+    // flagellum, a drawn spike, a holdfast, an exoenzyme's cloud. Under, so a limb's root
+    // disappears behind the body it grows from and there is no join to draw — see `limbmesh`.
+    let limbs = limbpipe::empty_mesh();
+    commands.spawn((
+        LimbMesh,
+        NoFrustumCulling,
+        Mesh2d(meshes.add(limbs)),
+        MeshMaterial2d(limb_materials.add(limbpipe::LimbMaterial {})),
+        Transform::from_xyz(0.0, 0.0, limbmesh::LIMB_Z),
+    ));
+
     // The same shape as the field, and deliberately not the same sampler.
     let mut barriers = Image::new(
         Extent3d {
@@ -2361,6 +2441,7 @@ fn setup(
         barriers,
         field_size: (1, 1),
         cells: cellmesh::Buffers::default(),
+        limbs: limbmesh::Buffers::default(),
     });
 }
 
@@ -2523,6 +2604,11 @@ fn keyboard(keys: &ButtonInput<KeyCode>, view: &mut View, sim: &mut SlideRes) {
     }
     if keys.just_pressed(KeyCode::KeyN) {
         view.organelles = !view.organelles;
+    }
+    // `m` for morphology. Beside `n` because they are the pair: what a cell is made of, and what
+    // it is doing with it.
+    if keys.just_pressed(KeyCode::KeyM) {
+        view.limbs = !view.limbs;
     }
     // `f` was the food web's own panel before M10.4 merged it into the ecology pane. Kept, and
     // now meaning "the ecology pane, on that view", which is what it always meant.
@@ -3002,6 +3088,7 @@ fn redraw(
             With<BarrierQuad>,
             Without<CellMesh>,
             Without<DotMesh>,
+            Without<LimbMesh>,
             Without<FieldQuad>,
             Without<MoteSprite>,
             Without<JunctionSprite>,
@@ -3014,14 +3101,7 @@ fn redraw(
     // `Without<BarrierQuad>` for the reason every other query here carries a list of them: the
     // wall layer became a mesh with a `Visibility` of its own, and two queries that can reach the
     // same component mutably are rejected when the schedule is built, not when they collide.
-    mut cell_mesh: Query<
-        (&Mesh2d, &mut Visibility),
-        (With<CellMesh>, Without<DotMesh>, Without<BarrierQuad>),
-    >,
-    mut dot_mesh: Query<
-        (&Mesh2d, &mut Visibility),
-        (With<DotMesh>, Without<CellMesh>, Without<BarrierQuad>),
-    >,
+    mut layers: Layers,
     mut motes: Query<
         (&MoteSprite, &mut Sprite, &mut Transform),
         (
@@ -3890,6 +3970,88 @@ fn redraw(
         }
     }
 
+    // Limbs: what cells have grown outside their membranes, into their own mesh under the cells.
+    //
+    // A second pass over the same population rather than a branch inside the one above, because
+    // they go to a different mesh with a different vertex layout — and because the cost of the
+    // pass is proportional to the limbs and not to the cells. On the mixed benchmark slide 3.8% of
+    // cells carry a cilium and 7.7% a holdfast, so on most slides this walks a list of empty
+    // vectors and pushes nothing.
+    //
+    // **A limb may be drawn over a neighbouring cell**, which nothing else on the slide may do. A
+    // spike wounds the cell it is touching, so a spike over its victim is the honest picture; the
+    // seam work `docs/OVERLAPS.md` records was about bodies, which tile and must never be drawn
+    // twice, and a limb is not a body. It is under the cells, so it reads as passing behind.
+    let want_limbs = frame.lod.resolves_organelles() && view.limbs;
+    art_handles.limbs.begin(if want_limbs { frame.cells.len() } else { 0 });
+    if want_limbs {
+        for dot in &frame.cells {
+            if dot.limbs.is_empty() {
+                continue;
+            }
+            let centre = to_screen(dot.x, dot.y);
+            let dim = optics.vignette(field_radius(centre));
+            // Hazed with the cell it grew from. Whatever depth of field is doing to a cell it must
+            // do to what the cell is holding out, or the limb reads as floating in front of it.
+            let haze = haze_of(optics, dot.depth, sim.selected == Some(dot.id));
+            let [r, g, b] = haze_into(dot.rgb, haze_rgb, haze);
+            for limb in &dot.limbs {
+                let Some(form) = limbmesh::form_of(limb.kind) else {
+                    continue;
+                };
+                let root = to_screen(dot.x + limb.dx, dot.y + limb.dy);
+                if root.x < cull.min_x
+                    || root.x > cull.max_x
+                    || root.y < cull.min_y
+                    || root.y > cull.max_y
+                {
+                    continue;
+                }
+                // Screen y is up and slide y is down, so the along-axis flips with it. A limb
+                // drawn in the slide's handedness would point at the mirror image of its own
+                // mount angle, which for a flagellum is the picture contradicting the physics.
+                let (ux, uy) = (limb.ux, -limb.uy);
+                let half_len = (limb.length + limb.inset) * scale * 0.5;
+                let half_wid = (limb.width * scale).max(0.35);
+                // A limb shorter than a pixel is not detail, it is a speck of the cell's colour
+                // sitting outside its outline.
+                if half_len < 0.5 {
+                    continue;
+                }
+                // The quad's centre, which is not the root: the root sits at the `-x` edge and the
+                // inset end of it is behind the membrane, where the body covers the join.
+                let along = half_len - limb.inset * scale;
+                art_handles.limbs.push(limbmesh::Placed {
+                    cx: root.x + ux * along,
+                    cy: root.y + uy * along,
+                    ux,
+                    uy,
+                    half_len,
+                    half_wid,
+                    rgba: [r * dim, g * dim, b * dim, 1.0],
+                    form,
+                    extent: limb.extent,
+                    phase: limb.phase,
+                    count: limb.count,
+                    inner: limb.inner,
+                    taper: limb.taper,
+                    seed: limb.seed,
+                });
+            }
+        }
+    }
+    let any_limbs = art_handles.limbs.limbs() > 0;
+    if let Ok((mesh_handle, mut visibility)) = layers.limbs.single_mut() {
+        *visibility = if any_limbs {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+        if let Some(mut mesh) = meshes.get_mut(&mesh_handle.0) {
+            limbpipe::upload(&mut mesh, &mut art_handles.limbs);
+        }
+    }
+
     // Into whichever of the two meshes this tier draws through, and the other one goes dark.
     //
     // Exactly one entity each, and that now has to be true rather than merely happening to be:
@@ -3903,7 +4065,7 @@ fn redraw(
     // with nothing alive on it simply does not draw the layer, and nor does the tier that is not
     // in force.
     let drawn = art_handles.cells.cells() > 0;
-    if let Ok((mesh_handle, mut visibility)) = cell_mesh.single_mut() {
+    if let Ok((mesh_handle, mut visibility)) = layers.cells.single_mut() {
         *visibility = if seamed && drawn {
             Visibility::Visible
         } else {
@@ -3915,7 +4077,7 @@ fn redraw(
             }
         }
     }
-    if let Ok((mesh_handle, mut visibility)) = dot_mesh.single_mut() {
+    if let Ok((mesh_handle, mut visibility)) = layers.dots.single_mut() {
         *visibility = if !seamed && drawn {
             Visibility::Visible
         } else {
@@ -5205,6 +5367,16 @@ fn menu_bar(root: &mut egui::Ui, sim: &mut SlideRes, view: &mut View, quit: &mut
                     .clicked()
                 {
                     view.organelles = !view.organelles;
+                }
+                if skin::menu_toggle(ui, "Limbs", "M", view.limbs)
+                    .on_hover_text(
+                        "what cells have grown outside their membranes: cilia, flagella, a \
+                         drawn spike, a holdfast, an exoenzyme's cloud. A sheathed spike is \
+                         nothing to see, which is the point of it",
+                    )
+                    .clicked()
+                {
+                    view.limbs = !view.limbs;
                 }
                 if skin::menu_toggle(ui, "Optics", "O", sim.engine.optics_enabled())
                     .on_hover_text("vignette, defocus and dust on the objective")
