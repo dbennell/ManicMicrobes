@@ -1037,7 +1037,7 @@ fn seed_one(world: &mut World, genome: &[u8], n: u32) {
 }
 
 /// Every scenario the library ships, so a new one cannot be added without being checked.
-const LIBRARY: [&str; 17] = [
+const LIBRARY: [&str; 18] = [
     "soup.ron",
     "photosynthesis_or_die.ron",
     "predator_introduction.ron",
@@ -1061,6 +1061,10 @@ const LIBRARY: [&str; 17] = [
     // the point of it — a world where a sense finally pays is exactly the kind acceptance 4
     // should be watching for a collapse.
     "the_scattering.ron",
+    // A long day over a lazy turn, and four rocks to hold on to. The combination no other slide
+    // had: `the_short_night` has a day and still water, the vents have a turning current under a
+    // flat sky, and a filter feeder needs both before its bet means anything.
+    "the_slow_gyre.ron",
 ];
 
 /// Scenarios that are deliberately not part of the curated library.
