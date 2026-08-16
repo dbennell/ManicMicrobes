@@ -67,7 +67,7 @@
 //! property a world arrives at rather than a number somebody set.
 
 /// ISA version stamped into save files, scenarios and archived genomes (SPEC §16).
-pub const ISA_VERSION: u16 = 11;
+pub const ISA_VERSION: u16 = 13;
 
 /// Number of opcodes. The opcode of a byte is `byte % OPCODE_COUNT` (SPEC §4.2), so four
 /// distinct byte values map to each opcode and most point mutations are synonymous.

@@ -803,6 +803,34 @@ pub struct MineralRates {
     /// The wall is *derived* rather than declared. Nothing sets a flag — dissolution takes a
     /// square below this line and it opens, deposition takes it above and it closes.
     pub wall_threshold: i32,
+
+    // --- calcite (`docs/CHEMISTRY.md` §11) ---
+    //
+    // Calcium and carbonate are **not** governed by the per-plane law above: their `saturation`
+    // entries are zero so that loop skips them entirely, and they come out of solution together
+    // instead, on a product and a pH. Two laws over one pair is how they come to disagree.
+    /// The concentration at which calcite is at equilibrium, `Q10` — as a *geometric mean* of the
+    /// two pools rather than as a raw product.
+    ///
+    /// Stated this way because a product is in `Q10²` and has no size a person can judge. As a
+    /// mean it reads directly: "above twenty-four units of each, a square precipitates", and a
+    /// square rich in one and poor in the other meets the line at the same place their product
+    /// does. `isqrt` of the product recovers it in one integer operation and no floats.
+    pub calcite_saturation: i32,
+    /// The pH at or above which calcite forms, and below which it dissolves, `Q10` on the
+    /// nought-to-fourteen scale of [`crate::chem::ph_of`].
+    ///
+    /// **This is the coupling the whole section is for.** Above the line a photosynthesising mat
+    /// lays down reef; below it a respiring crowd takes it back up, and the reef's carbonate
+    /// returning to the water raises the buffer and resists further acidification. Negative
+    /// feedback that nobody wrote as a feedback.
+    ///
+    /// Slightly alkaline rather than neutral, so that a slide seeded at parity sits just *below*
+    /// the line and has to be pushed over it by something photosynthesising. A world that
+    /// precipitates from its first tick has an answer before it has a question.
+    pub calcite_ph: i32,
+    /// Fraction of the distance to equilibrium that moves per weathering step, `Q10`.
+    pub calcite_rate: i32,
 }
 
 impl Default for MineralRates {
@@ -825,6 +853,22 @@ impl Default for MineralRates {
             // Two hundred units on a square. Below it the same stock is a *crust* lying in open
             // water, which is the state a square passes through on its way to being either.
             wall_threshold: crate::fixed::Q10_ONE * 200,
+            // Above the twenty of calcium a fresh slide seeds and below the forty of carbonate,
+            // so their geometric mean of about twenty-eight sits just over the line and a slide
+            // is *close* to equilibrium rather than far either side of it. Close is where a
+            // buffer is interesting: a small pH move decides the direction.
+            calcite_saturation: crate::fixed::Q10_ONE * 26,
+            // Half a pH unit alkaline of neutral. A slide seeded with matched pools reads exactly
+            // seven, which is below this, so nothing precipitates until something photosynthesises
+            // — the first reef on a slide is laid by the cells rather than by the seeding.
+            calcite_ph: crate::chem::PH_NEUTRAL + crate::fixed::Q10_ONE / 2,
+            // A hundred and twenty-eighth, which is eight times slower than `dissolve` and is
+            // measured rather than matched to it. At a sixteenth a lit slide laid down reef over
+            // a tenth of itself in two thousand ticks — the mechanism working, at a speed that
+            // reads as the world turning to stone rather than as geology. §10's note is that
+            // thousands of ticks is the right timescale for rock to appear where there was none,
+            // and this is that timescale for the pair.
+            calcite_rate: crate::fixed::Q10_ONE / 128,
         }
     }
 }
@@ -914,6 +958,9 @@ impl crate::state_hash::StateHash for BiologyConfig {
         h.i32(m.nucleation);
         h.u32(m.nucleation_slice);
         h.i32(m.wall_threshold);
+        h.i32(m.calcite_saturation);
+        h.i32(m.calcite_ph);
+        h.i32(m.calcite_rate);
         let m = &self.mutation;
         h.u32(m.point);
         h.u32(m.insertion);

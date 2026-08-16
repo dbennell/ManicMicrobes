@@ -94,7 +94,9 @@ fn an_operand_reaches_the_upper_half() {
     assert_eq!(OrganelleType::from_operand(22), OrganelleType::Flagellum);
     // And it still wraps, so no byte is illegal (hard rule 3).
     assert_eq!(OrganelleType::from_operand(32), OrganelleType::Membrane);
-    assert_eq!(OrganelleType::from_operand(-1), OrganelleType::Reserved31);
+    // -1 wraps to 31, which is the calcite test since ISA 13 — it was `Reserved31` and the
+    // assertion is about the *wrap*, not about what happens to live at the top of the catalogue.
+    assert_eq!(OrganelleType::from_operand(-1), OrganelleType::CalciteShell);
 }
 
 /// A flagellum drives the body harder than a cilium and the water less.

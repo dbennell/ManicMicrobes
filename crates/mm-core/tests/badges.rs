@@ -141,9 +141,12 @@ fn a_cell_can_read_its_own_badge_back() {
         EXPRESS #look
         HALT
         GENE    #look
-        IMM     22              ; membrane reading 22: my own badge — 21 until the chemical
-                                ; table gained dinitrogen at ISA 11, since the membrane scalars
-                                ; sit after the chemicals and widening the table moves them
+        IMM     24              ; membrane reading 24: my own badge. **It has moved twice** —
+                                ; 21 originally, 22 when dinitrogen landed at ISA 11, 24 when
+                                ; calcium and carbonate landed at ISA 12. The membrane's scalars
+                                ; sit after the chemical readings, so widening the table shifts
+                                ; every one of them, and this assertion failing is the version
+                                ; stamp doing its job rather than a regression
         ZERO                    ; slot 0, the membrane
         OGET
         ZERO

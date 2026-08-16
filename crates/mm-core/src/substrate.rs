@@ -611,6 +611,22 @@ impl Substrate {
         std::array::from_fn(|c| self.chem[c].iter().map(|v| *v as i64).sum())
     }
 
+    /// The pH of a square, `Q10` on a nought-to-fourteen scale.
+    ///
+    /// Derived from the carbonate and the dissolved CO₂ standing there and stored nowhere — see
+    /// [`crate::chem::ph_of`] for why the buffer is matter and the pH is a reading. A blocked
+    /// square holds nothing and therefore reads neutral, which is the same answer bare water
+    /// gives and is the honest one: rock has no pH.
+    #[inline]
+    #[must_use]
+    pub fn ph_at(&self, x: i32, y: i32) -> i32 {
+        let i = self.index(x, y);
+        crate::chem::ph_of(
+            self.chem[crate::chem::CARBONATE][i],
+            self.chem[crate::chem::CARBON_DIOXIDE][i],
+        )
+    }
+
     /// One solid plane, by slot. See [`crate::chem::SOLID_CHEMICALS`].
     #[must_use]
     pub fn solid_plane(&self, k: usize) -> &[i32] {

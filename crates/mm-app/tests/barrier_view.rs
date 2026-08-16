@@ -297,3 +297,80 @@ fn a_stroke_of_rock_reaches_the_texels_as_rock() {
     // whole slide.
     assert_eq!(texel(16, 22)[3], 0, "open water was painted as rock");
 }
+
+/// The acidity overlay: derived, absolute, and reachable the same way every chemical's is.
+///
+/// pH has no plane to switch on, so it rides at the end of the overlay space — which means the
+/// legend, the number keys and the bitmask all reach it with no special case, and adding it
+/// renumbered nothing.
+#[test]
+fn the_acidity_overlay_reads_the_water_and_not_a_plane() {
+    use mm_app::slide::ACIDITY;
+    let scenario = Scenario {
+        width: 16,
+        height: 16,
+        seeding: vec![
+            mm_core::Seeding::Uniform {
+                chemical: mm_core::chem::CARBON_DIOXIDE,
+                per_square: mm_core::fixed::q10(400),
+            },
+            mm_core::Seeding::Uniform {
+                chemical: mm_core::chem::CARBONATE,
+                per_square: mm_core::fixed::q10(400),
+            },
+        ],
+        ..Scenario::default()
+    };
+    let mut slide = Slide::new(scenario).expect("slide");
+    // The fresh slide opens with carbon dioxide on; what matters here is that acidity is not
+    // among them until it is asked for.
+    assert!(
+        !slide
+            .frame()
+            .overlays
+            .iter()
+            .any(|l| l.chemical == ACIDITY),
+        "acidity was on before anything switched it on"
+    );
+    // Named and coloured alongside the chemicals, so nothing that walks that list needs to know.
+    assert_eq!(slide.chemical_names().len(), mm_core::chem::CHEM_COUNT + 1);
+    assert_eq!(slide.chemical_names()[ACIDITY], "acidity");
+    assert_eq!(slide.chemical_colours().len(), mm_core::chem::CHEM_COUNT + 1);
+
+    slide.toggle_overlay(ACIDITY);
+    let frame = slide.frame();
+    let layer = frame
+        .overlays
+        .iter()
+        .find(|l| l.chemical == ACIDITY)
+        .expect("the acidity layer");
+    assert_eq!(layer.field.len(), 16 * 16);
+    // Matched pools read neutral, and neutral is the bottom of an acidity ramp.
+    assert!(
+        layer.field.iter().all(|v| *v == 0.0),
+        "neutral water was drawn as acid"
+    );
+
+    // Sour it, and the layer says so.
+    for y in 0..16i32 {
+        for x in 0..16i32 {
+            slide
+                .world_mut()
+                .substrate_mut()
+                .set_chem(mm_core::chem::CARBONATE, x, y, 0);
+        }
+    }
+    let frame = slide.frame();
+    let layer = frame
+        .overlays
+        .iter()
+        .find(|l| l.chemical == ACIDITY)
+        .expect("the acidity layer");
+    assert!(
+        layer.field.iter().all(|v| *v > 0.9),
+        "water with no buffer at all was not drawn as sour"
+    );
+    // Absolute, not eased against the frame: pH is a nought-to-fourteen scale, and a ramp
+    // normalised per frame would make "sour" mean whatever the sourest square happened to be.
+    assert_eq!(layer.scale, mm_core::chem::PH_NEUTRAL);
+}

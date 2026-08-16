@@ -11,10 +11,15 @@ use serde::{Deserialize, Serialize};
 use crate::fixed::Q10_ONE;
 use crate::state_hash::{StateHash, StateHasher};
 
-/// Number of chemical species. Fixed at 16: the index is a 4-bit operand so that a mutation
-/// to one is a small local perturbation rather than a 1-in-100 lottery, the same reasoning
-/// as the 16 organelle slots of SPEC §6.2.
-pub const CHEM_COUNT: usize = 17;
+/// Number of chemical species.
+///
+/// Sixteen originally, and for a reason worth keeping in view: the index started as a 4-bit
+/// operand so that a mutation to one was a small local perturbation rather than a 1-in-100
+/// lottery, the same reasoning as the 16 organelle slots of SPEC §6.2. It is nineteen now —
+/// dinitrogen at ISA 11 (§8), calcium and carbonate at ISA 12 (§11) — and each addition has been
+/// argued for individually, because the operand space is no longer a power of two and every one
+/// of them moves what a genome's high indices resolve to.
+pub const CHEM_COUNT: usize = 19;
 
 /// Dinitrogen: the inert reservoir a diazosome cracks, and the reason the table is seventeen.
 ///
@@ -35,6 +40,43 @@ pub const CHEM_COUNT: usize = 17;
 /// Scarcity becomes a historical property of that world rather than a parameter.
 pub const DINITROGEN: usize = 16;
 
+/// Calcium: the fourth mineral, and the one a reef is mostly made of.
+///
+/// Mobile enough to arrive and slow enough that a bed of it is a place — between nitrogen, which
+/// comes to you, and phosphate, which does not move at all. See `docs/CHEMISTRY.md` §11.
+pub const CALCIUM: usize = 17;
+
+/// Dissolved carbon dioxide: the waste every respiring cell makes and every photosynthesising one
+/// eats, and — since §11 — the acid half of the pH reading.
+///
+/// Named here rather than left as a literal because it now has two jobs. It was only ever the
+/// metabolic waste term, reached through `MetabolicChemistry::pathways`; `ph_of` reads it as the
+/// thing carbonate is buffering against, and a bare `11` at that call site would be the kind of
+/// coupling nobody finds later.
+pub const CARBON_DIOXIDE: usize = 11;
+
+/// Carbonate: the buffer, and the other half of calcite.
+///
+/// # Why this is worth a plane
+///
+/// It does three jobs, which is the only reason to spend a plane on something that is neither a
+/// monomer nor a fuel:
+///
+/// 1. **It is the buffer.** pH is derived from the ratio of this to dissolved CO₂ ([`ph_at`]), so
+///    a square thick with carbonate barely moves when respiration dumps waste into it and a
+///    square scoured of it swings hard. That is carbonate hardness, and it falls out of a ratio
+///    rather than needing a mechanism.
+/// 2. **It is half of calcite.** Calcium and carbonate precipitate together above a solubility
+///    product and dissolve together below it, gated on pH — which is what makes a calcite reef
+///    weather differently from a silica one rather than being a re-skin of it.
+/// 3. **It is the reservoir.** A reef dissolving in acid returns carbonate to the water, which
+///    raises the buffer, which resists further acidification. Negative feedback nobody wrote as
+///    a feedback.
+///
+/// `structural: false` and no `energy_yield`: it is not something to be built out of or burnt. It
+/// is the water's capacity to absorb an insult.
+pub const CARBONATE: usize = 18;
+
 /// The chemicals that can exist as a solid, in the order their planes are stored.
 ///
 /// # Why a list rather than a flag on `ChemicalDef`
@@ -48,11 +90,20 @@ pub const DINITROGEN: usize = 16;
 /// short: phosphorus and silicon, the two the catalogue's recipes are costed in and the two
 /// `docs/CHEMISTRY.md` §9 identifies as coming out of rock rather than out of the air.
 ///
-/// Carbon is the interesting candidate to add and is deliberately absent from the first cut — a
-/// carbonate reef locking carbon out of circulation is real world-structure, but §7 shows the
-/// carbon cycle is the one that oscillates, and giving it a new sink is not a change to make
-/// blind.
-pub const SOLID_CHEMICALS: [usize; 2] = [6, 7];
+/// **Sugar does not form reefs.** Only a mineral precipitates, which is what keeps this list
+/// short: phosphorus and silicon, the two the catalogue's recipes are costed in and the two
+/// `docs/CHEMISTRY.md` §9 identifies as coming out of rock rather than out of the air — and now
+/// calcium and carbonate, which are one mineral in two planes.
+///
+/// **Calcite is not a fifth species.** It is a square holding *both* the calcium and the carbonate
+/// planes as solid, which works because `Substrate::solid_total_at` already sums across planes:
+/// §10 records that judging a wall one plane at a time opened walls that were plainly solid, and
+/// "a reef made of two minerals is a reef". Precipitation takes the two out of the water in equal
+/// measure, so the pair moves together and no new species has to be invented to name the compound.
+///
+/// The order here is the order the planes are stored in, and it must never be permuted: a
+/// snapshot writes them positionally.
+pub const SOLID_CHEMICALS: [usize; 4] = [6, 7, CALCIUM, CARBONATE];
 
 /// How many planes of solid a substrate carries. See [`SOLID_CHEMICALS`].
 pub const SOLID_COUNT: usize = SOLID_CHEMICALS.len();
@@ -184,6 +235,52 @@ pub const MAX_DIFFUSION: i32 = Q10_ONE / 4;
 #[serde(from = "Vec<ChemicalDef>", into = "Vec<ChemicalDef>")]
 pub struct ChemTable {
     defs: [ChemicalDef; CHEM_COUNT],
+}
+
+/// Neutral water, `Q10`. Seven on a scale that runs nought to fourteen.
+pub const PH_NEUTRAL: i32 = 7 * Q10_ONE;
+
+/// The most acid or most alkaline water can read, `Q10`.
+pub const PH_MAX: i32 = 14 * Q10_ONE;
+
+/// The pH of water holding `carbonate` and `co2`, `Q10` on a nought-to-fourteen scale.
+///
+/// # Store the buffer, derive the pH (`docs/CHEMISTRY.md` §11)
+///
+/// pH is not matter. It does not conserve, so a plane holding it would be a field the M1 gate
+/// cannot check and a hole in the one invariant this project will not trade — §8 refused a
+/// nitrogen-importing port on the same ground and paid a whole chemical instead.
+///
+/// An aquarium keeps the two apart already: you *measure* carbonate hardness, which is matter in
+/// the water, and *read* pH, which is a number derived from it. So the buffer is a chemical like
+/// any other and this is a pure function of two planes at a square — computed where it is needed,
+/// stored nowhere, nothing to serialise, and no way for a saved world to come back with a pH that
+/// disagrees with the chemistry that produced it.
+///
+/// # Linear in a bounded ratio, where the real thing is logarithmic
+///
+/// Deliberate. Every mechanism downstream needs monotone, bounded and cheap; none of them needs
+/// the decade. A `log2` over fixed point is several times the arithmetic to move a threshold that
+/// has to be swept empirically anyway, and this is one function — if a sweep shows it compresses
+/// the interesting range, it changes here and nothing that reads it has to know.
+///
+/// # Total
+///
+/// Both pools empty reads neutral by definition rather than by dividing by zero: water with no
+/// carbon chemistry in it has no acidity to report, and neutral is the honest answer. The
+/// intermediate is `i64` because the numerator is a quantity times `Q10` and quantities run to
+/// `MAX_QUANTITY`.
+#[inline]
+#[must_use]
+pub fn ph_of(carbonate: i32, co2: i32) -> i32 {
+    let (b, a) = (i64::from(carbonate.max(0)), i64::from(co2.max(0)));
+    let sum = b + a;
+    if sum == 0 {
+        return PH_NEUTRAL;
+    }
+    let r = ((b - a) * i64::from(Q10_ONE)) / sum;
+    let ph = i64::from(PH_NEUTRAL) + 7 * r;
+    ph.clamp(0, i64::from(PH_MAX)) as i32
 }
 
 impl ChemTable {
@@ -518,10 +615,65 @@ impl ChemTable {
                 advection: 0,
                 saturation: 0,
             },
+            // --- the carbonate system (`docs/CHEMISTRY.md` §11) ---
+            //
+            // Calcium sits between the other two minerals on mobility, which is the axis that
+            // makes each of them a different niche rather than one scarcity three times over.
+            // Nitrogen comes to you, phosphate does not move at all, silica settles — and calcium
+            // drifts slowly enough that a bed of it is a *place* and fast enough that the place
+            // has a catchment.
+            //
+            // **Saturation zero, and that is not "it never precipitates".** It means the *generic*
+            // per-plane weathering law skips this plane — `World::weather` returns early on a
+            // ceiling of zero — because calcium and carbonate are not governed one at a time. They
+            // come out of solution together, on a solubility *product* and a pH threshold, and
+            // that is a mechanism of its own (`MineralRates::calcite_*`, §11). A `saturation` here
+            // as well would be two laws governing one pair, which is how they come to disagree.
+            //
+            // It also frees the seeding: with no per-plane ceiling the pools can be stocked at the
+            // magnitude the pH scale needs, which is comparable to the dissolved CO₂ they are
+            // read against rather than a tenth of it.
+            ChemicalDef {
+                name: "calcium".to_string(),
+                saturation: 0,
+                diffusion: Q10_ONE / 24,
+                toxicity: 0,
+                energy_yield: 0,
+                structural: true,
+                colour: [214, 206, 186],
+                decay_to: None,
+                decay_rate: 0,
+                advection: Q10_ONE / 2,
+            },
+            // The buffer has to be well mixed or it is not a buffer: a pool that cannot reach the
+            // square being acidified buffers nothing there. So it is the most mobile of the four
+            // minerals on both axes — diffusing at twice calcium and carried fully by the flow.
+            //
+            // `structural: false`: it is not a monomer and nothing is built out of it except
+            // calcite, which is charged as a recipe trace rather than as body mass.
+            // Saturation zero for the same reason calcium's is. See above.
+            ChemicalDef {
+                name: "carbonate".to_string(),
+                saturation: 0,
+                diffusion: Q10_ONE / 12,
+                toxicity: 0,
+                energy_yield: 0,
+                // `structural` means "usable as build material", and a calcite test is built out
+                // of this — so it is true here for the same reason it is true on silicon, whose
+                // only consumer is the silica test. It is not a monomer and it is not a fuel;
+                // those are `MetabolicChemistry::structural` and `energy_yield`, which are the
+                // fields that actually do something.
+                structural: true,
+                colour: [190, 200, 210],
+                decay_to: None,
+                decay_rate: 0,
+                advection: Q10_ONE,
+            },
         ])
     }
 
-    /// The definition for a chemical index, which wraps. Total for any input.
+
+/// The definition for a chemical index, which wraps. Total for any input.
     #[inline(always)]
     #[must_use]
     pub fn get(&self, c: usize) -> &ChemicalDef {
@@ -593,17 +745,21 @@ mod tests {
 
     #[test]
     fn indices_wrap() {
-        // Seventeen since dinitrogen joined the table, and these are the assertions that
-        // change when it does: what an out-of-range chemical operand *means* is part of the ISA,
-        // exactly as `BUILD 19` naming a different organelle is.
+        // Nineteen since calcium and carbonate joined the table, and these are the assertions
+        // that change when it widens: what an out-of-range chemical operand *means* is part of
+        // the ISA, exactly as `BUILD 19` naming a different organelle is.
         assert_eq!(chem_index(0), 0);
         assert_eq!(chem_index(16), 16);
+        assert_eq!(chem_index(18), 18);
         assert_eq!(chem_index(CHEM_COUNT as i16), 0);
         // Not `CHEM_COUNT - 1`, which is what a table of sixteen trained the eye to expect:
-        // `-1` is 65,535 unsigned and 65,535 is 3,855 x 17 exactly, so it lands on 0. Worth an
-        // assertion of its own precisely because it is the kind of thing a widening changes
-        // silently.
-        assert_eq!(chem_index(-1), 0);
+        // `-1` is 65,535 unsigned, and where that lands is a property of the table's size and
+        // nothing else. At sixteen it was 15; at seventeen it was 0, because 65,535 is 3,855 × 17
+        // exactly; at nineteen it is 4. **This assertion has now changed at two consecutive ISA
+        // versions**, which is the whole reason it is written down separately: a genome reaching
+        // past the end of the table reads a different chemical after every widening, silently,
+        // and archived genomes replay under the version they evolved in for exactly this.
+        assert_eq!(chem_index(-1), 4);
         for c in i16::MIN..=i16::MAX {
             assert!(chem_index(c) < CHEM_COUNT);
         }
@@ -643,7 +799,7 @@ mod tests {
     #[test]
     fn the_default_table_matches_the_spec_composition() {
         let t = ChemTable::spec_default();
-        assert_eq!(t.all().iter().filter(|d| d.structural).count(), 4);
+        assert_eq!(t.all().iter().filter(|d| d.structural).count(), 6);
         assert_eq!(t.all().iter().filter(|d| d.energy_yield > 0).count(), 3);
         assert_eq!(t.all().iter().filter(|d| d.toxicity > 0).count(), 1);
         assert_eq!(t.index_of("sugar"), Some(8));

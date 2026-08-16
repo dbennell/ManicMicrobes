@@ -28,9 +28,12 @@
         Uniform(chemical: 11, per_square: 409600),
         // The carbonate system (`docs/CHEMISTRY.md` §11). Carbonate matched to the dissolved
         // CO2 above, so the slide starts at pH 7 and every move from there is something the
-        // cells did; calcium at half that, which is a reef's worth of the other half.
+        // cells did. Calcium is then *not* free: the pair precipitates on the product of the
+        // two, so this is set to put `sqrt(calcium * carbonate)` a little over
+        // `minerals.calcite_saturation` — near enough to equilibrium that the pH decides which
+        // way it goes, which is the whole point of the coupling.
         Uniform(chemical: 18, per_square: 409600),
-        Uniform(chemical: 17, per_square: 204800),
+        Uniform(chemical: 17, per_square: 3461),
         Uniform(chemical: 14, per_square: 409600),
         Uniform(chemical: 4, per_square: 409600),
         // The three minerals nothing in the engine produces (`docs/CHEMISTRY.md` §8): seeding is

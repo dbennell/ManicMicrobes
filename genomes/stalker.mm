@@ -168,10 +168,14 @@
         IMM     3
         IMM     7               ; reading 3: the nearest one's badge
         OGET
-        IMM     22
-        ZERO                    ; my own badge. 21 until ISA 11 put dinitrogen in the chemical
-                                ; table: the membrane's scalars are laid out after the chemicals,
-                                ; so widening the table shifts everything past them.
+        IMM     24              ; membrane reading 24: my own badge.
+                                ; **It has moved twice now.** The membrane's scalars are laid out
+                                ; *after* the chemical readings, so widening the table shifts
+                                ; every reading past them: 21 originally, 22 when dinitrogen
+                                ; landed at ISA 11, 24 when calcium and carbonate landed at
+                                ; ISA 12. That is what the version stamp is for, and it is the
+                                ; one sharp edge of adding a chemical.
+        ZERO                    ; slot 0, the membrane
         OGET
         CMP
         JMPZ    kin

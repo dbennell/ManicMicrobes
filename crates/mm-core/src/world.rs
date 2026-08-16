@@ -1240,6 +1240,159 @@ impl World {
             }
         }
 
+        // --- calcite: the pair that comes out of solution together (§11) ---
+        //
+        // Not the per-plane law above, and their `saturation` entries are zero so that loop skips
+        // them. Calcium and carbonate precipitate and dissolve **together**, on a solubility
+        // product and on the pH — which is a function of three quantities at a square, and §8's
+        // precedent from denitrification is that a function of more than one chemical is a
+        // mechanism and not a table edit.
+        //
+        // The reef is the buffer's reservoir, and that is the behaviour worth having: acid
+        // dissolves the substrate, the substrate returns its carbonate to the water, the water's
+        // buffer rises and resists further acid. Nobody wrote that as a feedback.
+        if rates.calcite_rate > 0 && rates.calcite_saturation > 0 {
+            let s_line = i64::from(rates.calcite_saturation);
+            let (ca, co3) = (crate::chem::CALCIUM, crate::chem::CARBONATE);
+            let (kca, kco3) = (
+                crate::chem::solid_slot(ca).unwrap_or(0),
+                crate::chem::solid_slot(co3).unwrap_or(0),
+            );
+            for y in 0..h {
+                for x in 0..w {
+                    let i = self.substrate.index(x, y);
+                    let blocked = self.substrate.blocked()[i];
+                    // The water this square is in equilibrium with — and for a wall that is the
+                    // water *around* it, which is the whole of what took two goes to get right.
+                    //
+                    // A blocked square holds nothing: `ph_at` reads it neutral and its dissolved
+                    // minerals read zero. Both are the right answers to "what is in this rock" and
+                    // both are the wrong inputs to "is this rock dissolving". Read from the square
+                    // itself, a wall could never see the acid eating it *and* always looked
+                    // maximally thirsty — so every reef wore away at full rate no matter what it
+                    // stood in, including water saturated in exactly what it is made of.
+                    //
+                    // So a wall is judged against **one** open neighbour, and the same one for
+                    // both readings. The neighbour with the least mineral in it is the one the
+                    // rock is actually giving itself up to, and taking its pH from anywhere else
+                    // would be reading two different squares as though they were one.
+                    // The geometric mean of the two pools, which is the product law stated in
+                    // units a person can read: a square rich in one and poor in the other meets
+                    // the line exactly where its product does, and `isqrt` recovers it in one
+                    // integer operation with no floats (hard rule 2).
+                    let mineral_at = |s: &crate::Substrate, px: i32, py: i32| -> i64 {
+                        i64::from(s.chem_at(ca, px, py))
+                            .saturating_mul(i64::from(s.chem_at(co3, px, py)))
+                            .isqrt()
+                    };
+                    let (ph, water) = if blocked {
+                        let mut best: Option<(i64, i64)> = None;
+                        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                            let (nx, ny) = (x + dx, y + dy);
+                            if nx < 0 || ny < 0 || nx >= w || ny >= h {
+                                continue;
+                            }
+                            if self.substrate.blocked()[self.substrate.index(nx, ny)] {
+                                continue;
+                            }
+                            let m = mineral_at(&self.substrate, nx, ny);
+                            if best.is_none_or(|(_, bw)| m < bw) {
+                                best = Some((i64::from(self.substrate.ph_at(nx, ny)), m));
+                            }
+                        }
+                        // Walled in on every side: nothing can reach it and nothing dissolves it.
+                        // Reported as sweet and saturated, which is the state that does nothing.
+                        best.unwrap_or((i64::from(crate::chem::PH_MAX), i64::from(i32::MAX)))
+                    } else {
+                        (
+                            i64::from(self.substrate.ph_at(x, y)),
+                            mineral_at(&self.substrate, x, y),
+                        )
+                    };
+                    let acid = i64::from(rates.calcite_ph) - ph;
+                    if acid <= 0 && water > s_line && !blocked {
+                        // Alkaline and over the line: reef forms. Equal amounts of each, because
+                        // calcite is one mineral in two planes and a pair that drifted apart
+                        // would leave one of them doing all the deciding.
+                        let want = crate::fixed::q10_scale(
+                            (water - s_line).min(i64::from(i32::MAX)) as i32,
+                            rates.calcite_rate,
+                        );
+                        if want > 0 {
+                            let took_ca = -self.substrate.add_chem(ca, x, y, -want);
+                            let took_co3 = -self.substrate.add_chem(co3, x, y, -want);
+                            // Only what actually left the water, each plane on its own: asking
+                            // and achieving differ at a boundary, and the difference is where a
+                            // conservation bug lives.
+                            if took_ca > 0 {
+                                self.substrate.add_solid(kca, x, y, took_ca);
+                            }
+                            if took_co3 > 0 {
+                                self.substrate.add_solid(kco3, x, y, took_co3);
+                            }
+                        }
+                    } else {
+                        // Acid, or undersaturated, or both: the reef gives itself back. The two
+                        // deficits add, so a wall in sour water goes faster than one in water
+                        // that is merely thirsty, and either alone is enough.
+                        let thirst = (s_line - water).max(0);
+                        let sour = if acid > 0 {
+                            (s_line.saturating_mul(acid)) / i64::from(crate::chem::PH_MAX)
+                        } else {
+                            0
+                        };
+                        let want = crate::fixed::q10_scale(
+                            (thirst + sour).min(i64::from(i32::MAX)) as i32,
+                            rates.calcite_rate,
+                        );
+                        if want > 0 {
+                            for (k, c) in [(kca, ca), (kco3, co3)] {
+                                let held = self.substrate.solid_at(k, x, y);
+                                let give = want.min(held);
+                                if give <= 0 {
+                                    continue;
+                                }
+                                // Into this square's own water when it is open, and into a
+                                // neighbour's when it is not — a blocked square accepts nothing,
+                                // and rock dissolving has to have somewhere to dissolve *into*.
+                                let placed = if blocked {
+                                    let mut left = give;
+                                    for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                                        let (nx, ny) = (x + dx, y + dy);
+                                        if nx < 0 || ny < 0 || nx >= w || ny >= h {
+                                            continue;
+                                        }
+                                        left -= self.substrate.add_chem(c, nx, ny, left);
+                                        if left <= 0 {
+                                            break;
+                                        }
+                                    }
+                                    give - left
+                                } else {
+                                    self.substrate.add_chem(c, x, y, give)
+                                };
+                                if placed > 0 {
+                                    self.substrate.add_solid(k, x, y, -placed);
+                                }
+                            }
+                        }
+                        // And a reef worn past the line opens, the same way the per-plane law's
+                        // walls do. Gated on having held calcite, so bedrock is never touched.
+                        if blocked
+                            && self.substrate.solid_at(kca, x, y)
+                                + self.substrate.solid_at(kco3, x, y)
+                                >= 0
+                            && self.substrate.solid_total_at(x, y) <= rates.wall_threshold
+                            && (self.substrate.solid_at(kca, x, y) > 0
+                                || self.substrate.solid_at(kco3, x, y) > 0)
+                        {
+                            became_water.push((x, y));
+                        }
+                    }
+                }
+            }
+        }
+
         // --- has this square become rock? asked of every open square, once ---
         //
         // **The law is that a square is rock when it holds more than `wall_threshold` of solid,

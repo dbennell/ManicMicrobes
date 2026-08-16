@@ -1125,12 +1125,23 @@ pub struct OverlayLayer {
 /// to interpolate between them.
 pub const FLOW_STRIDE: u32 = 4;
 
+/// The overlay that is not a chemical: acidity, at the index just past the table.
+///
+/// pH is derived and stored nowhere (`chem::ph_of`), so it has no plane to switch on — but it is
+/// the reading the carbonate system exists to make legible, and a reading nobody can see is one
+/// nobody uses. It rides at the end of the overlay space so that adding it renumbered nothing:
+/// every chemical's overlay key, bit and legend row is where it was.
+pub const ACIDITY: usize = CHEM_COUNT;
+
+/// How many overlays there are: every chemical, plus [`ACIDITY`].
+pub const OVERLAY_COUNT: usize = CHEM_COUNT + 1;
+
 /// The simulation, and the only thing the front-end is allowed to hold.
 pub struct Slide {
     world: World,
     /// Which chemical overlays are switched on. Individually toggleable (M4), so this is a
     /// set and not a choice.
-    overlays: [bool; CHEM_COUNT],
+    overlays: [bool; OVERLAY_COUNT],
     /// Whether to gather the flow field into the frame. Off by default: it is an instrument
     /// reading rather than part of the picture, and gathering it costs a pass over the grid.
     pub show_flow: bool,
@@ -1152,7 +1163,7 @@ pub struct Slide {
     /// The top of each overlay's colour ramp, carried between frames so it can be eased into
     /// rather than recomputed from scratch. `0` means this layer has no exposure yet and the
     /// next frame should take the reading outright. See [`Slide::overlay_scale`].
-    overlay_scale: [f32; CHEM_COUNT],
+    overlay_scale: [f32; OVERLAY_COUNT],
 }
 
 /// How many ticks the food web averages over.
@@ -1248,7 +1259,7 @@ impl Slide {
     ///
     /// A scenario this engine cannot honour.
     pub fn new(scenario: Scenario) -> Result<Slide, mm_core::ScenarioError> {
-        let mut overlays = [false; CHEM_COUNT];
+        let mut overlays = [false; OVERLAY_COUNT];
         // Carbon dioxide by default: it is what the ancestor breathes out, so it is the layer
         // that first shows there is something alive on the slide.
         // `MM_NO_OVERLAY` turns it off, which is a debugging flag and earned its place the day
@@ -1263,7 +1274,7 @@ impl Slide {
             world: World::new(scenario)?,
             flows: crate::foodweb::Flows::default(),
             flows_filling: crate::foodweb::Flows::default(),
-            overlay_scale: [0.0; CHEM_COUNT],
+            overlay_scale: [0.0; OVERLAY_COUNT],
             overlays,
             show_flow: false,
             lod: Lod::Dots,
@@ -1356,13 +1367,13 @@ impl Slide {
     /// between two frames of the *same* world; carried across a load it would fade the new slide
     /// in from the old one's brightness, which looks like the file taking a moment to settle.
     fn forget_overlay_scale(&mut self) {
-        self.overlay_scale = [0.0; CHEM_COUNT];
+        self.overlay_scale = [0.0; OVERLAY_COUNT];
     }
 
     /// Show this chemical's overlay and no other. The number keys.
     pub fn set_overlay(&mut self, chemical: usize) {
-        self.overlays = [false; CHEM_COUNT];
-        if let Some(on) = self.overlays.get_mut(chemical % CHEM_COUNT) {
+        self.overlays = [false; OVERLAY_COUNT];
+        if let Some(on) = self.overlays.get_mut(chemical % OVERLAY_COUNT) {
             *on = true;
         }
         self.forget_overlay_scale();
@@ -1370,11 +1381,11 @@ impl Slide {
 
     /// Switch one chemical's overlay on or off without disturbing the others.
     pub fn toggle_overlay(&mut self, chemical: usize) {
-        if let Some(on) = self.overlays.get_mut(chemical % CHEM_COUNT) {
+        if let Some(on) = self.overlays.get_mut(chemical % OVERLAY_COUNT) {
             *on = !*on;
             // This one only. The others are still showing and their exposure is still good;
             // resetting them would flash every open layer whenever one was toggled.
-            self.overlay_scale[chemical % CHEM_COUNT] = 0.0;
+            self.overlay_scale[chemical % OVERLAY_COUNT] = 0.0;
         }
     }
 
@@ -1489,9 +1500,15 @@ impl Slide {
     /// chemistry.
     #[must_use]
     pub fn chemical_names(&self) -> Vec<String> {
-        (0..CHEM_COUNT)
+        let mut out: Vec<String> = (0..CHEM_COUNT)
             .map(|c| self.world.scenario().chemicals.get(c).name.clone())
-            .collect()
+            .collect();
+        // [`ACIDITY`] rides at the end. It is not a chemical and has no plane — pH is derived
+        // (`chem::ph_of`) — but the legend, the overlay keys and the bitmask are all indexed by
+        // this list, so being in it is what makes the reading reachable without a special case
+        // in each of them.
+        out.push("acidity".to_string());
+        out
     }
 
     /// Each chemical's overlay colour, in index order.
@@ -1501,9 +1518,13 @@ impl Slide {
     /// world that posed its own chemistry.
     #[must_use]
     pub fn chemical_colours(&self) -> Vec<[u8; 3]> {
-        (0..CHEM_COUNT)
+        let mut out: Vec<[u8; 3]> = (0..CHEM_COUNT)
             .map(|c| self.world.scenario().chemicals.get(c).colour)
-            .collect()
+            .collect();
+        // [`ACIDITY`], which is not in the table because it is not a chemical. Appended so the
+        // legend, the number keys and the overlay bitmask all reach it without a special case.
+        out.push([217, 89, 77]);
+        out
     }
 
     /// What the wiki calls this species, or a placeholder if the archive has not named it yet.
@@ -1567,6 +1588,48 @@ impl Slide {
                     }
                 })
                 .collect()
+        };
+        // And the overlay that is not a chemical.
+        //
+        // **Single-signed on purpose.** `art::paint_field` sums its layers, each with one tint, so
+        // a diverging ramp — blue one side of neutral, red the other — is not a thing this model
+        // can express without growing a mode. Acidity is the half that matters biologically and
+        // reads honestly on its own: a respiring crowd sours the water around it and the patch
+        // goes red, while alkaline water is legible as the *absence* of the layer. A diverging
+        // version wants `paint_field` to learn about signed layers, which is a change to every
+        // overlay rather than an addition of one.
+        let overlays = {
+            let mut overlays = overlays;
+            if self.overlays[ACIDITY] {
+                let s = self.world.substrate();
+                let field: Vec<f32> = (0..s.len())
+                    .map(|i| {
+                        let (x, y) = ((i % s.width() as usize) as i32, (i / s.width() as usize) as i32);
+                        let ph = s.ph_at(x, y);
+                        ((mm_core::chem::PH_NEUTRAL - ph) as f32
+                            / mm_core::chem::PH_NEUTRAL as f32)
+                            .clamp(0.0, 1.0)
+                    })
+                    .collect();
+                overlays.push(OverlayLayer {
+                    chemical: ACIDITY,
+                    name: "acidity".to_string(),
+                    // Warm red: the colour every other reading on the plate is not, and the one
+                    // an insult is drawn in elsewhere in the interface.
+                    rgb: [0.85, 0.35, 0.30],
+                    field,
+                    // Fixed rather than eased against the frame's own statistic, and this is the
+                    // one layer for which that is right: pH is an *absolute* scale from nought to
+                    // fourteen, so a ramp normalised per frame would make "sour" mean whatever
+                    // the sourest square happened to be and the colour would move when the world
+                    // did not. Neutral is the top of the ramp, so full red is pH zero.
+                    scale: mm_core::chem::PH_NEUTRAL,
+                    // Not a quantity. There is no total acidity in the world to report, because
+                    // there is no acidity plane — see `chem::ph_of`.
+                    total: 0,
+                });
+            }
+            overlays
         };
         let substrate = self.world.substrate();
         let cells = self.world.cells();
@@ -2382,6 +2445,12 @@ fn organelle_colour(kind: mm_core::OrganelleType) -> [f32; 3] {
         T::Pump => [0.75, 0.75, 0.78],
         // Silica: pale, cool and plainly not tissue.
         T::Shell => [0.82, 0.86, 0.90],
+        // Limestone against glass: warmer and a shade duller, so the two kinds of armour are
+        // told apart at a glance the way a chalk cliff is told from a quartz one.
+        T::CalciteShell => [0.90, 0.87, 0.79],
+        // The fourth sensor, in the sensors' family of colours rather than a new one — what it
+        // tastes is different, what it *is* is a chemosensor.
+        T::PhSensor => [0.62, 0.80, 0.72],
         // Cement, and the darkest thing in the catalogue. A holdfast is a commitment to a place.
         T::Holdfast => [0.50, 0.46, 0.40],
         T::JunctionPort => [0.58, 0.76, 0.78],
@@ -3355,7 +3424,10 @@ mod tests {
         // shell, a holdfast and a flagellum were the same mark. The catalogue is append-only and
         // the reservations are being filled one milestone at a time, so this is the test that
         // fires the *next* time an organ arrives without one — which is how the eleven got there.
-        let fallback = organelle_colour(mm_core::OrganelleType::Reserved31);
+        // Any reserved slot will do: what is wanted is the `_` arm's colour, and a reservation
+        // is the one thing guaranteed not to have an arm of its own. Slot 31 was used until ISA
+        // 13 filled it with the calcite test.
+        let fallback = organelle_colour(mm_core::OrganelleType::Reserved30);
         let mut colourless = Vec::new();
         for kind in *mm_core::OrganelleType::all() {
             if !kind.is_implemented() {

@@ -164,6 +164,33 @@ pub fn sense_chemical(substrate: &Substrate, chemical: usize, x: i32, y: i32) ->
     }
 }
 
+/// What a pH sensor reports: the acidity here, and which way the water sours.
+///
+/// pH is derived rather than stored (`chem::ph_of`), so this reads the two planes it is a
+/// function of at each sample point rather than a plane of its own — the same walk
+/// [`sense_chemical`] makes, done twice.
+///
+/// **Off the slide reads neutral, not nothing.** A chemical gradient at the edge reads the
+/// outside as zero because there is genuinely none there; pH has no zero to read, and treating
+/// the world's edge as maximally acidic would put a permanent gradient around the rim that every
+/// cell on it would follow.
+#[must_use]
+pub fn sense_ph(substrate: &Substrate, x: i32, y: i32) -> ChemReading {
+    let at = |dx: i32, dy: i32| -> i32 {
+        let sx = x + dx;
+        let sy = y + dy;
+        if sx < 0 || sy < 0 || sx >= substrate.width() as i32 || sy >= substrate.height() as i32 {
+            return crate::chem::PH_NEUTRAL;
+        }
+        substrate.ph_at(sx, sy)
+    };
+    ChemReading {
+        concentration: at(0, 0),
+        gradient_x: at(SENSOR_RANGE, 0).saturating_sub(at(-SENSOR_RANGE, 0)),
+        gradient_y: at(0, SENSOR_RANGE).saturating_sub(at(0, -SENSOR_RANGE)),
+    }
+}
+
 /// What a photosensor reports: intensity, and which way the light gets brighter.
 #[must_use]
 pub fn sense_light(substrate: &Substrate, x: i32, y: i32) -> ChemReading {
@@ -305,7 +332,24 @@ pub fn read_sensor(organelle: &Organelle, index: i16, ctx: SensorContext<'_>) ->
                 _ => sat_i16(glow[1].gradient_y),
             })
         }
-        OrganelleType::Shell => {
+        OrganelleType::PhSensor => {
+            // The water itself rather than something in it. `index % 3` gives the value and its
+            // two gradients, exactly as the chemosensor's does, so a genome that already knows
+            // how to follow a chemical knows how to follow acidity.
+            //
+            // Reported as raw `Q10` rather than through `visible`, following the photosensor's
+            // glow readings and for the reason their note gives: `visible` divides by `Q10_ONE`
+            // because it is for *amounts*, and pH is a scale from nought to fourteen. Divided
+            // down, the whole interesting range of a slide would be the integer 7 and every
+            // gradient would be nothing.
+            let r = sense_ph(substrate, x, y);
+            Some(match (index as u16) % 3 {
+                0 => sat_i16(r.concentration),
+                1 => sat_i16(r.gradient_x),
+                _ => sat_i16(r.gradient_y),
+            })
+        }
+        OrganelleType::Shell | OrganelleType::CalciteShell => {
             // A shell reports the trade it is making, from both ends of it.
             //
             // The coverage is a readback: a genome that closed its shell can find out how much

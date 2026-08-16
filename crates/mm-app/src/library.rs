@@ -53,7 +53,7 @@ pub struct NewWorld {
     /// Silicon is here for a different reason from the other three, and the reason is a bug it
     /// is fixing: it is not something every cell needs, it is something *no* cell could obtain.
     /// See [`NewWorld::default`].
-    pub chemistry: [(usize, i32); 7],
+    pub chemistry: [(usize, i32); 9],
     /// Who lives here, as a name the scenario can write down and [`mm_asm::locate`] can find.
     pub genome: String,
     /// Zero is a legal answer, and is the one you want when the point is to draw the world
@@ -75,6 +75,10 @@ pub const NITROGEN: usize = 5;
 pub const PHOSPHORUS: usize = 6;
 /// Dinitrogen: the inert pool, and the only thing a diazosome is for.
 pub const DINITROGEN: usize = mm_core::chem::DINITROGEN;
+/// Calcium: the fourth mineral, and half of a calcite test.
+pub const CALCIUM: usize = mm_core::chem::CALCIUM;
+/// Carbonate: the buffer, and the other half.
+pub const CARBONATE: usize = mm_core::chem::CARBONATE;
 
 impl Default for NewWorld {
     fn default() -> Self {
@@ -130,6 +134,29 @@ impl Default for NewWorld {
                 (CARBON_DIOXIDE, mm_core::fixed::q10(40)),
                 (OXIDANT, mm_core::fixed::q10(40)),
                 (SILICON, mm_core::fixed::q10(20)),
+                // The carbonate system (`docs/CHEMISTRY.md` §11).
+                //
+                // **Carbonate is matched to the dissolved CO₂ above rather than chosen**, and
+                // that is the whole of the number. pH is derived from the ratio of the two
+                // (`chem::ph_of`), so equal pools read as exactly neutral — which makes a fresh
+                // slide start at seven and every move away from it something the cells did. A
+                // figure picked independently would set the slide's resting pH to whatever the
+                // ratio happened to be, and every reading afterwards would be measured from a
+                // baseline nobody chose.
+                //
+                // Calcium is then **not** free either, and this is the number that trips people
+                // up. The pair precipitates on the *product* of the two, so once carbonate is
+                // pinned by the pH anchor, calcium is what decides whether the slide sits above
+                // or below `minerals.calcite_saturation`. Twice the amount that puts
+                // `sqrt(calcium x carbonate)` exactly on the line — near enough to equilibrium
+                // that the pH decides which way it goes, which is the whole point of the
+                // coupling, and far enough over that a lit mat has something to lay down.
+                //
+                // Unlike the three minerals above these are not Redfield quantities. Nothing is
+                // built out of them except a calcite test; what they are mostly for is to be
+                // water chemistry.
+                (CARBONATE, mm_core::fixed::q10(40)),
+                (CALCIUM, mm_core::fixed::q10(34)),
                 // Nitrogen and phosphorus, at the Redfield proportion of the carbon above.
                 //
                 // Organisms hold C : N : P at roughly 106 : 16 : 1 because that is what the
@@ -719,6 +746,8 @@ mod tests {
                 (NITROGEN, 0),
                 (PHOSPHORUS, 0),
                 (DINITROGEN, 0),
+                (CARBONATE, 0),
+                (CALCIUM, 0),
             ],
             genome: "predator.mm".to_string(),
             founders: 6,
@@ -830,6 +859,8 @@ mod tests {
                 (NITROGEN, 0),
                 (PHOSPHORUS, 0),
                 (DINITROGEN, 0),
+                (CARBONATE, 0),
+                (CALCIUM, 0),
             ],
             ..NewWorld::default()
         }

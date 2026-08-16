@@ -690,6 +690,38 @@ pub const FIELDS: &[Field] = &[
                and it closes. Below it the same stock is a crust lying in open water",
     },
     Field {
+        path: "minerals.calcite_saturation",
+        label: "calcite at",
+        group: Group::Chemistry,
+        unit: Unit::Q10,
+        note: "the concentration at which calcium and carbonate are at equilibrium, as a \
+               geometric mean of the two rather than as a product — so it reads directly, \
+               \"above this much of each, a square lays down reef\". The pair is not governed by \
+               the per-mineral solubility above: they come out of solution together, on this and \
+               on a pH, which is what makes a calcite reef weather differently from a silica one",
+    },
+    Field {
+        path: "minerals.calcite_ph",
+        label: "calcite pH",
+        group: Group::Chemistry,
+        unit: Unit::Q10,
+        note: "the pH at or above which calcite forms and below which it dissolves. **The \
+               coupling the carbonate system exists for**: above the line a photosynthesising mat \
+               lays down reef, below it a respiring crowd takes it back up, and the carbonate \
+               returning to the water raises the buffer and resists further acidification. Set it \
+               below neutral and a slide precipitates from its first tick, which is an answer \
+               before there is a question",
+    },
+    Field {
+        path: "minerals.calcite_rate",
+        label: "calcite rate",
+        group: Group::Chemistry,
+        unit: Unit::Q10,
+        note: "how much of the distance to equilibrium calcite moves each weathering step, in \
+               either direction. Rock is the slowest thing in the world and this is where that is \
+               said for the reef",
+    },
+    Field {
         path: "ecology.em_range",
         label: "sight range",
         group: Group::Ecology,
@@ -758,7 +790,7 @@ pub const PATHWAY_COLUMNS: [(&str, &str); 4] = [
 pub const CATALOGUE_PREFIX: &str = "metabolism.catalogue.specs.";
 
 /// The seven numbers each catalogue entry carries, as (suffix, column heading).
-pub const CATALOGUE_COLUMNS: [(&str, &str); 24] = [
+pub const CATALOGUE_COLUMNS: [(&str, &str); 26] = [
     ("build_matter", "matter"),
     ("build_matter_per_param", "matter/size"),
     ("build_energy", "energy"),
@@ -768,7 +800,7 @@ pub const CATALOGUE_COLUMNS: [(&str, &str); 24] = [
     ("teardown_recovery", "recovered"),
     // The recipe: what a type costs *beyond* structural matter, one column per chemical.
     //
-    // Sixteen columns of which fifteen are zero on every shipped entry, which is an honest
+    // Nineteen columns of which most are zero on every shipped entry, which is an honest
     // picture of a sparse table rather than a good one to look at. They are here because the
     // test below holds the page to covering the whole catalogue — a number the engine reads and
     // the rules page cannot show is a number that silently stops matching what is running.
@@ -792,6 +824,8 @@ pub const CATALOGUE_COLUMNS: [(&str, &str); 24] = [
     ("build_trace.14", "oxygen"),
     ("build_trace.15", "carrion"),
     ("build_trace.16", "dinitrogen"),
+    ("build_trace.17", "calcium"),
+    ("build_trace.18", "carbonate"),
 ];
 
 /// The fields in one group, in table order.

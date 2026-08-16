@@ -562,12 +562,15 @@ fn the_synapse_moves_matter_exactly() {
     // chemical the cell holds none of, and the test reported "nothing crossed" — which was true
     // and had nothing to do with the opcode it exists to check. The obvious repair, writing 0 for
     // signal_a, is worse: it transfers *energy*, silently, and the chemical column stays empty in
-    // exactly the same way. 17 is the operand that reaches signal_a now.
+    // exactly the same way. 17 was the operand that reached signal_a after that.
     //
-    // Which is the sharp edge of widening a chemical table, recorded here because it cost two
-    // wrong fixes to find: an out-of-range operand is not a mistake a genome makes, it is a thing
-    // genomes rely on, and what it means is part of the ISA.
-    let bytes = mm_asm::assemble("IMM 4\nIMM 17\nZERO\nJXFER\nDROP\nHALT\n")
+    // **ISA 12 moved it again**, to 19, when calcium and carbonate joined the table — and this
+    // failed in exactly the same way, with exactly the same message, for the third time. Which is
+    // the sharp edge of widening a chemical table, recorded here because it cost two wrong fixes
+    // to find the first time: an out-of-range operand is not a mistake a genome makes, it is a
+    // thing genomes rely on, and what it means is part of the ISA. The operand that reaches
+    // signal_a is `CHEM_COUNT` itself, and it will move again the next time the table does.
+    let bytes = mm_asm::assemble("IMM 4\nIMM 19\nZERO\nJXFER\nDROP\nHALT\n")
         .expect("assembles")
         .bytes;
     let mut world = World::new(petri_with_diffusion(3, 32, Some(0))).expect("world");

@@ -895,7 +895,7 @@ it is a square holding **both** planes as solid, and `Substrate::solid_total_at`
 across planes for exactly this reason — §10 records that judging a wall one plane at a time opened
 walls that were plainly solid, and "a reef made of two minerals is a reef".
 
-Carbonate is `structural: false` and has no `energy_yield`: it is not something to be built out of
+Carbonate carries no `energy_yield`: it is not something to be burnt
 or burnt, it is the water's capacity to absorb an insult.
 
 The saturations are the least-supported numbers here and are flagged as such below.
@@ -1153,6 +1153,61 @@ Written down because the fishbowl argument is only worth anything if the line is
   seeding calcium and carbonate, and a shipped genome must *eat* them. §8 records both halves of
   that lesson — a world test cannot catch a gate, a gate cannot catch an empty world, and neither
   catches a cell that never goes shopping.
+
+### Built, and four things the design got wrong
+
+All of it, at ISA 12 and 13. The shape held; four of the specifics did not, and each was found by
+a test rather than by reading.
+
+**1. The saturations were the wrong instrument.** §11 gave calcium and carbonate a `saturation` of
+24 units each, which would have put them under the *per-plane* weathering law as well as under the
+calcite law — two laws governing one pair, which is how they come to disagree. Both are zero now:
+`World::weather` returns early on a ceiling of zero, so the generic arm skips them entirely and
+the pair is governed once, on the product and the pH. It also frees the seeding, which mattered
+more than expected — see 3.
+
+**2. The pH scale was linear and had to be, but for a different reason than the one given.** §11
+argued for linear-in-a-bounded-ratio on cost grounds. The stronger argument turned up in testing:
+at the operating point — pools comparable, which is how a world is seeded — the swing for an
+insult `d` goes as `K·d / 2P`, so doubling the buffer halves the swing. **That is the buffering,
+and it is a property of the ratio rather than something implemented.** A log form would have given
+a swing independent of the buffer entirely, which is the opposite of what was wanted.
+
+The way to get this wrong is written into `carbonate_buffers_the_swing`, because the first version
+of that test got it wrong: raising carbonate against a *fixed* CO₂ walks the operating point up
+the curve rather than adding capacity, and the curve is least sensitive at its ends. A world pinned
+at pH 2 does not move much because there is nowhere left to go, which is saturation and not
+buffering.
+
+**3. Calcium is not a free parameter, and this is the number that will trip people up.** Carbonate
+is pinned by the pH anchor — matched to a world's dissolved CO₂ so the slide reads exactly seven
+and every move from there is something the cells did. Calcite then precipitates on the *product*,
+so calcium is the only thing left that decides whether a world sits above or below the line. Each
+world seeds twice the amount that puts `sqrt(calcium × carbonate)` exactly at
+`calcite_saturation`: near enough to equilibrium that the pH decides the direction, far enough
+over that a lit mat has something to lay down. On the shipped scenarios, whose CO₂ is 400 units,
+that is 3.4 units of calcium; on the fresh slide, whose CO₂ is 40, it is 34.
+
+**A consequence worth stating: calcium is scarce on the 400-CO₂ worlds.** That falls out of the
+anchor rather than being chosen, and whether it makes calcite armour too dear to reach on exactly
+the worlds people run is a question for a sweep, not for an argument.
+
+**4. A wall cannot be judged against itself, and this cost two goes.** A blocked square holds
+nothing: `ph_at` reads it neutral and its dissolved minerals read zero. Both are the right answers
+to "what is in this rock" and the wrong inputs to "is this rock dissolving". Read from the square
+itself a reef could never see the acid eating it *and* always looked maximally thirsty — so every
+reef wore away at full rate whatever it stood in, including water saturated in exactly what it is
+made of. A wall is now judged against **one** open neighbour, the same one for both readings: the
+one with the least mineral in it, which is what the rock is actually giving itself up to.
+
+The first fix did only the pH half, and the test passed anyway on the thirst term. That is what
+`a_reef_in_saturated_but_sour_water_still_wears` is for — it holds the water at the calcite line
+so thirst is nought and acid is the only thing left that can move the reef.
+
+**And the rate is measured rather than matched.** `calcite_rate` started at a sixteenth, matching
+`dissolve`, and a lit slide laid down reef over a tenth of itself in two thousand ticks — the
+mechanism working, at a speed that reads as the world turning to stone rather than as geology. A
+hundred and twenty-eighth is §10's "thousands of ticks" for the pair.
 
 ### Versioning
 

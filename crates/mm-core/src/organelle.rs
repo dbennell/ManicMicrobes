@@ -166,7 +166,16 @@ pub enum OrganelleType {
     /// water. A ciliate anchored on a holdfast pumps its own square and filter-feeds on it
     /// (`tests/ciliary_probe.rs`); a flagellate goes somewhere.
     Flagellum = 22,
-    Reserved23 = 23,
+    /// Pairs with [`OrganelleType::Chemosensor`]: taste a chemical, or taste the water itself.
+    ///
+    /// Reads pH — the ratio of carbonate to dissolved CO₂ at the square (`chem::ph_of`) — and its
+    /// two gradients, on the same `index % 3` its sibling uses. One bit-flip retunes a lineage
+    /// from tasting a substance to tasting acidity.
+    ///
+    /// **Without it the carbonate swing would select on lineages that cannot act on it**, which
+    /// is a pressure with no strategy behind it. With it, "swim away from the acid" and "build
+    /// armour only where the water is sweet" are both reachable by mutation.
+    PhSensor = 23,
     Reserved24 = 24,
     Reserved25 = 25,
     Reserved26 = 26,
@@ -178,7 +187,19 @@ pub enum OrganelleType {
     Exoenzyme = 28,
     Reserved29 = 29,
     Reserved30 = 30,
-    Reserved31 = 31,
+    /// Pairs with [`OrganelleType::Shell`]: a test of glass, or a test of limestone.
+    ///
+    /// The same armour, made of the other mineral and on opposite terms. Silica is dear, slow and
+    /// **pH-indifferent**; calcite is cheap, quick and **dissolves in acid** — so a calcite-shelled
+    /// cell in a crowded respiring mat is paying for its neighbours' CO₂, and the same cell in
+    /// bright open water is armoured for nearly nothing. Neither dominates, which is the test of
+    /// whether a sibling was worth a slot.
+    ///
+    /// It has to be a sibling rather than an option on the shell's recipe, because
+    /// [`OrganelleSpec::build_trace`] is an **AND**: every non-zero entry is required, charged and
+    /// refunded together, so calcium beside silicon would make a shell needing both. See
+    /// `docs/CHEMISTRY.md` §11.
+    CalciteShell = 31,
 }
 
 const CATALOGUE: [OrganelleType; CATALOGUE_SIZE] = [
@@ -205,7 +226,7 @@ const CATALOGUE: [OrganelleType; CATALOGUE_SIZE] = [
     OrganelleType::LipidDroplet,
     OrganelleType::Reserved21,
     OrganelleType::Flagellum,
-    OrganelleType::Reserved23,
+    OrganelleType::PhSensor,
     OrganelleType::Reserved24,
     OrganelleType::Reserved25,
     OrganelleType::Reserved26,
@@ -213,7 +234,7 @@ const CATALOGUE: [OrganelleType; CATALOGUE_SIZE] = [
     OrganelleType::Exoenzyme,
     OrganelleType::Reserved29,
     OrganelleType::Reserved30,
-    OrganelleType::Reserved31,
+    OrganelleType::CalciteShell,
 ];
 
 impl OrganelleType {
@@ -254,14 +275,12 @@ impl OrganelleType {
                 | OrganelleType::Reserved16
                 | OrganelleType::Reserved17
                 | OrganelleType::Reserved21
-                | OrganelleType::Reserved23
                 | OrganelleType::Reserved24
                 | OrganelleType::Reserved25
                 | OrganelleType::Reserved26
                 | OrganelleType::Reserved27
                 | OrganelleType::Reserved29
                 | OrganelleType::Reserved30
-                | OrganelleType::Reserved31
         )
     }
 
@@ -285,6 +304,8 @@ impl OrganelleType {
             OrganelleType::Oscillator => "oscillator",
             OrganelleType::Holdfast => "holdfast",
             OrganelleType::Shell => "shell",
+            OrganelleType::CalciteShell => "calcite shell",
+            OrganelleType::PhSensor => "pH sensor",
             OrganelleType::Diazosome => "diazosome",
             OrganelleType::Chemosynth => "chemosynthetic granule",
             OrganelleType::LipidDroplet => "lipid droplet",
@@ -293,14 +314,12 @@ impl OrganelleType {
             OrganelleType::Reserved16 => "reserved_16",
             OrganelleType::Reserved17 => "reserved_17",
             OrganelleType::Reserved21 => "reserved_21",
-            OrganelleType::Reserved23 => "reserved_23",
             OrganelleType::Reserved24 => "reserved_24",
             OrganelleType::Reserved25 => "reserved_25",
             OrganelleType::Reserved26 => "reserved_26",
             OrganelleType::Reserved27 => "reserved_27",
             OrganelleType::Reserved29 => "reserved_29",
             OrganelleType::Reserved30 => "reserved_30",
-            OrganelleType::Reserved31 => "reserved_31",
         }
     }
 
@@ -484,6 +503,7 @@ pub const fn default_control(kind: OrganelleType) -> [i16; 2] {
         | OrganelleType::Spike
         | OrganelleType::Holdfast
         | OrganelleType::Shell
+        | OrganelleType::CalciteShell
         | OrganelleType::Exoenzyme => [0, 0],
         _ => [Q10_ONE as i16, 0],
     }
@@ -1047,10 +1067,46 @@ impl OrganelleCatalogue {
         // if behaviour changes when nitrogen arrives, this is the entry that has to be ruled in
         // or out separately, because §6's lesson is that the one you did not measure alone is the
         // one that was two orders out.
+        // A test of limestone: the shell's sibling, priced against *it* rather than against the
+        // catalogue, because bit 4 of the type operand is one mutation away and that is the
+        // comparison a genome is actually making.
+        //
+        // Cheaper and quicker on every axis that is about *laying it down* — limestone
+        // precipitates where glass has to be spun — and identical on the two that are about
+        // having laid it: upkeep, because a wall is cheap to keep whatever it is made of, and
+        // `teardown_recovery`, because mineral put down does not come back up.
+        //
+        // The recipe is the trade. Silicon is scarce, immobile-ish and contested only by whatever
+        // is armoured; calcium and carbonate are abundant, well mixed, and the carbonate half is
+        // the same pool that buffers the water — so a lineage that armours itself in calcite is
+        // drawing down its own neighbourhood's buffer, and a crowd of them makes the water that
+        // dissolves them. Silica has no such loop and costs more for not having one.
+        specs[OrganelleType::CalciteShell as usize] = OrganelleSpec {
+            build_matter: q10(11),
+            build_matter_per_param: q10(1) / 4,
+            build_energy: q10(14),
+            build_ticks: 18,
+            upkeep: q10(8) / 96,
+            upkeep_per_param: q10(8) / 1024,
+            teardown_recovery: Q10_ONE / 8,
+            build_trace: {
+                let mut r = NO_TRACE;
+                r[crate::chem::CALCIUM] = q10(4);
+                r[crate::chem::CARBONATE] = q10(4);
+                r
+            },
+        };
+
         for kind in [
             OrganelleType::Chemosensor,
             OrganelleType::Photosensor,
             OrganelleType::TouchSensor,
+            // The fourth sensor, on the same terms as the other three — and it wants the same
+            // caveat. Sensors are the cost of *perceiving at all*, taxing them is a distinct
+            // pressure from taxing metabolism, and a fourth is a fourth call on the same sixteen
+            // slots. If behaviour changes when the carbonate system lands, this entry has to be
+            // ruled in or out separately.
+            OrganelleType::PhSensor,
         ] {
             specs[kind as usize].build_trace = nitrogen_trace(618);
         }
@@ -1126,7 +1182,15 @@ pub enum MembraneReading {
     Age = 2,
     Radius = 3,
     Damage = 4,
-    /// `5..=20` read internal chemical `idx - 5`.
+    /// `5..=(4 + CHEM_COUNT)` read internal chemical `idx - 5`.
+    ///
+    /// **The discriminants below are labels, not wire indices.** `decode` places `Badge` at
+    /// `5 + CHEM_COUNT` and `Crowding` at `6 + CHEM_COUNT`, so where they actually sit moves every
+    /// time the table grows — 21 and 22 when it held sixteen, 22 and 23 at ISA 11, 24 and 25 at
+    /// ISA 12. A genome reading its own badge or its own crowding at a hard-coded index reads
+    /// something else afterwards, which is exactly what the version stamp is for (hard rule 8) and
+    /// why archived genomes replay under the version they evolved in. This comment said `5..=20`
+    /// for two ISA versions after that stopped being true.
     Chemical = 5,
     /// This cell's own surface badge, at the index right after the chemicals.
     ///
@@ -1217,7 +1281,11 @@ pub const SHELL_MAX_COVER: i32 = Q10_ONE * 7 / 8;
 /// and applying it here would let two half-shells cover more than the pair of them can.
 #[must_use]
 pub fn shell_cover_of(o: &Organelle) -> i32 {
-    if o.kind != OrganelleType::Shell || !o.is_active() {
+    if !matches!(
+        o.kind,
+        OrganelleType::Shell | OrganelleType::CalciteShell
+    ) || !o.is_active()
+    {
         return 0;
     }
     let closed = (o.control[0] as i32).clamp(0, Q10_ONE);
@@ -1352,7 +1420,9 @@ mod tests {
                 "chemosynthetic granule",
                 "lipid droplet",
                 "flagellum",
+                "pH sensor",
                 "exoenzyme vesicle",
+                "calcite shell",
             ]
         );
     }
