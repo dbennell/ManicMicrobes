@@ -766,3 +766,173 @@ fn rock_laid_by_hand_is_written_into_the_scenario() {
         );
     }
 }
+
+/// **Rock that grows, grows.** The ratchet, which for a long time did not turn.
+///
+/// Deposition used to fire only on squares holding *none* of the mineral — an `else` on the
+/// dissolution arm — so a square could take one step's worth and was then frozen: every step
+/// afterwards it fell into the dissolve branch and could never add to itself. A crust spread
+/// sideways and could not thicken, and the only route to `wall_threshold` was for a single step's
+/// deposit to clear it in one go, which needs water eight times the threshold above saturation.
+/// No shipped slide is anywhere near that, so "walls that grow from minerals falling out of
+/// solution" grew crusts and never a wall.
+#[test]
+fn a_crust_thickens_into_a_wall_instead_of_freezing() {
+    let mut world = World::new(slide()).expect("world");
+    let c = SOLID_CHEMICALS[1];
+    let k = solid_slot(c).expect("solid-capable");
+    let saturation = mm_core::chem::ChemTable::spec_default().get(c).saturation;
+    let threshold = world.biology().minerals.wall_threshold;
+
+    // A seed of solid, and water over saturation but nowhere near enough to close the square in
+    // one deposit — which is the case the old law could not grow through.
+    world.substrate_mut().add_solid(k, 12, 12, q10(20));
+    let held = saturation * 30;
+    assert!(
+        mm_core::fixed::q10_scale(held - saturation, world.biology().minerals.deposit) < threshold,
+        "the fixture can close the square in one step, which is the case that already worked"
+    );
+    for (x, y) in [(12, 12), (11, 12), (13, 12), (12, 11), (12, 13)] {
+        world.substrate_mut().set_chem(c, x, y, held);
+    }
+    world.adopt_current_contents_as_baseline();
+
+    let mut thickest = 0;
+    for _ in 0..400 {
+        world.run(16);
+        thickest = thickest.max(world.substrate().solid_at(k, 12, 12));
+        if world.substrate().blocked()[world.substrate().index(12, 12)] {
+            world.check_matter().expect("growing must conserve");
+            return;
+        }
+    }
+    panic!(
+        "the crust stalled at {thickest} of the {threshold} it needs to be a wall: deposition is \
+         not adding to a square that already holds some"
+    );
+}
+
+/// And a nucleus is a grain rather than a wall — by arithmetic, not by assertion.
+///
+/// The scan took the *whole* excess above saturation, which its own note called "a grain, not a
+/// wall" while delivering several times `wall_threshold` in one go. That only looked harmless
+/// because nothing asked whether the square had become rock; with the question asked, an
+/// unbounded nucleus turns a supersaturated slide to stone in a single weathering step.
+#[test]
+fn a_nucleus_is_never_more_than_half_a_wall() {
+    let mut world = World::new(slide()).expect("world");
+    let c = SOLID_CHEMICALS[0];
+    let k = solid_slot(c).expect("solid-capable");
+    let saturation = mm_core::chem::ChemTable::spec_default().get(c).saturation;
+    let threshold = world.biology().minerals.wall_threshold;
+
+    // Water at fifty times saturation everywhere: the state that paved the slide.
+    for y in 0..24i32 {
+        for x in 0..24i32 {
+            world.substrate_mut().set_chem(c, x, y, saturation * 50);
+        }
+    }
+    world.adopt_current_contents_as_baseline();
+    world.run(4_000);
+
+    let plane = world.substrate().solid_plane(k);
+    let nucleated = plane.iter().filter(|v| **v > 0).count();
+    assert!(nucleated > 0, "nothing nucleated, so this proves nothing");
+    world.check_matter().expect("nucleation must conserve");
+}
+
+/// **No shipped world seeds a mineral above what its water can hold.**
+///
+/// The rule, stated directly, and the test that was missing for the third time. §8 records the
+/// shape twice already: adding a recipe and seeding the slide it needs are two edits in two
+/// crates and no test spanned them; then seeding the slide and teaching a genome to eat it were
+/// two more. This is the same gap between a *ceiling* and the worlds measured against it.
+///
+/// Silicon gained a `saturation` of forty units when the mineral walls landed, and every scenario
+/// written before that kept seeding two hundred — five times what the water can hold — which was
+/// harmless only because precipitation did not work. With it working they precipitate, and
+/// `the_black_smoker` turned thirty per cent of itself to rock in two thousand ticks.
+///
+/// The fresh slide has always seeded twenty against the ceiling of forty and is the figure the
+/// rest were brought to. This test is cheap, exact, and names the fix, where the behavioural one
+/// below measures the consequence over two thousand ticks and can only say that something is
+/// wrong.
+#[test]
+fn no_shipped_world_seeds_a_mineral_above_its_own_saturation() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scenarios");
+    let mut checked = 0;
+    for entry in std::fs::read_dir(&dir).expect("scenarios directory") {
+        let path = entry.expect("entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("ron") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("read");
+        let scenario: mm_core::Scenario = ron::from_str(&text)
+            .unwrap_or_else(|e| panic!("{} does not parse: {e}", path.display()));
+        for seed in &scenario.seeding {
+            let (chemical, per_square) = match seed {
+                Seeding::Uniform { chemical, per_square } => (*chemical, *per_square),
+                Seeding::Patch { chemical, per_square, .. } => (*chemical, *per_square),
+                Seeding::Gradient { chemical, high, .. } => (*chemical, *high),
+                // Rock is solid, not dissolved. Its whole point is to be above the line.
+                Seeding::Rock { .. } | Seeding::Spike { .. } => continue,
+            };
+            let ceiling = scenario.chemicals.get(chemical).saturation;
+            if ceiling <= 0 {
+                continue;
+            }
+            assert!(
+                per_square <= ceiling,
+                "{}: seeds {per_square} of {} against a saturation of {ceiling}. Water cannot \
+                 hold that, so it precipitates — the world turns to rock on its own from the \
+                 first weathering step",
+                scenario.name,
+                scenario.chemicals.get(chemical).name,
+            );
+        }
+        checked += 1;
+    }
+    assert!(checked > 10, "only {checked} scenarios were checked");
+}
+
+/// **No shipped slide turns to stone.** The regression the fixed law could plausibly cause.
+///
+/// Promotion is now asked of every open square rather than only of one that has just been
+/// deposited on, and deposition ratchets rather than firing once. Both are wanted; both would be
+/// a disaster on a world that starts supersaturated, because it would pave over on the first
+/// weathering step and every cell on it would be sealed in rock.
+///
+/// It is safe because the shipped worlds seed their minerals *below* saturation — the fresh slide
+/// holds one unit of phosphate against a ceiling of eight, `soup.ron` four, and silicon twenty
+/// against forty (`docs/CHEMISTRY.md` §8). That is a property of the scenario files rather than of
+/// the law, which is exactly why it wants a test: a scenario edited to seed more is one weathering
+/// step from a solid slide, and nothing else would say so.
+#[test]
+fn the_shipped_worlds_do_not_pave_themselves_over() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scenarios");
+    let mut checked = 0;
+    for entry in std::fs::read_dir(&dir).expect("scenarios directory") {
+        let path = entry.expect("entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("ron") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("read");
+        let scenario: mm_core::Scenario = ron::from_str(&text)
+            .unwrap_or_else(|e| panic!("{} does not parse: {e}", path.display()));
+        let name = scenario.name.clone();
+        let squares = (scenario.width * scenario.height) as usize;
+        let mut world = World::new(scenario).expect("world");
+        let before = world.substrate().blocked().iter().filter(|b| **b).count();
+        world.run(2_000);
+        let after = world.substrate().blocked().iter().filter(|b| **b).count();
+        // A little growth is the feature working. A tenth of the slide is the feature running away.
+        assert!(
+            after <= before + squares / 10,
+            "{name}: rock went from {before} squares to {after} of {squares} in two thousand \
+             ticks. A world that paves itself over is one where the weathering law is fighting \
+             the seeding rather than the other way round"
+        );
+        checked += 1;
+    }
+    assert!(checked > 10, "only {checked} scenarios were checked");
+}

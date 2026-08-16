@@ -1084,6 +1084,7 @@ impl World {
             for y in 0..h {
                 for x in 0..w {
                     let held = self.substrate.solid_at(k, x, y);
+                    let blocked_here = self.substrate.blocked()[self.substrate.index(x, y)];
                     if held > 0 {
                         // Dissolve into each open neighbour, in proportion to its deficit.
                         let mut left = held;
@@ -1112,27 +1113,50 @@ impl World {
                         }
                         // Against the square's *whole* solid, not this plane's. A wall of two
                         // minerals is still a wall when either one of them is thin.
-                        if self.substrate.blocked()[self.substrate.index(x, y)]
+                        //
+                        // **Demotion stays here, gated on this square having held solid**, and it
+                        // cannot move to the pass below with its sibling. A wall worn all the way
+                        // to nothing is a blocked square holding nothing — which is bedrock, and
+                        // bedrock is permanent. The two are told apart only by *having been rock a
+                        // moment ago*, which is what `held > 0` says and what a test on the total
+                        // alone cannot. Written the other way it opens every authored wall on the
+                        // slide on the first weathering step.
+                        if blocked_here
                             && self.substrate.solid_total_at(x, y) <= rates.wall_threshold
                         {
                             became_water.push((x, y));
                         }
-                    } else if rates.deposit > 0 {
-                        // Growth on a surface: an open square touching solid, holding more than
-                        // it can keep in solution. Surfaces only, because a full scan of open
-                        // water is a pass this engine cannot afford every step — see §10.
+                    }
+                    // Growth on a surface: an open square over saturation with solid to grow on.
+                    // Surfaces only, because a full scan of open water is a pass this engine
+                    // cannot afford every step — see §10, and the nucleation slice below is what
+                    // covers water with no surface anywhere near it.
+                    //
+                    // **Not an `else` on the branch above, and that was the bug.** Deposition used
+                    // to fire only on squares holding *none* of this mineral, so a square could
+                    // take one step's worth and was then frozen: it fell into the dissolve arm
+                    // every step afterwards and could never add to itself. A crust spread sideways
+                    // and could not thicken, and the only way to reach `wall_threshold` was for a
+                    // single step's deposit to clear it in one go — which needs water at eight
+                    // times the threshold above saturation, a state no shipped slide is in. Rock
+                    // that grows from minerals falling out of solution did not grow.
+                    //
+                    // The square's own solid counts as a surface now, which is what makes the
+                    // ratchet work: the first grain is the seed for the next layer.
+                    if rates.deposit > 0 && !blocked_here {
                         let here = self.substrate.chem_at(*c, x, y);
-                        if here <= ceiling || self.substrate.blocked()[self.substrate.index(x, y)] {
+                        if here <= ceiling {
                             continue;
                         }
-                        let touches = [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|(dx, dy)| {
-                            let (nx, ny) = (x + dx, y + dy);
-                            nx >= 0
-                                && ny >= 0
-                                && nx < w
-                                && ny < h
-                                && self.substrate.solid_at(k, nx, ny) > 0
-                        });
+                        let touches = held > 0
+                            || [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|(dx, dy)| {
+                                let (nx, ny) = (x + dx, y + dy);
+                                nx >= 0
+                                    && ny >= 0
+                                    && nx < w
+                                    && ny < h
+                                    && self.substrate.solid_at(k, nx, ny) > 0
+                            });
                         if !touches {
                             continue;
                         }
@@ -1145,9 +1169,6 @@ impl World {
                         let taken = -self.substrate.add_chem(*c, x, y, -want);
                         if taken > 0 {
                             self.substrate.add_solid(k, x, y, taken);
-                            if self.substrate.solid_total_at(x, y) > rates.wall_threshold {
-                                became_rock.push((x, y));
-                            }
                         }
                     }
                 }
@@ -1192,16 +1213,56 @@ impl World {
                         if self.substrate.blocked()[i] || self.cell_at(x, y).is_some() {
                             continue;
                         }
-                        // A grain, not a wall: it takes the excess above *saturation* and leaves
-                        // the square open, so what the scan produces is a surface for the cheap
-                        // path to grow on rather than a wall out of nowhere.
+                        // **A grain, not a wall — and now that is true by arithmetic.**
+                        //
+                        // This took the whole excess above saturation, which said "a grain"
+                        // and delivered several times `wall_threshold`: measured on a 32×32
+                        // slide seeded at fifty times saturation, every one of 1,024 squares
+                        // ended up holding twice the wall line, and none of them was a wall,
+                        // because nothing outside the deposition arm asked. Half the excess
+                        // problem was that nothing asked; the other half was the size of the
+                        // grain, and a law that only holds when nobody checks is not a law.
+                        //
+                        // So: the same fraction surface growth takes, capped at half a wall.
+                        // What the scan produces is a *surface* for the cheap path to grow on,
+                        // and the growing is the cheap path's job.
                         let here = self.substrate.chem_at(c, x, y);
-                        let want = here.saturating_sub(ceiling).max(0);
+                        let excess = here.saturating_sub(ceiling).max(0);
+                        let want = crate::fixed::q10_scale(excess, rates.deposit)
+                            .min(rates.wall_threshold / 2)
+                            .max(0);
                         let taken = -self.substrate.add_chem(c, x, y, -want);
                         if taken > 0 {
                             self.substrate.add_solid(k, x, y, taken);
                         }
                     }
+                }
+            }
+        }
+
+        // --- has this square become rock? asked of every open square, once ---
+        //
+        // **The law is that a square is rock when it holds more than `wall_threshold` of solid,
+        // and nothing sets a flag.** It was only ever *asked* inside the deposition arm, so it was
+        // asked once per square — at the moment the first grain landed on it — and never again.
+        // Solid arriving any other way sat above the line indefinitely: the nucleation scan, a
+        // wall raised over mineral with nowhere to push it, `World::set_rock`, or simply a crust
+        // that thickened past the line on a later step. Measured before this existed, on a slide
+        // seeded at fifty times saturation: 1,024 squares of 1,024 holding twice the wall line,
+        // and not one of them a wall.
+        //
+        // Its own pass rather than inline, because a square is judged on its *whole* solid across
+        // every plane and the loop above is per plane. **Promotion only.** Demotion lives in that
+        // loop and has to, for the bedrock reason written over it there: a wall worn away to
+        // nothing is a blocked square holding nothing, which is exactly what bedrock is, and the
+        // two are told apart only by having been rock a moment ago.
+        for y in 0..h {
+            for x in 0..w {
+                if self.substrate.blocked()[self.substrate.index(x, y)] {
+                    continue;
+                }
+                if self.substrate.solid_total_at(x, y) > rates.wall_threshold {
+                    became_rock.push((x, y));
                 }
             }
         }
