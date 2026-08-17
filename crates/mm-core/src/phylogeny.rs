@@ -370,15 +370,25 @@ impl Phylogeny {
         // A second seeding of the same genome joins the species already founded for it,
         // rather than founding an identical rival — twelve founders of one ancestor are one
         // species, which is what anybody looking at the tree would expect.
-        let fingerprint = genome.fingerprint();
-        if let Some(existing) = self
-            .species
-            .values()
-            .find(|s| s.parent.is_none() && s.founder_fingerprint == fingerprint)
-        {
-            return existing.id;
+        if let Some(existing) = self.root_for_fingerprint(genome.fingerprint()) {
+            return existing;
         }
         self.insert(None, genome, traits, tick, 0)
+    }
+
+    /// The root species already founded for a genome's fingerprint, if there is one.
+    ///
+    /// The identity [`Phylogeny::found`] merges on, made available to a caller that needs to ask
+    /// the same question *after* seeding — which is how [`crate::World::place_community`] learns
+    /// the root each founding genome resolved to without depending on the order ids are handed
+    /// out in. Deterministic: `species` is a `BTreeMap`, so the first match is the lowest id
+    /// (hard rule 6).
+    #[must_use]
+    pub fn root_for_fingerprint(&self, fingerprint: u64) -> Option<SpeciesId> {
+        self.species
+            .values()
+            .find(|s| s.parent.is_none() && s.founder_fingerprint == fingerprint)
+            .map(|s| s.id)
     }
 
     /// Decide which species a newborn belongs to (SPEC §10.3).

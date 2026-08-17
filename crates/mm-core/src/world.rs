@@ -1865,6 +1865,65 @@ impl World {
         out
     }
 
+    /// Place a labelled community and return the cohorts to census it by.
+    ///
+    /// # Why this exists
+    ///
+    /// [`place_cohort`](World::place_cohort) puts a mixed community on the slide correctly and
+    /// says nothing about who is who afterwards, so every caller that wanted to *measure* a
+    /// community grew its own seeding loop. `m8_ecology.rs` had three of them — `seed`, `seed_one`
+    /// and an inline loop in `run_food_web` — at 400, 500 and 600 starting energy, with three
+    /// different placement arithmetics and two different organelle kits. A result taken on one is
+    /// not comparable with a result taken on another, and none of them is what the microscope or
+    /// `mm-cli` does, which is [`World::place_inhabitants`].
+    ///
+    /// So: one path, the same one the front ends use, and the lineage identity captured at the
+    /// moment of seeding, which is the only moment it is unambiguous.
+    ///
+    /// # What the roots mean
+    ///
+    /// Each distinct genome founds one root species and every descendant chains to it, however
+    /// damaged its genome becomes — see [`crate::census`] on why descent and not bytes. Two
+    /// members carrying the *same* genome resolve to the same root and cannot be told apart,
+    /// because [`Phylogeny::found`](crate::phylogeny::Phylogeny::found) merges them deliberately;
+    /// a caller that needs two arms of one genome wants
+    /// [`World::spawn_cell_as_new_species`], as the arena does.
+    ///
+    /// A member none of whose founders landed — every slot inside a barrier, say — comes back with
+    /// `founded: 0` and a root of [`u32::MAX`], which no species can hold. It censuses as an empty
+    /// cohort rather than silently matching somebody else's cells.
+    pub fn place_community(
+        &mut self,
+        members: &[(&str, &[u8], u32)],
+        place: crate::Placement,
+    ) -> Vec<crate::census::Cohort> {
+        let request: Vec<(&[u8], u32)> = members.iter().map(|(_, g, n)| (*g, *n)).collect();
+        let placed = self.place_cohort(&request, place);
+        members
+            .iter()
+            .enumerate()
+            .map(|(k, (label, bytes, _))| {
+                let landed = placed.get(k).copied().unwrap_or(0);
+                // Read back rather than assumed: `found` merges by fingerprint, so the root for
+                // this genome is whichever species already holds its fingerprint.
+                let root = crate::genome::Genome::new(bytes.to_vec())
+                    .ok()
+                    .and_then(|g| self.archive.root_for_fingerprint(g.fingerprint()))
+                    .unwrap_or(u32::MAX);
+                crate::census::Cohort::new(*label, root, landed)
+            })
+            .collect()
+    }
+
+    /// Take a census of the slide, by descent.
+    ///
+    /// Thin, and here rather than at each call site so that a caller cannot accidentally read the
+    /// cells against a stale archive.
+    #[must_use]
+    pub fn census(&self, cohorts: &[crate::census::Cohort]) -> crate::census::Census {
+        crate::census::Census::take(self.tick, &self.cells, &self.archive, cohorts)
+    }
+
     /// One member of a cohort: `k` runs `first..first + count` out of `total`.
     fn place_run(
         &mut self,
