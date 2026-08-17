@@ -427,6 +427,60 @@ fn the_shipped_organisms_reproduce() {
 }
 
 #[test]
+fn an_engulfer_cannot_pay_for_the_body_that_engulfment_needs() {
+    // The other half of the predation finding, and the reason the food-web guard above is red.
+    //
+    // `docs/FEEDING.md` §4 rules out every predation fix that does not move the deposit to the
+    // predator, and engulfment is the one route that does: the body arrives *inside* the eater and
+    // arrives as *structure*. `genomes/engulfer.mm` is written for it — and it is the first genome
+    // in the tree to open a vacuole's mouth at all, which is its own finding, because the
+    // mechanism has been in `ecology.rs` unused.
+    //
+    // It builds the body it is written to build, holds it for a hundred ticks, and starves. Alone
+    // at full light it reaches mass 147 with six organelles by tick 100, is down to the membrane
+    // alone by 300 — the chloroplast shed to pay for the rest, which is the spiral — and is dead
+    // by 700. Peroxide never exceeds 11 and damage stays at zero, so this is upkeep against
+    // income and not the exhaust problem.
+    //
+    // `docs/ECONOMY.md` §12.1 measured the same wall from the other side: 818 cells at four
+    // organelles, 666 at six, zero at eight. An engulfer needs six and cannot give any of them
+    // up — the vacuole is the mouth and the shell is the mass.
+    //
+    // **This test asserts the current failure on purpose.** When §12.1 is fixed it should start
+    // failing, and that is the signal that the fix reached the thing it was for. Do not relax it;
+    // update it, and expect `a_food_web_holds_together_guard` to go green in the same commit.
+    let bytes = assemble("engulfer.mm");
+    let mut world = World::new(scenario("predator_introduction.ron")).expect("world");
+    world.place_community(&[("engulfer", &bytes, 1)], mm_core::Placement::Spread);
+    let peak_mass = |w: &World| -> i32 {
+        w.cells()
+            .iter()
+            .map(|i| w.cells().mass[i] / mm_core::Q10_ONE)
+            .max()
+            .unwrap_or(0)
+    };
+
+    world.run(100);
+    let built = peak_mass(&world);
+    assert!(
+        built >= 120,
+        "the engulfer should reach the bulk it needs to eat a median prey cell (60 units, so 120 \
+         to qualify at `engulf_ratio` of two); it reached {built}. If this fails the genome has \
+         stopped building its own body and the rest of this test proves nothing."
+    );
+
+    world.run(1_400);
+    let n = world.cells().len();
+    assert_eq!(
+        n, 0,
+        "the engulfer survived {n} cells past 1,500 ticks. If `ECONOMY.md` §12.1 has been fixed \
+         this is the good news and this test is what has to change — see its header. If it has \
+         not, a large body has become affordable by some other route and that is worth knowing."
+    );
+    world.check_matter().expect("books balance");
+}
+
+#[test]
 fn the_hunter_cannot_pay_for_itself_and_that_is_the_point() {
     // Asserted rather than left in a comment, because it is the finding that made
     // `predator.mm` exist: a spike with no stomach is a net loss. If a later balancing change
