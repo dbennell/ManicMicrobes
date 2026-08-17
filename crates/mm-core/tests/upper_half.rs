@@ -171,6 +171,16 @@ fn a_granule_makes_a_living_with_the_lights_off() {
 #[test]
 fn an_exoenzyme_dissolves_into_the_square() {
     let mut world = World::new(slide(Q10_ONE)).expect("world");
+    // The carbonate buffer is held still, for the reason `engulf.rs` holds it still: this asserts
+    // matter **per chemical**, and the buffer's whole job is to move carbon between two of them.
+    // That is a species change like the diazosome's, reported through `Ledger::convert` and
+    // checked by `check_matter` below — but it breaks the stricter per-species equality, which is
+    // the right assertion for a dissolving and the wrong one for a world with a buffer running.
+    // Without this the test fails on its own chemistry: CO2 419,430,400 -> 412,928,000 with
+    // carbonate 0 -> 6,502,400, the same 6,502,400 moved between two species and the sum exact.
+    let mut biology = world.biology().clone();
+    biology.minerals.buffer_rate = 0;
+    world.set_biology(biology);
     let digester = spawn(&mut world, 16, 16, q10(60));
     let victim = spawn(&mut world, 16, 16, q10(300));
     put(&mut world, digester, 2, OrganelleType::Exoenzyme, 200, Q10_ONE as i16);

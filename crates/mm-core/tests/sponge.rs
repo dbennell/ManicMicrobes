@@ -219,56 +219,62 @@ fn a_filter_takes_detritus_out_of_a_current_and_a_bare_cell_does_not() {
 
 #[test]
 fn a_cell_carried_by_the_water_catches_nothing() {
-    // The property that stops this being a slower `EAT`. Two identical filtering cells, one on
-    // a slide where the water is moving and one where it is still — and the still one is *not*
-    // the poorer, because a cell adrift in a current is in still water as far as it can tell.
+    // The property that stops this being a slower `EAT`: what a filter takes is what goes *past*
+    // it, so a cell carried along by a current sees still water. `ecology::captured` says it
+    // outright — it returns zero for a relative speed of zero — and this is the behavioural check.
     //
-    // No barriers here: nothing to hold on to, so the cell in the current goes with it.
+    // # What this measured before, which was the clock
+    //
+    // It compared **detritus removed from the world** between a walled slide and an unwalled one,
+    // and it failed. Both halves of that were wrong.
+    //
+    // *Detritus decays.* `decay_to` carbon at rate 1 is a half-life near seven hundred ticks, so
+    // over a 600-tick run a slide **with nobody on it at all** loses 438 permille of its detritus.
+    // That is the entire signal the old assertion was reading: an empty slide, one bare cell and
+    // one filtering cell all came back at 438 permille, and the filtering cell removed *less* than
+    // the empty one.
+    //
+    // *And the two arms had different amounts of detritus in them.* `seed_detritus` adds to every
+    // square and a barrier square accepts nothing, so the walled arm started with a smaller pool —
+    // 7.9M against 94.4M in the reproduction. Comparing absolute totals across two pools of
+    // different size measures the seeding, and 38,805,955 / 0.94 is 41,283,000 against the other
+    // arm's 41,290,393, which is the same number to within two parts in ten thousand.
+    //
+    // # What it measures now
+    //
+    // One geometry, one pool, one current. Both cells are in the same channel; one is against the
+    // wall where its holdfast has something to grip and one is in midstream where it has nothing,
+    // so the only difference is whether it can hold station. And it reads what the **cell gained**
+    // rather than what the world lost, which is the only quantity a decaying pool cannot forge.
     let genome = assemble("sponge.mm");
-    let mut drifting = 0i64;
     let mut anchored = 0i64;
-    for (label, current, walls) in [
-        (
-            "adrift",
-            CurrentField::Uniform {
-                vx: Q10_ONE / 8,
-                vy: 0,
-            },
-            false,
-        ),
-        (
-            "anchored",
-            CurrentField::Uniform {
-                vx: Q10_ONE / 8,
-                vy: 0,
-            },
-            true,
-        ),
-    ] {
-        let mut scenario = channel(current);
-        if !walls {
-            scenario.barriers.clear();
-        }
-        let mut world = World::new(scenario).expect("world");
+    let mut adrift = 0i64;
+    for (label, y, keep) in [("anchored (against the wall)", 21, true), ("adrift (midstream)", 24, false)] {
+        let mut world = World::new(channel(CurrentField::Uniform {
+            vx: Q10_ONE / 8,
+            vy: 0,
+        }))
+        .expect("world");
         seed_detritus(&mut world, q10(40));
-        // Against the wall when there is one, so it has something to grip.
-        let y = if walls { 21 } else { 24 };
         put(&mut world, &genome, 10, y, Some(200));
-        let before = world.ledger().chem_totals()[DETRITUS];
+        let before = structural_on_slide(&world);
         for _ in 0..600 {
             world.step();
         }
-        let taken = before - world.ledger().chem_totals()[DETRITUS];
-        eprintln!("{label}: {taken} detritus taken");
-        if walls {
-            anchored = taken;
+        let gained = structural_on_slide(&world) - before;
+        eprintln!("{label}: gained {gained} structural");
+        if keep {
+            anchored = gained;
         } else {
-            drifting = taken;
+            adrift = gained;
         }
     }
     assert!(
-        anchored > drifting,
-        "holding station bought nothing: anchored took {anchored}, adrift took {drifting}"
+        anchored > adrift,
+        "holding station bought nothing: anchored gained {anchored} structural, adrift gained \
+         {adrift}. `captured` returns zero for a relative speed of zero, so a cell that cannot \
+         grip should gain nothing from its filter — if these are equal, either the midstream cell \
+         is somehow gripping or `slip` is reading something other than the water going past."
     );
 }
 
