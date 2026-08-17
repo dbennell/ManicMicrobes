@@ -160,6 +160,11 @@ docs/FEEDING.md   the ways of making a living, the control-word ledger, and the 
 docs/ECONOMY.md   what a cell earns and pays, why the autotroph wins everything, and the rebalance.
                   Its harness is `mm_core::balance` + `tests/balance.rs`; run it before and after
                   any change to a price, a rate or a light regime.
+docs/ZOO.md       why the slide holds one strategy instead of a dozen. Reads ECONOMY.md and
+                  FEEDING.md together and argues that nearly every mechanism the zoo needs is
+                  already built and defaulted to zero — and that `light_occlusion` being one of
+                  them is the root, because without it energy input scales with population rather
+                  than area and the slide has no energy ceiling. The order of work is §7.
 docs/NEURONS.md   nervous systems from junctions: what works, what blocks it, what not to build.
 docs/STIFFNESS.md the contact model, turgor, and which of the squish is physics and which is drawn.
 docs/OVERLAPS.md  the overlapping cells: what it was, what it was not, and the bench.
