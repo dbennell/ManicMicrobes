@@ -14,8 +14,19 @@
 //! thirds of that, the deposit lands where the *victim* died and diffuses from there — and what
 //! does arrive is a substrate the mitochondrion's capacity was already the binding term on.
 //!
-//! Engulfment satisfies both by construction: the matter arrives **inside** the predator, and it
-//! arrives as **structure**, which is built with rather than burnt.
+//! Engulfment satisfies both by construction: the matter arrives **inside** the predator.
+//!
+//! What it arrives *as* changed once a cell could digest what it carries. It used to be
+//! structure — the victim's `mass`, converted straight to build material, and nothing else. That
+//! satisfied §4's first conclusion and quietly failed the whole point: a cell is four compartments
+//! and only one of them was being taken, so the victim's cytoplasm and its organelles' minerals
+//! were deposited into the *water* by `apply_deaths` and the eater got bricks and no bread.
+//! `genomes/engulfer.mm` swallowed and starved.
+//!
+//! Now **you get what it had**: its cytoplasm crosses as itself, its minerals cross as themselves,
+//! and its body arrives as carrion inside the eater, to be digested by a lysosome. So swallowing
+//! is a *species change* (carbon to carrion) where it used to be a move, and the tests below say
+//! so — see `swallowing_moves_matter_and_creates_none`.
 //!
 //! # And why it is a size comparison
 //!
@@ -33,6 +44,7 @@ use mm_core::fixed::{pos, q10};
 use mm_core::{LightRegime, Organelle, OrganelleType, Scenario, Seeding, World, Q10_ONE};
 
 const STRUCTURAL: usize = 4;
+use mm_core::ecology::CARRION;
 
 fn slide() -> Scenario {
     Scenario {
@@ -104,10 +116,47 @@ fn a_larger_cell_swallows_a_smaller_one() {
     );
     let i = world.cells_mut().index(predator).expect("the predator lived");
     assert!(
-        world.cells().interior(i)[STRUCTURAL] > 0,
-        "the predator swallowed something and got no structural matter out of it, which is the \\
-         entire reason to prefer this to a spike"
+        world.cells().interior(i)[CARRION] > 0,
+        "the predator swallowed something and got no carrion out of it. The body arrives as \
+         flesh now rather than as build material — `carrion_fraction` describes a corpse rotting \
+         in water and being eaten is not rotting — so a lysosome is what turns a kill into food."
     );
+}
+
+/// And the groceries, not only the bricks.
+///
+/// The failure this exists for is silent and is what `engulfer.mm` died of: engulfment took
+/// `mass` alone, so the victim's cytoplasm was deposited into the water by `apply_deaths` and the
+/// eater swallowed a whole cell without acquiring one unit of anything burnable.
+#[test]
+fn a_swallowed_cell_hands_over_its_cytoplasm() {
+    let mut world = World::new(slide()).expect("world");
+    let predator = cell(&mut world, 16, 16, q10(400), Q10_ONE as i16, 0);
+    let prey = cell(&mut world, 16, 16, q10(40), 0, 0);
+
+    // Something in the prey worth having, and none of it in the predator.
+    let sugar = 8;
+    {
+        let p = world.cells_mut().index(prey).expect("prey");
+        world.cells_mut().interior_mut(p)[sugar] = q10(30);
+        let e = world.cells_mut().index(predator).expect("predator");
+        world.cells_mut().interior_mut(e)[sugar] = 0;
+    }
+    world.adopt_current_contents_as_baseline();
+
+    world.run(3);
+
+    assert!(
+        world.cells_mut().index(prey).is_none(),
+        "nothing was swallowed, so this measures nothing"
+    );
+    let i = world.cells_mut().index(predator).expect("the predator lived");
+    assert!(
+        world.cells().interior(i)[sugar] > 0,
+        "the predator swallowed a cell holding thirty units of substrate and got none of it. \
+         That is what `engulfer.mm` starved of: the body was taken and the food left behind."
+    );
+    world.check_matter().expect("books balance");
 }
 
 /// Not if it is not big enough. The gate is bulk, and nothing else.
@@ -185,10 +234,26 @@ fn swallowing_moves_matter_and_creates_none() {
         world.cells_mut().index(prey).is_none(),
         "nothing was swallowed, so this test is measuring nothing"
     );
+    // **The sum, not the per-species array.** Swallowing now converts the victim's body from
+    // structural carbon into carrion, which is a balanced reaction reported through
+    // `Ledger::convert` — so per-species totals are *supposed* to move, exactly as they do for
+    // the buffer this test switches off and for the diazosome. I4 in its exact form is "total
+    // matter is invariant, and a per-species total may change only through a reported reaction",
+    // and that is what the two assertions below are between them: the sum cannot move, and
+    // `check_matter` recomputes every species against the ledger's claim and fails on any drift.
+    let after = world.total_matter();
     assert_eq!(
-        world.total_matter(),
-        before,
-        "matter changed over a swallowing"
+        after.iter().sum::<i64>(),
+        before.iter().sum::<i64>(),
+        "matter was created or destroyed over a swallowing: {before:?} then {after:?}"
+    );
+    assert!(
+        after[CARRION] > before[CARRION] && after[STRUCTURAL] < before[STRUCTURAL],
+        "a swallowed body did not become carrion: structural {} -> {}, carrion {} -> {}",
+        before[STRUCTURAL],
+        after[STRUCTURAL],
+        before[CARRION],
+        after[CARRION]
     );
     world.check_matter().expect("I4 broke over an engulfment");
 }

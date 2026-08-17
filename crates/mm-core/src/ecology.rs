@@ -542,7 +542,10 @@ pub fn step(
     // How fast the water is going past each cell, `Q10`, from the physics phase.
     slip: &[i32],
     config: &EcologyConfig,
-    chemistry: &crate::organelle::MetabolicChemistry,
+    // The whole catalogue rather than just its `metabolism`, because engulfment has to ask what
+    // the victim's organelles were *made of* — a swallowed nucleus's phosphorus belongs to the
+    // eater, and only `OrganelleSpec::trace_cost` knows how much of it there was.
+    catalogue: &crate::organelle::OrganelleCatalogue,
     ledger: &mut Ledger,
     // What each cell's spikes, holdfasts and lysosomes add up to, from `scan_into`.
     scan: &[EcologyScan],
@@ -551,6 +554,7 @@ pub fn step(
     // moved must go through `apply_deaths` like any other corpse so the books close in one place.
     eaten: &mut Vec<crate::cell::CellId>,
 ) -> EcologyReport {
+    let chemistry = &catalogue.metabolism;
     let mut report = EcologyReport::default();
     eaten.clear();
 
@@ -714,35 +718,109 @@ pub fn step(
                 cells.energy[i] = cells.energy[i].saturating_sub(cost);
                 ledger.dissipate(cost as i64);
 
-                // The body, as structural matter, into the predator's interior — bounded by what
-                // it can hold, with the remainder going to the water rather than nowhere.
+                // **You get what it had.**
+                //
+                // This took only `mass` and left everything else, and the everything else is
+                // where the food was. The victim then went through `apply_deaths` with its mass
+                // already zeroed, which deposits its cytoplasm and its organelles' minerals into
+                // the *water* — so an eater got the bricks and the square got the groceries.
+                // `genomes/engulfer.mm` is the demonstration: it swallowed and starved.
+                //
+                // A cell is four compartments and each means something different to whatever
+                // eats it, so each is treated as what it is rather than folded into one number:
+                //
+                //   cytoplasm  already-digested food. Crosses as itself, no loss, no conversion.
+                //   body       raw flesh. Becomes carrion *inside* the eater; needs a lysosome.
+                //   minerals   what the organelles were made of. Cross as themselves.
+                //   energy     its charge. Dies with it — `apply_deaths` dissipates it.
+                //
+                // `carrion_fraction` is deliberately **not** applied. That split describes how a
+                // corpse rots in water — half flesh, half plain carbon anything can absorb — and
+                // being eaten is not rotting. A swallowed body is flesh, whole.
+                //
+                // `engulf_efficiency` applies to the body alone. Taxing the cytoplasm would tax
+                // it twice: it is already dissolved, and its owner already paid to dissolve it.
                 let structural = chemistry.structural % crate::chem::CHEM_COUNT;
+                let (vx, vy) = (
+                    crate::fixed::pos_to_square(cells.x[j]),
+                    crate::fixed::pos_to_square(cells.y[j]),
+                );
+
+                // The organelles let go of their minerals into the victim's own cytoplasm — the
+                // same release `apply_deaths` performs — so that the transfer below carries them
+                // without needing a second rule. The slots are emptied as they are drained, or
+                // `apply_deaths` would release the same matter a second time and mint it.
+                for s in 0..crate::organelle::SLOT_COUNT {
+                    let o = cells.slots(j)[s];
+                    if !o.is_present() {
+                        continue;
+                    }
+                    let spec = *catalogue.spec(o.kind);
+                    if !spec.has_trace() {
+                        continue;
+                    }
+                    for c in 0..crate::chem::CHEM_COUNT {
+                        if c == structural {
+                            continue;
+                        }
+                        let held = spec.trace_cost(c, o.param);
+                        if held > 0 {
+                            cells.interior_mut(j)[c] =
+                                cells.interior(j)[c].saturating_add(held);
+                        }
+                    }
+                    cells.slots_mut(j)[s] = Organelle::empty();
+                }
+
+                // The body, as carrion, inside the eater.
                 let taken = cells.mass[j];
                 cells.mass[j] = 0;
                 let usable = q10_scale(taken, config.engulf_efficiency);
                 let lost = taken.saturating_sub(usable);
                 let room = crate::biology::interior_capacity(cells, i)
-                    .saturating_sub(cells.interior(i)[structural])
+                    .saturating_sub(cells.interior(i)[CARRION])
                     .max(0);
                 let into_cell = usable.min(room);
                 if into_cell > 0 {
-                    cells.interior_mut(i)[structural] =
-                        cells.interior(i)[structural].saturating_add(into_cell);
+                    cells.interior_mut(i)[CARRION] =
+                        cells.interior(i)[CARRION].saturating_add(into_cell);
+                    ledger.convert(structural, CARRION, into_cell as i64);
                 }
-                // Whatever would not fit, plus the share the swallowing wasted, goes back to the
-                // square as itself. It is the same chemical either way, so no conversion is
-                // involved and nothing needs converting through the ledger.
+                // What would not fit, plus the share the swallowing wasted, lands on the square
+                // as carrion — which is where a kill too big to finish belongs, and is the one
+                // part of a swallowed meal anybody else can reach.
                 let spill = usable.saturating_sub(into_cell).saturating_add(lost);
                 if spill > 0 {
-                    let (vx, vy) = (
-                        crate::fixed::pos_to_square(cells.x[j]),
-                        crate::fixed::pos_to_square(cells.y[j]),
-                    );
-                    let placed = substrate.add_chem(structural, vx, vy, spill);
+                    let placed = substrate.add_chem(CARRION, vx, vy, spill);
+                    ledger.convert(structural, CARRION, placed as i64);
                     let stuck = spill.saturating_sub(placed);
                     if stuck > 0 {
+                        // Nowhere to put it: it stays in the husk as plain carbon and
+                        // `apply_deaths` will try again. Not converted, because it never became
+                        // carrion.
                         cells.interior_mut(j)[structural] =
                             cells.interior(j)[structural].saturating_add(stuck);
+                    }
+                }
+
+                // And the cytoplasm, as itself. Same chemical on both sides, so this is a move
+                // and not a reaction — nothing to report to the ledger. Whatever the eater has
+                // no room for stays in the husk and reaches the water through `apply_deaths`,
+                // which is what makes a stomach worth having: eat more than you can hold and you
+                // are feeding the neighbourhood.
+                for c in 0..crate::chem::CHEM_COUNT {
+                    let held = cells.interior(j)[c];
+                    if held <= 0 {
+                        continue;
+                    }
+                    let room = crate::biology::interior_capacity(cells, i)
+                        .saturating_sub(cells.interior(i)[c])
+                        .max(0);
+                    let moved = held.min(room);
+                    if moved > 0 {
+                        cells.interior_mut(j)[c] = held.saturating_sub(moved);
+                        cells.interior_mut(i)[c] =
+                            cells.interior(i)[c].saturating_add(moved);
                     }
                 }
                 report.engulfed = report.engulfed.saturating_add(1);
@@ -1187,7 +1265,7 @@ mod tests {
         crowding: &[i32],
         slip: &[i32],
         config: &EcologyConfig,
-        chemistry: &crate::organelle::MetabolicChemistry,
+        catalogue: &crate::organelle::OrganelleCatalogue,
         ledger: &mut Ledger,
     ) -> EcologyReport {
         let mut scan = Vec::new();
@@ -1197,7 +1275,7 @@ mod tests {
         // whole `World` and therefore gets the deaths buried for it.
         let mut eaten = Vec::new();
         super::step(
-            cells, substrate, neighbours, crowding, slip, config, chemistry, ledger, &scan,
+            cells, substrate, neighbours, crowding, slip, config, catalogue, ledger, &scan,
             &mut eaten,
         )
     }
@@ -1321,11 +1399,7 @@ mod tests {
             &crowding,
             &still,
             &config,
-            &Scenario::stress(16, 16)
-                .biology
-                .metabolism
-                .catalogue
-                .metabolism,
+            &Scenario::stress(16, 16).biology.metabolism.catalogue,
             &mut ledger,
         );
         assert!(
@@ -1420,7 +1494,7 @@ mod tests {
             &[],
             &[],
             &EcologyConfig::default(),
-            &crate::organelle::MetabolicChemistry::default(),
+            &crate::organelle::OrganelleCatalogue::balanced(),
             &mut ledger,
         );
 
@@ -1454,7 +1528,7 @@ mod tests {
             &[],
             &[],
             &EcologyConfig::default(),
-            &crate::organelle::MetabolicChemistry::default(),
+            &crate::organelle::OrganelleCatalogue::balanced(),
             &mut ledger,
         );
         assert_eq!(cells.damage[cells.index(victim).unwrap()], 0);
@@ -1480,7 +1554,7 @@ mod tests {
             &[],
             &[],
             &EcologyConfig::default(),
-            &crate::organelle::MetabolicChemistry::default(),
+            &crate::organelle::OrganelleCatalogue::balanced(),
             &mut ledger,
         );
         assert_eq!(
@@ -1509,7 +1583,7 @@ mod tests {
             &[],
             &[],
             &EcologyConfig::default(),
-            &crate::organelle::MetabolicChemistry::default(),
+            &crate::organelle::OrganelleCatalogue::balanced(),
             &mut ledger,
         );
 
@@ -1540,7 +1614,7 @@ mod tests {
             &[],
             &[],
             &EcologyConfig::default(),
-            &crate::organelle::MetabolicChemistry::default(),
+            &crate::organelle::OrganelleCatalogue::balanced(),
             &mut ledger,
         );
         assert!(
@@ -1568,7 +1642,7 @@ mod tests {
             &[],
             &[],
             &EcologyConfig::default(),
-            &crate::organelle::MetabolicChemistry::default(),
+            &crate::organelle::OrganelleCatalogue::balanced(),
             &mut ledger,
         );
         assert_eq!(substrate.chem_at(CARRION, 5, 5), before);

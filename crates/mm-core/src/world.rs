@@ -958,7 +958,7 @@ impl World {
                 &self.crowding,
                 &self.slip,
                 &self.biology.ecology,
-                &self.biology.metabolism.catalogue.metabolism,
+                &self.biology.metabolism.catalogue,
                 &mut self.ledger,
                 &self.ecology_scan,
                 &mut self.eaten,
