@@ -38,6 +38,7 @@ pub mod arena;
 pub mod balance;
 pub mod biology;
 pub mod cell;
+pub mod census;
 pub mod chem;
 pub mod config;
 pub mod ecology;
@@ -75,6 +76,7 @@ pub mod world;
 
 pub use biology::{BiologyConfig, BiologyReport, CellHost};
 pub use cell::{CellArena, CellId, CellSeed};
+pub use census::{Census, CensusLog, Cohort, CohortReading, Fate};
 pub use chem::{ChemTable, ChemicalDef, CHEM_COUNT};
 pub use config::VmConfig;
 pub use fixed::{POS_ONE, Q10_ONE};
