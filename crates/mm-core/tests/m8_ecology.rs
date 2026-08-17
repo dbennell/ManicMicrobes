@@ -427,28 +427,39 @@ fn the_shipped_organisms_reproduce() {
 }
 
 #[test]
-fn an_engulfer_cannot_pay_for_the_body_that_engulfment_needs() {
-    // The other half of the predation finding, and the reason the food-web guard above is red.
+fn an_engulfer_can_afford_the_body_engulfment_needs() {
+    // **This test used to assert the opposite, and flipping it is the result.**
     //
-    // `docs/FEEDING.md` §4 rules out every predation fix that does not move the deposit to the
-    // predator, and engulfment is the one route that does: the body arrives *inside* the eater and
-    // arrives as *structure*. `genomes/engulfer.mm` is written for it — and it is the first genome
-    // in the tree to open a vacuole's mouth at all, which is its own finding, because the
-    // mechanism has been in `ecology.rs` unused.
+    // It was written when `engulfer.mm` died at about tick 700 of its own upkeep, and it said so
+    // out loud: "when `ECONOMY.md` §12.1 is fixed it should start failing, and that is the signal
+    // that the fix reached the thing it was for." It started failing. §12.1 was not fixed — the
+    // genome was, twice, and the diagnosis in the old version of this comment was wrong.
     //
-    // It builds the body it is written to build, holds it for a hundred ticks, and starves. Alone
-    // at full light it reaches mass 147 with six organelles by tick 100, is down to the membrane
-    // alone by 300 — the chloroplast shed to pay for the rest, which is the spiral — and is dead
-    // by 700. Peroxide never exceeds 11 and damage stays at zero, so this is upkeep against
-    // income and not the exhaust problem.
+    // What was actually killing it, in order of discovery:
     //
-    // `docs/ECONOMY.md` §12.1 measured the same wall from the other side: 818 cells at four
-    // organelles, 666 at six, zero at eight. An engulfer needs six and cannot give any of them
-    // up — the vacuole is the mouth and the shell is the mass.
+    //   1. It had no lysosome. Once engulfment began handing over a victim's body as *carrion*
+    //      rather than as structural matter, a swallowed cell was inedible: carrion held climbed
+    //      to 88 — the body's whole `interior_capacity` — and sat there. It was eating from tick
+    //      200 and starving with a full stomach.
+    //   2. It ate its own children. `SPLIT` halves mass evenly, so a mother qualifies to swallow
+    //      her daughter the moment she doubles back to her divide weight, and `#divide` needs
+    //      energy as well as mass so a fat, poor cell sails past that weight and keeps growing.
+    //      The lineage peaked at thirty and ate itself down while every survivor was well fed.
+    //   3. It was carrying a shell as ballast that the vacuole and lysosome now supply, which is
+    //      a seventh organelle in a catalogue where §12.1 measures eight as fatal.
     //
-    // **This test asserts the current failure on purpose.** When §12.1 is fixed it should start
-    // failing, and that is the signal that the fix reached the thing it was for. Do not relax it;
-    // update it, and expect `a_food_web_holds_together_guard` to go green in the same commit.
+    // So the body *is* affordable, and what §12.1 measures is real but was never what this
+    // particular cell was dying of. A comfortable explanation that happened to be true of
+    // something else.
+    //
+    // What this now guards is the pair of properties the genome has to keep: it must build a body
+    // big enough to qualify, and it must be able to pay for that body indefinitely with no prey
+    // at all — because a predator that cannot outlive a famine is not a predator, it is a bloom.
+    //
+    // It does **not** claim the engulfer thrives. Alone it survives at one cell, which is exactly
+    // right for a heterotroph's upkeep on an autotroph's income. In a community it holds twenty to
+    // fifty cells to tick 5,000 and falls away by 10,000, and that is still open — see the
+    // genome's own header.
     let bytes = assemble("engulfer.mm");
     let mut world = World::new(scenario("predator_introduction.ron")).expect("world");
     world.place_community(&[("engulfer", &bytes, 1)], mm_core::Placement::Spread);
@@ -470,12 +481,11 @@ fn an_engulfer_cannot_pay_for_the_body_that_engulfment_needs() {
     );
 
     world.run(1_400);
-    let n = world.cells().len();
-    assert_eq!(
-        n, 0,
-        "the engulfer survived {n} cells past 1,500 ticks. If `ECONOMY.md` §12.1 has been fixed \
-         this is the good news and this test is what has to change — see its header. If it has \
-         not, a large body has become affordable by some other route and that is worth knowing."
+    assert!(
+        !world.cells().is_empty(),
+        "the engulfer died inside 1,500 ticks with nothing to eat. It is meant to be able to sit \
+         out a famine on its chloroplast — if it cannot, either its upkeep has risen or its \
+         income has fallen, and `docs/ECONOMY.md` §12.1 is where to look."
     );
     world.check_matter().expect("books balance");
 }
