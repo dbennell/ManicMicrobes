@@ -923,6 +923,35 @@ pub fn step(
                 crate::fixed::pos_to_square(cells.x[i]),
                 crate::fixed::pos_to_square(cells.y[i]),
             );
+            // What the cell has already caught, before what is going past.
+            //
+            // [`captured`] is about *interception* — how much of the drift a holdfast can take
+            // out of the water — and matter that is already inside has been intercepted. So it
+            // is converted at the filter's own throughput without asking the flow for permission
+            // a second time, which is also why `speed` does not appear in this half.
+            //
+            // Without it, `EAT` on detritus was the same dead end carrion was: the opcode would
+            // put it in the cytoplasm and nothing could ever take it out again.
+            // **The filter deliberately does *not* read the interior, and the lysosome does.**
+            //
+            // It was given an interior draw in the same pass that gave the lysosome one, on the
+            // symmetry that both organelles transform something a cell might be carrying. The
+            // symmetry is false and `tests/sponge.rs` caught it inside one run:
+            //
+            //   a_cell_carried_by_the_water_catches_nothing
+            //   anchored took 38,805,955 -- adrift took 41,290,393
+            //
+            // A holdfast's income is *interception* — `captured` scales with the slip the
+            // holdfast refused, so a cell carried along by the current catches nothing, and that
+            // is the whole design rather than a detail of it. An interior draw is by definition
+            // flow-free, and passive transport quietly fills every cell's cytoplasm with whatever
+            // it is standing in, so the drifting cell simply converted its own leakage and
+            // out-earned the anchored one. Holding station stopped buying anything.
+            //
+            // The lysosome has no such property to lose: it digests a pool, and where the pool is
+            // does not change what digestion means. So the interior route belongs to it alone,
+            // which is also the right answer for engulfment — a swallowed body is digested, not
+            // strained out of the water.
             let here = substrate.chem_at(DETRITUS, sx, sy);
             if here > 0 {
                 // From the physics phase, because it is the only place the answer exists: a
@@ -990,12 +1019,35 @@ pub fn step(
                 crate::fixed::pos_to_square(cells.x[i]),
                 crate::fixed::pos_to_square(cells.y[i]),
             );
-            let available = substrate.chem_at(CARRION, sx, sy);
-            let taken = capacity.min(available).max(0);
-            if taken <= 0 {
-                continue;
+            // **What the cell is carrying, before what it is standing in.**
+            //
+            // A lysosome that could only reach the square was the reason `EAT` on carrion was a
+            // dead end: the opcode takes any chemical into the cytoplasm, and carrion arriving
+            // there could never be turned into anything again. Matter went in and did not come
+            // out, which is a sink wearing the costume of a meal.
+            //
+            // It is also what stopped a cell eating another cell. Engulfment puts a body inside
+            // the eater, and a stomach that can only digest the floor is not a stomach —
+            // `genomes/engulfer.mm` starved holding its dinner.
+            //
+            // Inside first rather than in some proportion, because the alternative loses a
+            // swallowed meal to whatever else is standing on the same square, and the whole
+            // point of swallowing is that the meal is yours. The square is the remainder.
+            let held = cells.interior(i)[CARRION].max(0);
+            let from_inside = capacity.min(held);
+            if from_inside > 0 {
+                cells.interior_mut(i)[CARRION] =
+                    cells.interior(i)[CARRION].saturating_sub(from_inside);
             }
-            let moved = -substrate.add_chem(CARRION, sx, sy, -taken);
+            let headroom = capacity.saturating_sub(from_inside);
+            let available = substrate.chem_at(CARRION, sx, sy);
+            let taken = headroom.min(available).max(0);
+            let from_square = if taken > 0 {
+                (-substrate.add_chem(CARRION, sx, sy, -taken)).max(0)
+            } else {
+                0
+            };
+            let moved = from_inside.saturating_add(from_square);
             if moved <= 0 {
                 continue;
             }
