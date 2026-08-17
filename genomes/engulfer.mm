@@ -50,105 +50,101 @@
 ;
 ; This genome targets a little over 200, which reaches p90 and leaves headroom under the cap.
 ;
-; ---------------------------------------------------------------- mass is bought with shell
+; ---------------------------------------------------------------- mass, and the shell that went
 ;
 ; Mass comes from building organelles: `matter_cost = build_matter + build_matter_per_param *
-; param`, and it lands in `cells.mass`. So the question is which organelle is the cheapest
-; ballast, and the answer is not the vacuole:
+; param`, and it lands in `cells.mass`. This carried a `param 160` shell for a while purely as
+; ballast, on the arithmetic that a shell is the cheapest mass in the catalogue — 76.8 units for
+; 2.07 of upkeep at param 255, against a vacuole's 35.9 for 2.12 — with `control[0] = 0` so that
+; it covered nothing and shaded nothing while still weighing everything.
 ;
-;   at param 255      mass    upkeep/tick    mass per upkeep
-;   vacuole           35.9        2.12             17
-;   shell             76.8        2.07             37
+; **It is gone, and dropping it cost nothing measurable.** Once the vacuole grew to 120 and a
+; lysosome arrived, the body reached mass 125 on its own, which already clears twice the median
+; prey of 60. The shell was buying bulk this cell no longer had to buy, at the price of a seventh
+; organelle in a catalogue where `ECONOMY.md` §12.1 measures eight as fatal.
 ;
-; A shell is **twice the mass for the same upkeep**, because `build_matter_per_param` is q10/4
-; against the cheap default's q10/8 and its base upkeep is the lowest in the catalogue.
+; The trick is left written down because it is real and a descendant may want it: a shell opened
+; to nothing is mass without shade, which is the trade `control[0]` exists to express. What it
+; costs is being edible — an open shell adds nothing to the bulk an eater has to get round.
 ;
-; The catch is that a shell shades what is under it — `shell_cover_of` scales cover by
-; `control[0]`, and the same word closes the shell and darkens the cell, deliberately, because
-; "it is one surface doing one thing". A finished organelle starts at `[Q10_ONE, 0]`, so a shell
-; built and left alone is shut and dark.
+; Measured on `predator_introduction.ron` with 24 ancestors and mutation on, mass in whole units,
+; which is where the targets above come from:
 ;
-; So `#bulk` opens it: `control[0] = 0` is a shell that covers nothing, shades nothing, protects
-; nothing, and still weighs everything. That is not a loophole, it is the trade the control word
-; exists to express — a genome that wants the light back opens up, and this one wants the light
-; and the ballast and is willing to be edible for them. A descendant that meets something big
-; enough to swallow it has the other setting available and one mutation away.
+;   tick     cells   min   p50   p90   max
+;    500       170     7    49   113   144
+;  2,000     1,826     4    61   121   399
+;  5,000     3,090     4    59   108   399
+; 10,000     3,381     4    60   101   398
+;
+; The median prey weighs 60, so 120 buys the middle of the population and 220 buys nine tenths of
+; it. `max_mass` is 400, and the fattest ancestors sit there — those are food for nobody, because
+; eating one would take 800 and the ceiling forbids it.
 ;
 ; ---------------------------------------------------------------- and why it divides on mass
 ;
-; Engulfment has no kin check either, for the same reason the spike has none, and `SPLIT` halves
-; mass evenly — so mother and daughter come out of a division at 1:1 and neither can eat the
-; other while the ratio needs to be 2:1. The danger arrives later: a mother who regrows to twice
-; what her daughter still weighs qualifies, and `predator.mm`'s comment records what happens to a
-; lineage whose parent kills its young.
+; Dividing on **mass** rather than on energy keeps this lineage's weight in a band instead of
+; letting it drift upward, which matters because weight is the whole of what decides who it can
+; eat — including, without a kin check anywhere, its own daughters.
 ;
-; Dividing on **mass** rather than on energy is what keeps that from being a sterility switch. A
-; cell that splits the moment it reaches `BIG` can never be more than `BIG`, its daughters start
-; at `BIG/2`, and reaching twice a `BIG/2` daughter means reaching `BIG` — which is the tick it
-; divides instead. The two thresholds are the same number by construction, so the mother is
-; always dividing at the moment she would otherwise qualify, and she is small again immediately.
+; It is *not* sufficient on its own, and the third section below is the record of finding that
+; out: `#divide` needs energy as well as mass, so a fat and poor cell sails past `BIG` and keeps
+; growing. `#mouth` is what actually closes that hole. This gene keeps the band; that gene refuses
+; to qualify while the band is exceeded.
 ;
-; It is not proof against a *stalled* daughter: one that cannot feed stays at `BIG/2` while her
-; mother regrows, and is eventually eaten by her. That is left in deliberately. A starving
-; daughter being recycled by her mother is an ecological outcome, not a bug, and it is exactly
-; the kind of thing the engine should be allowed to do without anybody legislating about
-; families.
+; The energy guard stays, below the mass guard: a cell big enough but too poor to pay
+; `division_energy` must not spend the whole copy discovering that.
 ;
-; The energy guard stays as well, below the mass guard: a cell that is big enough but too poor to
-; pay `division_energy` must not spend the whole copy discovering that.
+; ---------------------------------------------------------------- WHAT KILLED IT, THREE TIMES
 ;
-; ---------------------------------------------------------------- IT DOES NOT WORK, AND WHY
+; The first draft of this header blamed `docs/ECONOMY.md` §12.1 — six organelles is unaffordable,
+; therefore an engulfer cannot live. **That was wrong, and it was wrong in the way a comfortable
+; explanation usually is: it was true of something, and it was not what was happening here.** Two
+; of the three things that killed this cell were bugs in this file.
 ;
-; **This genome is not viable, and it is shipped for the same reason `hunter.mm` is.** It builds
-; exactly the body it is written to build and then cannot pay for it. Alone on
-; `predator_introduction.ron` at full light, one founder, mutation off:
+; Measured on `predator_introduction.ron`, six founders against twenty-four ancestors, `Spread`:
 ;
-;   tick    mass  energy  organelles
-;      0      30     400  membrane nucleus/44 mito/50 chloro/60      (the seeded kit)
-;    100     147     393  membrane nucleus/56 mito/50 chloro/100 vacuole/24 shell/160
-;    200      73     214  the same six
-;    300      36     126  **membrane only** — everything else shed
-;    400      91      71  membrane, mito rebuilding
-;    500     132      40  membrane nucleus(building) mito vacuole — no chloroplast
-;    600     132       8  the same, and broke
-;    700       —       —  dead
+;   what it was                                    trajectory                    ends
+;   no lysosome                                    dead by tick 2,500            extinct
+;   + a lysosome                                   6 30 18 14 5                  dead by 10,000
+;   + a mouth that shuts at BIG                    6 29 14 28 24 ... 4           holds to 5,000
 ;
-; It reaches its target body inside a hundred ticks, holds it for a hundred more, and then
-; autophagy takes it apart from the outside in. The chloroplast goes with everything else, which
-; is the death spiral: the one organelle earning anything is shed to pay for the ones that are
-; not, and it never gets rebuilt because rebuilding it costs energy the cell no longer has.
+; **First: it had no gut.** Engulfment used to deposit a victim as structural matter, which is
+; build material and needs no enzyme, so the first draft carried no lysosome deliberately and said
+; so — "matter is what it steals, light is what it works for". Once a swallowed cell began handing
+; over its cytoplasm and its body separately, the body arrived as *carrion*, and this cell had
+; nothing to digest it with. The instrumentation said so plainly and nobody read it: carrion held
+; climbed to 88, which is exactly this body's `interior_capacity`, and stopped. It was eating from
+; tick 200 and starving with a full stomach the entire time.
 ;
-; It **starves**; it is not poisoned. Peroxide never exceeds 11 and damage stays at zero for the
-; whole run, so this is not the exhaust problem — it is upkeep against income, flat out.
+; **Second: it ate its own children.** `ecology::step` gates a kill on bulk and has no kin check,
+; so a genome cannot refuse a victim — the engine picks. `SPLIT` halves mass evenly, so a mother
+; qualifies to swallow her daughter the moment she doubles back to her divide weight. The first
+; draft called that safe on the grounds that the two thresholds were the same number, and they are
+; not: `#divide` also needs *energy*, so a cell that is fat and poor sails past `BIG` and keeps
+; growing. Cells were measured at 249 against a divide threshold of 140, which is twice a 124-unit
+; daughter with room to spare. The lineage peaked at thirty and ate itself back down while every
+; survivor was well fed — high mass, high energy, falling population, which is a signature worth
+; recognising because it looks nothing like starvation.
 ;
-; And that is not a fixable property of this genome. `docs/ECONOMY.md` §12.1 measured the same
-; wall from the other side, with matched pairs built by hand so mutation never had to find them:
+; `#mouth` is the fix and it is the interesting one: **not to qualify.** Past `BIG` the cell shuts
+; its mouth, because the only things it now outweighs two to one are its own young.
 ;
-;     pairs  organelles   population   starved   poisoned
-;         1           4          818     2,177          0
-;         2           6          666       737          0
-;         3           8            0        16        153
-;         4          10            0         0         32
+; **Third, and still open: it does not hold past five thousand ticks.** With both fixed it
+; sustains twenty to fifty cells to tick 5,000 and is down to four by 10,000 — with a scavenger
+; present and mutation on, twenty-one at 2,000 and one at 10,000. It is no longer dying of any of
+; the above: energy is high at the end, not low. What it is dying of is not yet known, and the
+; candidates are §12.1's ceiling (this still carries six organelles), prey growing past what it
+; can outweigh as the slide fills, and the mouth-shut band above `BIG` leaving it a pure autotroph
+; for long stretches with a heterotroph's upkeep.
 ;
-; Six organelles is where the population has already fallen by a fifth and eight is where it
-; reaches zero. This cell has six, and it needs them: the vacuole is the mouth, the shell is the
-; mass, and neither is optional for a cell whose whole living is being twice the bulk of its
-; neighbour. A leaner engulfer is not an engulfer.
-;
-; So the conclusion is about the engine and not about the assembly. **Predation needs ownership of
-; the kill, ownership needs engulfment, engulfment needs a large body, and a large body is not
-; currently affordable.** M8's trophic-structure gate is therefore blocked behind §12.1, whose
-; stated cause is that respiration's exhaust scales with respiration while excretion does not —
-; and the starvation mode measured here says upkeep against income is the half of it that bites
-; first, before the exhaust does.
-;
-; What this genome is for, until that changes: it is the smallest complete statement of the
-; problem. It assembles, it fits its nucleus, it builds the right body, it opens the first vacuole
-; mouth in `genomes/`, and it dies of the bill. When §12.1 is fixed this genome should live, and
-; that makes it the test for whether the fix worked.
+; So the honest state: engulfment works, the feeding chain works, and this genome is viable for a
+; few thousand ticks and not yet for twenty. `an_engulfer_cannot_pay_for_the_body_that_engulfment
+; _needs` still passes and still asserts the *solo* case, which is unchanged — alone on a slide
+; with nothing to eat it dies of upkeep at about tick 700, and that part was always about §12.1.
 
         EXPRESS #build
         EXPRESS #bulk
+        EXPRESS #gut
         EXPRESS #mouth
         EXPRESS #feed
         EXPRESS #keep
@@ -193,18 +189,42 @@
 ; `control[0] = 0` declines the cover so the chloroplast above still sees the sun.
 
         GENE    #bulk
-        IMM     24              ; vacuole — the mouth. Small: see below.
+        IMM     120             ; vacuole — the mouth, and the stomach it needs to be
         IMM     4
         IMM     4
         BUILD
-        IMM     160             ; shell — ballast, not armour
-        IMM     15
-        IMM     5
+        RET
+
+; ---------------------------------------------------------------- the gut
+;
+; **Without this the cell swallows and starves with its mouth full**, and it did, for exactly as
+; long as this gene was missing. Measured on `predator_introduction.ron`, six founders, prey in
+; reach from tick zero:
+;
+;   tick   cells   mass   energy   carrion held
+;    200      10    107      214             44
+;    500       3    361       98             88
+;   1000       0      0        0              —
+;
+; It was eating from the first two hundred ticks. The carrion column is the whole story: it climbs
+; to 88 and stops, because 88 is this body's `interior_capacity` — sixty-four base plus what the
+; vacuole adds — and then nothing happens to it ever again. A swallowed body arrives as *flesh*,
+; and flesh is not food until something digests it.
+;
+; That is a change this genome was written before. Engulfment used to deposit the victim's mass as
+; structural matter, which is build material and needs no enzyme, so the first draft carried no
+; lysosome and said so in its header: "matter is what it steals; light is what it works for". Once
+; a swallowed cell started handing over its cytoplasm and its body separately, the body became
+; carrion and the header became wrong.
+;
+; No `OSET` needed: a lysosome is not one of the organelles that reaches outside the membrane, so
+; `default_control` starts it at `[Q10_ONE, 0]` — open — where a spike or a holdfast starts shut.
+
+        GENE    #gut
+        IMM     100             ; lysosome, to turn what it swallows into something burnable
+        IMM     11
+        IMM     6
         BUILD
-        ZERO                    ; control 0 — cover *nothing*, so the light still lands
-        ZERO
-        IMM     5
-        OSET
         RET
 
 ; ---------------------------------------------------------------- open the mouth
@@ -218,7 +238,41 @@
 ;
 ; So a mouth has to be asked for, every generation, by a genome that means it. This one means it.
 
+; It shuts the mouth once it is big, and that is not thrift — it is the only defence against
+; eating its own young that a genome has.
+;
+; `ecology::step` gates a kill on bulk and nothing else. There is no kin check and there must not
+; be one, so **a genome cannot refuse a victim**; appetite is all-or-nothing and the engine picks
+; the target. The only lever left is not to *qualify*: stay under twice the weight of whatever is
+; standing next to you.
+;
+; `SPLIT` halves mass evenly, so a mother at `BIG` leaves two cells at `BIG/2` and reaches twice
+; her daughter's weight exactly when she gets back to `BIG`. The first draft called that safe
+; because `BIG` is also the divide threshold — she would divide on the same tick she qualified.
+; It is not safe, because `#divide` needs mass **and** energy, and a cell that is fat but poor
+; sails past `BIG` and keeps growing. Measured: a divide threshold of 140 and cells at 249, which
+; is twice a 124-unit daughter with room to spare. The lineage peaked at thirty and ate itself
+; back down to nothing while every survivor was well fed.
+;
+; So the mouth closes at `BIG` instead. Past that weight the cell has nothing to gain by eating —
+; it is trying to divide — and everything to lose, because the only things it now qualifies to
+; swallow are its own children.
+
         GENE    #mouth
+        ZERO                    ; reading 0 — this cell's own mass
+        ZERO                    ; slot 0 — the membrane is the self-sensor
+        OGET
+        IMM     140             ; BIG, the same number `#divide` uses
+        CMP
+        ONE
+        ADD
+        JMPZ    hungry          ; under weight — safe to eat, nothing here is half of me
+        ZERO                    ; at weight — shut, before a daughter looks like dinner
+        ONE
+        IMM     4
+        OSET
+        RET
+hungry:
         IMM     255
         IMM     2
         SHL                     ; 1020, near the Q10 clamp
