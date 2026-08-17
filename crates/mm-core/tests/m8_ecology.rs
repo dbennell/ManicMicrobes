@@ -864,12 +864,32 @@ fn acceptance_allopatric_speciation() {
 /// reports therefore differ from those recorded before this commit**, and every figure quoted in
 /// the assertions below was re-measured on it.
 ///
-/// `predator.mm` rather than `hunter.mm`. The hunter is deliberately a bad predator — it has no
-/// lysosome, so it pays the dearest upkeep in the catalogue and its kills become carrion that its
-/// competitors eat. Seeding it here measured that, not a trophic structure: the guard came back
-/// with seven predators in seventeen thousand cells across every scenario in the library. Which is
-/// a result about the hunter, and it is why the hunter is shipped, but a level that cannot pay for
-/// itself is not a level.
+/// # `sentinel.mm`, and why it is not `predator.mm`
+///
+/// The spike lineage in `genomes/` is four genomes at four stages of discovery: `hunter.mm` has a
+/// spike and no stomach and pays for its neighbours' lunch; `predator.mm` adds the stomach and had
+/// to turn its weapon down to a sixty-fourth to stop killing its own daughters; `sentinel.mm` adds
+/// a badge and a touch sensor, can therefore tell its children from its dinner, and carries the
+/// weapon at full extension again; `stalker.mm` adds eyes.
+///
+/// **This seeded the second of the four, and that is the whole reason the guard below was red.**
+/// Measured over 20,000 ticks on this slide, six founders each, with the scavenger present:
+///
+///   predator.mm    79  54  39  25  17   6   4   3     collapsed
+///   sentinel.mm   187 203 226 197 182 130  93  68     held
+///   stalker.mm     17   0   0   0   0   0   0   0     extinct at 5,000
+///
+/// So a food web does hold here, and it took the genome that can tell kin from prey. SPEC §13's
+/// extension table is why: a spike at 512 reaches a population of one and a spike at 16 reaches
+/// 64, and the sentinel is the only one of the four that can run the weapon hard without
+/// sterilising itself.
+///
+/// **`stalker.mm` is worse than blind, and that is a finding rather than a bug in it.** Its own
+/// header says the sense is "a homing sense and not a searching one" with an `em_range` of six
+/// squares — and `Spread` puts six founders some fifty squares apart, so it reads a gradient of
+/// exactly zero and sits still, where the blind genomes at least wander into something. Eyes with
+/// no search behind them are a liability. What that wants is a run-and-tumble: wander while the
+/// gradient is zero, steer when it is not. Nothing in `genomes/` does that yet.
 fn run_food_web(seed_value: u64, ticks: u64, sample: u64) -> (CensusLog, Vec<Cohort>) {
     let mut s = scenario("predator_introduction.ron");
     s.seed = seed_value;
@@ -880,12 +900,12 @@ fn run_food_web(seed_value: u64, ticks: u64, sample: u64) -> (CensusLog, Vec<Coh
     });
 
     let ancestor = assemble("ancestor.mm");
-    let predator = assemble("predator.mm");
+    let sentinel = assemble("sentinel.mm");
     let scavenger = assemble("scavenger.mm");
     let cohorts = world.place_community(
         &[
             ("ancestor", &ancestor, 24),
-            ("predator", &predator, 6),
+            ("sentinel", &sentinel, 6),
             ("scavenger", &scavenger, 6),
         ],
         mm_core::Placement::Spread,
@@ -963,14 +983,14 @@ fn acceptance_trophic_structure() {
         // counter-move count was taken between two columns that both track the founder kit more
         // than they track anybody's fortunes.
         let prey = log.fate("ancestor");
-        let hunters = log.fate("predator");
+        let hunters = log.fate("sentinel");
         let both_held = prey.held() && hunters.held();
         let counter_moves = log
             .samples()
             .windows(2)
             .filter(|w| {
                 let at = |c: &Census, label: &str| c.cohort(label).map_or(0, |r| r.cells);
-                (at(&w[1], "predator") > at(&w[0], "predator"))
+                (at(&w[1], "sentinel") > at(&w[0], "sentinel"))
                     != (at(&w[1], "ancestor") > at(&w[0], "ancestor"))
             })
             .count();
