@@ -298,6 +298,31 @@ ticks into substrate. That is a phagosome, it is what a real phagocyte does, and
 It also gives the vacuole a second reason to be large, which is the first time size has bought
 anything but a bill.
 
+### 6.2a It was built, it works, and the engulfer still dies
+
+Both halves landed. A lysosome now draws from the interior before the square, and engulfment hands
+over the victim's cytoplasm as itself, its minerals as themselves, and its body as carrion inside
+the eater. `engulf.rs::a_swallowed_cell_hands_over_its_cytoplasm` holds the mechanism to it.
+
+**It did not save `engulfer.mm`.** Seeded into `predator_introduction.ron` against 24 ancestors,
+20,000 ticks, with and without a rival scavenger:
+
+```text
+  with a scavenger      engulfer  0 0 0 0 0 0 0 0    extinct by tick 2,500
+  without one           engulfer  0 0 0 0 0 0 0 0    extinct by tick 2,500
+  sentinel, same slide  sentinel  187 203 226 197 182 130 93 68    held
+```
+
+Which is what the solo measurement already implied and nobody read carefully enough: it dies at
+about tick 700 **of its own upkeep, before it has eaten anything at all.** A food route is no use
+to a cell that cannot afford to stay alive long enough to use it.
+
+So §6.1 and §6.2 are discharged and the wall behind them is exactly where §6.4 said it was. The
+order of work in §7 stands, with step 2's prediction now answered in the negative: cells that *can*
+eat still cannot live, because six organelles is unaffordable. The next lever is not another
+feeding mechanism. It is §6.4 — either the specialisation ceiling, or multicellularity as the
+cheaper way round it.
+
 ### 6.3 Nothing swims
 
 `ECONOMY.md` §14.1: a cell below 192 `Q10` of thrust is driven *backwards* by its own wake. One
