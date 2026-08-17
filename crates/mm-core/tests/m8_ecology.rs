@@ -14,6 +14,7 @@ use std::path::Path;
 
 use mm_core::biology::BiologyConfig;
 use mm_core::cell::{CellId, CellSeed};
+use mm_core::census::{Census, CensusLog, Cohort};
 use mm_core::config::VmConfig;
 use mm_core::ecology::{TrophicMix, CARRION};
 use mm_core::events::Occurrence;
@@ -794,8 +795,28 @@ fn acceptance_allopatric_speciation() {
 // > In the predator scenario, a stable predator-prey oscillation persists for > 1,000,000
 // > ticks in >= 5 of 10 seeds.
 
-/// Seed a world with a mixed community and report the trophic mix over time.
-fn run_food_web(seed_value: u64, ticks: u64, sample: u64) -> Vec<TrophicMix> {
+/// Seed a world with a mixed community and report what became of each lineage.
+///
+/// # Seeded through `place_community`, which moves the numbers
+///
+/// This had its own seeding loop, and so did `strategy_mix_after` and `seed` — three of them in
+/// this file, at 400, 500 and 600 starting energy, with three different placement arithmetics.
+/// None of them was what the microscope and `mm-cli` do, which is `World::place_inhabitants`. A
+/// result taken on one was not comparable with a result taken on another, and this history was
+/// partly a statement about `placed * 7 % width`.
+///
+/// So it goes through [`World::place_community`] now: the front ends' own path, on the `Spread`
+/// lattice, with the nucleus sized to the genome rather than fixed at 96. **The populations this
+/// reports therefore differ from those recorded before this commit**, and every figure quoted in
+/// the assertions below was re-measured on it.
+///
+/// `predator.mm` rather than `hunter.mm`. The hunter is deliberately a bad predator — it has no
+/// lysosome, so it pays the dearest upkeep in the catalogue and its kills become carrion that its
+/// competitors eat. Seeding it here measured that, not a trophic structure: the guard came back
+/// with seven predators in seventeen thousand cells across every scenario in the library. Which is
+/// a result about the hunter, and it is why the hunter is shipped, but a level that cannot pay for
+/// itself is not a level.
+fn run_food_web(seed_value: u64, ticks: u64, sample: u64) -> (CensusLog, Vec<Cohort>) {
     let mut s = scenario("predator_introduction.ron");
     s.seed = seed_value;
     let mut world = World::new(s).expect("world");
@@ -804,76 +825,69 @@ fn run_food_web(seed_value: u64, ticks: u64, sample: u64) -> Vec<TrophicMix> {
         ..BiologyConfig::default()
     });
 
-    // `predator.mm` rather than `hunter.mm`. The hunter is deliberately a bad predator — it
-    // has no lysosome, so it pays the dearest upkeep in the catalogue and its kills become
-    // carrion that its competitors eat. Seeding it here measured that, not a trophic
-    // structure: the guard came back with seven predators in seventeen thousand cells across
-    // every scenario in the library. Which is a result about the hunter, and it is why the
-    // hunter is shipped, but a level that cannot pay for itself is not a level.
-    let genomes = [
-        (assemble("ancestor.mm"), 24u32),
-        (assemble("predator.mm"), 6),
-        (assemble("scavenger.mm"), 6),
-    ];
-    let (w, h) = (world.substrate().width(), world.substrate().height());
-    let mut placed = 0u32;
-    for (genome, count) in &genomes {
-        for _ in 0..*count {
-            let Ok(g) = world.genomes().intern(genome.clone()) else {
-                continue;
-            };
-            let x = (placed * 7 % w.saturating_sub(1).max(1)) as i32;
-            let y = (placed * 11 % h.saturating_sub(1).max(1)) as i32;
-            let id = world.spawn_cell(CellSeed {
-                x: pos(x),
-                y: pos(y),
-                mass: q10(30),
-                energy: q10(600),
-                membrane: 24,
-                key: 11,
-                badge: 0,
-                species: 0,
-                parent: CellId::NONE,
-                birth_tick: 0,
-                genome: g,
-            });
-            stock(&mut world, id);
-            placed += 1;
-        }
-    }
-    world.adopt_current_contents_as_baseline();
+    let ancestor = assemble("ancestor.mm");
+    let predator = assemble("predator.mm");
+    let scavenger = assemble("scavenger.mm");
+    let cohorts = world.place_community(
+        &[
+            ("ancestor", &ancestor, 24),
+            ("predator", &predator, 6),
+            ("scavenger", &scavenger, 6),
+        ],
+        mm_core::Placement::Spread,
+    );
 
-    let mut history = Vec::new();
+    let mut log = CensusLog::new();
+    log.sample(world.tick_count(), world.cells(), world.archive(), &cohorts);
     for _ in 0..(ticks / sample.max(1)).max(1) {
         world.run(sample);
-        history.push(TrophicMix::of(world.cells()));
+        log.sample(world.tick_count(), world.cells(), world.archive(), &cohorts);
         if world.cells().is_empty() {
             break;
         }
     }
-    history
+    (log, cohorts)
 }
 
 #[test]
 fn a_food_web_holds_together_guard() {
     // The mechanism check behind acceptance 2: three strategies seeded together must all still
     // be present a while later. Not the million-tick oscillation, which is the ignored test.
+    //
+    // # What this asserted before, and why `> 0` was not enough
+    //
+    // It asserted `total > 0` and `producers > 0`, and never looked at the predators at all. Both
+    // held while the predator lineage fell from 110 cells at tick 5,000 to two at tick 15,000 and
+    // stayed there — so the guard was green across the whole of the collapse it exists to notice.
+    //
+    // The producers column could not have caught it either, in either direction. It is the guild
+    // census of SPEC §13 and it is right about guilds: it counts every cell carrying a chloroplast,
+    // the founder kit hands out a finished one, and so it reads 955–999 permille on every lit slide
+    // in the library whatever is happening to anybody. What a lineage is doing is a different
+    // question and `mm_core::census` is where it is asked.
     let ticks = if cfg!(debug_assertions) {
         2_000
     } else {
         20_000
     };
-    let history = run_food_web(1, ticks, ticks / 8);
-    let last = history.last().copied().unwrap_or_default();
-    eprintln!(
-        "after {ticks} ticks: {} producers, {} predators, {} scavengers, {} osmotrophs of {}",
-        last.producers, last.predators, last.scavengers, last.osmotrophs, last.total
-    );
+    let (log, _) = run_food_web(1, ticks, ticks / 8);
+    eprintln!("{}", log.report());
+    let last = log.last().expect("at least one census");
     assert!(last.total > 0, "the whole community died");
-    assert!(
-        last.producers > 0,
-        "the producers went extinct and took the food web with them"
-    );
+    for (label, fate) in log.fates() {
+        assert!(
+            fate.held(),
+            "the {label} lineage did not hold over {ticks} ticks: {}.\n\nA lineage that peaks and \
+             then falls below a quarter of its peak is not part of a food web, whatever the guild \
+             columns say. If this is the predator, the parameters to look at are `spike_damage` \
+             and `spike_upkeep`, and SPEC §13's extension table is the place to start — but note \
+             that `predator.mm` already mounts its spike at extension 16, which is the survivable \
+             setting that table recommends, so a collapse here is not the newborn cliff and is \
+             worth understanding rather than tuning.\n\n{}",
+            fate.describe(),
+            log.report()
+        );
+    }
 }
 
 #[test]
@@ -884,33 +898,47 @@ fn acceptance_trophic_structure() {
     let mut survived = 0;
 
     for s in seeds {
-        let history = run_food_web(s, ticks, 5_000);
-        let last = history.last().copied().unwrap_or_default();
-        // "A stable oscillation persists" is read as: both levels are still present at the
-        // end, and neither ran away — a predator that ate everything and starved is not an
+        let (log, _) = run_food_web(s, ticks, 5_000);
+        // "A stable oscillation persists" is read as: both levels are still a going concern at
+        // the end, and neither ran away — a predator that ate everything and starved is not an
         // oscillation, and neither is a prey population that was never touched.
-        let both_present = last.producers > 0 && last.predators > 0;
-        let oscillated = history
+        //
+        // Read off the lineages rather than the guild columns, which is the correction this
+        // commit is for. `last.predators > 0` was satisfied by a two-cell remnant out of 3,600
+        // and reported it as a structure that had persisted for a million ticks; and the
+        // counter-move count was taken between two columns that both track the founder kit more
+        // than they track anybody's fortunes.
+        let prey = log.fate("ancestor");
+        let hunters = log.fate("predator");
+        let both_held = prey.held() && hunters.held();
+        let counter_moves = log
+            .samples()
             .windows(2)
-            .filter(|w| (w[1].predators > w[0].predators) != (w[1].producers > w[0].producers))
+            .filter(|w| {
+                let at = |c: &Census, label: &str| c.cohort(label).map_or(0, |r| r.cells);
+                (at(&w[1], "predator") > at(&w[0], "predator"))
+                    != (at(&w[1], "ancestor") > at(&w[0], "ancestor"))
+            })
             .count();
         eprintln!(
-            "seed {s}: ended {} producers / {} predators, {oscillated} counter-moves over {} \
-             samples",
-            last.producers,
-            last.predators,
-            history.len()
+            "seed {s}: prey {} | predators {} | {counter_moves} counter-moves over {} samples",
+            prey.describe(),
+            hunters.describe(),
+            log.samples().len()
         );
-        if both_present && oscillated * 4 > history.len() {
+        if both_held && counter_moves * 4 > log.samples().len() {
             survived += 1;
         }
     }
     eprintln!("a predator-prey structure persisted in {survived} of 10 seeds");
     assert!(
         survived >= 5,
-        "a predator-prey structure persisted in only {survived} of 10 seeds. The parameters to \
-         look at are `spike_damage` and `spike_upkeep` — a spike that is too cheap eats \
-         everything and starves, and one that is too dear is never worth building."
+        "a predator-prey structure persisted in only {survived} of 10 seeds, where a lineage \
+         counts as persisting only if it ended above a quarter of its own peak. The parameters to \
+         look at are `spike_damage` and `spike_upkeep` — a spike that is too cheap eats everything \
+         and starves, and one that is too dear is never worth building. Note before tuning either: \
+         `predator.mm` mounts its spike at extension 16, the survivable setting SPEC §13's table \
+         recommends, so a collapse here is not the newborn cliff."
     );
 }
 
@@ -992,7 +1020,7 @@ fn acceptance_extinction_and_recovery() {
 // > No scenario in the library collapses to a single strategy within 100,000 ticks. If one
 // > does, it is a balancing bug, not a result.
 
-fn strategy_mix_after(name: &str, ticks: u64) -> Option<TrophicMix> {
+fn strategy_mix_after(name: &str, ticks: u64) -> Option<Census> {
     let mut world = World::new(scenario(name)).expect("world");
     world.set_biology(BiologyConfig {
         mutation: MutationRates::default(),
@@ -1002,39 +1030,23 @@ fn strategy_mix_after(name: &str, ticks: u64) -> Option<TrophicMix> {
     // question about whether a variety can coexist, not about whether one can invent the
     // others. The hunter is in here as well as the predator: it is a viable-but-worse variant,
     // and a world that cannot keep a worse variant alive at all is a world with one answer.
-    for genome in ["ancestor.mm", "hunter.mm", "predator.mm", "scavenger.mm"] {
-        let bytes = assemble(genome);
-        seed_one(&mut world, &bytes, 8);
-    }
-    world.adopt_current_contents_as_baseline();
+    let genomes: Vec<(String, Vec<u8>)> = ["ancestor.mm", "hunter.mm", "predator.mm", "scavenger.mm"]
+        .iter()
+        .map(|g| ((*g).to_string(), assemble(g)))
+        .collect();
+    let members: Vec<(&str, &[u8], u32)> = genomes
+        .iter()
+        .map(|(label, bytes)| (label.as_str(), bytes.as_slice(), 8u32))
+        .collect();
+    let cohorts = world.place_community(&members, mm_core::Placement::Spread);
     world.run(ticks);
-    (!world.cells().is_empty()).then(|| TrophicMix::of(world.cells()))
+    (!world.cells().is_empty()).then(|| world.census(&cohorts))
 }
 
-fn seed_one(world: &mut World, genome: &[u8], n: u32) {
-    let (w, h) = (world.substrate().width(), world.substrate().height());
-    for k in 0..n {
-        let Ok(g) = world.genomes().intern(genome.to_vec()) else {
-            continue;
-        };
-        let x = ((k * 13 + genome.len() as u32) % w.max(1)) as i32;
-        let y = ((k * 17 + genome.len() as u32) % h.max(1)) as i32;
-        let id = world.spawn_cell(CellSeed {
-            x: pos(x),
-            y: pos(y),
-            mass: q10(30),
-            energy: q10(500),
-            membrane: 24,
-            key: 11,
-            badge: 0,
-            species: 0,
-            parent: CellId::NONE,
-            birth_tick: 0,
-            genome: g,
-        });
-        stock(world, id);
-    }
-}
+// `seed_one` lived here — the third of this file's three seeding loops, at 500 starting energy on
+// a `(k * 13 + len) % width` lattice. `strategy_mix_after` was its only caller and now seeds
+// through `World::place_community`, so it is gone rather than kept for a future caller: a second
+// way to put cells on a slide is how the numbers stopped being comparable in the first place.
 
 /// Every scenario the library ships, so a new one cannot be added without being checked.
 const LIBRARY: [&str; 18] = [
@@ -1189,14 +1201,11 @@ fn no_degenerate_optimum_guard() {
         10_000
     };
     for name in LIBRARY {
-        let Some(mix) = strategy_mix_after(name, ticks) else {
+        let Some(census) = strategy_mix_after(name, ticks) else {
             eprintln!("{name}: extinct at {ticks} ticks");
             continue;
         };
-        eprintln!(
-            "{name}: {} producers, {} predators, {} scavengers, {} osmotrophs of {}",
-            mix.producers, mix.predators, mix.scavengers, mix.osmotrophs, mix.total
-        );
+        eprintln!("{name}:\n{}", census.report());
     }
 }
 
@@ -1204,23 +1213,34 @@ fn no_degenerate_optimum_guard() {
 #[ignore = "100,000 ticks across the whole library; --release --ignored"]
 fn acceptance_no_degenerate_optimum() {
     let ticks = common::env_usize("MM_M8_TICKS", 100_000) as u64;
+    // # Measured on lineage shares, not on guild columns
+    //
+    // This read `TrophicMix::is_monoculture`, which cannot answer the question. The founder kit
+    // hands every seeded cell a finished chloroplast, so the producers column stands at 955–999
+    // permille across **fifteen of the eighteen** library scenarios at a tenth of this tick budget
+    // — soup 955, the tide 967, the short night 999. The only three under the line are the three
+    // where most surviving cells no longer carry a chloroplast at all (the thicket 753, the lean
+    // water 227 against 773 osmotrophs, the drift 896). The test could therefore only ever fail,
+    // and it would have failed while measuring nothing but the kit. It is `#[ignore]`d, which is
+    // why nobody found out.
+    //
+    // Lineage shares discriminate where guild columns do not: on the food-web slide the ancestor
+    // cohort holds 877 permille at tick 40,000, which is dominance and not degeneracy, and the
+    // number moves when the ecology moves.
     let mut collapsed = Vec::new();
     for name in LIBRARY {
-        let Some(mix) = strategy_mix_after(name, ticks) else {
+        let Some(census) = strategy_mix_after(name, ticks) else {
             eprintln!("{name}: extinct — not a monoculture, but not a result either");
             continue;
         };
-        eprintln!(
-            "{name}: {} producers, {} predators, {} scavengers, {} osmotrophs of {}",
-            mix.producers, mix.predators, mix.scavengers, mix.osmotrophs, mix.total
-        );
-        if mix.is_monoculture(950) {
+        eprintln!("{name}:\n{}", census.report());
+        if census.is_monoculture(950) {
             collapsed.push(name);
         }
     }
     assert!(
         collapsed.is_empty(),
-        "these scenarios collapsed to a single strategy within {ticks} ticks: {collapsed:?}. \
+        "these scenarios collapsed onto a single lineage within {ticks} ticks: {collapsed:?}. \
          The milestone says this is a balancing bug rather than a result — the costs to look \
          at are the chloroplast's upkeep against `spike_upkeep` and `digestion_efficiency`."
     );
