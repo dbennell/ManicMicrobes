@@ -368,6 +368,64 @@ else. That is a real answer to `FEEDING.md` §4 that does not need §12.1 fixed 
 
 ---
 
+### 6.5 Nothing sleeps, and now something can — but it cannot see the night
+
+Added after §6.4 because it is smaller than the four above and because it is half-done in a way
+worth recording precisely.
+
+**The mechanism landed.** `OrganelleSpec::upkeep_throttled` (ISA 14, `docs/ECONOMY.md` §17) makes
+three quarters of a mitochondrion's, chloroplast's, chemosynthetic granule's, lysosome's and
+diazosome's upkeep follow `control[0]`, so a cell that shuts an engine stops paying the working
+rate for it. Measured at +39% on lifespan in the dark. Before it, `OSET`ting a throttle to zero
+lowered what an organelle *produced* and not a unit of what it cost, which is why no shipped genome
+had ever closed one.
+
+**The sense did not.** A photosensor reports ambient light as `light / Q10_ONE`, and
+`the_short_night.ron` — the one shipped day/night world — runs between 128 and 1024. The whole
+cycle therefore reads as the integer **0** — measured, twenty distinct raw values between 128 and
+1023 and one distinct reading, in `tests/light_resolution.rs`. Not "zero except at noon": the
+triangle peaks at 1023, one short of the divisor, so the reading never reaches 1 at all. *A genome
+on that slide has no bits of information about the light.* This is the same defect `sensing.rs`'s
+own pH-sensor note describes and fixes for itself, and it has a direct bearing on the matrix in §5: `the_short_night` is listed
+there with "scarcity: none" and a 999‰ producer monoculture, and part of the reason is that the
+one strategy its name proposes is not expressible. A world cannot select for something no genome
+can perceive.
+
+**And the first genome to use it loses.** `genomes/sleeper.mm` is `ancestor.mm` plus one gene: it
+shuts the chloroplast when the cell holds no carbon dioxide, which is a state `the_thicket` was
+built to create. Measured over 20,000 ticks:
+
+| world | ancestor | sleeper | first dormancy |
+| --- | ---: | ---: | --- |
+| the arena, head to head | 567 | 497 | — |
+| `the_thicket` | 1,156 | 1,053 | tick 1,000 |
+| `the_lean_water` | 2,193 | 1,950 | tick 500 |
+
+The controls rule out the boring explanations. An ancestor with nothing changed but a 48-unit
+nucleus *ties*, so it is not genome length. `Occurrence::Dormancy` fires at tick 1,000 and 500 and
+never for the ancestor, so it is not a branch that never runs. **It idles, it saves what it should
+save, and it still loses.**
+
+What beats it is **chatter**: the gate is instantaneous and carbon dioxide is intermittent, so the
+cell reads zero on a tick the water has not refilled and is still shut when the CO2 arrives. Three
+quarters of a chloroplast's upkeep is 0.064 a tick, and one tick of missed fixation is worth more.
+A second gene, gating the *mitochondrion* on held sugar, was written and removed: it killed the
+lineage outright at 14,649 ticks, because `#grow` dumps eight units of surplus sugar every tick so
+the holding rounds to zero and the engine spends its life shut.
+
+So the honest state, and it is two statements not one:
+
+* **The mechanism works.** +39% on lifespan in a controlled dark, `tests/dormancy.rs`.
+* **There is nowhere for it to pay yet.** Idling wants a signal that *persists* — a night, a
+  season — and the only persistent scarcity in the library is the day/night cycle, which the
+  paragraph above shows no genome can perceive. The signals a genome *can* read are its own
+  interior chemistry, which is too jittery to gate on without hysteresis.
+
+That is a finding about the library and the sensor rather than about the pricing, and it puts two
+cheap things in front of any further work here: **give the light reading resolution** (an ISA bump,
+because it is genome-observable), and **give a genome a way to hold a throttle shut for N ticks**
+— which needs no engine change at all, only an `OSCILLATOR` in place of a reading.
+
 ## 7. The order of work, and why this order
 
 **This order was wrong in the first draft and §5 corrected it.** The draft put light rivalry first,
