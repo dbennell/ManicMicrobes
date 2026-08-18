@@ -458,37 +458,6 @@ fn acceptance_a_detector_fires_when_the_event_happens_and_not_before() {
 }
 
 #[test]
-fn a_detector_for_a_mechanism_that_does_not_exist_stays_silent() {
-    // The other half of "not before": a newspaper reporting a mechanism the engine has not got
-    // is reporting fiction. Which mechanisms those are changes every milestone — junctions
-    // arrived at M7 and predation at M8 — so this asks `detectable_now()` rather than carrying
-    // a list that silently rots into a list of things that merely have not happened yet.
-    let undetectable: Vec<Occurrence> = Occurrence::ALL
-        .iter()
-        .copied()
-        .filter(|o| !o.detectable_now())
-        .collect();
-    assert!(
-        !undetectable.is_empty(),
-        "every occurrence is implemented; delete this test rather than letting it pass vacuously"
-    );
-
-    let mut world = living_world(6, 64, 12, "ancestor.mm");
-    world.run(if cfg!(debug_assertions) {
-        1_000
-    } else {
-        10_000
-    });
-    for what in undetectable {
-        assert_eq!(
-            world.events().first(what),
-            None,
-            "{what:?} was reported, but its mechanism does not exist yet"
-        );
-    }
-}
-
-#[test]
 fn replication_is_reported_once_the_population_starts_dividing() {
     let mut world = living_world(7, 48, 8, "ancestor.mm");
     world.archive_mut().sample_interval = 25;

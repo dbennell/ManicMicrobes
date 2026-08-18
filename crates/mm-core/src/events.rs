@@ -68,8 +68,14 @@ pub enum Occurrence {
     /// the engine knows the word: a spike does damage, damage kills, and death makes carrion.
     Predation,
 
-    // --- Declared, not yet detectable. ---
-    /// Requires a dormant state, which nothing implements.
+    /// A cell has shut down machinery it is still carrying: an active organelle of a
+    /// [`crate::organelle::THROTTLEABLE`] type turned to zero, which lowers what it costs to keep
+    /// as well as what it produces.
+    ///
+    /// Only a genome can do this. `default_control` starts every one of those types wide open and
+    /// mutation edits genome bytes rather than control words, so a closed engine is always the
+    /// result of an `OSET` — this cell's, or an ancestor's whose loadout it inherited. That is
+    /// what makes it reportable as a strategy rather than as damage.
     Dormancy,
 }
 
@@ -104,10 +110,13 @@ impl Occurrence {
     /// events that did not happen is worse than one with fewer pages.
     #[must_use]
     pub fn detectable_now(&self) -> bool {
-        // M7 filled in the junction half; M8 filled in predation. `Dormancy` is what is left,
-        // and there is no dormant state to enter — SPEC lists it, nothing implements it, and a
-        // detector that fired for it would be reporting fiction.
-        !matches!(self, Occurrence::Dormancy)
+        // M7 filled in the junction half, M8 filled in predation, and `upkeep_throttled` filled
+        // in the last one. Dormancy sat here unimplementable for six milestones because SPEC §5
+        // describes it as `HALT` yielding the instruction budget, and thinking was never what a
+        // cell died of: the bill is organelle upkeep and nothing a genome could do reached it.
+        // Now that shutting an engine lowers what it costs to keep, a cell carrying a closed one
+        // is in a state, not merely running a cheap program.
+        true
     }
 
     /// A headline, in the register of a newspaper rather than a log file.
@@ -225,14 +234,17 @@ impl EventLog {
             Occurrence::Motility,
             Occurrence::ChemotacticMachinery,
             Occurrence::PhototacticMachinery,
+            Occurrence::Dormancy,
         ];
         if wanted.iter().all(|w| self.already(*w)) {
             return;
         }
+        let want_dormancy = !self.already(Occurrence::Dormancy);
         for i in world.cells.iter() {
             let mut cilia = false;
             let mut chemo = false;
             let mut photo = false;
+            let mut dormant = false;
             for o in world.cells.slots(i) {
                 if !o.is_active() {
                     continue;
@@ -243,15 +255,32 @@ impl EventLog {
                     OrganelleType::Photosensor => photo = true,
                     _ => {}
                 }
-            }
-            if !cilia {
-                continue;
+                // Machinery the cell is carrying and has switched off. Only a genome can put an
+                // organelle in that state — see `Occurrence::Dormancy` — so this reports a
+                // decision rather than a defect. Behind the flag because it is a five-element
+                // scan per slot per cell, and this whole loop exists to stop running once its
+                // firsts have all happened.
+                if want_dormancy
+                    && !dormant
+                    && crate::organelle::THROTTLEABLE.contains(&o.kind)
+                    && o.effort() == 0
+                {
+                    dormant = true;
+                }
             }
             let species = world.cells.species[i];
             let (x, y) = (
                 crate::fixed::pos_to_square(world.cells.x[i]),
                 crate::fixed::pos_to_square(world.cells.y[i]),
             );
+            // Before the cilium gate below, because sleeping is not something only swimmers do.
+            // Solvent, so that a corpse mid-collapse is not reported as having chosen to rest.
+            if dormant && world.cells.energy[i] > 0 && !self.already(Occurrence::Dormancy) {
+                self.record(tick, Occurrence::Dormancy, species, x, y);
+            }
+            if !cilia {
+                continue;
+            }
             // Motility means a cilium that is actually being driven, not merely owned: a
             // cell carrying an idle cilium has not moved and reporting it would be a lie.
             if !self.already(Occurrence::Motility)
@@ -499,11 +528,13 @@ mod tests {
         // The list shrank at M7, which is the point of having it: junctions, clusters and
         // foreign injection all became real, so they moved from one half to the other and
         // this test had to be updated deliberately rather than drifting.
-        // Everything except dormancy is implemented as of M8.
+        // Everything is implemented: M8 was the last of the junction and predation half, and
+        // `OrganelleSpec::upkeep_throttled` gave dormancy a state to be in. The list is empty and
+        // this test now guards the other direction — that nothing is quietly re-declared
+        // unimplementable to make a detector's absence look deliberate.
         for what in Occurrence::ALL {
-            assert_eq!(
+            assert!(
                 what.detectable_now(),
-                !matches!(what, Occurrence::Dormancy),
                 "{what:?} disagrees with what the engine actually implements"
             );
         }
@@ -544,10 +575,6 @@ mod tests {
             deduped.len(),
             Occurrence::ALL.len(),
             "ALL repeats a variant"
-        );
-        assert!(
-            !Occurrence::ALL.iter().all(|o| o.detectable_now()),
-            "if everything is detectable, the silence test has nothing left to check"
         );
     }
 

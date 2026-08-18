@@ -25,6 +25,7 @@
 use mm_core::biology::BiologyConfig;
 use mm_core::cell::{CellId, CellSeed};
 use mm_core::fixed::{pos, q10, Q10_ONE};
+use mm_core::events::Occurrence;
 use mm_core::light::LightRegime;
 use mm_core::{MutationRates, Organelle, OrganelleType, Scenario, World};
 
@@ -178,5 +179,44 @@ fn an_open_organelle_is_priced_exactly_as_it_was_before_any_of_this() {
         catalogue.upkeep(&slots),
         hand_summed,
         "a loadout at full throttle is not priced as the catalogue's own columns say"
+    );
+}
+
+#[test]
+fn the_timeline_reports_a_cell_that_has_shut_something_down() {
+    // `Occurrence::Dormancy` was declared at M5 and carried the note "requires a dormant state,
+    // which nothing implements" through six milestones, because SPEC §5 describes dormancy as
+    // `HALT` yielding the instruction budget and that was never what a cell died of. It is the
+    // last of the sixteen to get a mechanism, which is why the two tests that guarded the
+    // *absence* of one — `events::all_lists_every_kind_of_occurrence`'s trailing assert and
+    // `m5_phylogeny::a_detector_for_a_mechanism_that_does_not_exist_stays_silent` — are gone.
+    // Both said in as many words to delete them rather than let them pass vacuously. This is
+    // what replaces them.
+    let mut world = night();
+    let _ = sleeper(&mut world, 4, false);
+    assert_eq!(
+        world.events().first(Occurrence::Dormancy),
+        None,
+        "before any tick"
+    );
+    world.run(4);
+    assert!(
+        world.events().first(Occurrence::Dormancy).is_some(),
+        "a cell carrying two shut engines was not reported as dormant"
+    );
+}
+
+#[test]
+fn a_cell_running_flat_out_is_not_reported_as_resting() {
+    // The other half, and the one that would make the newspaper a liar: every organelle in every
+    // shipped genome is wide open, so if this fired the timeline would announce dormancy on tick
+    // one of every run ever made.
+    let mut world = night();
+    let _ = sleeper(&mut world, 4, true);
+    world.run(200);
+    assert_eq!(
+        world.events().first(Occurrence::Dormancy),
+        None,
+        "an awake cell was reported as dormant"
     );
 }
