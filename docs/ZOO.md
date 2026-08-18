@@ -368,10 +368,11 @@ else. That is a real answer to `FEEDING.md` §4 that does not need §12.1 fixed 
 
 ---
 
-### 6.5 Nothing sleeps, and now something can — but it cannot see the night
+### 6.5 Nothing slept, and now something does — in one world, and not by seeing the night
 
-Added after §6.4 because it is smaller than the four above and because it is half-done in a way
-worth recording precisely.
+Added after §6.4 because it is smaller than the four above, and because what it half-does is
+worth recording precisely: the pricing works and pays, the *sense* that would make it a response
+to nightfall does not exist.
 
 **The mechanism landed.** `OrganelleSpec::upkeep_throttled` (ISA 14, `docs/ECONOMY.md` §17) makes
 three quarters of a mitochondrion's, chloroplast's, chemosynthetic granule's, lysosome's and
@@ -391,40 +392,59 @@ there with "scarcity: none" and a 999‰ producer monoculture, and part of the r
 one strategy its name proposes is not expressible. A world cannot select for something no genome
 can perceive.
 
-**And the first genome to use it loses.** `genomes/sleeper.mm` is `ancestor.mm` plus one gene: it
-shuts the chloroplast when the cell holds no carbon dioxide, which is a state `the_thicket` was
-built to create. Measured over 20,000 ticks:
+**And the first genome to use it wins in exactly one world, which is the interesting part.**
+`genomes/sleeper.mm` is `ancestor.mm` plus one gene: it shuts the chloroplast when the cell holds
+less than four units of carbon dioxide. Five seeds each, 20,000 ticks:
 
-| world | ancestor | sleeper | first dormancy |
+| world | ancestor | sleeper | result |
 | --- | ---: | ---: | --- |
-| the arena, head to head | 567 | 497 | — |
-| `the_thicket` | 1,156 | 1,053 | tick 1,000 |
-| `the_lean_water` | 2,193 | 1,950 | tick 500 |
+| `the_lean_water` | ~2,190 | ~2,570 | **wins 5 of 5**, +14% to +20% |
+| `the_thicket` | ~1,155 | ~1,053 | loses 5 of 5, −5% to −10% |
 
-The controls rule out the boring explanations. An ancestor with nothing changed but a 48-unit
-nucleus *ties*, so it is not genome length. `Occurrence::Dormancy` fires at tick 1,000 and 500 and
-never for the ancestor, so it is not a branch that never runs. **It idles, it saves what it should
-save, and it still loses.**
+It idles on a third of its cell-ticks in both. The split is not about how often it sleeps, it is
+about whether sleeping buys anything: **`the_lean_water` is the one world in the library whose
+limit is not area** (§16), so a unit of upkeep saved turns into another cell. `the_thicket` is
+area-bound, the saving has nowhere to go, and the gene's instructions are a dead loss.
 
-What beats it is **chatter**: the gate is instantaneous and carbon dioxide is intermittent, so the
-cell reads zero on a tick the water has not refilled and is still shut when the CO2 arrives. Three
-quarters of a chloroplast's upkeep is 0.064 a tick, and one tick of missed fixation is worth more.
-A second gene, gating the *mitochondrion* on held sugar, was written and removed: it killed the
-lineage outright at 14,649 ticks, because `#grow` dumps eight units of surplus sugar every tick so
-the holding rounds to zero and the engine spends its life shut.
+That is the first "same physics, different answer in a different world" this document has been
+able to show for a mechanism rather than for a starting population, and it is what §7.4 wants an
+acceptance test to assert.
 
-So the honest state, and it is two statements not one:
+The one cheap change still in front of any further work here is **giving the light concentration
+reading resolution.** It is an ISA bump, because it is genome-observable — and it is precedented
+rather than novel: `GRADIENT_GAIN` is already **256** on the *gradient* readings for exactly this
+reason, and the note beside it says that handing genomes a zero to navigate by "is what starved
+M3's chemotaxis acceptance test". The concentration readings never got the same treatment. So a
+genome can already tell which way is brighter at 256× resolution, and cannot tell whether it is
+bright at all. Note the two are not interchangeable: `DayNight` is spatially uniform, so its
+gradient is zero everywhere and phototaxis cannot substitute for a level.
 
-* **The mechanism works.** +39% on lifespan in a controlled dark, `tests/dormancy.rs`.
-* **There is nowhere for it to pay yet.** Idling wants a signal that *persists* — a night, a
-  season — and the only persistent scarcity in the library is the day/night cycle, which the
-  paragraph above shows no genome can perceive. The signals a genome *can* read are its own
-  interior chemistry, which is too jittery to gate on without hysteresis.
+### 6.5a Two wrong diagnoses, kept because of how they were wrong
 
-That is a finding about the library and the sensor rather than about the pricing, and it puts two
-cheap things in front of any further work here: **give the light reading resolution** (an ISA bump,
-because it is genome-observable), and **give a genome a way to hold a throttle shut for N ticks**
-— which needs no engine change at all, only an `OSCILLATOR` in place of a reading.
+The genome lost everywhere for its first three measurements, and both explanations offered for
+that were false. They are recorded because neither was visible by reading the code and both are
+the kind of mistake that is easy to repeat.
+
+**"It is chattering."** The story was that an instantaneous gate on an intermittent resource shuts
+an engine needed again a tick later. Measured: the cell holds three to forty whole units of CO2,
+never once drops below one, and the chloroplast was **never shut at all**. A gate that looks like
+it is failing to pay may simply not be running.
+
+**"It is instruction overhead."** Raising `instr_per_tick` did not close the gap monotonically —
+8 and 16 gave the same deficit and 32 reversed it — which no per-tick tax explains.
+
+**What it actually was: gene order.** The driver ran `EXPRESS #feed` before `EXPRESS #sun`, and
+`#feed` eats forty units of carbon dioxide, so the gate read a freshly topped-up cell every time.
+It fired on **0%** of cell-ticks while a third of the population sat below its threshold at *end*
+of tick — and those cells were low because they had photosynthesised, which happens after the gate
+has looked. The gene was testing a condition its own genome prevented. Swapping two `EXPRESS`
+lines takes it from 0% to 33% and `the_lean_water` from a loss to a win.
+
+Two process notes, since both cost more than the bug did. The population is the unit of
+measurement, not a cell: the first probe followed `cells().iter().next()` five thousand ticks into
+a mutating lineage and reported a fact about one arbitrary descendant. And every number quoted for
+this genome before the last round was a single seed, which CLAUDE.md is explicit is not a result.
+`tests/sleeper_probe.rs` holds all three probes.
 
 ## 7. The order of work, and why this order
 

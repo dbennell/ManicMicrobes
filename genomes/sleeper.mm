@@ -3,35 +3,38 @@
 ; This is `ancestor.mm` with one gene added and one number changed, deliberately, so that any
 ; difference between them is the gene. Same body, same feeding, same division threshold.
 ;
-; ---------------------------------------------------------------- read this first: it loses
+; ---------------------------------------------------------------- what it is worth, and where
 ;
-; **It is beaten by the plain ancestor in every world it has been run in**, and it is kept for the
-; same reason `hoarder.mm` is: that is the measurement, not the hope. It is here as the first
-; genome to use ISA 14's throttled upkeep at all, and as the record of what happened when it did.
+; The first genome to use ISA 14's throttled upkeep. It idles on a third of its cell-ticks, and
+; whether that is worth anything depends entirely on the world. Five seeds each, 20,000 ticks:
 ;
-;   world                    ancestor   sleeper   first dormancy
-;   the arena, head to head        567       497   —
-;   the_thicket                  1,156     1,053   tick 1,000
-;   the_lean_water               2,193     1,950   tick 500
+;   world             ancestor   sleeper   result
+;   the_lean_water       ~2,190    ~2,570   **wins 5 of 5**, +14% to +20%
+;   the_thicket          ~1,155    ~1,053   loses 5 of 5, -5% to -10%
 ;
-; The middle column is not the interesting one. **The gate fires** — `Occurrence::Dormancy` is
-; recorded at tick 1,000 and 500, and never for the ancestor — so this is not a genome paying for
-; a branch it never takes. It idles, it saves what it should save, and it still loses.
+; That split is the point, and it is the first thing in this project that dormancy has been worth
+; anything in. `the_lean_water` is the one world in the library whose limit is *not area*
+; (`docs/ECONOMY.md` §16), so a unit of upkeep saved turns into another cell. `the_thicket` is
+; area-bound, the saving has nowhere to go, and the gene's instructions are a dead loss.
 ;
-; What it is losing to is **chatter.** The gate is instantaneous and carbon dioxide is
-; intermittent: the cell reads zero on a tick the water has not refilled yet, shuts the
-; chloroplast, and is still shut on the tick the CO2 arrives. Three quarters of a chloroplast's
-; upkeep is 0.064 a tick and one tick of missed fixation is worth more than that.
+; ---------------------------------------------------------------- two things this got wrong first
 ;
-; So the finding, which is worth more than the genome: **idling needs hysteresis, or a signal that
-; persists.** A cell should sleep through something long — a night, a season — and the only
-; persistent scarcity in the library is the day/night cycle, which the next section shows no
-; genome can see. Between those two facts, dormancy currently has no world to pay in. That is a
-; statement about the library and the sensor, not about the mechanism, which `tests/dormancy.rs`
-; measures at +39% on lifespan when the dark actually lasts.
+; Both worth keeping, because both took a measurement to see and neither was visible by reading
+; the code.
 ;
-; The obvious next version, for whoever picks this up: hold the throttle shut for N ticks once
-; closed, or gate on an `OSCILLATOR` rather than on a reading. Neither needs an engine change.
+; **The gene order was the whole thing.** The driver ran `EXPRESS #feed` before `EXPRESS #sun`,
+; and `#feed` EATs forty units of carbon dioxide. So the gate read a cell that had just been
+; topped up, every single time, and fired on **0%** of cell-ticks while a third of the population
+; sat below its threshold at end of tick — those cells were low because they had *photosynthesised*,
+; which happens after the gate has looked. The gene was testing a condition its own genome
+; prevented. Swapping the two `EXPRESS` lines takes it from 0% to 33%, and `the_lean_water` from a
+; loss to a win. Nothing else changed.
+;
+; **And the diagnosis before that was worse.** The deficit was first blamed on the gate chattering
+; — closing on a momentary zero and missing the fixation a tick later. That is a good story and it
+; is false: the cell holds three to forty whole units of CO2, never drops below one, and at the
+; time the chloroplast was never shut at all. A gate that looks like it is failing to pay may
+; simply not be running. `tests/sleeper_probe.rs` is the probe that settles which.
 ;
 ; ---------------------------------------------------------------- what it is for
 ;
@@ -66,16 +69,10 @@
 ;   * a chloroplast with no carbon dioxide in the cell can fix nothing, whatever the light;
 ;   * a mitochondrion with no sugar in the cell can burn nothing, whatever it is asked for.
 ;
-; **The second one was written, measured and removed, and that is the most useful thing in this
-; file.** Gating the mitochondrion on held sugar killed the lineage outright — extinct at 14,649
-; ticks against an ancestor still at 746 — because `#grow` below dumps eight units of surplus sugar
-; into the water every tick, so the cell's holding rounds to zero most ticks and the engine spends
-; its life shut. The controls, run head to head against `ancestor.mm` over 20,000 ticks:
-;
-;   both genes          extinct at 17,965
-;   #burn alone         extinct at 14,649
-;   #sun alone          501 against 551 — a tie
-;   nucleus 48 alone    530 against 509 — a tie, so the bigger nucleus is not the cost
+; **The second one was written, measured and removed.** Gating the mitochondrion on held sugar
+; killed the lineage outright — extinct at 14,649 ticks against an ancestor still at 746 — because
+; `#grow` below dumps eight units of surplus sugar into the water every tick, so the cell's
+; holding rounds to zero most ticks and the engine spends its life shut.
 ;
 ; It is not a bug in the mechanism; it is the mechanism working. The word that stops a
 ; mitochondrion's bill stops its respiration by the same fraction, so a genome that idles an engine
@@ -109,7 +106,7 @@
 ; ---------------------------------------------------------------- the number that changed
 ;
 ; The nucleus is 48 rather than the ancestor's 40. Nucleus `param` is genome capacity at 8 bytes a
-; unit, so 40 holds 320 bytes and this genome is longer than that. A daughter truncated at 320
+; unit, so 40 holds 320 bytes and this genome is 295. A daughter truncated at 320
 ; would lose its last gene silently — no error, no death, just a lineage that quietly stops being
 ; this organism. `engulfer.mm` learned that one the same way.
 ;
@@ -119,8 +116,8 @@
 ; does not show up.
 
         EXPRESS #build
-        EXPRESS #feed
         EXPRESS #sun
+        EXPRESS #feed
         EXPRESS #grow
         EXPRESS #divide
         HALT
@@ -170,6 +167,10 @@
         IMM     16              ; reading 5 + 11 — carbon dioxide held
         ZERO                    ; slot 0, the membrane
         OGET
+        IMM     4               ; LEAN — see below
+        CMP                     ; -1 if under, 0 or 1 if not
+        ONE
+        ADD                     ; 0 if under, non-zero if not
         JMPZ    shut
         IMM     255             ; there is something to fix: run it
         IMM     2
