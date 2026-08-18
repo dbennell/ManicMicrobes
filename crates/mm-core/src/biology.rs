@@ -1091,6 +1091,7 @@ impl crate::state_hash::StateHash for BiologyConfig {
             h.u16(spec.build_ticks);
             h.i32(spec.upkeep);
             h.i32(spec.upkeep_per_param);
+            h.i32(spec.upkeep_throttled);
             h.i32(spec.teardown_recovery);
             for v in spec.build_trace {
                 h.i32(v);

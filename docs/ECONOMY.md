@@ -84,6 +84,11 @@ ones**. Read this page before trusting anything below it.
 * **`CurrentField::Tidal`** (§16), the first current that is a function of time. `refresh_velocity`
   had to learn that a current can vary: it wrote the prescribed field once on the reasoning that a
   current does not depend on the tick, which was true of every variant before this one.
+* **Upkeep answers to the throttle** (§17). An organelle turned down costs less to keep, so a cell
+  in the dark can cut about a third of its bill instead of paying full price for machinery it
+  cannot use. Five types qualify and the audit of why only five is the substance of it. This is
+  also the last of `events::Occurrence`'s sixteen to get a mechanism — dormancy had been declared
+  and undetectable since M5.
 * **`drift`'s bout is 3,000 ticks and its lanes are inside the channel** (§15.2). The first is
   what lets the fairness control pass at full length — the world is a sixty-cell population whose
   mirror random-walks, not a slide with a better half. The second is so that the column measures
@@ -1927,3 +1932,128 @@ Two things this leaves open, and the first is not a balance question:
   channel is unreachable from the ISA. This is the single cheapest unblocking in the document.
 * **Whether forcing should be able to fail at all**, rather than always succeeding at a price. That
   is a §8.2 question and not one to settle by tuning a constant.
+
+---
+
+## 17. Dormancy, and where the energy was actually going
+
+§1 says respiration is the only income and every other organelle is a pure cost. This section is
+the other half of that sentence, which nobody had measured: **what the cost is made of**, and
+what a cell can do about it.
+
+### 17.1 The breakdown
+
+The per-tick bill in `metabolism.rs` is four terms:
+
+```
+upkeep = metabolic_floor + organelle upkeep + turgor_cost(solute) + leak_cost(energy)
+```
+
+Measured on a five-organelle body, energy per tick, with the share of the total:
+
+| condition | floor | organelle | turgor | leak | total |
+|---|---|---|---|---|---|
+| 400 sugar, 400 energy | 0.016 (3.6%) | **0.419 (96.0%)** | 0.002 | 0.000 | 0.437 |
+| no sugar, 400 energy | 0.016 (3.6%) | 0.419 (96.4%) | 0.000 | 0.000 | 0.435 |
+| torn down to two, 400 sugar | 0.016 (5.2%) | 0.204 (68.3%) | **0.079 (26.5%)** | 0.000 | 0.299 |
+| 400 sugar, **4000 energy** | 0.016 (0.0%) | 0.419 (1.3%) | 0.002 | **31.250 (98.6%)** | 31.687 |
+
+Three things fall out, and two of them corrected a claim made in this conversation before it was
+measured.
+
+**Organelle upkeep is 96% of an idle cell's bill.** Not the floor, not turgor. §9a asked "do
+organelles cost too much?" and answered no on the grounds that halving the column moved nothing;
+that answer stands, but the reason it stands is not that the column is small. It is 96% of the
+bill and halving it still moved nothing, which is a statement about what the slide runs out of
+(§3) rather than about the column.
+
+**Tearing down raises turgor.** Row three is the trap: dropping from five organelles to two cut
+organelle upkeep by half and cut the *total* by only a third, because the vacuole that went was
+sequestering solute and the quadratic charge in §6 came back. A teardown that keeps the vacuole
+saves more than one that does not — which is the opposite of the intuition that a dormant cell
+should shed everything, and it explains a non-monotonic survival series (856, 985, **919**, 1093)
+that had looked like noise.
+
+**A cell cannot bank its way to a long sleep.** Row four: at 4,000 energy the leak above
+`energy_reserve` is 31.25 a tick, seventy times the whole normal bill. Storing against the dark
+is not merely unprofitable (§11.3 measured that); above the reserve it is *actively destructive*.
+Any dormancy that works has to lower the burn rate, because raising the reserve is not available.
+
+### 17.2 `control[0]` is not a throttle, and that is why this is a table
+
+The obvious mechanism — scale an organelle's upkeep by its throttle — is wrong, and the audit
+that shows why is the substance of the change. `control[0]` is four different things:
+
+| what it is | types | reader |
+|---|---|---|
+| a **throttle** | mitochondrion, chloroplast, chemosynthetic granule, lysosome, diazosome | `capacity_by_pathway`, `digestive_capacity_by_pathway`, `fixation_capacity` |
+| an **effort** | spike, holdfast, exoenzyme, cilium, flagellum, shell | `spike_reach`, `holdfast_effort`, `cilium_power` |
+| a **selector** | chemosensor and pH sensor (*which chemical*), oscillator (*phase*), nucleus (*copy fidelity*), membrane (*permeability*) | `chem_index`, `oscillator_phase`, `nucleus_fidelity` |
+| **unread** | vacuole, photosensor, touch sensor, junction port, lipid droplet | — |
+
+A blanket rule would have priced a chemosensor by which chemical it happened to watch:
+`chem_index` reads a raw index, so a sensor set to chemical 3 carries `control[0] == 3`, which as
+a `Q10` fraction is three parts in a thousand. It would have slept for free.
+
+So the rule is **a type's upkeep may follow `control[0]` only where closing `control[0]`
+surrenders the service**, stated as `organelle::THROTTLEABLE` and held to the catalogue by a test.
+Five types qualify. The reaching six pass the rule and are excluded anyway: they are already
+retracted when idle, so including them would not help a sleeping cell — it would hand a permanent
+discount to every armed cell that is not currently stabbing, which is a question about ambush and
+not about night.
+
+The vacuole is the near miss worth naming. It *looks* throttleable and is not: both of its
+services — `sequestered` and the room it adds in `interior_capacity` — read `param` and ignore
+`control[0]` entirely, so a closed vacuole would keep its solute out of the turgor reckoning,
+keep its cytoplasm, and pay less for both. Making it honest means gating both together, which is
+a change to what every cell in the world can hold.
+
+### 17.3 What it buys, and what it cannot reach
+
+`upkeep_throttled` is three quarters of a throttleable type's line; the remaining quarter is
+basal. Two identical bodies in the dark, one with its chloroplast and mitochondrion shut:
+
+```
+awake  1,191 ticks
+asleep 1,659 ticks          +39%
+```
+
+The ceiling on that number is arithmetic and worth writing down, because it is the reason this is
+a night and not a season. For the engulfer's loadout:
+
+```
+nucleus 56       0.125   copy fidelity, not a throttle — cannot sleep
+chloroplast 100  0.086   sleeps
+vacuole 120      0.066   wants to stay open (see 17.1)
+lysosome 100     0.064   sleeps
+mitochondrion 50 0.041   sleeps
+membrane 24      0.039   permeability, not a throttle — cannot sleep
+```
+
+The throttleable three are 0.191 of a 0.437 bill and three quarters of that is reachable, so the
+best a cell can do is cut about a third. Add the un-throttleable half of the loadout to the leak
+ceiling in 17.1 and the shape of the mechanism is fixed: **dormancy in this engine is a lower burn
+rate, never a stopped clock.** A spore is not reachable and should not be promised.
+
+### 17.4 Why it is not exploitable
+
+No anti-cheat was needed, and the reason is the same fact that makes the table small: the word
+that cuts a mitochondrion's upkeep cuts its respiration, and the word that cuts a chloroplast's
+cuts its photosynthesis. **A cell cannot idle and go on earning.** Sleeping is only ever correct
+when there was nothing to earn, which is exactly when it should be.
+
+Build matter is still sunk, so a hoard of shut organelles is locked-up matter in a world where
+matter is conserved — and the basal quarter means carrying is never free, which is the pressure
+§12.1 measures (818 cells at four organelles, 666 at six, none at eight).
+
+### 17.5 The number to settle
+
+Three quarters is a guess with a reason, not a result. The quarter that stays basal is doing real
+work — it is what keeps "park sixteen closed organelles" from being free — but nothing has
+measured whether a quarter is the right size of it, or whether the reachable third is enough to
+change what wins in `the_short_night`. That is a `mm_core::balance` question and it is the open
+item this section leaves behind.
+
+The prediction, for whoever runs it: this should not move a single shipped genome, because every
+one of them leaves its metabolic controls wide open and a full throttle is an exact identity. If
+the panel moves, something is wrong with the identity rather than with the balance.

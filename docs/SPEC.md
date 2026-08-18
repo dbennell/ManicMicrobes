@@ -269,8 +269,22 @@ rather than wrapping — otherwise a copy loop that ran one byte too far would r
 more.
 
 **Execution budget.** A cell executes up to `instr_per_tick` instructions per tick (default
-16), each costing energy. `HALT` yields the remainder of the budget and refunds a fraction
-of its cost — sleeping is cheap, which makes dormancy an evolvable strategy.
+**8**). `HALT` yields the remainder of the budget.
+
+This paragraph used to read "default 16, each costing energy" and to say that `HALT` "refunds a
+fraction of its cost — sleeping is cheap, which makes dormancy an evolvable strategy." Two of
+those three claims were never implemented and the third did not matter, so all three are
+corrected here rather than left as an aspiration the code was silently failing.
+
+* **The default is 8, not 16.** It was halved with the metabolic rates so that behaviour kept
+  step with the body; `VmConfig::DEFAULT` records why.
+* **Instructions cost no energy.** There is no per-instruction charge anywhere in the VM, and so
+  nothing for `HALT` to refund a fraction of. Thinking is free.
+* **Dormancy does not live here.** It lives in §6.2's `upkeep_throttled`. What a cell dies of is
+  the per-tick maintenance bill, which is 96% organelle upkeep for an idle cell
+  (`docs/ECONOMY.md` §17), and no amount of yielding the instruction budget touches a unit of it.
+  A genome sleeps by closing throttles, not by halting — and it can reach about a third of its
+  bill that way, which funds a night and not a season.
 
 ### 5.1 Instruction set (64 opcodes)
 
@@ -437,7 +451,7 @@ what was exhausted and slots per cell are not.
 | 1 | `NUCLEUS` | copy fidelity | capacity, used |
 | 2 | `MITOCHONDRION` | throttle | rate, substrate available |
 | 3 | `CHLOROPLAST` | throttle | rate, local light |
-| 4 | `VACUOLE` | — | capacity, contents |
+| 4 | `VACUOLE` | —, appetite | capacity, contents |
 | 5 | `PUMP` | chemical, signed rate | achieved rate |
 | 6 | `CILIUM` | signed power | achieved thrust, load |
 | 7 | `CHEMOSENSOR` | chemical | concentration, gradient dx, gradient dy |
@@ -462,6 +476,28 @@ what was exhausted and slots per cell are not.
 Organelles have a `param` (0–255) set at `BUILD` time, scaling capability and cost. They
 take time to construct, consuming structural chemicals and energy across multiple ticks; a
 partially built organelle is inert.
+
+**Upkeep answers to the first control word, where that word is a throttle.** `OrganelleSpec`
+carries an `upkeep_throttled` fraction; the part of a type's upkeep it names follows `control[0]`
+and the remainder is basal. This is where dormancy lives — §5's `HALT` makes thinking cheap and
+thinking is not what a cell dies of.
+
+The column above is the authority on which types qualify, and reading it that way is the whole
+constraint: **only the entries whose first control input is written "throttle" or "rate" may have
+a non-zero fraction.** Where that word is a *selector* — `NUCLEUS` copy fidelity, `MEMBRANE`
+permeability, `CHEMOSENSOR` chemical, `OSCILLATOR` period — closing it surrenders nothing, and
+pricing upkeep by it would sell a sensor tuned to chemical 3 for three parts in a thousand. Where
+it is unread, as on `VACUOLE`, there is nothing to surrender at all. The engine states the
+qualifying list as `organelle::THROTTLEABLE` and a test holds the catalogue to it.
+
+The reaching organelles — `SPIKE`, `HOLDFAST`, `CILIUM`, `FLAGELLUM`, `SHELL`, `EXOENZYME` — pass
+that rule and are excluded anyway. They begin retracted, so a sleeping cell has already stopped
+paying for their *work*; making their standing upkeep answer to extension would be a discount on
+carrying an unused weapon, which is a separate question from dormancy.
+
+A cell cannot idle and go on earning, because the word that lowers a mitochondrion's upkeep lowers
+its respiration by the same fraction. That is what makes the mechanism self-limiting and why it
+needs no guard.
 
 ### 6.3 Differentiation
 

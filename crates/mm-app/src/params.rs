@@ -803,13 +803,17 @@ pub const PATHWAY_COLUMNS: [(&str, &str); 4] = [
 pub const CATALOGUE_PREFIX: &str = "metabolism.catalogue.specs.";
 
 /// The seven numbers each catalogue entry carries, as (suffix, column heading).
-pub const CATALOGUE_COLUMNS: [(&str, &str); 26] = [
+pub const CATALOGUE_COLUMNS: [(&str, &str); 27] = [
     ("build_matter", "matter"),
     ("build_matter_per_param", "matter/size"),
     ("build_energy", "energy"),
     ("build_ticks", "ticks"),
     ("upkeep", "upkeep"),
     ("upkeep_per_param", "upkeep/size"),
+    // How much of the upkeep a genome can switch off by closing `control[0]`. Non-zero on the
+    // five types where that word gates the organelle's output; zeroing the column poses a world
+    // where dormancy is impossible, which is a regime worth being able to set from this page.
+    ("upkeep_throttled", "dormancy"),
     ("teardown_recovery", "recovered"),
     // The recipe: what a type costs *beyond* structural matter, one column per chemical.
     //

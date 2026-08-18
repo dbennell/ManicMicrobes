@@ -326,7 +326,6 @@ impl OrganelleType {
     /// How many bands the emission spectrum is divided into.
     pub const EM_BANDS: usize = 2;
 
-
     /// Work done against the world: pushing, gripping, stabbing.
     ///
     /// The split is between *doing* and *being*, not between kinds of organ, and getting that
@@ -426,6 +425,29 @@ impl Organelle {
     pub fn throttle(&self) -> i32 {
         (self.control[0] as i32).clamp(0, Q10_ONE)
     }
+
+    /// How hard this organelle is being worked, `Q10`, regardless of which way.
+    ///
+    /// What [`OrganelleSpec::upkeep_throttled`] is charged against, and **not** the same as
+    /// [`Organelle::throttle`] — the difference is a cilium, and it is not academic.
+    /// [`crate::sensing::cilium_power`] clamps to `-Q10..=Q10` because a beat has a direction:
+    /// a cilium at `-Q10_ONE` is driving at full power in reverse. `throttle` reports that as
+    /// zero, so pricing upkeep on it would have let a cell swim backwards for nothing, which is
+    /// the same shape of bug as pricing a chemosensor by which chemical it watches. Magnitude is
+    /// what a bill wants; sign is what the propulsion wants; they are different questions asked
+    /// of one word.
+    ///
+    /// Everything else is one-sided already and gets the plain clamp.
+    #[inline]
+    #[must_use]
+    pub fn effort(&self) -> i32 {
+        match self.kind {
+            OrganelleType::Cilium | OrganelleType::Flagellum => {
+                (self.control[0] as i32).clamp(-Q10_ONE, Q10_ONE).abs()
+            }
+            _ => self.throttle(),
+        }
+    }
 }
 
 /// What an organelle type costs and what it can do.
@@ -449,6 +471,56 @@ pub struct OrganelleSpec {
     pub upkeep: i32,
     /// Extra upkeep per unit of `param`, in [`UPKEEP_SCALE`]ths of `Q10`.
     pub upkeep_per_param: i32,
+    /// How much of this type's upkeep follows `control[0]`, `Q10`.
+    ///
+    /// The dormancy dial. An organelle turned down costs less to keep, so a cell in the dark can
+    /// halve its burn by closing the machinery it cannot use — which is what makes sleeping
+    /// through a night an evolvable strategy rather than a slow death (SPEC §5). The rest of the
+    /// bill is basal and is paid whatever the control says: a closed organelle is still protein a
+    /// cell keeps folded, and if carrying were free there would be no pressure against carrying
+    /// sixteen of everything.
+    ///
+    /// **Zero — the `Default` — is exactly the old behaviour**, and that polarity is load-bearing
+    /// three times over. A scenario that names some fields of a spec and omits this one is
+    /// unchanged; the `Empty` slot's `Default` is unchanged; and a *snapshot* written before this
+    /// field existed loads as a record of the catalogue it was written under, which is what hard
+    /// rule 7 asks for. At the other end the arithmetic is an identity — a control at full
+    /// throttle pays `upkeep + upkeep_per_param * param` exactly, with no rounding to argue about
+    /// — so every genome in `genomes/`, which leaves its metabolic controls wide open, is priced
+    /// today as it was yesterday by construction rather than by measurement.
+    ///
+    /// # This may only be non-zero where `control[0]` actually gates the service
+    ///
+    /// The rule, and the reason this is per-type data rather than one formula in the upkeep
+    /// block: **`control[0]` is not a throttle everywhere.** It is four different things.
+    ///
+    /// * A *throttle* on the mitochondrion, chloroplast, chemosynthetic granule, lysosome and
+    ///   diazosome — [`crate::metabolism::Metabolism::capacity_by_pathway`],
+    ///   [`crate::ecology::digestive_capacity_by_pathway`] and
+    ///   [`crate::biology::fixation_capacity`] all scale their output by it. Closing one buys the
+    ///   discount and surrenders the work, which is the trade this field is for.
+    /// * An *effort or extension* on the spike, holdfast, exoenzyme, cilium, flagellum and shell.
+    ///   Same bargain, and they already pay separately for the work itself in
+    ///   [`crate::ecology`], so their catalogue line is more carrying than doing.
+    /// * A **selector** on the chemosensor and the pH sensor (*which chemical*), the oscillator
+    ///   (*phase*), the nucleus (*copy fidelity*) and the membrane (*permeability*). This is why
+    ///   a blanket rule would have been a bug rather than a balance question:
+    ///   [`crate::sensing::chem_index`] reads a raw chemical index, so a sensor watching chemical
+    ///   3 carries `control[0] == 3`, which as a `Q10` fraction is three parts in a thousand. It
+    ///   would have slept for free, priced by which chemical it happened to watch.
+    /// * *Unread* on the vacuole, the photosensor, the touch sensor, the junction port and the
+    ///   lipid droplet — nothing to surrender, so a discount here is a discount for nothing.
+    ///
+    /// The vacuole is the one worth naming, because it looks throttleable and is not. Its two
+    /// services — [`crate::biology::sequestered`] and the room it adds in
+    /// [`crate::biology::interior_capacity`] — read `param` and ignore `control[0]` entirely, so
+    /// a closed vacuole would keep its solute out of the turgor reckoning and keep its cytoplasm
+    /// and pay less for both. Making it honest means gating *both* of those on the control
+    /// together, which is a change to what every cell can hold and does not belong in this one.
+    ///
+    /// [`THROTTLEABLE`] states the answer as a table and `the_dormancy_dial_is_only_set_where_the_control_gates_the_service`
+    /// checks the catalogue against it, so switching one on later is a deliberate act.
+    pub upkeep_throttled: i32,
     /// Fraction of its structural matter recovered by `TEAR`, `Q10`. The rest is lost to the
     /// fluid as waste — dismantling is not free, or a cell would rebuild itself every tick.
     pub teardown_recovery: i32,
@@ -576,15 +648,41 @@ impl OrganelleSpec {
         self.build_trace.iter().any(|v| *v != 0)
     }
 
-    /// Energy per tick to keep one at a given size, `Q10`.
+    /// Energy per tick to keep one at a given size, running flat out, `Q10`.
+    ///
+    /// The full bill, which is what every caller outside the upkeep block wants: what this
+    /// organelle costs to have. [`OrganelleSpec::upkeep_cost_at`] is the same thing asked about
+    /// an organelle that is idling.
     #[inline]
     #[must_use]
     pub fn upkeep_cost(&self, param: u8) -> i32 {
+        self.upkeep_cost_at(param, Q10_ONE)
+    }
+
+    /// Energy per tick to keep one at a given size and a given [`Organelle::effort`], `Q10`.
+    ///
+    /// `basal + variable * effort`, where the split is [`OrganelleSpec::upkeep_throttled`] of the
+    /// whole. At `effort == Q10_ONE` this is `basal + variable`, which is the whole, so the full
+    /// bill is an identity rather than a rounding of one — see the field's note for why that
+    /// matters more than it looks.
+    #[inline]
+    #[must_use]
+    pub fn upkeep_cost_at(&self, param: u8, effort: i32) -> i32 {
         // Summed in the fine unit and divided once, so `upkeep_per_param` keeps its resolution
         // all the way through: five of the catalogue's eight entries used to sit at 1 `Q10`,
-        // which is a rate that cannot be lowered without switching the mechanism off.
-        self.upkeep
-            .saturating_add(self.upkeep_per_param.saturating_mul(param as i32))
+        // which is a rate that cannot be lowered without switching the mechanism off. The
+        // throttle split happens up here for the same reason — a quarter of a coarse bill of 2
+        // is 0, and a quarter of the fine 41 behind it is 10.
+        let fine = self
+            .upkeep
+            .saturating_add(self.upkeep_per_param.saturating_mul(param as i32));
+        let dial = self.upkeep_throttled.clamp(0, Q10_ONE);
+        if dial == 0 {
+            return fine / UPKEEP_SCALE;
+        }
+        let variable = crate::fixed::q10_scale(fine, dial);
+        let basal = fine.saturating_sub(variable);
+        basal.saturating_add(crate::fixed::q10_scale(variable, effort.clamp(0, Q10_ONE)))
             / UPKEEP_SCALE
     }
 }
@@ -602,6 +700,43 @@ impl OrganelleSpec {
 /// — so this unit change on its own moves nothing. What it buys is four more halvings of headroom
 /// before the floor, which is what the tempo work in this commit spends one of.
 const UPKEEP_SCALE: i32 = 16;
+
+/// How much of a throttleable organelle's upkeep the throttle can reach, `Q10`.
+///
+/// Three quarters, so a quarter is basal. The quarter is the point as much as the three: a cell
+/// that could park sixteen closed organelles for nothing would face no pressure against carrying
+/// every capability it might one day want, and `docs/ECONOMY.md` §12.1 — 818 cells at four
+/// organelles, 666 at six, none at all at eight — is a measurement of that pressure working.
+/// Dormancy should change the slope of the bill, not repeal it.
+///
+/// A number to be settled by `mm_core::balance` rather than by argument, which is why it is named
+/// here instead of written out five times in the catalogue below.
+const DORMANT_SHARE: i32 = Q10_ONE * 3 / 4;
+
+/// The organelle types whose upkeep may follow `control[0]`, and the whole of the audit behind
+/// [`OrganelleSpec::upkeep_throttled`].
+///
+/// Five, and every one of them scales its *output* by the same word: closing one is a real
+/// surrender, not a discount. That is the property the field's note requires and the one this
+/// table exists to pin down, because it cannot be checked mechanically — nothing in the type
+/// system knows that `capacity_by_pathway` reads `control[0]`.
+///
+/// **The reaching organelles are deliberately absent**, and they are the near miss. A spike, a
+/// holdfast, a cilium and an exoenzyme all gate their work on `control[0]` too, so they pass the
+/// rule. What they do not pass is the question this change is answering. They are already
+/// retracted when idle — `default_control` starts them at zero — so putting them here would not
+/// help a sleeping cell at all; it would hand a permanent discount to every armed cell that is
+/// not currently stabbing. Whether a sheathed spike should be cheap to carry is a real question
+/// and `crates/mm-core/src/ecology.rs` has an opinion about it, but it is a question about
+/// ambush, not about night, and answering both in one commit would make the balance harness's
+/// before-and-after unreadable.
+pub const THROTTLEABLE: [OrganelleType; 5] = [
+    OrganelleType::Mitochondrion,
+    OrganelleType::Chloroplast,
+    OrganelleType::Chemosynth,
+    OrganelleType::Lysosome,
+    OrganelleType::Diazosome,
+];
 
 /// The costs and capabilities of every catalogue entry.
 #[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
@@ -828,6 +963,7 @@ impl OrganelleCatalogue {
             build_ticks: 8,
             upkeep: q10(8) / 64,
             upkeep_per_param: q10(8) / 1024,
+            upkeep_throttled: 0,
             teardown_recovery: Q10_ONE / 2,
             build_trace: NO_TRACE,
         };
@@ -857,6 +993,7 @@ impl OrganelleCatalogue {
             build_ticks: 0,
             upkeep: q10(8) / 32,
             upkeep_per_param: q10(8) / 512,
+            upkeep_throttled: 0,
             teardown_recovery: 0,
             build_trace: NO_TRACE,
         };
@@ -869,6 +1006,7 @@ impl OrganelleCatalogue {
             build_ticks: 12,
             upkeep: q10(8) / 32,
             upkeep_per_param: q10(8) / 256,
+            upkeep_throttled: 0,
             teardown_recovery: Q10_ONE / 2,
             build_trace: {
                 // Phosphorus, and only the nucleus takes it: a genome is a nucleic acid and
@@ -887,6 +1025,7 @@ impl OrganelleCatalogue {
             build_ticks: 10,
             upkeep: q10(8) / 48,
             upkeep_per_param: q10(8) / 768,
+            upkeep_throttled: DORMANT_SHARE,
             teardown_recovery: Q10_ONE / 2,
             build_trace: nitrogen_trace(773),
         };
@@ -897,6 +1036,7 @@ impl OrganelleCatalogue {
             build_ticks: 14,
             upkeep: q10(8) / 40,
             upkeep_per_param: q10(8) / 640,
+            upkeep_throttled: DORMANT_SHARE,
             teardown_recovery: Q10_ONE / 2,
             build_trace: nitrogen_trace(1082),
         };
@@ -914,6 +1054,7 @@ impl OrganelleCatalogue {
             build_ticks: 20,
             upkeep: q10(8) / 24,
             upkeep_per_param: q10(8) / 384,
+            upkeep_throttled: 0,
             teardown_recovery: Q10_ONE / 2,
             build_trace: NO_TRACE,
         };
@@ -935,6 +1076,7 @@ impl OrganelleCatalogue {
             build_ticks: 16,
             upkeep: q10(8) / 48,
             upkeep_per_param: q10(8) / 768,
+            upkeep_throttled: 0,
             teardown_recovery: Q10_ONE / 4,
             build_trace: NO_TRACE,
         };
@@ -951,6 +1093,7 @@ impl OrganelleCatalogue {
             build_ticks: 28,
             upkeep: q10(8) / 96,
             upkeep_per_param: q10(8) / 1024,
+            upkeep_throttled: 0,
             teardown_recovery: Q10_ONE / 8,
             // Silicon, and it is the only entry in the catalogue that asks for anything but
             // carbon. A test is mineral, and the table has carried silicon since the beginning
@@ -985,6 +1128,7 @@ impl OrganelleCatalogue {
             build_ticks: 22,
             upkeep: q10(8) / 40,
             upkeep_per_param: q10(8) / 640,
+            upkeep_throttled: DORMANT_SHARE,
             teardown_recovery: Q10_ONE / 3,
             build_trace: nitrogen_trace(1391),
         };
@@ -998,6 +1142,7 @@ impl OrganelleCatalogue {
             build_ticks: 18,
             upkeep: q10(8) / 44,
             upkeep_per_param: q10(8) / 700,
+            upkeep_throttled: DORMANT_SHARE,
             teardown_recovery: Q10_ONE / 3,
             build_trace: nitrogen_trace(1082),
         };
@@ -1010,6 +1155,7 @@ impl OrganelleCatalogue {
             build_ticks: 12,
             upkeep: q10(8) / 128,
             upkeep_per_param: q10(8) / 2048,
+            upkeep_throttled: 0,
             teardown_recovery: Q10_ONE / 2,
             build_trace: NO_TRACE,
         };
@@ -1023,6 +1169,7 @@ impl OrganelleCatalogue {
             build_ticks: 18,
             upkeep: q10(8) / 40,
             upkeep_per_param: q10(8) / 512,
+            upkeep_throttled: 0,
             teardown_recovery: Q10_ONE / 3,
             build_trace: NO_TRACE,
         };
@@ -1036,6 +1183,7 @@ impl OrganelleCatalogue {
             build_ticks: 14,
             upkeep: q10(8) / 48,
             upkeep_per_param: q10(8) / 768,
+            upkeep_throttled: 0,
             teardown_recovery: Q10_ONE / 3,
             build_trace: nitrogen_trace(927),
         };
@@ -1049,6 +1197,7 @@ impl OrganelleCatalogue {
             build_ticks: 12,
             upkeep: q10(8) / 56,
             upkeep_per_param: q10(8) / 896,
+            upkeep_throttled: DORMANT_SHARE,
             teardown_recovery: Q10_ONE / 2,
             build_trace: nitrogen_trace(927),
         };
@@ -1088,6 +1237,7 @@ impl OrganelleCatalogue {
             build_ticks: 18,
             upkeep: q10(8) / 96,
             upkeep_per_param: q10(8) / 1024,
+            upkeep_throttled: 0,
             teardown_recovery: Q10_ONE / 8,
             build_trace: {
                 let mut r = NO_TRACE;
@@ -1154,7 +1304,18 @@ impl OrganelleCatalogue {
         let mut total = 0i32;
         for o in slots {
             if o.is_present() {
-                total = total.saturating_add(self.spec(o.kind).upkeep_cost(o.param));
+                // At the effort it is actually running, which for every organelle in every
+                // shipped genome is full and therefore the same number it has always been.
+                //
+                // **An unfinished one pays full price whatever its control says**, and that is
+                // the one place the rule needs stating rather than following. Everywhere else the
+                // bargain is self-enforcing: closing a throttle surrenders the output, so a cell
+                // cannot idle and go on earning. A half-built organelle produces nothing either
+                // way, so there is nothing to surrender and the discount would be free — small,
+                // eight ticks of three quarters of one line, and a hole is a hole. Construction is
+                // not something a cell gets to sleep through.
+                let effort = if o.is_active() { o.effort() } else { Q10_ONE };
+                total = total.saturating_add(self.spec(o.kind).upkeep_cost_at(o.param, effort));
             }
         }
         total
@@ -1529,6 +1690,217 @@ mod tests {
             assert!(large >= small, "{} got cheaper with size", kind.name());
             assert!(spec.upkeep_cost(255) >= spec.upkeep_cost(0));
         }
+    }
+
+    #[test]
+    fn the_dormancy_arithmetic_is_total() {
+        // Hard rule 3. `param` is bounded by its type but `effort` is `control[0]`, which a genome
+        // writes with `OSET` and can therefore make any `i16`; and a ruleset can put any `i32` in
+        // any catalogue column. Every product here goes through `q10_mul`, which promotes to
+        // `i64` and saturates, so this is a check that nothing was added outside it.
+        for upkeep in [i32::MIN, -1, 0, 1, 16, i32::MAX] {
+            for per in [i32::MIN, 0, 1, i32::MAX] {
+                for dial in [i32::MIN, 0, 1, Q10_ONE, Q10_ONE * 4, i32::MAX] {
+                    let spec = OrganelleSpec {
+                        upkeep,
+                        upkeep_per_param: per,
+                        upkeep_throttled: dial,
+                        ..OrganelleSpec::default()
+                    };
+                    for param in [0u8, 1, 128, 255] {
+                        for effort in [i32::MIN, -1, 0, 1, Q10_ONE, i32::MAX] {
+                            let _ = spec.upkeep_cost_at(param, effort);
+                        }
+                    }
+                }
+            }
+        }
+        // And `effort` itself, over every control word a genome can write.
+        for kind in [OrganelleType::Cilium, OrganelleType::Mitochondrion] {
+            for control in [i16::MIN, -1, 0, 1, i16::MAX] {
+                let mut o = Organelle::finished(kind, 200);
+                o.control[0] = control;
+                let e = o.effort();
+                assert!(
+                    (0..=Q10_ONE).contains(&e),
+                    "{} {control} -> {e}",
+                    kind.name()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_control_at_full_throttle_pays_exactly_what_it_always_did() {
+        // The property the whole design rests on, and the reason it can ship without re-running
+        // a single balance measurement: every genome in `genomes/` leaves its metabolic controls
+        // wide open, so if full effort is an identity then nothing any of them does is repriced.
+        // Asserted against the arithmetic rather than against a recorded table, over every type
+        // and every `param` a `u8` can hold, because a rounding error that only appears at
+        // param 173 is exactly the kind this would otherwise ship.
+        let cat = OrganelleCatalogue::balanced();
+        for kind in OrganelleType::all() {
+            let spec = cat.spec(*kind);
+            for param in 0..=255u8 {
+                let expected = spec
+                    .upkeep
+                    .saturating_add(spec.upkeep_per_param.saturating_mul(param as i32))
+                    / UPKEEP_SCALE;
+                assert_eq!(
+                    spec.upkeep_cost_at(param, Q10_ONE),
+                    expected,
+                    "{} at param {param} is repriced at full throttle",
+                    kind.name()
+                );
+                assert_eq!(spec.upkeep_cost(param), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn the_dormancy_dial_is_only_set_where_the_control_gates_the_service() {
+        // `THROTTLEABLE` is the audit and this is the only thing that can check it: whether
+        // `control[0]` really gates a type's output is a fact about `capacity_by_pathway` and
+        // `digestive_capacity_by_pathway`, not about anything the type system can see. So the
+        // table is written by hand and the catalogue is held to it — switching one on later
+        // means editing the list, which is the point.
+        let cat = OrganelleCatalogue::balanced();
+        for kind in OrganelleType::all() {
+            let dial = cat.spec(*kind).upkeep_throttled;
+            let listed = THROTTLEABLE.contains(kind);
+            assert_eq!(
+                dial > 0,
+                listed,
+                "{} has a dormancy dial of {dial} and is {}in THROTTLEABLE",
+                kind.name(),
+                if listed { "" } else { "not " }
+            );
+        }
+        // And the ones that would have been bugs rather than balance questions, named so that
+        // the reasoning survives the table: a sensor's `control[0]` is a chemical index, a
+        // nucleus's is copy fidelity, a membrane's is permeability, and a vacuole's is unread.
+        for kind in [
+            OrganelleType::Chemosensor,
+            OrganelleType::PhSensor,
+            OrganelleType::Oscillator,
+            OrganelleType::Nucleus,
+            OrganelleType::Membrane,
+            OrganelleType::Vacuole,
+        ] {
+            assert_eq!(cat.spec(kind).upkeep_throttled, 0, "{}", kind.name());
+        }
+    }
+
+    #[test]
+    fn a_closed_organelle_is_cheaper_to_keep_and_not_free() {
+        // Both halves matter. Cheaper, or there is no dormancy; not free, or there is no
+        // pressure against carrying sixteen of everything shut — which is the pressure
+        // `docs/ECONOMY.md` §12.1 measures.
+        let cat = OrganelleCatalogue::balanced();
+        for kind in THROTTLEABLE {
+            let spec = cat.spec(kind);
+            let open = spec.upkeep_cost_at(100, Q10_ONE);
+            let shut = spec.upkeep_cost_at(100, 0);
+            assert!(
+                shut < open,
+                "{} does not sleep: {shut} vs {open}",
+                kind.name()
+            );
+            assert!(shut > 0, "{} sleeps for nothing", kind.name());
+            // Monotone in between, so a genome that half-closes gets half the discount and
+            // there is a gradient for selection to climb rather than a cliff.
+            let half = spec.upkeep_cost_at(100, Q10_ONE / 2);
+            assert!(
+                shut <= half && half <= open,
+                "{} {shut} {half} {open}",
+                kind.name()
+            );
+        }
+    }
+
+    #[test]
+    fn an_organelle_under_construction_cannot_be_slept_through() {
+        // The one asymmetry the self-enforcing bargain does not cover: an unfinished organelle
+        // produces nothing open or shut, so a discount for closing it would be free.
+        let cat = OrganelleCatalogue::balanced();
+        let mut slots = [Organelle::empty(); SLOT_COUNT];
+        slots[0] = Organelle::finished(OrganelleType::Membrane, 24);
+        slots[2] = Organelle::building(OrganelleType::Chloroplast, 100, 5);
+        let building = cat.upkeep(&slots);
+        slots[2].control[0] = 0;
+        assert_eq!(
+            cat.upkeep(&slots),
+            building,
+            "a half-built chloroplast was slept through"
+        );
+        // And once it finishes, the same closed control does buy the discount.
+        slots[2].remaining_build = 0;
+        assert!(cat.upkeep(&slots) < building);
+    }
+
+    #[test]
+    fn a_cilium_driving_backwards_is_not_asleep() {
+        // `cilium_power` clamps to `-Q10..=Q10` because a beat has a direction, so `throttle`
+        // reports full reverse as zero. Pricing upkeep on that would have sold backwards
+        // swimming for nothing. `effort` is the magnitude, and this is the only place the two
+        // differ.
+        let mut back = Organelle::finished(OrganelleType::Cilium, 100);
+        back.control[0] = -(Q10_ONE as i16);
+        assert_eq!(back.throttle(), 0);
+        assert_eq!(back.effort(), Q10_ONE);
+
+        let mut idle = Organelle::finished(OrganelleType::Mitochondrion, 100);
+        idle.control[0] = 0;
+        assert_eq!(idle.effort(), 0, "a shut throttle is a shut throttle");
+    }
+
+    #[test]
+    fn a_spec_that_says_nothing_about_dormancy_is_priced_as_it_always_was() {
+        // The polarity that lets an old snapshot keep its old physics, and a scenario that
+        // names three fields of a spec keep the rest: zero means "does not respond".
+        let quiet = OrganelleSpec {
+            upkeep: 16 * 8,
+            upkeep_per_param: 16,
+            ..OrganelleSpec::default()
+        };
+        assert_eq!(quiet.upkeep_throttled, 0);
+        for effort in [0, Q10_ONE / 3, Q10_ONE, i32::MAX, i32::MIN] {
+            assert_eq!(quiet.upkeep_cost_at(200, effort), (16 * 8 + 16 * 200) / 16);
+        }
+    }
+
+    #[test]
+    fn a_loadout_sleeps_by_what_it_shuts_and_no_more() {
+        let cat = OrganelleCatalogue::balanced();
+        let mut slots = [Organelle::empty(); SLOT_COUNT];
+        slots[0] = Organelle::finished(OrganelleType::Membrane, 24);
+        slots[1] = Organelle::finished(OrganelleType::Nucleus, 56);
+        slots[2] = Organelle::finished(OrganelleType::Chloroplast, 100);
+        slots[3] = Organelle::finished(OrganelleType::Mitochondrion, 50);
+        slots[4] = Organelle::finished(OrganelleType::Chemosensor, 40);
+        let awake = cat.upkeep(&slots);
+
+        // Shutting the sensor buys nothing — it is a selector, not a throttle, and this is the
+        // free lunch the per-type table exists to refuse.
+        slots[4].control[0] = 0;
+        assert_eq!(cat.upkeep(&slots), awake, "a sensor slept for free");
+
+        // Shutting the two engines buys three quarters of their line and nothing of the
+        // membrane's or the nucleus's, which cannot be surrendered and are not offered.
+        slots[2].control[0] = 0;
+        slots[3].control[0] = 0;
+        let asleep = cat.upkeep(&slots);
+        let engines = cat.spec(OrganelleType::Chloroplast).upkeep_cost(100)
+            + cat.spec(OrganelleType::Mitochondrion).upkeep_cost(50);
+        assert!(asleep < awake);
+        assert!(
+            awake - asleep <= engines,
+            "slept for more than the engines cost: {awake} -> {asleep}, engines {engines}"
+        );
+        assert!(
+            awake - asleep >= engines / 2,
+            "the discount is not worth having: {awake} -> {asleep}, engines {engines}"
+        );
     }
 
     #[test]

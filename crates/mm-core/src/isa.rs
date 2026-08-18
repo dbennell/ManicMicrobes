@@ -7,7 +7,8 @@
 //! from sixteen types to thirty-two on the `n + 16` pairing `docs/FEEDING.md` §6 designs; version
 //! 8 appended a crowding reading to the membrane; version 9 made the widening at 7 actually
 //! reach `BUILD`; version 10 gave the catalogue recipes in nitrogen and phosphorus; version 11
-//! put the atmosphere on the slide and turned the diazosome the right way round.
+//! put the atmosphere on the slide and turned the diazosome the right way round; versions 12 and
+//! 13 were the carbonate system; version 14 made upkeep answer to the throttle.
 //!
 //! A genome archived under 5 or earlier that built a type-15 organelle was paying for a no-op.
 //! Under 6 the same byte builds armour that shades it, so those genomes have to be replayed
@@ -66,8 +67,27 @@
 //! fixed at seeding while the split between locked and available evolves — scarcity as a
 //! property a world arrives at rather than a number somebody set.
 
+//! # 14, the throttle reaches the bill
+//!
+//! `OrganelleSpec` gains an `upkeep_throttled` column and five entries set it: an organelle turned
+//! down now costs less to keep, so a cell can idle its metabolism through a night instead of
+//! paying full price for machinery it cannot use. SPEC §5 has promised dormancy as an evolvable
+//! strategy since the beginning and nothing implemented the half of it that mattered — `HALT`
+//! made *thinking* cheap and the bill a cell actually dies of was untouched.
+//!
+//! A bump for the same reason 10 was: a new cost column in the catalogue is a catalogue change
+//! (hard rule 8), and this one is observable from inside a genome — `OSET 0` on a mitochondrion
+//! used to buy nothing but a lower burn rate and now buys a lower bill as well, so the same bytes
+//! describe a different organism. It renumbers nothing and takes nothing away, which puts it at
+//! the mild end of the list beside 10's demand that a lineage learn to eat nitrogen.
+//!
+//! The narrow scope is deliberate and is argued at [`crate::organelle::THROTTLEABLE`]: only the
+//! five types that scale their *output* by `control[0]` may scale their upkeep by it. On a
+//! chemosensor that word chooses a chemical and on a nucleus it sets copy fidelity, and pricing
+//! those by it would have sold a sensor watching chemical 3 for three parts in a thousand.
+
 /// ISA version stamped into save files, scenarios and archived genomes (SPEC §16).
-pub const ISA_VERSION: u16 = 13;
+pub const ISA_VERSION: u16 = 14;
 
 /// Number of opcodes. The opcode of a byte is `byte % OPCODE_COUNT` (SPEC §4.2), so four
 /// distinct byte values map to each opcode and most point mutations are synonymous.

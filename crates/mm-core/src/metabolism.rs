@@ -64,9 +64,13 @@ pub struct Capacities {
     /// the loop that consumed it runs on one.
     ///
     /// Exact, and the reason is worth stating because the neighbouring hoist is *not* legal:
-    /// upkeep depends only on the loadout, and nothing in the sequential loop builds, tears down
-    /// or retypes an organelle — the construction pass that does runs earlier, before
-    /// `capacities_into`. `osmotic_load` cannot move here for exactly the opposite reason: it
+    /// upkeep depends only on the loadout — its types, its `param`s and, since
+    /// `OrganelleSpec::upkeep_throttled`, its control words — and nothing in the sequential loop
+    /// builds, tears down, retypes or re-throttles an organelle. The construction pass that does
+    /// runs earlier, and `OSET` is a VM instruction and so belongs to the execute phase, which is
+    /// a different phase again. A throttle closed this tick is therefore charged from the next
+    /// one, exactly as it is *rated* from the next one by `capacity_by_pathway` above — the cost
+    /// and the output move together, which keeps a genome from ever seeing one without the other. `osmotic_load` cannot move here for exactly the opposite reason: it
     /// reads the cytoplasm, which photosynthesis, respiration and growth all rewrite before the
     /// upkeep block asks for it, so hoisting it would price a cell's turgor on chemistry it no
     /// longer holds.

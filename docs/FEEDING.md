@@ -181,6 +181,20 @@ established rule, stated here because it has been followed twice without being w
 > **A type is the right unit when the thing has its own build cost, upkeep and teardown. A control
 > word is the right unit when it is the same machinery doing a different job.**
 
+And a second rule, added by ISA 14 and worth stating before it catches somebody:
+
+> **`control[0]` on a throttling type is no longer free to repurpose, because it is now a price as
+> well as a rate.** `OrganelleSpec::upkeep_throttled` makes three quarters of a mitochondrion's,
+> chloroplast's, chemosynthetic granule's, lysosome's and diazosome's upkeep follow that word, so
+> giving it a second meaning on one of those five would mean a genome could lower its bill by
+> saying something unrelated. The other twenty-seven words are unaffected; `docs/SPEC.md` §6.2
+> holds the qualifying list and `organelle::THROTTLEABLE` is the code that states it.
+
+The table above is also two facts out of date, both recorded elsewhere and neither reopened here:
+the vacuole's `control[1]` is engulf appetite (`ecology.rs`, and the note there explains why it is
+the second word and not the first), and the membrane's permeability is implemented — passive
+transport reads it in `ecology.rs`.
+
 Applied honestly to the candidates this investigation raises:
 
 - **Lysis** (§17.5, designed and unbuilt) — same machinery as a spike, something you extend to
