@@ -2082,3 +2082,104 @@ item this section leaves behind.
 The prediction, for whoever runs it: this should not move a single shipped genome, because every
 one of them leaves its metabolic controls wide open and a full throttle is an exact identity. If
 the panel moves, something is wrong with the identity rather than with the balance.
+
+---
+
+## 18. A meal is four compartments, and two of them were being thrown away
+
+§17.4a states the law that a gate pays on an absent input, not a low one. This section is the
+other half of the same investigation: not *when* to eat, but **what eating is worth**, which
+turned out to be much less than the mechanism implied.
+
+### 18.1 What one swallowed cell delivered
+
+One engulfer, one median prey — mass 60, charge 400, twenty units of cytoplasm:
+
+```text
+  eater before   energy 400   substrate  0   mass 200
+  eater after    energy 211   substrate 53   mass 200
+  gains from the meal:   substrate +53,   mass +0
+  prey charge 400 units:  dissipated
+```
+
+Two holes, and neither was a balance question.
+
+**The charge was destroyed.** A cell is four compartments and three of them crossed — cytoplasm
+as itself, body as carrion, minerals as themselves — while the charge died with the victim. Set
+against what the rest of the meal is worth, that is not a rounding: 400 units destroyed against
+about 37 gained once the flesh is digested and burnt. **A predator was burning an order of
+magnitude more energy than it took.**
+
+And it was already inconsistent with the engine. `JXFER` with `what == 0` has moved `cells.energy`
+straight across a junction since M7, bounded only by what the sender holds. A parasite could drink
+a host's charge through a straw; a predator that swallowed the same cell whole got nothing.
+
+**`mass +0`.** The lysosome only ever made fuel — `CARRION -> pathway.substrate`, full stop — so a
+predator was permanently *fuel-rich and brick-poor*. That is precisely what a late-introduced
+`engulfer.mm` looks like as it dies: energy 490 and rising, mass stuck at 98, under its own divide
+weight of 140 and under the two-to-one bulk gate it needs to take another meal. **It was not
+starving. It could not grow.**
+
+Meanwhile the holdfast's filter has had `capture_efficiency` — "fraction of captured detritus that
+becomes structural matter" — all along. The sessile guild ate bricks and the predatory guild ate
+fuel, and only one of them could build a body out of a meal. That asymmetry was never argued for;
+it fell out of the two organelles being written at different times.
+
+### 18.2 The two dials
+
+`digestion_structural_share` (1/2) splits what digestion recovers between structural matter and
+burnable substrate. `engulf_charge_recovery` (1/8) keeps a share of the victim's charge instead of
+dissipating it. Both are `EcologyConfig`, so neither is an ISA bump — the same class as
+`bleed_rate` — and both ship **on**, because §2's whole complaint is that this project lands
+mechanisms defaulted to zero and then wonders why the slide is a monoculture.
+
+An eighth rather than the whole charge for two reasons. The physical reading is "some of it
+survives the meal", not all — a predator does not harvest ATP. And at the whole 400 one meal is
+nine hundred ticks of upkeep, which is a runaway, and worse it makes the lysosome optional: a
+predator living on charge alone needs no gut, which *removes* mechanism rather than adding it.
+
+### 18.3 The wall, which is the half the engine cannot supply
+
+Growth is capped at `q10(membrane.param) + membrane.control[1]`. Every shipped genome carries the
+ancestor's membrane of 24 — a target of twenty-four units against organelles weighing over a
+hundred — so `room` is negative every tick and no amount of structural matter becomes body. **The
+engine makes the brick available; wanting somewhere to put it is the genome's business.**
+
+Measured on one cell: with membrane 24 a fed predator holds sixteen units of structural matter and
+grows by nothing. With membrane 200 the same meal takes it from mass 130 to 146. I4 holds either
+way — matter with nowhere to go stays in the cytoplasm rather than being destroyed.
+
+And on a slide, which is the case that matters, dropping the predator into 3,297 settled ancestors:
+
+| `engulfer.mm` | outcome |
+| --- | --- |
+| membrane 24 | 15 cells, then **extinct by t=12,000** |
+| membrane 200 | 15, 8, 7, 7, 9, **11 at t=28,000**, 215 meals, mass p90 206, still climbing |
+
+Nothing else changed — same body, same mouth, same gut. It compounds because of the two-to-one
+bulk gate: a predator that can grow qualifies for larger prey, and one that cannot is stuck eating
+whatever is under half its own build weight forever, which in a settled slide is the empty set.
+**The wall is what turns a meal into the ability to take the next one.**
+
+### 18.4 What this does not fix
+
+`stalker.mm` still dies on introduction, and it is not close: **11,220 wounds and 0 meals.** It
+stabs constantly and gains nothing, because a wound leaks only when `bleed_rate` is non-zero and
+that is still 0 — and turning it on was measured not to save it either, because what leaks is
+matter and matter is not income (§1). Charge recovery makes that gap *wider*, not narrower:
+swallowing now yields a compartment that stabbing cannot reach. Whether that is the right ladder —
+`FEEDING.md` §4 argues ownership of the kill is the whole game, which says yes — or too steep, is
+the open question this section leaves.
+
+### 18.5 What is unresolved in the dials themselves
+
+**The brick share is global.** A lysosome's `control[0]` is its throttle and `control[1]` its
+pathway, so there is no word left for a cell to say "make me bricks today". If that matters it
+wants a field on `Pathway` rather than a third control word.
+
+**It moves the scavengers too.** Any lysosome digesting carrion now gets half bricks, which halves
+`scavenger.mm`'s fuel yield. That is a real change to a shipped strategy and it is the reason the
+panel has to be re-cut.
+
+**Neither number is a result.** A half and an eighth are first cuts with reasons, not measurements.
+`mm_core::balance` decides them.

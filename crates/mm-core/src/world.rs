@@ -134,6 +134,9 @@ pub struct World {
     /// terms as `slip`: cleared and refilled by every ecology phase, never carried between ticks,
     /// so excluded from equality, hashing and snapshots.
     eaten: Vec<crate::cell::CellId>,
+    /// Who struck or swallowed whom this tick, for the renderer. Scratch on exactly the terms
+    /// `eaten` is, and read by nothing in the simulation — see [`crate::ecology::Deed`].
+    deeds: Vec<crate::ecology::Deed>,
     /// What each cell's cilia and holdfasts add up to, gathered in parallel just before the
     /// physics phase reads it. Scratch on the same terms as `slip`: derived every tick from the
     /// organelle loadout, so excluded from equality, hashing and snapshots.
@@ -377,6 +380,7 @@ impl World {
             pressure: Vec::new(),
             slip: Vec::new(),
             eaten: Vec::new(),
+            deeds: Vec::new(),
             body_scan: Vec::new(),
             ecology_scan: Vec::new(),
             cells: CellArena::new(),
@@ -740,6 +744,11 @@ impl World {
 
     /// Advance one tick, in the fixed order of SPEC §12.
     pub fn step(&mut self) {
+        // The picture's channel is emptied here rather than in the phase that fills it, because
+        // the phase does not always run: an empty slide skips ecology entirely, and clearing in
+        // there left a single tool-driven kill being reported on every tick for the rest of the
+        // run. The tick owns it. See [`crate::ecology::Deed`].
+        self.deeds.clear();
         let seed = self.scenario.seed;
         let tick = self.tick;
         let mut report = TickReport::default();
@@ -962,6 +971,7 @@ impl World {
                 &mut self.ledger,
                 &self.ecology_scan,
                 &mut self.eaten,
+                &mut self.deeds,
             );
             // Swallowed whole, so they die on the same path starvation uses. Their mass and
             // interior have already moved, so `apply_deaths` finds a corpse with nothing left in
@@ -974,6 +984,7 @@ impl World {
                 &self.biology,
                 &mut self.ledger,
                 &mut self.pending,
+                &mut self.deeds,
             );
             report.biology.deaths = dead.deaths;
             report.biology.to_carrion = dead.to_carrion;
@@ -2181,6 +2192,17 @@ impl World {
         &mut self.components
     }
 
+    /// What was struck or swallowed this tick, for the picture to show.
+    ///
+    /// Valid until the next `step` and then overwritten, which is the whole design: it reports a
+    /// fact that exists for one phase and is unrecoverable afterwards. Nothing in `mm-core` reads
+    /// it, and nothing should — a genome that could sense a deed would be sensing something no
+    /// organelle reports.
+    #[must_use]
+    pub fn deeds(&self) -> &[crate::ecology::Deed] {
+        &self.deeds
+    }
+
     /// The species archive and the tree over it.
     #[must_use]
     pub fn archive(&self) -> &crate::phylogeny::Phylogeny {
@@ -2312,12 +2334,15 @@ impl World {
             return;
         }
         self.pending.deaths.push(cell);
+        // The tool's kill lands in the same channel a natural death does, so a cell culled from
+        // the microscope leaves the same husk on the glass as one that starved.
         biology::apply_deaths(
             &mut self.cells,
             &mut self.substrate,
             &self.biology,
             &mut self.ledger,
             &mut self.pending,
+            &mut self.deeds,
         );
     }
 

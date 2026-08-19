@@ -11,7 +11,8 @@ fn root(rel: &str) -> std::path::PathBuf {
 }
 
 fn asm(genome: &str) -> Vec<u8> {
-    let source = std::fs::read_to_string(root(genome)).expect("genome");
+    let path = if genome.starts_with('/') { std::path::PathBuf::from(genome) } else { root(genome) };
+    let source = std::fs::read_to_string(path).expect("genome");
     mm_asm::assemble(&source).expect("assemble").bytes
 }
 
@@ -39,7 +40,13 @@ fn masses(world: &World, cohorts: &[Cohort], label: &str) -> Option<(i32, i32, i
 #[test]
 #[ignore = "a probe; run it on purpose"]
 fn what_happens_when_a_predator_arrives_late() {
-    for predator in ["genomes/engulfer.mm", "genomes/stalker.mm"] {
+    let walled = std::env::var("MM_WALLED").is_ok();
+    let list: &[&str] = if walled {
+        &["/tmp/claude-1000/-home-david-Projects-ManicMicrobes/cc52660f-01a9-41ab-83b4-2d6c8a7d50e4/scratchpad/engulfer_walled.mm"]
+    } else {
+        &["genomes/engulfer.mm", "genomes/stalker.mm"]
+    };
+    for predator in list {
         let scenario = Scenario::from_ron(
             &std::fs::read_to_string(root("scenarios/predator_introduction.ron")).expect("scenario"),
         )
@@ -56,20 +63,23 @@ fn what_happens_when_a_predator_arrives_late() {
         cohorts.append(&mut later);
         eprintln!("\n=== {predator} into {settled} settled ancestors ===");
 
-        let mut last = world.report();
+        let (mut engulfed, mut wounded) = (0u64, 0u64);
         for step in 1..=10 {
-            world.run(2_000);
-            let now = world.report();
+            for _ in 0..2_000 {
+                world.run(1);
+                // Accumulated, because `World::report` is the *last tick's* counters and diffing
+                // it across a window measures one tick of it.
+                engulfed += world.report().ecology.engulfed as u64;
+                wounded += world.report().ecology.wounded as u64;
+            }
             let (pa, pp) = (
                 masses(&world, &cohorts, "ancestor"),
                 masses(&world, &cohorts, "predator"),
             );
-            let killed = now.ecology.engulfed as i64 - last.ecology.engulfed as i64;
-            let wounded = now.ecology.wounded as i64 - last.ecology.wounded as i64;
             if let (Some(a), Some(p)) = (pa, pp) {
                 eprintln!(
                     "t={:>6}  ancestor n={:<5} mass p10/50/90 {:>3}/{:>3}/{:>3}   \
-                     predator n={:<4} mass {:>3}/{:>3}/{:>3}   engulfed {killed:<4} wounded {wounded}",
+                     predator n={:<4} mass {:>3}/{:>3}/{:>3}   meals {engulfed:<5} wounds {wounded}",
                     world.tick_count(), a.3, a.0, a.1, a.2, p.3, p.0, p.1, p.2
                 );
                 if p.3 == 0 {
@@ -84,7 +94,6 @@ fn what_happens_when_a_predator_arrives_late() {
                     if p.1 >= a.0 * 2 { "can swallow the smallest tenth" } else { "CANNOT SWALLOW ANYTHING" }
                 );
             }
-            last = now;
         }
     }
 }

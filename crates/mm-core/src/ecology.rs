@@ -79,6 +79,41 @@ pub struct EcologyConfig {
     pub engulf_ratio: i32,
     /// Energy to swallow one `Q10` of another cell's mass.
     pub engulf_energy: i32,
+    /// Fraction of a swallowed cell's **charge** the eater keeps, `Q10`. The rest dissipates.
+    ///
+    /// A cell is four compartments and, until this existed, three of them crossed: the cytoplasm
+    /// as itself, the body as carrion, the organelles' minerals as themselves — and the charge
+    /// died with the victim. Measured against what the rest of the meal is worth, that is not a
+    /// rounding: a median prey carries about **400** units of charge and its flesh yields about
+    /// **37** units of energy once digested and burnt. **A predator was destroying an order of
+    /// magnitude more energy than it gained.**
+    ///
+    /// # Why this is not a new kind of thing
+    ///
+    /// One cell's charge becoming another's is already in the engine and has been since M7:
+    /// `JXFER` with `what == 0` moves `cells.energy` straight across a junction, bounded only by
+    /// what the sender holds. So a parasite may drink a host's charge through a straw while a
+    /// predator that swallows the same cell whole gets nothing, and there is no defence of that
+    /// asymmetry — it is an omission, not a decision.
+    ///
+    /// # Why it is a fraction and a small one
+    ///
+    /// Because the physical reading is "some of the charge survives the meal", not all of it: a
+    /// predator does not harvest its prey's ATP. At the whole 400 one meal is nine hundred ticks
+    /// of upkeep, which is a runaway, and worse, it makes the lysosome optional — a predator that
+    /// lives on charge alone needs no gut, which *removes* mechanism. An eighth puts a meal's
+    /// charge on the same order as its flesh rather than ten times it.
+    ///
+    /// # What it makes true that was not
+    ///
+    /// `genomes/stalker.mm` hunts up the metabolic emission band, which reports how big and how
+    /// taxed a neighbour is — the fattest cell on the slide. With this, the brightest cell is
+    /// also the richest one, so the sensor and the payoff finally point at the same thing.
+    ///
+    /// Energy is *accounted* rather than conserved (I5) — it enters from light and leaves as
+    /// dissipation — so moving charge from victim to eater breaks no invariant. It makes the
+    /// dissipation entry smaller, which is the point.
+    pub engulf_charge_recovery: i32,
     /// Fraction of a swallowed cell's mass that lands as usable structural matter, `Q10`.
     ///
     /// High on purpose, and that is the point of the whole mechanism rather than a generosity.
@@ -162,6 +197,41 @@ pub struct EcologyConfig {
     /// Fraction of digested carrion that becomes usable substrate, `Q10`. The rest is waste:
     /// scavenging is lossy, or a corpse would be worth more than the cell that made it.
     pub digestion_efficiency: i32,
+    /// Of what digestion recovers, the share that lands as **structural matter** rather than as
+    /// burnable substrate, `Q10`.
+    ///
+    /// # Why a predator could pay its bills forever and never grow
+    ///
+    /// Flesh is polymer, and a thing made of polymer is both fuel and brick. The lysosome only
+    /// ever made it fuel: `CARRION -> pathway.substrate`, full stop. Measured on one median prey
+    /// swallowed whole — mass 60, charge 400, 20 units of cytoplasm:
+    ///
+    /// ```text
+    ///   eater before   energy 400   substrate  0   mass 200
+    ///   eater after    energy 211   substrate 53   mass 200
+    ///   gains from the meal:  substrate +53,  mass +0
+    /// ```
+    ///
+    /// **Mass plus nothing.** So a predator is permanently fuel-rich and brick-poor, which is
+    /// exactly what a late-introduced `genomes/engulfer.mm` looks like when it dies: energy 490
+    /// and rising, mass stuck at 98, under its own divide weight of 140 and under the two-to-one
+    /// bulk gate it needs to take another meal. It is not starving. It cannot grow.
+    ///
+    /// The holdfast's filter has had the mirror of this dial all along —
+    /// [`EcologyConfig::capture_efficiency`], "fraction of captured detritus that becomes
+    /// structural matter" — so the sessile guild eats bricks and the predatory guild eats fuel,
+    /// and only one of them can build a body out of a meal. That asymmetry was never argued for;
+    /// it fell out of the two organelles being written at different times.
+    ///
+    /// **This is a global rate, not a genome's choice.** A lysosome's `control[0]` is its throttle
+    /// and `control[1]` its pathway, so there is no word left for a cell to say "make me bricks
+    /// today". If that turns out to matter it wants a pathway field rather than a third control.
+    ///
+    /// A cell still has to *want* the mass: growth is capped at `q10(membrane.param) +
+    /// membrane.control[1]`, and a predator whose organelles already outweigh that target grows
+    /// by nothing however much structural matter it holds. The engine makes the brick available;
+    /// raising the membrane's investment to have somewhere to put it is the genome's business.
+    pub digestion_structural_share: i32,
     /// Membrane damage a tick, per whole radius a cell is pressed into by cells it is not
     /// joined to, `Q10`.
     ///
@@ -253,6 +323,10 @@ impl Default for EcologyConfig {
             // spread of sizes on a grown slide puts some pairs within reach of it.
             engulf_ratio: Q10_ONE * 2,
             engulf_energy: Q10_ONE / 32,
+            // On, not zero. `docs/ZOO.md` §2 blames the slide being a monoculture on exactly the
+            // habit of landing a mechanism defaulted off, and this one has a measured asymmetry
+            // behind it rather than a hope: `JXFER` already moves charge between cells.
+            engulf_charge_recovery: Q10_ONE / 8,
             // Three quarters. Against the sixth or so a spike-and-scavenge kill returns, and
             // as *structure* rather than substrate — see the field's own note.
             engulf_efficiency: Q10_ONE * 3 / 4,
@@ -278,6 +352,9 @@ impl Default for EcologyConfig {
             dissolve_rate: Q10_ONE / 64,
             digestion_rate: Q10_ONE / 8,
             digestion_efficiency: (Q10_ONE * 2) / 3,
+            // Half and half, because flesh is both and there is no reason in the physics to
+            // prefer either. It is the first cut, not a result — `mm_core::balance` decides it.
+            digestion_structural_share: Q10_ONE / 2,
             // Off by default, on the evidence. See the field's own note: measured against a run
             // with it at `Q10_ONE / 64`, it moved the settled population by 1.3% and killed
             // almost nobody. `split_pressure` is what bounds a crowd now.
@@ -321,6 +398,70 @@ pub struct EcologyReport {
     pub bled: i64,
     /// Matter crossing membranes passively in either direction, `Q10`.
     pub crossed: i64,
+    /// Charge taken from swallowed cells rather than dissipated, `Q10`. The size of the second
+    /// income — see [`EcologyConfig::engulf_charge_recovery`].
+    pub charge_taken: i64,
+}
+
+/// One thing a cell did to another cell this tick, for the picture to show.
+///
+/// # Why the renderer needs this and cannot derive it
+///
+/// A spike wound moves `cells.damage[j]` and leaves nothing behind that says who dealt it; a
+/// swallowed cell is simply gone next frame. So the microscope showed cells vanishing with no
+/// cause and no culprit, which is the complaint that produced this: *"it's not obvious what cell
+/// its attacking and what really happened."* Both facts exist for exactly the length of one
+/// ecology phase and are then unrecoverable, so they are published while they are true.
+///
+/// Scratch on the same terms as the `eaten` channel: cleared and refilled every ecology phase,
+/// never carried between ticks, and therefore excluded from equality, hashing and snapshots
+/// (hard rule 7 gains no surface). Determinism is inherited rather than argued — the loop that
+/// fills this is the sequential one, in slot order over cells and then neighbour order, which is
+/// the discipline `step`'s own note describes.
+///
+/// **Nothing in the simulation reads it.** It is a one-way channel out, and it must stay one:
+/// a genome that could sense a deed would be sensing something no organelle reports.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Deed {
+    /// The cell that acted. [`crate::cell::CellId::NONE`] when nothing did — a cell that starves
+    /// is killed by arithmetic, not by anybody.
+    pub actor: crate::cell::CellId,
+    /// The cell it acted on.
+    pub target: crate::cell::CellId,
+    /// Where it happened, `POS`, which is the target's position at the moment it happened.
+    ///
+    /// Carried rather than looked up because the commonest use is a cell that no longer exists:
+    /// by the time a frame is built the swallowed and the dead are out of the arena and there is
+    /// nothing left to ask.
+    pub x: i32,
+    pub y: i32,
+    pub kind: DeedKind,
+}
+
+/// What a [`Deed`] was.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DeedKind {
+    /// A spike landed. Carries the damage dealt, `Q10`, so the picture can show a graze
+    /// differently from a killing blow.
+    Struck { damage: i32 },
+    /// A cell took in food it had to work for — a lysosome digesting carrion, a filter catching
+    /// detritus. Carries what was taken, `Q10`.
+    ///
+    /// **Gated at a whole unit.** Every lysosome in a crowd digests a trickle every tick, and a
+    /// deed per cell per tick would be fifty thousand entries describing nothing anybody can see.
+    /// A whole unit is the smallest amount the picture could show.
+    Fed { amount: i32 },
+    /// A cell was swallowed whole. The target is gone by the end of the tick.
+    Swallowed,
+    /// A cell left the arena. Reported for every death however caused, so the picture can show
+    /// something leaving rather than a cell simply not being in the next frame — which is what
+    /// "cells just disappear" was.
+    ///
+    /// The cause is not carried and deliberately so: by the time `apply_deaths` runs, starvation,
+    /// poisoning and being eaten have been merged into one list and the distinction is genuinely
+    /// gone. A renderer that wants it can pair this with the `Swallowed` deed naming the same
+    /// cell, which is the only cause that has a culprit worth drawing.
+    Died,
 }
 
 /// How far one spike is out, `Q10` of its full travel — zero if it is sheathed, still building,
@@ -553,6 +694,11 @@ pub fn step(
     // uses — `ecology` has no business despawning anything, and a victim whose mass has already
     // moved must go through `apply_deaths` like any other corpse so the books close in one place.
     eaten: &mut Vec<crate::cell::CellId>,
+    // What was done to whom, for the picture. Appended to, never cleared: the tick owns this
+    // channel and clears it, because this phase does not always run — an empty slide skips it,
+    // and a `clear` in here left one tool-driven kill being re-announced on every tick forever.
+    // Write-only from the simulation's point of view — see [`Deed`].
+    deeds: &mut Vec<Deed>,
 ) -> EcologyReport {
     let chemistry = &catalogue.metabolism;
     let mut report = EcologyReport::default();
@@ -650,6 +796,13 @@ pub fn step(
                     cells.damage[j] = cells.damage[j].saturating_add(damage);
                     report.damage_dealt += damage as i64;
                     report.wounded = report.wounded.saturating_add(1);
+                    deeds.push(Deed {
+                        actor: cells.id_at(i),
+                        target: cells.id_at(j),
+                        x: cells.x[j],
+                        y: cells.y[j],
+                        kind: DeedKind::Struck { damage },
+                    });
                 }
             }
         }
@@ -716,6 +869,18 @@ pub fn step(
                     continue;
                 }
                 cells.energy[i] = cells.energy[i].saturating_sub(cost);
+
+                // The fourth compartment. Taken from the victim before `apply_deaths` sees it, so
+                // what it goes on to dissipate is exactly the remainder and the books still
+                // balance — energy is accounted rather than conserved (I5), and this only makes
+                // the dissipation entry smaller.
+                let charge = cells.energy[j].max(0);
+                let kept = q10_scale(charge, config.engulf_charge_recovery.clamp(0, Q10_ONE));
+                if kept > 0 {
+                    cells.energy[j] = cells.energy[j].saturating_sub(kept);
+                    cells.energy[i] = cells.energy[i].saturating_add(kept);
+                    report.charge_taken = report.charge_taken.saturating_add(kept as i64);
+                }
                 ledger.dissipate(cost as i64);
 
                 // **You get what it had.**
@@ -732,7 +897,10 @@ pub fn step(
                 //   cytoplasm  already-digested food. Crosses as itself, no loss, no conversion.
                 //   body       raw flesh. Becomes carrion *inside* the eater; needs a lysosome.
                 //   minerals   what the organelles were made of. Cross as themselves.
-                //   energy     its charge. Dies with it — `apply_deaths` dissipates it.
+                //   energy     its charge. A share crosses; the rest dissipates. See
+                //              `EcologyConfig::engulf_charge_recovery` — it was all dissipated
+                //              until that existed, which destroyed about ten times the energy the
+                //              flesh went on to yield.
                 //
                 // `carrion_fraction` is deliberately **not** applied. That split describes how a
                 // corpse rots in water — half flesh, half plain carbon anything can absorb — and
@@ -826,6 +994,13 @@ pub fn step(
                 report.engulfed = report.engulfed.saturating_add(1);
                 report.swallowed = report.swallowed.saturating_add(taken as i64);
                 eaten.push(cells.id_at(j));
+                deeds.push(Deed {
+                    actor: cells.id_at(i),
+                    target: cells.id_at(j),
+                    x: cells.x[j],
+                    y: cells.y[j],
+                    kind: DeedKind::Swallowed,
+                });
                 break;
             }
         }
@@ -1079,6 +1254,15 @@ pub fn step(
                         }
                     }
                     report.filtered = report.filtered.saturating_add(taken as i64);
+                    if taken >= Q10_ONE {
+                        deeds.push(Deed {
+                            actor: cells.id_at(i),
+                            target: cells.id_at(i),
+                            x: cells.x[i],
+                            y: cells.y[i],
+                            kind: DeedKind::Fed { amount: taken },
+                        });
+                    }
                 }
             }
         }
@@ -1139,15 +1323,33 @@ pub fn step(
             // would be quietly making the wrong substance in any world that did.
             let substrate_chem = p.substrate % CHEM_COUNT;
             let waste_chem = p.waste % CHEM_COUNT;
+            let structural_chem = chemistry.structural % CHEM_COUNT;
 
-            let room = crate::biology::interior_capacity(cells, i)
-                .saturating_sub(cells.interior(i)[substrate_chem])
-                .max(0);
-            let into_cell = recovered.min(room);
-            if into_cell > 0 {
-                cells.interior_mut(i)[substrate_chem] =
-                    cells.interior(i)[substrate_chem].saturating_add(into_cell);
-                ledger.convert(CARRION, substrate_chem, into_cell as i64);
+            // Flesh is polymer, so it is both fuel and brick — see
+            // `EcologyConfig::digestion_structural_share`. The brick half is taken off first and
+            // the remainder is fuel, so the two shares always sum to what was recovered and no
+            // rounding can mint a unit between them.
+            let as_brick = q10_scale(recovered, config.digestion_structural_share);
+            let as_fuel = recovered.saturating_sub(as_brick);
+
+            let mut into_cell = 0i32;
+            // Both halves are capacity-bounded independently, because a cell full of fuel may
+            // still have room for structure and the reverse. If the structural chemical *is* the
+            // substrate — a scenario is free to pose that — the second draw simply finds the
+            // capacity the first one left, which is correct rather than a special case.
+            for (chem, amount) in [(structural_chem, as_brick), (substrate_chem, as_fuel)] {
+                if amount <= 0 {
+                    continue;
+                }
+                let room = crate::biology::interior_capacity(cells, i)
+                    .saturating_sub(cells.interior(i)[chem])
+                    .max(0);
+                let took = amount.min(room);
+                if took > 0 {
+                    cells.interior_mut(i)[chem] = cells.interior(i)[chem].saturating_add(took);
+                    ledger.convert(CARRION, chem, took as i64);
+                    into_cell = into_cell.saturating_add(took);
+                }
             }
             // Whatever the cell had no room for, plus the digestion loss, goes back to the water
             // as waste rather than being destroyed.
@@ -1165,6 +1367,15 @@ pub fn step(
             }
             report.digested += moved as i64;
             report.scavenged += into_cell as i64;
+            if into_cell >= Q10_ONE {
+                deeds.push(Deed {
+                    actor: cells.id_at(i),
+                    target: cells.id_at(i),
+                    x: cells.x[i],
+                    y: cells.y[i],
+                    kind: DeedKind::Fed { amount: into_cell },
+                });
+            }
         }
     }
 
@@ -1274,9 +1485,11 @@ mod tests {
         // list is discarded. A test that wants engulfment has `tests/engulf.rs`, which drives a
         // whole `World` and therefore gets the deaths buried for it.
         let mut eaten = Vec::new();
+        let mut deeds = Vec::new();
         super::step(
             cells, substrate, neighbours, crowding, slip, config, catalogue, ledger, &scan,
             &mut eaten,
+            &mut deeds,
         )
     }
 
@@ -1697,6 +1910,93 @@ mod tests {
                 Organelle::finished(OrganelleType::Chloroplast, 60);
         }
         assert!(!TrophicMix::of(&cells).is_monoculture(900));
+    }
+
+    #[test]
+    fn a_strike_and_a_swallow_are_reported_with_both_ends() {
+        // The channel the microscope was missing. A wound moves `damage[j]` and leaves nothing
+        // saying who dealt it; a swallowed cell is simply gone. Both are published while true.
+        use crate::cell::CellSeed;
+        let mut world = crate::World::new(crate::Scenario {
+            seed: 3,
+            width: 16,
+            height: 16,
+            ..crate::Scenario::default()
+        })
+        .expect("world");
+        world.set_biology(crate::biology::BiologyConfig {
+            mutation: crate::MutationRates::none(),
+            ..crate::biology::BiologyConfig::default()
+        });
+        let genome = world.genomes().intern(vec![0x2E]).expect("genome");
+        let seed = |mass: i32| CellSeed {
+            x: crate::fixed::pos(8),
+            y: crate::fixed::pos(8),
+            mass: crate::fixed::q10(mass),
+            energy: crate::fixed::q10(400),
+            membrane: 24,
+            key: 11,
+            badge: 0,
+            species: 0,
+            parent: crate::cell::CellId::NONE,
+            birth_tick: 0,
+            genome: genome.clone(),
+        };
+        let hunter = world.spawn_cell(seed(200));
+        let prey = world.spawn_cell(seed(60));
+        let i = world.cells().index(hunter).expect("alive");
+        let mut spike = Organelle::finished(OrganelleType::Spike, 200);
+        spike.control[0] = Q10_ONE as i16; // drawn — a sheathed spike wounds nothing
+        world.cells_mut().slots_mut(i)[5] = spike;
+        world.adopt_current_contents_as_baseline();
+
+        world.run(1);
+        let struck: Vec<_> = world
+            .deeds()
+            .iter()
+            .filter(|d| matches!(d.kind, DeedKind::Struck { .. }))
+            .collect();
+        assert!(!struck.is_empty(), "a drawn spike on a neighbour reported nothing");
+        assert_eq!(struck[0].actor, hunter, "the strike names the wrong attacker");
+        assert_eq!(struck[0].target, prey, "the strike names the wrong victim");
+
+        // And a swallow, from the same channel.
+        let i = world.cells().index(hunter).expect("alive");
+        let mut vac = Organelle::finished(OrganelleType::Vacuole, 120);
+        vac.control[1] = Q10_ONE as i16; // appetite, which is shut on a fresh vacuole
+        world.cells_mut().slots_mut(i)[4] = vac;
+        for _ in 0..8 {
+            world.run(1);
+            if let Some(d) = world
+                .deeds()
+                .iter()
+                .find(|d| d.kind == DeedKind::Swallowed)
+            {
+                assert_eq!(d.actor, hunter);
+                assert_eq!(d.target, prey);
+                return;
+            }
+        }
+        panic!("nothing was swallowed, so the channel was not exercised");
+    }
+
+    #[test]
+    fn the_deed_channel_is_cleared_every_tick_and_never_accumulates() {
+        // Scratch, not state. If it accumulated it would be world state by the back door, and
+        // hard rule 7 would have a surface it does not know about.
+        let mut world = crate::World::new(crate::Scenario {
+            seed: 3,
+            width: 16,
+            height: 16,
+            ..crate::Scenario::default()
+        })
+        .expect("world");
+        world.run(20);
+        assert!(
+            world.deeds().is_empty(),
+            "an empty slide reported deeds: {:?}",
+            world.deeds()
+        );
     }
 
     #[test]

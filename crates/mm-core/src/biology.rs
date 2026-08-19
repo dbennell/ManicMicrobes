@@ -1026,6 +1026,7 @@ impl crate::state_hash::StateHash for BiologyConfig {
         h.i32(e.carrion_fraction);
         h.i32(e.engulf_ratio);
         h.i32(e.engulf_energy);
+        h.i32(e.engulf_charge_recovery);
         h.i32(e.engulf_efficiency);
         h.i32(e.permeability_rate);
         h.i32(e.bleed_rate);
@@ -1033,6 +1034,7 @@ impl crate::state_hash::StateHash for BiologyConfig {
         h.i32(e.dissolve_rate);
         h.i32(e.digestion_rate);
         h.i32(e.digestion_efficiency);
+        h.i32(e.digestion_structural_share);
         h.i32(e.crowding_damage);
         h.i32(e.crowding_reference_radius);
         h.u32(e.crowding_grace);
@@ -2058,6 +2060,10 @@ pub fn apply_deaths(
     config: &BiologyConfig,
     ledger: &mut Ledger,
     pending: &mut Pending,
+    // Appended to, not cleared: `ecology::step` clears it earlier in the same tick and the dead
+    // are buried after it. Write-only from the simulation's point of view — see
+    // [`crate::ecology::Deed`].
+    deeds: &mut Vec<crate::ecology::Deed>,
 ) -> DeathReport {
     let mut died = DeathReport::default();
     // Sorted so that two cells dying on the same square deposit in a fixed order, whatever
@@ -2071,6 +2077,14 @@ pub fn apply_deaths(
         };
         let sx = pos_to_square(cells.x[i]);
         let sy = pos_to_square(cells.y[i]);
+        // Announced before the cell is taken apart, while it still has a position to announce.
+        deeds.push(crate::ecology::Deed {
+            actor: crate::cell::CellId::NONE,
+            target: id,
+            x: cells.x[i],
+            y: cells.y[i],
+            kind: crate::ecology::DeedKind::Died,
+        });
 
         // Structural mass becomes a corpse, mostly.
         //
@@ -2951,6 +2965,7 @@ mod tests {
             &f.config,
             &mut f.ledger,
             &mut f.pending,
+            &mut Vec::new(),
         );
         assert_eq!(died.deaths, 1);
         assert!(died.to_carrion > 0, "the corpse left no carrion");
@@ -2990,6 +3005,7 @@ mod tests {
             &f.config,
             &mut f.ledger,
             &mut f.pending,
+            &mut Vec::new(),
         );
         // Anything the neighbourhood could not take is recorded as evicted rather than
         // quietly not adding up: I4 has no exception for a full square.
@@ -3029,6 +3045,7 @@ mod tests {
             &f.config,
             &mut f.ledger,
             &mut f.pending,
+            &mut Vec::new(),
         );
         assert_eq!(died.deaths, 2, "a duplicated death must be applied once");
         assert_eq!(f.cells.len(), 0);

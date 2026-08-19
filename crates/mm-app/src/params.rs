@@ -539,12 +539,24 @@ pub const FIELDS: &[Field] = &[
                would be worth more than the cell that made it",
     },
     Field {
+        path: "ecology.digestion_structural_share",
+        label: "digestion, brick share",
+        group: Group::Ecology,
+        unit: Unit::Fraction,
+        note: "of what digestion recovers, the share landing as structural matter rather than as \
+               fuel. At zero a predator can pay its bills forever and never grow: a swallowed \
+               body arrived as something to burn and nothing to build with, so it was fuel-rich \
+               and brick-poor while the holdfast's filter — which has had the mirror of this \
+               dial all along — was the reverse",
+    },
+    Field {
         path: "ecology.capture_efficiency",
         label: "capture efficiency",
         group: Group::Ecology,
         unit: Unit::Fraction,
-        note: "filtered detritus that becomes structural matter. The rest is waste, or a grain \
-               would be worth more to the cell that caught it than it was to the world",
+        note: "captured detritus that becomes structural matter. The rest is waste, for the \
+               reason digestion's is: a grain must never be worth more to the cell that caught \
+               it than it was to the world",
     },
     Field {
         path: "ecology.capture_rate",
@@ -582,6 +594,17 @@ pub const FIELDS: &[Field] = &[
                a spike-and-scavenge kill returns perhaps a sixth of a corpse, and returns it as \
                something to burn rather than something to build with. This is the number that \
                makes eating other cells a living rather than a gesture",
+    },
+    Field {
+        path: "ecology.engulf_charge_recovery",
+        label: "charge recovered",
+        group: Group::Ecology,
+        unit: Unit::Fraction,
+        note: "a swallowed cell's stored energy kept by the eater rather than dissipated. A prey \
+               carries roughly ten times more charge than its flesh is worth once burnt, so at \
+               zero a predator destroyed an order of magnitude more energy than it gained. \
+               JXFER has moved charge between cells since M7, so a parasite could already drink \
+               what a predator had to waste",
     },
     Field {
         path: "ecology.bleed_rate",

@@ -129,7 +129,39 @@
 ; `#mouth` is the fix and it is the interesting one: **not to qualify.** Past `BIG` the cell shuts
 ; its mouth, because the only things it now outweighs two to one are its own young.
 ;
-; **Third, and still open: it does not hold past five thousand ticks.** With both fixed it
+; ---------------------------------------------------------------- the wall, and why it is the
+;                                                                   difference between eating and
+;                                                                   living
+;
+; `IMM 200` on slot 0 is not armour. It is **room to put a meal in**.
+;
+; Growth is capped at `q10(membrane.param) + membrane.control[1]`, and this genome ran on the
+; ancestor's 24 — a target of twenty-four units against organelles already weighing over a
+; hundred. So `room` was negative every tick of its life and it could not grow by one unit
+; however much it ate. Every gram of mass it had came from `BUILD`, and `BUILD` stops when the
+; body is finished.
+;
+; That did not matter while digestion only made fuel. It matters now that it makes bricks too
+; (`EcologyConfig::digestion_structural_share`): a swallowed body is polymer, half of it comes
+; back as structural matter, and a cell with no wall to grow into simply holds that matter in its
+; cytoplasm until it dies of being too small to eat anything.
+;
+; Measured, dropped into a slide of 3,297 settled ancestors — which is the case this genome has
+; always failed, because introduction is harder than co-seeding:
+;
+;   membrane  24    15 cells, then extinct by t=12,000
+;   membrane 200    15, 8, 7, 7, 9, **11** at t=28,000, mass p90 206, still climbing
+;
+; Nothing else changed. It is the same body, the same mouth, the same gut.
+;
+; The reason it compounds is the two-to-one bulk gate. A predator that can grow can qualify for
+; larger prey; one that cannot is stuck eating whatever is smaller than half of its own build
+; weight, forever, and in a settled slide that set is empty. The wall is what turns a meal into
+; the ability to take the next one.
+;
+; ---------------------------------------------------------------- what was still open, and is not
+;
+; **It did not hold past five thousand ticks.** With both fixed it
 ; sustains twenty to fifty cells to tick 5,000 and is down to four by 10,000 — with a scavenger
 ; present and mutation on, twenty-one at 2,000 and one at 10,000. It is no longer dying of any of
 ; the above: energy is high at the end, not low. What it is dying of is not yet known, and the
@@ -175,6 +207,10 @@
         IMM     50              ; mitochondrion, to burn what the chloroplast fixes
         IMM     2
         IMM     2
+        BUILD
+        IMM     200             ; the wall, and it is what makes a meal into a body — see below
+        ZERO                    ; type ignored on slot 0
+        ZERO                    ; slot 0 — the membrane
         BUILD
         RET
 

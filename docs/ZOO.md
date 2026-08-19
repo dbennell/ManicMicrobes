@@ -323,6 +323,44 @@ eat still cannot live, because six organelles is unaffordable. The next lever is
 feeding mechanism. It is §6.4 — either the specialisation ceiling, or multicellularity as the
 cheaper way round it.
 
+### 6.2b And now it lives, because a meal became a body
+
+§6.2a ended "the feeding fix works and the engulfer still dies". It does not any more, and the
+missing piece was not economics.
+
+A swallowed body only ever became *fuel*: the lysosome converts carrion to the pathway's
+substrate and nothing routed it to structure. Measured on one median prey — mass 60, charge 400 —
+the meal delivered **substrate +53, mass +0**, and the victim's 400 units of charge were
+dissipated against the 37 the flesh was worth. So a predator was fuel-rich and brick-poor, and a
+late-introduced engulfer died at energy 490 with its mass stuck at 98: under its own divide weight
+of 140, under the two-to-one bulk gate, and not starving in the least.
+
+Two `EcologyConfig` dials, both shipped on and neither an ISA bump (`docs/ECONOMY.md` §18):
+`digestion_structural_share` splits digestion between brick and fuel, and
+`engulf_charge_recovery` keeps an eighth of the victim's charge instead of burning it —
+`JXFER` has moved charge between cells since M7, so a parasite could already drink what a predator
+had to waste.
+
+And one genome change, which is the half the engine cannot supply. Growth is capped at
+`q10(membrane.param)`, so the ancestor's wall of 24 leaves a predator whose organelles weigh over
+a hundred with no room at all. `engulfer.mm` now builds its wall at 200. Dropped into 3,297
+settled ancestors — the case it has always failed, because introduction is harder than co-seeding:
+
+| `engulfer.mm` | outcome |
+| --- | --- |
+| wall 24 | 15 cells, then extinct by t=12,000 |
+| wall 200 | 15, 8, 7, 7, 9, **11 at t=28,000**, 215 meals, mass p90 206, still climbing |
+
+Nothing else changed. It compounds through the bulk gate: a predator that can grow qualifies for
+larger prey, and one that cannot is stuck eating whatever is under half its own build weight,
+which in a settled slide is nothing at all.
+
+**`stalker.mm` is untouched by this and still dies** — 11,220 wounds and 0 meals on the same
+slide. It stabs and gains nothing, because a wound leaks only when `bleed_rate` is non-zero, that
+is still 0, and turning it on was measured not to save it either: what leaks is matter, and §5.2's
+point stands that matter is not income. Charge recovery makes that gap wider rather than narrower.
+So §7's first item is now half-answered — **swallowing is a living; stabbing still is not.**
+
 ### 6.3 Nothing swims
 
 `ECONOMY.md` §14.1: a cell below 192 `Q10` of thrust is driven *backwards* by its own wake. One

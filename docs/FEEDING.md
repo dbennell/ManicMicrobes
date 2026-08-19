@@ -440,6 +440,46 @@ they are three problems.
 
 ---
 
+## 8a. What each way of eating actually hands you, which is not the same thing
+
+§4 argues that a new way to eat cannot pay by itself. This is the table that makes the reason
+concrete, and it turned up a hole that had nothing to do with yield.
+
+**A cell is four compartments**, and what a feeding method delivers is a statement about which of
+them it can reach:
+
+| method | organelle | delivers | reaches the charge? |
+| --- | --- | --- | --- |
+| photosynthesis | chloroplast | fuel | n/a |
+| chemosynthesis | chemosynth granule | fuel | n/a |
+| absorption (`EAT`) | — | whatever is dissolved, as itself | **no** — water holds no charge |
+| filter feeding | holdfast | **bricks** (`capture_efficiency`) | no |
+| scavenging | lysosome | fuel and bricks | no — a corpse's charge is already gone |
+| engulfment | vacuole + lysosome | cytoplasm, minerals, fuel, bricks, **charge** | **yes** |
+| exoenzyme | exoenzyme vesicle | bricks, into the water | no |
+| spike | spike | carrion, into the water | only via `bleed_rate`, which is 0 |
+| junction transfer | junction port | whatever the donor holds | **yes**, since M7 |
+
+Two things fall out that were not designed and are worth keeping deliberately.
+
+**Only swallowing and junctions can reach a charge.** Every other method launders its take through
+the water, and the water holds no charge — you cannot absorb a volt. That is not a limitation, it
+is the sharpest available statement of §4's conclusion that *ownership of the kill matters more
+than the yield of the kill*, and it enforces the predation ladder through physics rather than
+through tuning: swallow whole, or share through a junction, or settle for what the water gives
+back.
+
+**Bricks and fuel were split down guild lines by accident.** The filter turned detritus into
+structural matter and the lysosome turned carrion into substrate, so the sessile guild could build
+a body out of a meal and the predatory guild could only burn one. Nobody chose that; the two
+organelles were written at different times. `docs/ECONOMY.md` §18 has the measurement — a
+swallowed prey delivered `substrate +53, mass +0` — and the fix, which is to give digestion the
+same brick-or-fuel split the filter has always had.
+
+The corollary for anything added to this list later: **say which compartments it reaches before
+arguing about its rate.** A method that cannot deliver bricks cannot fund growth however generous
+its yield, and a method that cannot deliver charge is asking its owner to have another income.
+
 ## 9. What this investigation did not settle
 
 Recorded so the next person does not assume it was checked.
