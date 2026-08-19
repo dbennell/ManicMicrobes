@@ -303,8 +303,8 @@ pub fn read_sensor(organelle: &Organelle, index: i16, ctx: SensorContext<'_>) ->
             let r = sense_chemical(substrate, chemical, x, y);
             Some(match (index as u16) % 3 {
                 0 => visible(r.concentration),
-                1 => visible_gradient(r.gradient_x),
-                _ => visible_gradient(r.gradient_y),
+                1 => visible_fine(r.gradient_x),
+                _ => visible_fine(r.gradient_y),
             })
         }
         OrganelleType::Photosensor => {
@@ -316,9 +316,11 @@ pub fn read_sensor(organelle: &Organelle, index: i16, ctx: SensorContext<'_>) ->
             // Appended, so 0, 1 and 2 still mean what they have always meant and only the
             // indices that used to wrap have changed.
             Some(match (index as u16) % 9 {
-                0 => visible(sense_light(substrate, x, y).concentration),
-                1 => visible_gradient(sense_light(substrate, x, y).gradient_x),
-                2 => visible_gradient(sense_light(substrate, x, y).gradient_y),
+                // All three at `SENSE_GAIN`, so a level and its gradients are one unit system.
+                // Full daylight reads 256 and the darkest shipped night reads 24.
+                0 => visible_fine(sense_light(substrate, x, y).concentration),
+                1 => visible_fine(sense_light(substrate, x, y).gradient_x),
+                2 => visible_fine(sense_light(substrate, x, y).gradient_y),
                 // Reported in `Q10` energy a tick rather than divided down to whole units like
                 // the light readings are. A whole cell's upkeep is well under one unit — the
                 // ancestor's is 0.41 — so `visible` would round every signature on the slide to
@@ -390,9 +392,21 @@ pub fn read_sensor(organelle: &Organelle, index: i16, ctx: SensorContext<'_>) ->
         OrganelleType::Oscillator => {
             let phase = oscillator_phase(organelle.control[0], tick, cell_key);
             Some(match (index as u16) % 2 {
+                // **A pulse, not a phase**, and deliberately left one. `visible` divides the
+                // `Q10` triangle by `Q10_ONE`, so this reads 1 on the single tick the triangle
+                // peaks and 0 for the rest of the period — which is the third place in this file
+                // where a scale went through an amount's divisor, and the only one that is not a
+                // bug. `genomes/oscillator.mm` reads it as "the pulse, 1 on the beat and 0
+                // otherwise" and is built on that, and a pulse is what a clock is for.
+                //
+                // Putting it on `SENSE_GAIN` would make it a readable triangle and is a real
+                // option — a genome could then hold a throttle shut for a fraction of a period
+                // rather than latching between two pulses — but it would change what a shipped
+                // genome's `OGET` returns on every tick but one, so it wants its own measurement
+                // rather than a ride on the light fix.
                 0 => visible(phase),
-                // The phase again, shifted a quarter turn, so a genome can get a second
-                // rhythm out of one clock without arithmetic.
+                // The same pulse half a period out, so a genome gets an on-beat and an off-beat
+                // from one clock without arithmetic. Between the two it can latch.
                 _ => visible(Q10_ONE.saturating_sub(phase)),
             })
         }
@@ -464,14 +478,30 @@ pub fn holdfast_grip_of(o: &Organelle) -> i32 {
     q10_scale(GRIP_PER_PARAM.saturating_mul(o.param as i32), effort)
 }
 
-/// How much finer a gradient reading is than a concentration reading.
+/// How much finer a reading is when what it reports is not an amount.
 ///
-/// # Why gradients need their own scale
+/// # Why some readings need their own scale
 ///
-/// A concentration is an amount; a gradient is the *difference* between two amounts one square
-/// apart, and in a diffused field that difference is two or three orders of magnitude smaller.
+/// `visible` divides by `Q10_ONE` because it is for *amounts* — how much sugar a cell holds, how
+/// much carbon is on a square — and those run to tens and hundreds of whole units. Two of the
+/// things a sensor reports are not amounts, and both were destroyed by being treated as one.
+///
+/// **A gradient** is the *difference* between two amounts one square apart, and in a diffused
+/// field that difference is two or three orders of magnitude smaller than the amounts making it.
 /// Both used to go through the same `q / Q10_ONE`, and the consequence was not a rounding
 /// detail — it was that the gradient outputs read **zero**.
+///
+/// **Ambient light** is an intensity, not a quantity: the field is a `Q10` fraction of full
+/// daylight, so its entire working range is about one unit wide. Every light regime in
+/// `scenarios/` sits between 96 and 1536, so `q / Q10_ONE` gave the whole library **one bit** —
+/// and never flipped it, because both `DayNight` worlds peak at 1023, one short of the divisor.
+/// A genome could not tell day from night. It was the gradient bug again in a second place, and
+/// it went unnoticed for longer because the sensor was not obviously returning nothing: it was
+/// returning a plausible, constant, wrong zero.
+///
+/// That leaves the two readings of *one organelle* in one unit system, which they were not:
+/// `OGET 0` on a photosensor was in whole units and `OGET 1` was in 256ths of the same physical
+/// quantity, so a genome comparing a level against its own gradient was comparing scales.
 ///
 /// Measured on M3's own patchy slide, food diffused for two thousand ticks:
 ///
@@ -487,14 +517,23 @@ pub fn holdfast_grip_of(o: &Organelle) -> i32 {
 /// run would have fixed it. This is what starved M3's chemotaxis acceptance test.
 ///
 /// 256 rather than 1024 so that a genuinely sharp edge — the boundary of a fresh patch, three
-/// orders of magnitude across — still saturates rather than wrapping, which is hard rule 4.
-const GRADIENT_GAIN: i32 = 256;
+/// orders of magnitude across — still saturates rather than wrapping, which is hard rule 4. It
+/// also puts full daylight at 256 and a dark night at 32, which is a range a genome can write
+/// thresholds in: `IMM` carries 0..255, so half daylight is one instruction.
+///
+/// **Amounts keep `visible`.** Applying this to a chemical concentration or an interior holding
+/// would clip everything above 128 units to `i16::MAX` — a full vacuole is 319 units — and
+/// trading the top of a range for the bottom of it is not a fix. The rule is the one the pH
+/// sensor's note already states: divide amounts by `Q10_ONE`, and report anything that is a
+/// *scale* at its own resolution.
+const SENSE_GAIN: i32 = 256;
 
-/// A gradient as a genome sees it: signed, saturating, and at [`GRADIENT_GAIN`]'s resolution.
+/// A reading that is not an amount, as a genome sees it: signed, saturating, and at
+/// [`SENSE_GAIN`]'s resolution.
 #[inline]
 #[must_use]
-fn visible_gradient(q: i32) -> i16 {
-    sat_i16(q / (Q10_ONE / GRADIENT_GAIN))
+fn visible_fine(q: i32) -> i16 {
+    sat_i16(q / (Q10_ONE / SENSE_GAIN))
 }
 
 /// How hard one propulsor is beating, `Q10` of its own capacity — zero if it is idle, still

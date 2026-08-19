@@ -420,7 +420,7 @@ fn a_chemosensor_can_actually_read_the_gradient_it_is_standing_in() {
     // It did not, and that is what starved the acceptance test below. A gradient of a few
     // hundred `Q10` units per square was being divided by 1024 along with the concentration
     // and arriving as a literal zero — at the centre of the slide, which is where the founders
-    // start. See `sensing::GRADIENT_GAIN`.
+    // start. See `sensing::SENSE_GAIN`.
     let mut world = World::new(patchy(1)).unwrap();
     world.run(2_000);
 
@@ -581,7 +581,7 @@ fn the_patches_still_exist_once_a_population_has_been_eating_them() {
 ///
 /// # Two causes were found. The first is fixed. The second makes this scenario unwinnable.
 ///
-/// **One — the sensor could not read the gradient.** Fixed; see `sensing::GRADIENT_GAIN` and
+/// **One — the sensor could not read the gradient.** Fixed; see `sensing::SENSE_GAIN` and
 /// `a_chemosensor_can_actually_read_the_gradient_it_is_standing_in`. Both the concentration
 /// and the gradient went through the same divide-by-1024, and a gradient is two or three
 /// orders of magnitude smaller than an amount, so it arrived as a literal zero at the centre

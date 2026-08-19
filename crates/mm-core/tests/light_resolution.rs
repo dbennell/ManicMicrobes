@@ -1,4 +1,4 @@
-//! What a genome can actually see of the light, which is less than one bit.
+//! What a genome can see of the light. It was less than one bit; ISA 15 made it a signal.
 
 use mm_core::biology::BiologyConfig;
 use mm_core::cell::{CellId, CellSeed};
@@ -7,15 +7,15 @@ use mm_core::light::LightRegime;
 use mm_core::{MutationRates, Organelle, OrganelleType, Scenario, World};
 
 #[test]
-fn a_photosensor_cannot_tell_day_from_night() {
-    // `read_sensor` reports ambient light as `sat_i16(light / Q10_ONE)`, and `the_short_night.ron`
-    // — the one shipped day/night world — runs between 128 and 1024. So the whole cycle reads as
-    // the integer 0 except at the instant of peak noon, and a genome has no way to know it is
-    // night. This is the same defect the pH sensor's own note in `sensing.rs` describes and fixes
-    // for itself: "divided down, the whole interesting range of a slide would be the integer 7".
+fn a_photosensor_can_tell_day_from_night() {
+    // This test was written to record the *defect*: `read_sensor` divided ambient light by
+    // `Q10_ONE`, and `the_short_night.ron` runs between 128 and 1024, so a full cycle gave twenty
+    // distinct values of the field and one distinct reading of it — zero, never once reaching 1,
+    // because the triangle peaks at 1023. A genome could not tell day from night.
     //
-    // Recorded as a test rather than a comment because it bounds what any dormancy genome can be
-    // written against — see `genomes/sleeper.mm`, which watches its inputs instead.
+    // ISA 15 put the three ambient readings on `SENSE_GAIN`, the scale the gradient readings have
+    // used since M3 for the same reason. It is kept pointing the other way: the reading has to
+    // track the field, or a dormancy genome has nothing to sleep on.
     let mut world = World::new(Scenario {
         seed: 42,
         width: 16,
@@ -87,12 +87,21 @@ fn a_photosensor_cannot_tell_day_from_night() {
 
     // The field really does move: twenty different values between 128 and 1023.
     assert!(distinct_raw.len() > 10, "the light did not change; {raw:?}");
-    // And the genome sees one number the whole way round. Not "0 except at noon" — the triangle
-    // peaks at 1023, one short of the divisor, so the reading never reaches 1 at all.
-    assert_eq!(
-        distinct.len(),
-        1,
-        "the reading has gained resolution — good, and this test now needs rewriting: {readings:?}"
+    // And the genome now sees it move. Not all twenty: `DayNight` is a symmetric triangle, so its
+    // rising and falling legs report the same levels and any faithful reading of it has about
+    // half as many distinct values as samples. Ten is that, and it was one.
+    assert!(
+        distinct.len() >= 10,
+        "the reading is coarser than the field it reports: {} raw, {} seen — {readings:?}",
+        distinct_raw.len(),
+        distinct.len()
     );
-    assert_eq!(readings[0], 0);
+    // Night is distinguishable from day by a plain comparison, which is the whole point, and
+    // both ends fit in a range a genome can write with `IMM` (0..255) plus one shift.
+    let (low, high) = (
+        *readings.iter().min().expect("readings"),
+        *readings.iter().max().expect("readings"),
+    );
+    assert!(low < high / 4, "night {low} is not clearly darker than day {high}");
+    assert!(high < 1024, "daylight at {high} leaves a genome little room under saturation");
 }

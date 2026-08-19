@@ -2046,6 +2046,31 @@ Build matter is still sunk, so a hoard of shut organelles is locked-up matter in
 matter is conserved — and the basal quarter means carrying is never free, which is the pressure
 §12.1 measures (818 cells at four organelles, 666 at six, none at eight).
 
+### 17.4a When a gate pays, which is narrower than it looks
+
+Two genomes were written against this mechanism and they disagree, and the disagreement is the
+generalisable part.
+
+`genomes/sleeper.mm` gates a chloroplast on **carbon dioxide** and wins 5 of 5 seeds in
+`the_lean_water`. `genomes/nightjar.mm` gates the same organelle on **light** and loses on every
+configuration measured — every eye size, every threshold, every night depth, every chloroplast
+size. Darkening the night made it *worse*, which rules out the obvious explanation.
+
+> **A throttle gate pays when its input is absent, and loses when its input is merely low.**
+
+Carbon dioxide is either in the cell or it is not, so shutting the chloroplast when it is gone
+costs exactly zero income and the saved upkeep is clear profit. Light is a continuum: below any
+threshold a genome can name the chloroplast is still working, just less, so the gate trades real
+fixation for upkeep every time it fires. No threshold repairs that, because the only light level
+at which shutting is free is exactly zero.
+
+There is a second constraint, and this is the first place in the project where it binds rather
+than being a truism: **a sensor must cost less than the decision it informs.** `nightjar.mm`'s
+first draft carried a param-40 photosensor at 28 `Q10` a tick, paid at noon as well as at
+midnight, against a param-60 chloroplast's 42 `Q10` a tick saveable and only while dark. It went
+extinct by tick 3,000. `read_sensor`'s ambient-light path never reads `param` at all, so that eye
+was buying nothing whatsoever — anything watching only ambient light should build one at param 0.
+
 ### 17.5 The number to settle
 
 Three quarters is a guess with a reason, not a result. The quarter that stays basal is doing real

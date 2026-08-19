@@ -8,7 +8,8 @@
 //! 8 appended a crowding reading to the membrane; version 9 made the widening at 7 actually
 //! reach `BUILD`; version 10 gave the catalogue recipes in nitrogen and phosphorus; version 11
 //! put the atmosphere on the slide and turned the diazosome the right way round; versions 12 and
-//! 13 were the carbonate system; version 14 made upkeep answer to the throttle.
+//! 13 were the carbonate system; version 14 made upkeep answer to the throttle; version 15
+//! gave the light reading a resolution.
 //!
 //! A genome archived under 5 or earlier that built a type-15 organelle was paying for a no-op.
 //! Under 6 the same byte builds armour that shades it, so those genomes have to be replayed
@@ -86,8 +87,34 @@
 //! chemosensor that word chooses a chemical and on a nucleus it sets copy fidelity, and pricing
 //! those by it would have sold a sensor watching chemical 3 for three parts in a thousand.
 
+//! # 15, the light a genome can actually see
+//!
+//! `read_sensor` reported ambient light as `light / Q10_ONE`, and the light field is a `Q10`
+//! fraction of full daylight — so the whole of `scenarios/`, which runs between 96 and 1536, was
+//! squeezed into **one bit**, and the bit never flipped: both `DayNight` worlds peak at 1023, one
+//! short of the divisor. Measured over a full cycle of `the_short_night`, twenty distinct values
+//! of the field and *one* distinct reading of it. **A genome could not tell day from night**, and
+//! `docs/ZOO.md` §5 lists that world as a 999‰ monoculture partly because the one strategy its
+//! name proposes was not expressible.
+//!
+//! The three ambient readings now go through `SENSE_GAIN`, which the *gradient* readings have
+//! used since M3 for the same reason — the note beside it records that handing genomes a zero to
+//! navigate by "is what starved M3's chemotaxis acceptance test". This is that bug's second site.
+//! It also puts a photosensor's level and its gradients in one unit system, which they were not:
+//! `OGET 0` was in whole units while `OGET 1` was in 256ths of the same physical quantity.
+//!
+//! A bump because it changes what a byte returns, which is the line ISA 8 was drawn on when it
+//! appended a reading to the membrane. **No shipped genome moves**: `stalker.mm` is the only one
+//! carrying a photosensor and it reads 7 and 8, the glow gradients, which never went through the
+//! amount divisor. Full daylight now reads 256 and the darkest shipped night 24, a range a genome
+//! can write thresholds in with a single `IMM`.
+//!
+//! Amounts are deliberately left alone. Chemical concentrations and interior holdings keep
+//! `q / Q10_ONE`, because at this gain everything above 128 units would clip — a full vacuole is
+//! 319 — and trading the top of a range for the bottom is not a fix.
+
 /// ISA version stamped into save files, scenarios and archived genomes (SPEC §16).
-pub const ISA_VERSION: u16 = 14;
+pub const ISA_VERSION: u16 = 15;
 
 /// Number of opcodes. The opcode of a byte is `byte % OPCODE_COUNT` (SPEC §4.2), so four
 /// distinct byte values map to each opcode and most point mutations are synonymous.

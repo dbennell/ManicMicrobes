@@ -381,7 +381,7 @@ rate for it. Measured at +39% on lifespan in the dark. Before it, `OSET`ting a t
 lowered what an organelle *produced* and not a unit of what it cost, which is why no shipped genome
 had ever closed one.
 
-**The sense did not.** A photosensor reports ambient light as `light / Q10_ONE`, and
+**The sense did not, and now it does (ISA 15).** A photosensor reported ambient light as `light / Q10_ONE`, and
 `the_short_night.ron` — the one shipped day/night world — runs between 128 and 1024. The whole
 cycle therefore reads as the integer **0** — measured, twenty distinct raw values between 128 and
 1023 and one distinct reading, in `tests/light_resolution.rs`. Not "zero except at noon": the
@@ -410,14 +410,12 @@ That is the first "same physics, different answer in a different world" this doc
 able to show for a mechanism rather than for a starting population, and it is what §7.4 wants an
 acceptance test to assert.
 
-The one cheap change still in front of any further work here is **giving the light concentration
-reading resolution.** It is an ISA bump, because it is genome-observable — and it is precedented
-rather than novel: `GRADIENT_GAIN` is already **256** on the *gradient* readings for exactly this
-reason, and the note beside it says that handing genomes a zero to navigate by "is what starved
-M3's chemotaxis acceptance test". The concentration readings never got the same treatment. So a
-genome can already tell which way is brighter at 256× resolution, and cannot tell whether it is
-bright at all. Note the two are not interchangeable: `DayNight` is spatially uniform, so its
-gradient is zero everywhere and phototaxis cannot substitute for a level.
+That defect is fixed. ISA 15 put the three ambient readings on `SENSE_GAIN` — the same 256 the
+*gradient* readings have used since M3, whose note says that handing genomes a zero to navigate by
+"is what starved M3's chemotaxis acceptance test". This was that bug's second site. The same cycle
+now reads `54 76 98 … 255 … 54 32`, and no shipped genome moved, because `stalker.mm` is the only
+one carrying a photosensor and it reads the glow gradients, which never went through the amount
+divisor.
 
 ### 6.5a Two wrong diagnoses, kept because of how they were wrong
 
@@ -445,6 +443,49 @@ measurement, not a cell: the first probe followed `cells().iter().next()` five t
 a mutating lineage and reported a fact about one arbitrary descendant. And every number quoted for
 this genome before the last round was a single seed, which CLAUDE.md is explicit is not a result.
 `tests/sleeper_probe.rs` holds all three probes.
+
+### 6.5b What a night gate is worth, which is nothing, and the law that explains it
+
+`genomes/nightjar.mm` is the genome that fix made writable: the ancestor plus a photosensor and a
+gate that shuts the chloroplast below a light threshold. **It loses on every configuration
+measured** — every eye size, every threshold, every night depth, every chloroplast size. Its best
+result is a tie.
+
+The measurement that settles the diagnosis is the one that went the wrong way. Holding the genome
+and *darkening* the night, on the theory that `the_short_night`'s floor of 128 is an eighth of
+daylight and not really night:
+
+| night floor | ancestor | nightjar |
+| ---: | ---: | ---: |
+| 128 | 992, 978 | 987, 985 |
+| 64 | 1023, 992 | 938, 935 |
+| 16 | 1025, 983 | 931, 894 |
+| 0 | 1023, 1001 | 905, 877 |
+
+**A darker night makes it worse**, which is the opposite of what "not dark enough" predicts.
+
+The law, and it is the useful output of the whole exercise:
+
+> **A throttle gate pays when its input is absent, and loses when its input is merely low.**
+
+`sleeper.mm` gates on carbon dioxide, which is either in the cell or is not; when it is not, the
+chloroplast can fix nothing and shutting it costs exactly zero income, so the saved upkeep is
+clear profit — 5 of 5 seeds in `the_lean_water`. Light is a continuum: below any threshold a
+genome can name the chloroplast is still working, just less, so the gate always trades real
+fixation for upkeep. No threshold fixes that, because the only light level at which shutting is
+free is exactly zero and a triangle is at zero for one tick. The corollary is a design rule for
+every dormancy gate after this one: **gate on a quantity that goes to zero, not on one that
+fades.**
+
+A second constraint, first met here: **a sensor must cost less than the decision it informs.** The
+first draft's param-40 photosensor cost 28 `Q10` a tick *always*, against a param-60 chloroplast's
+42 `Q10` a tick saveable *and only while dark*; it went extinct by tick 3,000. `read_sensor`'s
+ambient-light path never reads `param`, so a photosensor's size buys nothing for that reading at
+all — it is pure cost, and anything watching only ambient light should build one at param 0.
+
+So `the_short_night` remains a producer monoculture, and §5's table stands — but for a better
+reason than "no genome can see the night". A genome can see it now, and there is nothing there
+worth waking up for.
 
 ## 7. The order of work, and why this order
 
