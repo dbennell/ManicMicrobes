@@ -59,6 +59,19 @@ pub struct CellDot {
     /// How long this cell has existed, in ticks. Only the first few matter to the renderer,
     /// which uses them to swell a newborn into place rather than have it appear whole.
     pub age: u32,
+    /// How whole this cell's membrane is, `1.0` untouched and `0.0` about to fail.
+    ///
+    /// `cells.damage[i]` against the tolerance the membrane's own `param` buys, which is the
+    /// same ratio `metabolism` uses to decide a cell has been poisoned — so what the picture
+    /// shows and what kills the cell are one number rather than two that agree by luck.
+    ///
+    /// `docs/UI.md` has specified this since it was written — *"`state`: damage, membrane
+    /// integrity"*, and *"`membrane = smoothstep(R − w, R, r) · integrity`, thin bright ring,
+    /// broken where damaged"* — and `cell.wgsl` has implemented it just as long, wearing the
+    /// outline down with a hashed wobble. Every construction site passed a constant `1.0`,
+    /// including the bench's, so the effect had never been drawn once. A cell taking eleven
+    /// thousand spike wounds looked exactly like one in perfect health until it vanished.
+    pub integrity: f32,
     /// Where this cell is flattened by the neighbours it is pressed into.
     ///
     /// Empty below [`Lod::Packed`], which is a tier earlier than `organelles` — a crowd reads as
@@ -753,10 +766,58 @@ impl Lod {
     }
 }
 
+/// Something that happened on the slide, placed for the picture to show.
+///
+/// # Why this exists
+///
+/// A spike wound moved a number the picture never read, and a swallowed cell was simply absent
+/// from the next frame. Watching a predator was therefore watching cells blink out for no visible
+/// reason — which is the whole complaint this answers.
+///
+/// These come from `mm_core::World::deeds`, which reports a fact that is true for one phase and
+/// unrecoverable afterwards. [`Slide`] accumulates them across the ticks inside a frame and ages
+/// them out, so a mark is visible for a moment after the event rather than for the single frame
+/// the event happened to land in.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Mark {
+    /// Where it happened, in substrate squares.
+    pub x: f32,
+    pub y: f32,
+    /// Where the cell responsible is *now*, for a deed that has one and whose actor is still
+    /// alive — so a swallow can be drawn as the victim going somewhere rather than as a cell
+    /// evaporating. `None` when nobody was responsible or the culprit has since died itself.
+    pub actor: Option<(f32, f32)>,
+    /// How far through its life this mark is, `0.0` fresh and `1.0` spent.
+    pub age: f32,
+    pub kind: MarkKind,
+}
+
+/// What a [`Mark`] shows.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum MarkKind {
+    /// A spike landed. `strength` is the damage as a fraction of what a median membrane
+    /// tolerates, clamped — a graze and a killing blow should not look the same.
+    Struck { strength: f32 },
+    /// A meal that had to be worked for: carrion digested, detritus caught.
+    Fed { strength: f32 },
+    /// A cell was swallowed whole.
+    Swallowed,
+    /// A cell left the arena, however it went.
+    Died,
+}
+
+/// How many ticks a mark stays on the glass.
+///
+/// Long enough to be seen at ordinary speed and short enough that a busy slide is not a wall of
+/// them. At one tick a frame this is a little under a second.
+pub const MARK_LIFE: u64 = 45;
+
 /// One frame's worth of world, with no way back to it.
 #[derive(Clone, Debug, Default)]
 pub struct Frame {
     pub tick: u64,
+    /// What happened recently, freshest last. See [`Mark`].
+    pub marks: Vec<Mark>,
     pub width: u32,
     pub height: u32,
     pub cells: Vec<CellDot>,
@@ -1164,7 +1225,30 @@ pub struct Slide {
     /// rather than recomputed from scratch. `0` means this layer has no exposure yet and the
     /// next frame should take the reading outright. See [`Slide::overlay_scale`].
     overlay_scale: [f32; OVERLAY_COUNT],
+    /// Recent strikes, meals, swallows and deaths, with the tick each happened on.
+    ///
+    /// Gathered here rather than in `frame` because `mm_core::World::deeds` is only valid until
+    /// the next tick, and `advance` runs as many ticks as it likes between frames. Anything not
+    /// taken while it is true is gone.
+    ///
+    /// Bounded by [`MARK_CAP`] as well as by age, because a slide where everything dies at once
+    /// should cost the renderer a moment's work rather than a hundred thousand quads.
+    marks: std::collections::VecDeque<(u64, Mark)>,
+    /// The tick the marks were last taken on, and how many of that tick's deeds were taken.
+    ///
+    /// `World` clears its channel at the top of each tick, so gathering twice within one tick
+    /// would double every mark and gathering once per *frame* would lose everything a tool did
+    /// between frames. This pair makes the gather idempotent: take only what has arrived since
+    /// last time, whether that was a step ago or a button press ago.
+    gathered: (u64, usize),
 }
+
+/// The most marks kept at once.
+///
+/// A mass extinction is the case this is for: fifty thousand deaths in one tick is a real thing
+/// that happens on this slide, and drawing all of them would turn the frame that shows it into
+/// the frame that drops. The oldest go first, so what survives is what just happened.
+const MARK_CAP: usize = 4096;
 
 /// How many ticks the food web averages over.
 ///
@@ -1275,6 +1359,8 @@ impl Slide {
             flows: crate::foodweb::Flows::default(),
             flows_filling: crate::foodweb::Flows::default(),
             overlay_scale: [0.0; OVERLAY_COUNT],
+            marks: std::collections::VecDeque::new(),
+            gathered: (0, 0),
             overlays,
             show_flow: false,
             lod: Lod::Dots,
@@ -1309,11 +1395,99 @@ impl Slide {
     /// on how long the last frame took would produce a different world on a fast machine than
     /// on a slow one, and every guarantee in the spec rests on it not doing that.
     pub fn advance(&mut self, ticks: u64) {
+        // Before the first step, because a tool's kill lands in the channel outside a tick and
+        // the next `step` clears it. Idempotent, so this is free when there is nothing waiting.
+        self.gather_marks();
         for _ in 0..ticks {
             self.world.step();
             self.history.maybe_sample(&self.world);
             self.accumulate_flows();
+            self.gather_marks();
         }
+    }
+
+    /// Take this tick's deeds before they are overwritten.
+    ///
+    /// `World::deeds` is valid for exactly one tick, and `advance` may run a thousand of them
+    /// between two frames, so anything not taken here is gone. That is also why the *position*
+    /// travels with the deed rather than being looked up: the swallowed and the dead are out of
+    /// the arena by the time a frame is built and there is nothing left to ask.
+    fn gather_marks(&mut self) {
+        let tick = self.world.tick_count();
+        // Only what has arrived since the last gather. See `Slide::gathered`.
+        let already = if self.gathered.0 == tick { self.gathered.1 } else { 0 };
+        let fresh = self.world.deeds().len();
+        self.gathered = (tick, fresh);
+        // Ageing out happens whether or not anything new arrived — a quiet slide is exactly when
+        // the last of the marks should be clearing off the glass, and an early return here left
+        // a spent mark on it forever.
+        self.expire_marks(tick);
+        if fresh <= already {
+            return;
+        }
+        // A median membrane's tolerance, so a strike's strength is a fraction of what a cell can
+        // take rather than a raw `Q10` nobody can read. `q10(24)` is the ancestor's wall, which
+        // every shipped genome carries.
+        let tolerance = mm_core::fixed::q10(24).max(1) as f32;
+        for deed in &self.world.deeds()[already..] {
+            let kind = match deed.kind {
+                mm_core::ecology::DeedKind::Struck { damage } => MarkKind::Struck {
+                    strength: (damage as f32 / tolerance).clamp(0.0, 1.0),
+                },
+                mm_core::ecology::DeedKind::Fed { amount } => MarkKind::Fed {
+                    // Against a whole cell's worth of food rather than a tolerance: sixty units
+                    // is about a median prey, so a full meal reads as one and a nibble as little.
+                    strength: (amount as f32 / mm_core::fixed::q10(60) as f32).clamp(0.0, 1.0),
+                },
+                mm_core::ecology::DeedKind::Swallowed => MarkKind::Swallowed,
+                mm_core::ecology::DeedKind::Died => MarkKind::Died,
+            };
+            // Where the culprit is *now*, so a swallow can be drawn as the victim going into
+            // something. Looked up rather than carried, because the actor is alive by
+            // definition — and `None` if it died in the same tick, which happens.
+            let actor = self.world.cells().index(deed.actor).map(|i| {
+                (
+                    self.world.cells().x[i] as f32 / POS_ONE as f32,
+                    self.world.cells().y[i] as f32 / POS_ONE as f32,
+                )
+            });
+            self.marks.push_back((
+                tick,
+                Mark {
+                    x: deed.x as f32 / POS_ONE as f32,
+                    y: deed.y as f32 / POS_ONE as f32,
+                    actor,
+                    age: 0.0,
+                    kind,
+                },
+            ));
+        }
+        self.expire_marks(tick);
+    }
+
+    /// Drop the marks that are spent, and the oldest of them if there are too many.
+    fn expire_marks(&mut self, tick: u64) {
+        while self.marks.len() > MARK_CAP {
+            self.marks.pop_front();
+        }
+        while let Some((at, _)) = self.marks.front() {
+            if tick.saturating_sub(*at) < MARK_LIFE {
+                break;
+            }
+            self.marks.pop_front();
+        }
+    }
+
+    /// The marks still worth drawing, aged.
+    fn live_marks(&self) -> Vec<Mark> {
+        let now = self.world.tick_count();
+        self.marks
+            .iter()
+            .map(|(at, m)| Mark {
+                age: (now.saturating_sub(*at) as f32 / MARK_LIFE as f32).clamp(0.0, 1.0),
+                ..*m
+            })
+            .collect()
     }
 
     /// Fold this tick's flows into the food web's window, rolling it over when it is full.
@@ -1548,6 +1722,11 @@ impl Slide {
     /// `a_watched_world_matches_a_headless_one` checks.
     #[must_use]
     pub fn frame(&mut self) -> Frame {
+        // Anything a tool did since the last tick — a culled cell, say — is in the channel now
+        // and will be cleared by the next one. Idempotent, so this costs nothing when `advance`
+        // has already taken it.
+        self.gather_marks();
+
         // Destructured so the borrow checker can see that the exposure being written and the
         // world being read are different fields. The obvious spelling clones the chemical
         // table to get out of the way, which is sixteen `String` allocations a frame for a
@@ -1922,6 +2101,7 @@ impl Slide {
                     limbs,
                     cluster_size: cluster_size[i],
                     age: cells.age[i],
+                    integrity: integrity_of(cells, i),
                     squash,
                     area_swell,
                     armour: mm_core::organelle::shell_cover(cells, i) as f32
@@ -2048,6 +2228,7 @@ impl Slide {
         }
 
         Frame {
+            marks: self.live_marks(),
             tick: self.world.tick_count(),
             width: substrate.width(),
             height: substrate.height(),
@@ -2607,6 +2788,21 @@ impl Series {
 /// **A cell carrying none of the newly-tinted types is unchanged to within a few hundredths**,
 /// which is what makes this safe to land on its own: only cells that actually carry a shell, a
 /// spike, a holdfast, a lysosome, a droplet or a variant move at all.
+/// How whole a cell's membrane is, `1.0` untouched and `0.0` about to fail.
+///
+/// The tolerance is `q10(membrane.param)`, floored at `q10(1)`, which is exactly what
+/// `metabolism::step` compares damage against when it decides a cell has been poisoned. Deriving
+/// the picture from the same quantity is the point: a cell that looks half-eaten *is* half-eaten,
+/// and a shift in the poisoning rule moves the drawing with it rather than leaving the two to
+/// drift apart.
+fn integrity_of(cells: &mm_core::CellArena, i: usize) -> f32 {
+    let tolerance = mm_core::fixed::q10(i32::from(cells.slots(i)[0].param)).max(mm_core::fixed::q10(1));
+    let damage = cells.damage[i].max(0);
+    // Saturating rather than wrapping, and in `f32` only after the ratio is taken, so a cell that
+    // is far past its tolerance clamps to 0 instead of coming back round to whole.
+    (1.0 - damage as f32 / tolerance as f32).clamp(0.0, 1.0)
+}
+
 fn cell_colour(cells: &mm_core::CellArena, i: usize, table: &mm_core::ChemTable) -> [f32; 3] {
     use mm_core::organelle::MEMBRANE_SLOT;
     // The cytoplasm, at unit weight: what is left when a cell has built nothing.

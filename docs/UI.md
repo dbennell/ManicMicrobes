@@ -987,6 +987,19 @@ grain   = hash(p·k + seed)                 // faint interior granularity; a fla
 membrane= smoothstep(R − w, R, r) · integrity   // thin bright ring, broken where damaged
 ```
 
+> **`integrity` was a constant `1.0` for the whole of the project's life until it was not.** The
+> shader implemented it — the outline wears down by `1 − integrity` with a hashed wobble, and the
+> membrane ring breaks — and `docs/UI.md` specified it, and every construction site in `main.rs`,
+> `cellmesh.rs`, `cellpipe.rs` and even `shaderbench.rs` passed one. So the effect had never been
+> drawn once, and a cell taking eleven thousand spike wounds looked exactly like a cell in perfect
+> health until the frame it vanished. It is fed from `slide::integrity_of` now, which is
+> `damage / q10(membrane.param)` — the same ratio `metabolism` compares against when it decides a
+> cell has been poisoned, so what the picture shows and what kills the cell are one number.
+>
+> An organelle's `integrity` stays `1.0` and that is not the same oversight: integrity is the
+> *membrane's*, and a nucleus does not wear at its edge because the cell around it is being
+> stabbed.
+
 Two things worth noting about that. First, **depth of field costs one addend.** Widening the
 smoothstep is a real blur of the silhouette, so the defocused cells in the Astomes footage come
 free rather than needing a post-process pass. Second, **the hemisphere normal is the whole
@@ -1919,6 +1932,43 @@ scenario… S` opens it on the scenario view, which is what that item has always
 the pane that holds the path field*, not *write the file*.
 
 ---
+
+## 12a. Marks: showing what happened, not only what is left
+
+**The complaint this answers, in the words it arrived in:** *"it's not obvious when watching an
+engulfer or a stalker what cell it's attacking and what really happened — cells just disappear."*
+
+That was accurate, and it was not a shortage of pixels. Both facts a viewer wanted were true for
+exactly one phase of one tick and then unrecoverable: a spike wound moves `cells.damage[j]` and
+leaves nothing saying who dealt it, and a swallowed cell is simply absent from the next frame. The
+picture was showing the *consequence* of predation and never the act.
+
+`mm_core::World::deeds` publishes them while they are true — a strike, a meal worked for, a
+swallow, a death — each with the position it happened at, because the swallowed and the dead are
+out of the arena by the time a frame is built and there is nothing left to ask. It is a one-way
+channel: **nothing in the simulation reads it, and nothing should**, or a genome would be sensing
+something no organelle reports. It is per-tick scratch, cleared by the tick and excluded from
+equality, hashing and snapshots, so hard rule 7 gains no surface.
+
+`Slide` accumulates deeds across the ticks inside a frame and ages them over `MARK_LIFE`, because
+`advance` may run a thousand ticks between two frames and an event that lands in the middle of one
+would otherwise never be seen. The buffer is capped: a mass extinction is fifty thousand deaths in
+one tick, and the frame that shows it should not be the frame that drops.
+
+**No new shader form was needed**, which is the part worth keeping. Every mark is drawn with
+geometry the junction and limb work already produced:
+
+| deed | drawn as | reads as |
+| --- | --- | --- |
+| struck | `BAND` across the line of the blow, width by damage | a blow landing, a graze thinner than a killing stroke |
+| fed | `HALO` closing inwards, warm and small | something taken in |
+| swallowed | `CHANNEL` from the victim's last position to the eater, plus a `HALO` | *it went in there* |
+| died | `HALO` opening outwards, cool and quiet | something left |
+
+The colours follow §8.2: a strike is the palette's `BAD`, because that is what damage is; a death
+is grey, because most deaths on this slide are nobody's doing; and a swallow is warm, because it
+is the one death with a culprit worth pointing at. A death that *was* somebody's doing already
+carries the swallow's tether or the strike's flash, so the quiet grey ring never has to work alone.
 
 ## 13. Order of work
 

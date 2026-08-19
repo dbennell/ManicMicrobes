@@ -374,6 +374,7 @@ mod tests {
                 depth: 0.0,
                 cluster_size: 1,
                 age: 1_000,
+                integrity: 1.0,
                 organelles: Vec::new(),
                 limbs: Vec::new(),
                 squash: Vec::new(),

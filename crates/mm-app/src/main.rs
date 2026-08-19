@@ -3921,7 +3921,11 @@ fn redraw(
                 // the radius: past about a quarter the fade reaches the quad's corners and the
                 // cell stops being a cell.
                 softness: (blur / body.max(1.0)).clamp(0.0, 0.25),
-                integrity: 1.0,
+                // Damage, at last. `cell.wgsl` has worn the outline down by `1 - integrity`
+                // since it was written and `docs/UI.md` has specified it for longer, and this
+                // was a constant `1.0` the whole time — so a cell being stabbed to death looked
+                // untouched right up to the frame it vanished. See `slide::integrity_of`.
+                integrity: dot.integrity,
                 rounded: 1.0,
             },
             squash: squash_of(dot),
@@ -3966,6 +3970,9 @@ fn redraw(
                                 .wrapping_add(nth as u64 + 1),
                         ),
                         softness: 0.0,
+                        // Whole, always, and not an oversight: integrity is the *membrane's*,
+                        // and an organelle has none. A nucleus does not wear at its edge because
+                        // the cell around it is being stabbed.
                         integrity: 1.0,
                         rounded: 1.0,
                     },
@@ -4067,7 +4074,7 @@ fn redraw(
     // when it has been pulled apart, and a row of pores when it is a channel rather than
     // structure. The sprite pool is gone with it — an entity per link is ten thousand of them in
     // a five-thousand-cell colony, which is the cost the cell mesh existed to remove.
-    art_handles.over.begin(frame.junctions.len());
+    art_handles.over.begin(frame.junctions.len() + frame.marks.len() * 2);
     if frame.lod.resolves_organelles() && view.limbs {
         for link in &frame.junctions {
             let a = to_screen(link.from.0, link.from.1);
@@ -4132,6 +4139,153 @@ fn redraw(
                 taper: 0.33,
                 seed: 0.0,
             });
+        }
+    }
+
+    // --- what just happened ---
+    //
+    // Marks: a strike, a meal, a swallow, a death. Drawn in the same overlay the junctions are,
+    // because they are the same kind of thing — a fact about the slide that is not a body.
+    //
+    // The complaint these answer: watching a predator was watching cells blink out for no visible
+    // reason. A spike moved a number nothing drew and a swallowed cell was simply absent from the
+    // next frame, so the picture showed the *consequence* of predation and never the act.
+    //
+    // No new form is needed. `HALO` is a hollow ring and is what a puff of something leaving
+    // looks like; `BAND` is a bar across a wall and is what a blow landing looks like; `CHANNEL`
+    // is a tether and is what "it went in there" looks like. Every one of them was already drawn
+    // by the junction and limb work.
+    for mark in &frame.marks {
+        let at = to_screen(mark.x, mark.y);
+        if at.x < cull.min_x || at.x > cull.max_x || at.y < cull.min_y || at.y > cull.max_y {
+            continue;
+        }
+        let dim = optics.vignette(field_radius(at));
+        // Everything fades out over its life. Nothing flashes *in*: an event that ramps up is an
+        // event you notice after it happened, and the whole point is to see it as it lands.
+        let fade = (1.0 - mark.age).clamp(0.0, 1.0);
+        // A soft ease so the last third is a whisper rather than a step.
+        let fade = fade * fade;
+        match mark.kind {
+            slide::MarkKind::Struck { strength } => {
+                // Across the line of the blow, at the point it landed. A graze is a thin bright
+                // line and a killing stroke is a broad one, because `strength` is the damage
+                // against what a membrane tolerates.
+                let (ux, uy) = match mark.actor {
+                    Some((ax, ay)) => {
+                        let from = to_screen(ax, ay);
+                        let d = (at - from).truncate();
+                        let n = d.length().max(1e-3);
+                        // Perpendicular: a wound lies across the direction it came from.
+                        (-d.y / n, d.x / n)
+                    }
+                    None => (0.0, 1.0),
+                };
+                let size = (scale * (0.18 + 0.30 * strength)).max(2.0);
+                art_handles.over.push(limbmesh::Placed {
+                    cx: at.x,
+                    cy: at.y,
+                    ux,
+                    uy,
+                    half_len: size,
+                    half_wid: (size * 0.22).max(1.0),
+                    // The palette's damage colour, hot at the moment of contact.
+                    rgba: [1.00 * dim, 0.55 * dim, 0.42 * dim, 0.95 * fade],
+                    form: limbmesh::form::BAND,
+                    extent: 1.0,
+                    phase: 0.0,
+                    count: 1.0,
+                    inner: 0.0,
+                    taper: 0.0,
+                    seed: 0.0,
+                });
+            }
+            slide::MarkKind::Fed { strength } => {
+                // A ring closing inwards on the eater: it took something in. Small, warm and
+                // brief, because feeding is the commonest of these and should not shout.
+                let size = (scale * (0.22 + 0.28 * strength) * (0.6 + 0.4 * mark.age)).max(2.0);
+                art_handles.over.push(limbmesh::Placed {
+                    cx: at.x,
+                    cy: at.y,
+                    ux: 1.0,
+                    uy: 0.0,
+                    half_len: size,
+                    half_wid: size,
+                    rgba: [0.72 * dim, 0.86 * dim, 0.52 * dim, 0.45 * fade],
+                    form: limbmesh::form::HALO,
+                    extent: 1.0,
+                    phase: 0.0,
+                    count: 1.0,
+                    // Hollow, and thinning as it goes.
+                    inner: 0.55 + 0.35 * mark.age,
+                    taper: 0.0,
+                    seed: 0.0,
+                });
+            }
+            slide::MarkKind::Swallowed => {
+                // The one that answers "where did it go". A tether from where the victim was to
+                // where its eater is now, plus a ring at the vanishing point.
+                if let Some((ax, ay)) = mark.actor {
+                    let eater = to_screen(ax, ay);
+                    let d = (eater - at).truncate();
+                    let n = d.length().max(1e-3);
+                    art_handles.over.push(limbmesh::Placed {
+                        cx: (at.x + eater.x) * 0.5,
+                        cy: (at.y + eater.y) * 0.5,
+                        ux: d.x / n,
+                        uy: d.y / n,
+                        half_len: n * 0.5,
+                        half_wid: (scale * 0.05).max(1.0),
+                        rgba: [0.95 * dim, 0.72 * dim, 0.35 * dim, 0.75 * fade],
+                        form: limbmesh::form::CHANNEL,
+                        extent: 1.0,
+                        phase: 0.0,
+                        count: (n / (scale * 0.25).max(1.0)).clamp(1.0, 8.0).floor(),
+                        inner: 0.0,
+                        taper: 0.0,
+                        seed: 0.0,
+                    });
+                }
+                let size = (scale * 0.30 * (0.7 + 0.5 * mark.age)).max(2.0);
+                art_handles.over.push(limbmesh::Placed {
+                    cx: at.x,
+                    cy: at.y,
+                    ux: 1.0,
+                    uy: 0.0,
+                    half_len: size,
+                    half_wid: size,
+                    rgba: [0.95 * dim, 0.72 * dim, 0.35 * dim, 0.65 * fade],
+                    form: limbmesh::form::HALO,
+                    extent: 1.0,
+                    phase: 0.0,
+                    count: 1.0,
+                    inner: 0.5 + 0.4 * mark.age,
+                    taper: 0.0,
+                    seed: 0.0,
+                });
+            }
+            slide::MarkKind::Died => {
+                // A ring opening outwards where a cell was. Cool and quiet — most deaths on this
+                // slide are nobody's doing, and a death that *was* somebody's doing already has
+                // the swallow's tether or the strike's flash on it.
+                let size = (scale * 0.26 * (0.5 + 1.1 * mark.age)).max(2.0);
+                art_handles.over.push(limbmesh::Placed {
+                    cx: at.x,
+                    cy: at.y,
+                    ux: 1.0,
+                    uy: 0.0,
+                    half_len: size,
+                    half_wid: size,
+                    rgba: [0.62 * dim, 0.66 * dim, 0.72 * dim, 0.50 * fade],
+                    form: limbmesh::form::HALO,
+                    extent: 1.0,
+                    phase: 0.0,
+                    count: 1.0,
+                    inner: 0.45 + 0.45 * mark.age,
+                    taper: 0.0,
+                    seed: 0.0,
+                });
+            }
         }
     }
 

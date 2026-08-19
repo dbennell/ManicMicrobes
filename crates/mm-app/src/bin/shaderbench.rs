@@ -493,7 +493,14 @@ fn redraw(
     };
     let buffers = &mut state.buffers;
     buffers.begin(cells.len() * if outline { 4 } else { 1 }, detail);
-    for cell in &cells {
+    // A ramp from whole to failing across the phantom, so the wear path is exercised on data no
+    // simulation made — which is what this bench is for. `cell.wgsl` has worn an outline down by
+    // `1 - integrity` since it was written and every caller, this one included, passed a constant
+    // `1.0`, so the effect had never been drawn once and could not be photographed to check.
+    // Off by default: a bench whose cells are all half-eaten is a worse control.
+    let wear = std::env::var("MM_BENCH_WEAR").is_ok();
+    let last = (cells.len().max(2) - 1) as f32;
+    for (nth, cell) in cells.iter().enumerate() {
         let at = to_screen(cell.blob.x, cell.blob.y);
         // Exactly what the microscope computes, and for the same reasons — see `main::redraw`.
         let body = cell.bare * 2.0 * zoom * cell.swell;
@@ -506,7 +513,11 @@ fn redraw(
             shape: cellmesh::Shape {
                 seed: cellmesh::seed_of(cell.blob.id),
                 softness: 0.0,
-                integrity: 1.0,
+                integrity: if wear {
+                    1.0 - (nth as f32 / last).clamp(0.0, 1.0)
+                } else {
+                    1.0
+                },
                 rounded,
             },
             squash: slots(cell),
@@ -812,10 +823,23 @@ fn photograph(
         return;
     };
     if state.shot_taken {
-        // A frame or two for the encode to reach the disk, then out.
+        // **Wait for the file, not for a number of frames.** `save_to_disk` is an observer, so the
+        // encode lands some frames after the request, and this used to count to four and leave. A
+        // single shot — the default, and the form every recipe in `CLAUDE.md` uses — lost the race
+        // often enough to matter, and lost it *silently*: the "photographed to" line below had
+        // already been printed, so the bench reported a picture it had not written and the next
+        // step in the script read a missing file. An instrument that lies quietly is the thing
+        // `docs/OVERLAPS.md` exists to prevent.
+        //
+        // Capped, so a genuinely failed write costs a second rather than hanging a headless run
+        // for ever, and it says so on the way out.
         *settled += 1;
-        if *settled > 3 {
+        let want = numbered(&path, state.taken.saturating_sub(1));
+        if std::path::Path::new(&want).exists() {
             exit.write(AppExit::Success);
+        } else if *settled > 240 {
+            eprintln!("shader bench: gave up waiting for {want} to reach the disk");
+            exit.write(AppExit::from_code(2));
         }
         return;
     }
@@ -841,7 +865,9 @@ fn photograph(
             Err(e) => eprintln!("shader bench: could not write {where_to}: {e}"),
         }
     }
-    eprintln!("shader bench: frame {} photographed to {file}", state.at);
+    // "requested", not "photographed": the encode has not happened yet and the file does not
+    // exist. The shot is confirmed by the wait above, which does not leave until it does.
+    eprintln!("shader bench: frame {} requested to {file}", state.at);
     state.taken += 1;
     if state.taken >= state.series {
         state.shot_taken = true;

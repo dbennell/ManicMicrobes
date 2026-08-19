@@ -135,6 +135,11 @@ cargo test -p mm-app --test shader_probe -- --ignored --nocapture --test-threads
 cargo test -p mm-app --test limb_probe
 cargo test -p mm-app --test shader_syntax     # the WGSL, parsed and validated with no display
 MM_BENCH_LIMBS=1 ./target/release/shaderbench   # or `k`: every form, on data no cell made
+MM_BENCH_WEAR=1 ./target/release/shaderbench    # membrane integrity ramped whole -> failing.
+                                                # `cell.wgsl` has worn the outline down by
+                                                # `1 - integrity` since it was written and every
+                                                # caller passed a constant 1.0, so this had never
+                                                # been drawn until it was wired to damage.
 
 # And what the shader actually put on the screen, against what it was told to draw. Two
 # photographs of one frame over different backgrounds give the coverage exactly; see the script.
